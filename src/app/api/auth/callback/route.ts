@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { authConfigured, sign, verify, SESSION_COOKIE, type Session } from "@/lib/auth";
 import { getDb, hasDatabase, schema } from "@/lib/db";
 
-/** GitHub OAuth 回调：换 token → 取用户 → 落 users 表 → 设会话 cookie */
+/** GitHub OAuth callback: exchange token → fetch user → upsert users row → set session cookie */
 export async function GET(req: Request) {
   if (!authConfigured()) {
     return NextResponse.json({ error: "auth_not_configured" }, { status: 501 });

@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "API — 公开接口文档",
+  title: "API — Public API Reference",
   description:
-    "PluginWorld 公开 REST API v1：跨生态插件搜索、详情、统计。为 AI agent 设计。",
+    "PluginWorld public REST API v1: cross-ecosystem plugin search, details and stats. Built for AI agents.",
   alternates: { canonical: "/docs/api" },
 };
 
@@ -40,94 +40,100 @@ export default function ApiDocsPage() {
     <div className="mx-auto max-w-3xl px-5 py-14">
       <p className="label text-muted">DEVELOPERS · API V1</p>
       <h1 className="mt-2 text-3xl font-bold tracking-[-0.01em] text-ink sm:text-4xl">
-        公开 API
+        Public API
       </h1>
       <p className="mt-4 text-[15px] leading-relaxed text-muted">
-        只读 REST API，对齐官方 MCP Registry 风格。为 AI agent 设计——让
-        harness、CLI 与 agent 直接搜索并接入插件。无需鉴权，限流 60 req/min/IP，
-        跨域开放（CORS *）。
+        A read-only REST API, aligned with the official MCP Registry style and
+        built for AI agents — so harnesses, CLIs and agents can search and plug
+        in directly. No auth required. Rate limit: 60 req/min per IP. CORS
+        open (*).
       </p>
 
       <h2 id="search" className="mt-12 text-xl font-bold text-ink">
-        搜索插件
+        Search plugins
       </h2>
       <div className="mt-3">
         <CodeBlock>{`GET https://www.pluginworld.ai/api/v1/plugins`}</CodeBlock>
       </div>
       <div className="mt-4">
-        <Param name="q" type="string" desc="全文搜索：名称、描述、关键词、owner" />
-        <Param name="ecosystem" type="dsh | claude-code | mcp" desc="按生态筛选" />
-        <Param name="category" type="string" desc="按分类筛选，如 ai-agents" />
+        <Param name="q" type="string" desc="Full-text search: name, description, keywords, owner" />
+        <Param name="ecosystem" type="dsh | claude-code | mcp" desc="Filter by ecosystem" />
+        <Param name="category" type="string" desc="Filter by category, e.g. ai-agents" />
         <Param
           name="sort"
           type="score | stars | trending | updated"
-          desc="排序，默认 score（统一质量评分）"
+          desc="Sort order — defaults to score (unified quality score)"
         />
-        <Param name="page" type="int" desc="页码，从 1 开始" />
-        <Param name="per_page" type="int ≤ 100" desc="每页条数，默认 24" />
+        <Param name="page" type="int" desc="Page number, starting at 1" />
+        <Param name="per_page" type="int ≤ 100" desc="Items per page, default 24" />
       </div>
-      <p className="mt-5 text-[14px] text-muted">示例：找一个 AI code review 插件</p>
+      <p className="mt-5 text-[14px] text-muted">
+        Example: find an AI code review plugin
+      </p>
       <div className="mt-2">
         <CodeBlock>{`curl "https://www.pluginworld.ai/api/v1/plugins?q=code+review&ecosystem=claude-code&sort=score"`}</CodeBlock>
       </div>
 
-      <h2 className="mt-12 text-xl font-bold text-ink">插件详情</h2>
+      <h2 className="mt-12 text-xl font-bold text-ink">Plugin details</h2>
       <div className="mt-3">
         <CodeBlock>{`GET /api/v1/plugins/{ecosystem}/{owner}/{name}
 GET /api/v1/plugins/{ecosystem}/{owner}/{name}?include=readme`}</CodeBlock>
       </div>
       <p className="mt-4 text-[14px] leading-relaxed text-muted">
-        返回完整元数据、原始 manifest、按生态生成的安装命令（
-        <code className="font-mono text-[12.5px] text-ink">install[]</code>
-        ）与分项质量评分。
+        Returns full metadata, the raw manifest, per-ecosystem install commands
+        (<code className="font-mono text-[12.5px] text-ink">install[]</code>)
+        and the score breakdown.
       </p>
       <div className="mt-3">
-        <CodeBlock>{`curl "https://www.pluginworld.ai/api/v1/plugins/mcp/modelcontextprotocol/servers"`}</CodeBlock>
+        <CodeBlock>{`curl "https://www.pluginworld.ai/api/v1/plugins/mcp/upstash/context7"`}</CodeBlock>
       </div>
 
-      <h2 className="mt-12 text-xl font-bold text-ink">市场统计</h2>
+      <h2 className="mt-12 text-xl font-bold text-ink">Market stats</h2>
       <div className="mt-3">
         <CodeBlock>{`GET /api/v1/stats
 
 {
-  "total_indexed": 347,
-  "by_ecosystem": { "dsh": 112, "claude-code": 98, "mcp": 137 },
-  "source_totals": { "dsh": 11347, "claude-code": 5564, "mcp": 25565 },
-  "categories": [{ "name": "ai-agents", "count": 84 }],
+  "total_indexed": 1787,
+  "by_ecosystem": { "dsh": 498, "claude-code": 496, "mcp": 793 },
+  "source_totals": { "dsh": 11389, "claude-code": 5572, "mcp": 26612 },
+  "categories": [{ "name": "ai-agents", "count": 1010 }],
   "last_synced_at": "2026-08-25T00:00:00Z"
 }`}</CodeBlock>
       </div>
 
       <h2 id="quality-score" className="mt-12 text-xl font-bold text-ink">
-        统一质量评分
+        Unified quality score
       </h2>
       <p className="mt-3 text-[14.5px] leading-relaxed text-muted">
-        每个插件 0–100 分，五个维度加权，跨生态可比：
+        Every plugin gets a 0–100 score from five weighted dimensions,
+        comparable across ecosystems:
       </p>
       <div className="mt-4">
-        <Param name="maintenance" type="0–30" desc="最近 commit 时间衰减（30 天内满分，半衰期 180 天）" />
-        <Param name="popularity" type="0–25" desc="stars/downloads 的生态内百分位" />
-        <Param name="compliance" type="0–20" desc="manifest 通过生态官方 schema 校验" />
-        <Param name="security" type="0–15" desc="license + install script 静态扫描 + owner 验证" />
-        <Param name="docs" type="0–10" desc="README 长度、结构、代码示例" />
+        <Param name="maintenance" type="0–30" desc="Commit recency decay (full within 30 days, 180-day half-life)" />
+        <Param name="popularity" type="0–25" desc="Star/download percentile within the ecosystem" />
+        <Param name="compliance" type="0–20" desc="Manifest passes the official ecosystem schema" />
+        <Param name="security" type="0–15" desc="License + install script static scan + owner verification" />
+        <Param name="docs" type="0–10" desc="README length, structure, code examples" />
       </div>
 
-      <h2 className="mt-12 text-xl font-bold text-ink">给 AI Agent 的提示</h2>
+      <h2 className="mt-12 text-xl font-bold text-ink">Tips for AI agents</h2>
       <p className="mt-3 text-[14.5px] leading-relaxed text-muted">
-        推荐流程：先用 <code className="font-mono text-[13px] text-ink">q + ecosystem</code>{" "}
-        搜索，按 <code className="font-mono text-[13px] text-ink">quality_score</code>{" "}
-        取前几名，再取详情中的{" "}
+        Recommended flow: search with{" "}
+        <code className="font-mono text-[13px] text-ink">q + ecosystem</code>,
+        take the top results by{" "}
+        <code className="font-mono text-[13px] text-ink">quality_score</code>,
+        then execute the{" "}
         <code className="font-mono text-[13px] text-ink">install[]</code>{" "}
-        字段直接执行接入命令。MCP server 封装（market_search / market_get 工具）在
-        roadmap P2。
+        commands from the detail response. An MCP server wrapper
+        (market_search / market_get tools) is on the roadmap (P2).
       </p>
 
       <div className="mt-12 rounded-[12px] border border-line bg-white p-6">
         <p className="label text-muted">FAIR USE</p>
         <p className="mt-2 text-[13.5px] leading-relaxed text-muted">
-          数据来源为公开元数据（GitHub API、官方 MCP
-          Registry），我们只索引并链接回源仓库。API 数据可自由使用，注明来源
-          pluginworld.ai 即可。
+          All data comes from public metadata (GitHub API, the official MCP
+          Registry); we index and link back to source repositories. API data is
+          free to use — just credit pluginworld.ai.
         </p>
       </div>
     </div>

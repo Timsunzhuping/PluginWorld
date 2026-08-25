@@ -63,33 +63,33 @@ const corpus: Plugin[] = [
 ];
 
 describe("matchScore", () => {
-  it("名称精确命中得分最高", () => {
+  it("exact name match scores highest", () => {
     const exact = matchScore(corpus[0], "code-review");
     const partial = matchScore(corpus[0], "review");
     expect(exact).toBeGreaterThan(partial);
     expect(partial).toBeGreaterThan(0);
   });
-  it("AND 语义：任一词未命中即 0", () => {
+  it("AND semantics: any unmatched term yields 0", () => {
     expect(matchScore(corpus[0], "code banana")).toBe(0);
   });
-  it("空查询返回 1（不过滤）", () => {
+  it("empty query returns 1 (no filtering)", () => {
     expect(matchScore(corpus[0], "")).toBe(1);
   });
 });
 
 describe("queryPlugins", () => {
-  it("关键词搜索 + 生态过滤", () => {
+  it("keyword search + ecosystem filter", () => {
     const all = queryPlugins(corpus, { q: "review" });
     expect(all.total).toBe(2);
     const dshOnly = queryPlugins(corpus, { q: "review", ecosystem: "dsh" });
     expect(dshOnly.total).toBe(1);
     expect(dshOnly.items[0].slug).toBe("dsh/acme/reviewer");
   });
-  it("分类过滤", () => {
+  it("category filter", () => {
     const r = queryPlugins(corpus, { category: "code-review" });
     expect(r.total).toBe(1);
   });
-  it("分页", () => {
+  it("pagination", () => {
     const r = queryPlugins(corpus, { perPage: 2, page: 2 });
     expect(r.items.length).toBe(1);
     expect(r.total).toBe(3);
@@ -97,15 +97,15 @@ describe("queryPlugins", () => {
 });
 
 describe("sortPlugins", () => {
-  it("score 排序默认", () => {
+  it("score sort is the default", () => {
     const sorted = sortPlugins(corpus, "score");
     expect(sorted[0].qualityScore).toBe(90);
   });
-  it("stars 排序", () => {
+  it("stars sort", () => {
     const sorted = sortPlugins(corpus, "stars");
     expect(sorted[0].stars).toBe(5000);
   });
-  it("trending 让近期活跃项目排前", () => {
+  it("trending ranks recently active projects first", () => {
     const sorted = sortPlugins(corpus, "trending");
     expect(sorted[0].slug).toBe("claude-code/x/formatter");
   });

@@ -13,7 +13,7 @@ import { ECOSYSTEM_META, ECOSYSTEMS, type Ecosystem } from "@/lib/types";
 import { avatarText, formatCount, formatDate, timeAgo } from "@/lib/utils";
 import { CATEGORY_LABELS } from "@/lib/categories";
 
-// ISR：详情页每小时增量再生（方案 §3 / §7）
+// ISR: detail pages regenerate hourly
 export const revalidate = 3600;
 export const dynamicParams = true;
 
@@ -40,10 +40,10 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const plugin = await load(await params);
   if (!plugin) return { title: "Not found" };
-  const title = `${plugin.name} — ${ECOSYSTEM_META[plugin.ecosystem].full} 插件`;
+  const title = `${plugin.name} — ${ECOSYSTEM_META[plugin.ecosystem].full} plugin`;
   const description =
     plugin.description ??
-    `${plugin.name} · ${ECOSYSTEM_META[plugin.ecosystem].full} 生态插件，质量评分 ${plugin.qualityScore}/100`;
+    `${plugin.name} · a ${ECOSYSTEM_META[plugin.ecosystem].full} plugin with a quality score of ${plugin.qualityScore}/100`;
   return {
     title,
     description,
@@ -64,7 +64,7 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
   const options = installOptions(plugin);
   const repoPath = plugin.repoUrl?.replace(/^https:\/\/github\.com\//, "");
 
-  // SEO：SoftwareApplication 结构化数据（schema.org）
+  // SEO: SoftwareApplication structured data (schema.org)
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
@@ -98,7 +98,7 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
 
-      {/* 面包屑 */}
+      {/* Breadcrumb */}
       <nav className="font-mono text-[12px] text-muted">
         <Link href="/browse" className="hover:text-ink">
           explore
@@ -111,7 +111,7 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
         <span className="text-ink">{plugin.name}</span>
       </nav>
 
-      {/* 头部 */}
+      {/* Header */}
       <header className="mt-6 flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-start gap-4 min-w-0">
           <span className="flex h-16 w-16 shrink-0 items-center justify-center rounded-[12px] bg-ink font-mono text-[24px] text-volt">
@@ -140,7 +140,7 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
               )}
             </div>
             <p className="mt-2 max-w-xl text-[15px] leading-relaxed text-charcoal">
-              {plugin.description ?? "暂无描述"}
+              {plugin.description ?? "No description yet."}
             </p>
             <p className="mt-2 font-mono text-[12px] text-muted">
               {plugin.ownerGithub && <>@{plugin.ownerGithub} · </>}
@@ -170,7 +170,7 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
       </header>
 
       <div className="mt-10 grid gap-10 lg:grid-cols-[1fr_320px]">
-        {/* 主栏 */}
+        {/* Main column */}
         <div className="min-w-0">
           {options.length > 0 && (
             <>
@@ -190,7 +190,7 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
           ) : (
             <div className="mt-3 rounded-[12px] border border-line bg-white p-8 text-center">
               <p className="text-[14px] text-muted">
-                README 未收录，前往{" "}
+                README not indexed yet — view it in the{" "}
                 {plugin.repoUrl ? (
                   <a
                     href={plugin.repoUrl}
@@ -198,18 +198,17 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
                     rel="noopener noreferrer"
                     className="text-volt-dark underline underline-offset-2"
                   >
-                    源仓库
+                    source repository
                   </a>
                 ) : (
-                  "源仓库"
-                )}{" "}
-                查看
+                  "source repository"
+                )}
               </p>
             </div>
           )}
         </div>
 
-        {/* 侧栏 */}
+        {/* Sidebar */}
         <aside className="space-y-8">
           <div className="rounded-[12px] border border-line bg-white p-5">
             <h2 className="label text-muted">QUALITY BREAKDOWN</h2>
@@ -315,21 +314,21 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
 
           <div className="rounded-[12px] border border-line bg-paper p-4">
             <p className="text-[12px] leading-relaxed text-muted">
-              PluginWorld 只索引公开元数据并链接回源仓库。发现恶意插件？
+              PluginWorld indexes public metadata only and links back to the source repo. Found a malicious plugin?
               <a
                 href={`mailto:report@pluginworld.ai?subject=${encodeURIComponent(
                   `Report: ${plugin.slug}`,
                 )}`}
                 className="text-signal underline underline-offset-2"
               >
-                举报
+                Report it
               </a>
             </p>
           </div>
         </aside>
       </div>
 
-      {/* 相似插件 */}
+      {/* Similar plugins */}
       {similar.length > 0 && (
         <section className="mt-16">
           <h2 className="label text-muted">SIMILAR PLUGINS</h2>

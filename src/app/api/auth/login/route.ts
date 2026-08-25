@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
 import { authConfigured, sign } from "@/lib/auth";
 
-/** GitHub OAuth 入口：跳转 github.com/login/oauth/authorize */
+/** GitHub OAuth entry point: redirects to github.com/login/oauth/authorize */
 export async function GET(req: Request) {
   if (!authConfigured()) {
     return NextResponse.json(

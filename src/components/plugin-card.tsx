@@ -5,8 +5,8 @@ import { EcosystemBadge } from "./ecosystem-badge";
 import { ScoreBadge } from "./score-badge";
 
 /**
- * PLUGIN CARD · 品牌核心组件
- * 字母头像 + 名称 + version · license + 描述 + ▲ 数据 + Install
+ * PLUGIN CARD · core brand component
+ * Letter avatar + name + version · license + description + ▲ stats + Install
  */
 export function PluginCard({ plugin }: { plugin: Plugin }) {
   const count = plugin.downloads > 0 ? plugin.downloads : plugin.stars;
@@ -36,7 +36,7 @@ export function PluginCard({ plugin }: { plugin: Plugin }) {
       </div>
 
       <p className="mt-3 line-clamp-2 flex-1 text-[13.5px] leading-relaxed text-charcoal">
-        {plugin.description ?? "暂无描述"}
+        {plugin.description ?? "No description yet."}
       </p>
 
       <div className="mt-4 flex items-center justify-between">

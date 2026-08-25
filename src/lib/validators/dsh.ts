@@ -2,15 +2,16 @@ import { z } from "zod";
 import type { ValidationResult } from "./index";
 
 /**
- * dsh (DeepSeek Harness) 插件规范校验。
- * dsh 基于 Cordis，「一切皆插件」，插件以 npm 包分发，manifest 即 package.json。
- * 判定规则：
- *  1. 合法的 package.json（name + version 必填，name 符合 npm 命名规范）
- *  2. 具备 dsh 插件信号之一：
- *     - 包名匹配 dsh-plugin-* / @scope/dsh-* / *-dsh-plugin
- *     - 声明 `dsh` / `cordis` 字段
- *     - peerDependencies / dependencies 中含 @deepseek-ai/dsh* 或 cordis
- *     - keywords 中含 dsh-plugin / dsh / cordis-plugin
+ * dsh (DeepSeek Harness) plugin spec validation.
+ * dsh is built on Cordis ("everything is a plugin"); plugins ship as npm packages,
+ * so the manifest is package.json.
+ * Acceptance rules:
+ *  1. Valid package.json (name + version required, name follows npm naming rules)
+ *  2. Has at least one dsh plugin signal:
+ *     - package name matches dsh-plugin-* / @scope/dsh-* / *-dsh-plugin
+ *     - declares a `dsh` / `cordis` field
+ *     - peerDependencies / dependencies include @deepseek-ai/dsh* or cordis
+ *     - keywords include dsh-plugin / dsh / cordis-plugin
  */
 
 const npmNameRe =

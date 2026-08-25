@@ -2,11 +2,12 @@ import { z } from "zod";
 import type { ValidationResult } from "./index";
 
 /**
- * MCP server 规范校验，对齐官方 Registry 的 server.json schema
- * (static.modelcontextprotocol.io/schemas)。
- * 必填 name（反向 DNS 命名空间，如 io.github.owner/repo）、description、version；
- * 且至少提供一种接入方式：packages[]（本地运行）或 remotes[]（远程端点）。
- * 兼容：GitHub 抓取到的 server 若只有 package.json，允许以 npm 包形态降级校验。
+ * MCP server spec validation, aligned with the official Registry's server.json schema
+ * (static.modelcontextprotocol.io/schemas).
+ * Requires name (reverse-DNS namespace, e.g. io.github.owner/repo), description, version;
+ * plus at least one access method: packages[] (local run) or remotes[] (remote endpoint).
+ * Compatibility: servers crawled from GitHub with only a package.json may fall back to
+ * npm-package-shaped validation.
  */
 
 const namespacedNameRe = /^[a-z0-9][a-z0-9._-]*(\.[a-z0-9][a-z0-9._-]*)+\/[A-Za-z0-9._-]+$/;

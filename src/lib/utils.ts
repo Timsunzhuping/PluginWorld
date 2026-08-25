@@ -5,7 +5,7 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-/** 2400000 → "2.4M"，brand: 数据用 mono 字体呈现，不夸张修饰 */
+/** 2400000 → "2.4M"; brand: numbers render in mono, no exaggerated styling */
 export function formatCount(n: number): string {
   if (n >= 1_000_000) return trimZero((n / 1_000_000).toFixed(1)) + "M";
   if (n >= 1_000) return trimZero((n / 1_000).toFixed(1)) + "K";
@@ -35,7 +35,7 @@ export function timeAgo(iso: string | null): string {
   return `${Math.floor(months / 12)}y ago`;
 }
 
-/** 插件卡片字母头像：取名字前两个有效字符，如 TypeFlow → "Ty" */
+/** Plugin-card letter avatar: first two valid characters of the name, e.g. TypeFlow → "Ty" */
 export function avatarText(name: string): string {
   const clean = name.replace(/^@[^/]+\//, "").replace(/[^a-zA-Z0-9一-龥]/g, "");
   const s = clean.slice(0, 2) || "??";

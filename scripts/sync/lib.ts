@@ -1,4 +1,4 @@
-/** 收录管道共享工具：HTTP、README 渲染、并发控制 */
+/** Shared utilities for the ingestion pipeline: HTTP, README rendering, concurrency control */
 import { marked } from "marked";
 import sanitizeHtml from "sanitize-html";
 
@@ -11,7 +11,7 @@ export function githubHeaders(): Record<string, string> {
     Accept: "application/vnd.github+json",
     "User-Agent": "pluginworld-sync (www.pluginworld.ai)",
   };
-  // GitHub Actions 中用 token 提高限额（方案 §6）
+  // Use a token in GitHub Actions to raise rate limits (spec §6)
   if (process.env.GITHUB_TOKEN) {
     headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   }
@@ -27,7 +27,7 @@ export async function fetchJson<T>(
     try {
       const res = await fetch(url, init);
       if (res.status === 403 || res.status === 429) {
-        // rate limited → 指数退避重试
+        // rate limited → retry with exponential backoff
         const wait = Math.min(60_000, 2_000 * 2 ** attempt);
         console.warn(`  rate limited on ${url}, waiting ${wait}ms`);
         await sleep(wait);
@@ -71,7 +71,7 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 简单并发池 */
+/** Simple concurrency pool */
 export async function pooled<T, R>(
   items: T[],
   concurrency: number,
@@ -91,7 +91,7 @@ export async function pooled<T, R>(
   return results;
 }
 
-/** 第三方 README 中的泄露密钥脱敏（我们会再分发这些内容，见方案 §9 合规） */
+/** Redact leaked secrets in third-party READMEs (we redistribute this content, see spec §9 compliance) */
 const SECRET_PATTERNS: [RegExp, string][] = [
   [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9\/_-]+/g, "https://hooks.slack.com/services/REDACTED"],
   [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, "xox?-REDACTED"],
@@ -115,7 +115,7 @@ export function redactSecrets(text: string): string {
   return out;
 }
 
-/** README markdown → 消毒后的 HTML；相对链接改写为源仓库绝对地址 */
+/** README markdown → sanitized HTML; relative links rewritten to absolute source-repo URLs */
 export function renderReadme(
   markdown: string,
   repoFullName: string | null,
@@ -175,7 +175,7 @@ export function renderReadme(
   };
 }
 
-/** 官方组织白名单：officialOwner trust flag */
+/** Official organization allowlist: officialOwner trust flag */
 export const OFFICIAL_OWNERS = new Set([
   "deepseek-ai",
   "anthropics",

@@ -1,12 +1,12 @@
 /**
- * 收录管道编排（方案 §6）：
- *   1. GitHub topic 抓取（dsh-plugin / claude-code-plugin / mcp-server）
- *   2. 官方 MCP Registry 同步并与 GitHub 结果合并（registryListed）
- *   3. 对每个 repo：fetch manifest + README → schema 校验 → install script 扫描 → 打分
- *   4. 写快照 src/data/seed/（站点 demo 模式直接消费）
- *   5. DATABASE_URL 存在时 upsert Postgres 并记录 sync_sources
+ * Ingestion pipeline orchestration (spec §6):
+ *   1. GitHub topic crawl (dsh-plugin / claude-code-plugin / mcp-server)
+ *   2. Official MCP Registry sync, merged with GitHub results (registryListed)
+ *   3. For each repo: fetch manifest + README → schema validation → install-script scan → scoring
+ *   4. Write snapshot to src/data/seed/ (consumed directly by the site's demo mode)
+ *   5. When DATABASE_URL is set, upsert into Postgres and record sync_sources
  *
- * 用法：npx tsx scripts/sync/run-all.ts [--pages 2] [--limit N] [--db]
+ * Usage: npx tsx scripts/sync/run-all.ts [--pages 2] [--limit N] [--db]
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -43,7 +43,7 @@ function slugFor(e: RawEntry): string {
   return `${e.ecosystem}/${e.owner.toLowerCase()}/${e.name.toLowerCase()}`;
 }
 
-/** slug → 确定性 UUID（重复 sync 保持稳定） */
+/** slug → deterministic UUID (stable across repeated syncs) */
 function stableId(slug: string): string {
   const h = createHash("sha256").update(`pluginworld:${slug}`).digest("hex");
   return [
@@ -80,7 +80,7 @@ function registryToRaw(server: RegistryServer): RawEntry {
   return {
     ecosystem: "mcp",
     owner: repoFull ? repoFull.split("/")[0] : namespace,
-    // slug 为三段式 {ecosystem}/{owner}/{name}，name 中的斜杠需折叠
+    // slug is three-part {ecosystem}/{owner}/{name}; slashes inside name must be collapsed
     name: repoFull ? repoFull.split("/")[1] : rest.join("-") || namespace,
     repoFullName: repoFull,
     description: server.description ?? null,
@@ -99,7 +99,7 @@ function registryToRaw(server: RegistryServer): RawEntry {
 async function fetchManifest(
   entry: RawEntry,
 ): Promise<Record<string, unknown> | null> {
-  // registry 条目自带 server.json 形态的 manifest
+  // Registry entries already carry a server.json-shaped manifest
   if (entry.registryServer) return entry.registryServer as unknown as Record<string, unknown>;
   if (!entry.repoFullName) return null;
   for (const p of manifestPaths(entry.ecosystem)) {
@@ -109,7 +109,7 @@ async function fetchManifest(
       const parsed = JSON.parse(text) as Record<string, unknown>;
       if (parsed && typeof parsed === "object") return parsed;
     } catch {
-      /* 无效 JSON → 尝试下一个路径 */
+      /* invalid JSON → try the next path */
     }
   }
   return null;
@@ -147,7 +147,7 @@ async function main() {
   console.log(`[sync] start pages=${pages} limit=${limit || "∞"} db=${writeDb}`);
   const startedAt = new Date();
 
-  // 1. 三大 topic + registry 并行抓取
+  // 1. Fetch the three topics + registry in parallel
   const [dsh, claudeCode, mcpTopic, registry] = await Promise.all([
     fetchTopicRepos("dsh", pages),
     fetchTopicRepos("claude-code", pages),
@@ -155,7 +155,7 @@ async function main() {
     fetchRegistryServers(),
   ]);
 
-  // 2. 归一化 + MCP 合并去重
+  // 2. Normalize + merge/dedupe MCP entries
   const entries: RawEntry[] = [];
   const cap = <T,>(arr: T[]) => (limit > 0 ? arr.slice(0, limit) : arr);
   for (const repo of cap(dsh.repos)) entries.push(repoToRaw(repo, "dsh"));
@@ -188,7 +188,7 @@ async function main() {
     `[sync] normalized ${entries.length} entries (registry merged: ${registryMerged}, registry-only: ${registryOnly})`,
   );
 
-  // 3. manifest + README + 校验 + 扫描（并发池）
+  // 3. Manifest + README + validation + scan (concurrency pool)
   fs.mkdirSync(README_DIR, { recursive: true });
   const now = new Date();
   const enriched = await pooled(entries, 12, async (entry, i) => {
@@ -200,7 +200,7 @@ async function main() {
     const validation = validateManifest(entry.ecosystem, manifest);
     const readme = readmeMd ? renderReadme(readmeMd, entry.repoFullName) : null;
     const suspicious = scanInstallScripts(manifest);
-    // private: true 的 package.json（monorepo 根）不可 npm install
+    // package.json with private: true (monorepo root) cannot be npm-installed
     const isPrivatePkg =
       manifest != null && (manifest as { private?: unknown }).private === true;
     const npmPackage = isPrivatePkg ? null : (validation.extracted.npmPackage ?? null);
@@ -210,7 +210,7 @@ async function main() {
     return { entry, manifest, validation, readme, suspicious, npmPackage, isPrivatePkg, registryStars };
   });
 
-  // registry-only 条目补 stars（避免 60/hr core 限额：仅在有 token 时做）
+  // Backfill stars for registry-only entries (avoid the 60/hr core rate limit: only with a token)
   async function fetchGithubStarsIfMissing(entry: RawEntry): Promise<{
     stars: number; forks: number; pushedAt: string | null; license: string | null;
   } | null> {
@@ -229,17 +229,17 @@ async function main() {
     };
   }
 
-  // 4. npm 下载量（dsh / 有 npm 包的 mcp）
+  // 4. npm download counts (dsh / mcp entries with an npm package)
   const withNpm = enriched.filter((e) => e.npmPackage);
   console.log(`[sync] fetching npm downloads for ${withNpm.length} packages`);
   const downloadsMap = new Map<string, number>();
-  // npm API 限流较紧：低并发 + 温和节流
+  // npm API rate limits are tight: low concurrency + gentle throttling
   await pooled(withNpm, 3, async (e) => {
     downloadsMap.set(e.npmPackage!, await fetchNpmDownloads(e.npmPackage!));
     await new Promise((r) => setTimeout(r, 150));
   });
 
-  // 5. 生态内百分位 + 评分
+  // 5. Per-ecosystem percentiles + scoring
   const starsByEco = new Map<Ecosystem, number[]>();
   const dlByEco = new Map<Ecosystem, number[]>();
   for (const e of enriched) {
@@ -277,7 +277,7 @@ async function main() {
       hasManifest: manifest != null,
       hasLicense: license != null,
       suspiciousInstallScript: suspicious,
-      verifiedOwner: officialOwner, // 认领后的 verifiedOwner 在 DB 模式下叠加
+      verifiedOwner: officialOwner, // claim-based verifiedOwner is layered on top in DB mode
       readmeLength: readme?.textLength ?? 0,
       readmeHasCodeExample: readme?.hasCodeExample ?? false,
       readmeHasStructure: readme?.hasStructure ?? false,
@@ -339,7 +339,7 @@ async function main() {
 
   plugins.sort((a, b) => b.qualityScore - a.qualityScore);
 
-  // 6. 写快照
+  // 6. Write snapshot
   fs.mkdirSync(SEED_DIR, { recursive: true });
   fs.writeFileSync(path.join(SEED_DIR, "plugins.json"), JSON.stringify(plugins, null, 1));
   const categoryCounts = new Map<string, number>();
@@ -370,7 +370,7 @@ async function main() {
     `spec_valid: ${plugins.filter((p) => p.specValid).length}`,
   );
 
-  // 7. DB upsert（可选）
+  // 7. DB upsert (optional)
   if (writeDb) {
     const { upsertPlugins } = await import("../db/upsert");
     await upsertPlugins(plugins, stats, startedAt);
@@ -379,7 +379,7 @@ async function main() {
   console.log(`[sync] done in ${((Date.now() - startedAt.getTime()) / 1000).toFixed(0)}s`);
 }
 
-/** 过滤 CI 占位符版本（如 ${VERSION}）与超长串 */
+/** Filter out CI placeholder versions (e.g. ${VERSION}) and overly long strings */
 function cleanVersion(v: string | undefined): string | null {
   if (!v) return null;
   if (v.includes("$") || v.includes("{") || v.length > 32) return null;

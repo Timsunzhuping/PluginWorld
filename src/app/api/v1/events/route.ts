@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { getDb, hasDatabase, schema } from "@/lib/db";
 import { clientIp, rateLimit } from "@/lib/rate-limit";
 
-/** POST /api/v1/events — view / install-copy 埋点（算 trending，方案 §4 events 表） */
+/** POST /api/v1/events — view / install-copy tracking (feeds trending, spec §4 events table) */
 export async function POST(req: Request) {
   const { ok } = rateLimit(clientIp(req));
   if (!ok) return NextResponse.json({ error: "rate_limited" }, { status: 429 });
@@ -20,7 +20,7 @@ export async function POST(req: Request) {
   }
 
   if (!hasDatabase()) {
-    // demo/快照模式：埋点为 no-op
+    // demo/snapshot mode: tracking is a no-op
     return NextResponse.json({ ok: true, recorded: false });
   }
 

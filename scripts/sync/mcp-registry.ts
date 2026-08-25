@@ -1,13 +1,13 @@
 /**
- * 官方 MCP Registry 同步（方案 §6）。
- * API: GET /v0/servers?limit=100&cursor=…（server.json + 命名空间所有权验证）
- * 输出：按 name 去重（保留最新版本）的 server 列表，
- * 供 run-all 与 GitHub topic 结果合并（registryListed trust flag）。
+ * Official MCP Registry sync (spec §6).
+ * API: GET /v0/servers?limit=100&cursor=… (server.json + namespace ownership verification)
+ * Output: server list deduped by name (latest version kept),
+ * merged with GitHub topic results in run-all (registryListed trust flag).
  */
 import { MCP_REGISTRY, fetchJson, sleep } from "./lib";
 
 export interface RegistryServer {
-  name: string; // 反向 DNS 命名空间，如 io.github.owner/name
+  name: string; // reverse-DNS namespace, e.g. io.github.owner/name
   title?: string;
   description?: string;
   version?: string;
@@ -81,14 +81,14 @@ export async function fetchRegistryServers(
   return { servers, totalSeen };
 }
 
-/** registry name → GitHub repo full_name（若可推导） */
+/** registry name → GitHub repo full_name (when derivable) */
 export function registryRepoFullName(server: RegistryServer): string | null {
   const url = server.repository?.url;
   if (url) {
     const m = /github\.com\/([^/]+)\/([^/#?]+)/.exec(url);
     if (m) return `${m[1]}/${m[2].replace(/\.git$/, "")}`;
   }
-  // io.github.{owner}/{name} 命名空间
+  // io.github.{owner}/{name} namespace
   const m = /^io\.github\.([^/]+)\/(.+)$/.exec(server.name);
   if (m) return `${m[1]}/${m[2]}`;
   return null;

@@ -3,10 +3,10 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 
 /**
- * GitHub OAuth 会话（Phase 3 · 插件认领需验证 GitHub 身份）。
- * 零依赖实现：HMAC 签名的 HttpOnly cookie。
- * 需要环境变量 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET / AUTH_SECRET，
- * 未配置时站点隐藏登录入口（demo 模式）。
+ * GitHub OAuth sessions (Phase 3 · plugin claiming requires a verified GitHub identity).
+ * Zero-dependency implementation: HMAC-signed HttpOnly cookie.
+ * Requires GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET / AUTH_SECRET env vars;
+ * when unset, the site hides the login entry point (demo mode).
  */
 
 export const SESSION_COOKIE = "pw_session";

@@ -41,8 +41,6 @@ export function Footer() {
             <LogoLockup onDark size={30} />
             <p className="mt-4 text-[14px] leading-relaxed text-faint">
               Plug in. The world is ready.
-              <br />
-              即插，即全球。
             </p>
             <p className="mt-4 font-mono text-[11px] tracking-wide text-faint">
               WWW.PLUGINWORLD.AI

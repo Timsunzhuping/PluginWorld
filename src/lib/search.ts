@@ -1,8 +1,8 @@
 import type { Plugin, PluginQuery, PluginQueryResult, SortKey } from "./types";
 
 /**
- * 快照模式的内存搜索/筛选/排序。
- * DB 模式下等价逻辑由 Postgres FTS + SQL 完成（见 lib/data.ts）。
+ * In-memory search/filter/sort for snapshot mode.
+ * In DB mode the equivalent logic is done by Postgres FTS + SQL (see lib/data.ts).
  */
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -10,7 +10,7 @@ const DAY = 24 * 60 * 60 * 1000;
 export function trendingScore(p: Plugin, now = Date.now()): number {
   const pushed = p.lastCommitAt ? new Date(p.lastCommitAt).getTime() : 0;
   const daysSincePush = Math.max(0, (now - pushed) / DAY);
-  // 活跃度衰减 × 流行度：近期有更新且流行的排前面
+  // Activity decay × popularity: recently updated and popular items rank first
   const recency = Math.pow(0.5, daysSincePush / 30);
   return Math.log10(1 + p.stars + p.downloads / 50) * (0.35 + 0.65 * recency);
 }
@@ -36,7 +36,7 @@ export function matchScore(p: Plugin, q: string): number {
     if (keywords.includes(term)) t += 3;
     if (categories.includes(term)) t += 3;
     if (desc.includes(term)) t += 2;
-    if (t === 0) return 0; // 所有词都必须命中（AND 语义）
+    if (t === 0) return 0; // every term must match (AND semantics)
     score += t;
   }
   return score;
@@ -79,7 +79,7 @@ export function queryPlugins(
     const scored = items
       .map((p) => ({ p, s: matchScore(p, query.q!) }))
       .filter((x) => x.s > 0);
-    // 相关度优先，其次按所选排序意图加权
+    // Relevance first, then weighted by the selected sort intent
     const sorted = sortPlugins(scored.map((x) => x.p), query.sort ?? "score");
     const rank = new Map(sorted.map((p, i) => [p.slug, i]));
     scored.sort((a, b) => b.s - a.s || rank.get(a.p.slug)! - rank.get(b.p.slug)!);

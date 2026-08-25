@@ -1,7 +1,7 @@
 import type { Plugin } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-/** 质量评分徽章：≥75 接通（volt）、≥50 常规、<50 弱 */
+/** Quality score badge: >=75 live (volt), >=50 normal, <50 weak */
 export function ScoreBadge({
   score,
   className,
@@ -22,7 +22,7 @@ export function ScoreBadge({
         tone,
         className,
       )}
-      title={`统一质量评分 ${score}/100`}
+      title={`Unified quality score ${score}/100`}
     >
       {Math.round(score)}
     </span>
@@ -30,14 +30,14 @@ export function ScoreBadge({
 }
 
 const DIMENSIONS = [
-  ["maintenance", "维护度", 30],
-  ["popularity", "流行度", 25],
-  ["compliance", "规范合规", 20],
-  ["security", "安全", 15],
-  ["docs", "文档", 10],
+  ["maintenance", "Maintenance", 30],
+  ["popularity", "Popularity", 25],
+  ["compliance", "Compliance", 20],
+  ["security", "Security", 15],
+  ["docs", "Docs", 10],
 ] as const;
 
-/** 详情页分项评分条（§5：每个维度独立展示） */
+/** Per-dimension score bars on the detail page (spec §5) */
 export function ScoreBars({ plugin }: { plugin: Plugin }) {
   return (
     <div className="space-y-2.5">
@@ -46,7 +46,7 @@ export function ScoreBars({ plugin }: { plugin: Plugin }) {
         const pct = Math.min(100, (value / max) * 100);
         return (
           <div key={key} className="flex items-center gap-3">
-            <span className="w-16 shrink-0 text-[12px] text-muted">{label}</span>
+            <span className="w-24 shrink-0 text-[12px] text-muted">{label}</span>
             <div className="h-1.5 flex-1 rounded-full bg-line/70 overflow-hidden">
               <div
                 className={cn(

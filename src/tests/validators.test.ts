@@ -3,11 +3,11 @@ import { validateDshManifest } from "@/lib/validators/dsh";
 import { validateClaudeCodeManifest } from "@/lib/validators/claude-code";
 import { validateMcpManifest } from "@/lib/validators/mcp";
 
-/** 方案要求：每个生态 3 个通过 + 3 个失败用例 */
+/** Spec requirement: 3 passing + 3 failing cases per ecosystem */
 
-describe("dsh 插件规范校验", () => {
-  // ---- 通过 ----
-  it("✓ dsh-plugin-* 命名的 npm 包", () => {
+describe("dsh plugin spec validation", () => {
+  // ---- pass ----
+  it("✓ npm package named dsh-plugin-*", () => {
     const r = validateDshManifest({
       name: "dsh-plugin-weather",
       version: "1.0.0",
@@ -16,7 +16,7 @@ describe("dsh 插件规范校验", () => {
     expect(r.valid).toBe(true);
     expect(r.extracted.npmPackage).toBe("dsh-plugin-weather");
   });
-  it("✓ scoped 包 + peerDependencies 里的 dsh 信号", () => {
+  it("✓ scoped package + dsh signal in peerDependencies", () => {
     const r = validateDshManifest({
       name: "@acme/harness-tools",
       version: "2.3.1",
@@ -24,7 +24,7 @@ describe("dsh 插件规范校验", () => {
     });
     expect(r.valid).toBe(true);
   });
-  it("✓ cordis 字段 / keywords 信号", () => {
+  it("✓ cordis field / keywords signal", () => {
     expect(
       validateDshManifest({ name: "my-tool", version: "0.1.0", cordis: {} }).valid,
     ).toBe(true);
@@ -33,16 +33,16 @@ describe("dsh 插件规范校验", () => {
         .valid,
     ).toBe(true);
   });
-  // ---- 失败 ----
-  it("✗ 缺 version", () => {
+  // ---- fail ----
+  it("✗ missing version", () => {
     expect(validateDshManifest({ name: "dsh-plugin-x" }).valid).toBe(false);
   });
-  it("✗ 非法 npm 包名", () => {
+  it("✗ invalid npm package name", () => {
     expect(
       validateDshManifest({ name: "Not A Package!", version: "1.0.0" }).valid,
     ).toBe(false);
   });
-  it("✗ 无任何 dsh 信号的普通包 / 空 manifest", () => {
+  it("✗ ordinary package with no dsh signal / null manifest", () => {
     expect(
       validateDshManifest({ name: "left-pad", version: "1.3.0" }).valid,
     ).toBe(false);
@@ -50,14 +50,14 @@ describe("dsh 插件规范校验", () => {
   });
 });
 
-describe("Claude Code 插件规范校验", () => {
-  // ---- 通过 ----
-  it("✓ 最小 plugin.json", () => {
+describe("Claude Code plugin spec validation", () => {
+  // ---- pass ----
+  it("✓ minimal plugin.json", () => {
     const r = validateClaudeCodeManifest({ name: "code-review" });
     expect(r.valid).toBe(true);
     expect(r.extracted.name).toBe("code-review");
   });
-  it("✓ 完整 plugin.json（commands/agents/hooks）", () => {
+  it("✓ full plugin.json (commands/agents/hooks)", () => {
     const r = validateClaudeCodeManifest({
       name: "deploy-helper",
       version: "1.2.0",
@@ -70,7 +70,7 @@ describe("Claude Code 插件规范校验", () => {
     expect(r.valid).toBe(true);
     expect(r.extracted.version).toBe("1.2.0");
   });
-  it("✓ marketplace.json（市场索引仓库）", () => {
+  it("✓ marketplace.json (marketplace index repo)", () => {
     const r = validateClaudeCodeManifest({
       name: "acme-marketplace",
       owner: { name: "Acme" },
@@ -78,14 +78,14 @@ describe("Claude Code 插件规范校验", () => {
     });
     expect(r.valid).toBe(true);
   });
-  // ---- 失败 ----
-  it("✗ 缺 name", () => {
+  // ---- fail ----
+  it("✗ missing name", () => {
     expect(validateClaudeCodeManifest({ version: "1.0.0" }).valid).toBe(false);
   });
-  it("✗ name 非 kebab-case", () => {
+  it("✗ name not kebab-case", () => {
     expect(validateClaudeCodeManifest({ name: "My Plugin!!" }).valid).toBe(false);
   });
-  it("✗ 空 marketplace（plugins 为空数组）/ 非对象", () => {
+  it("✗ empty marketplace (plugins is an empty array) / not an object", () => {
     expect(
       validateClaudeCodeManifest({ name: "empty market", plugins: [] }).valid,
     ).toBe(false);
@@ -93,9 +93,9 @@ describe("Claude Code 插件规范校验", () => {
   });
 });
 
-describe("MCP server.json 规范校验", () => {
-  // ---- 通过 ----
-  it("✓ npm 包形态的 server.json", () => {
+describe("MCP server.json spec validation", () => {
+  // ---- pass ----
+  it("✓ npm-package-shaped server.json", () => {
     const r = validateMcpManifest({
       name: "io.github.acme/files",
       description: "Filesystem MCP server",
@@ -105,7 +105,7 @@ describe("MCP server.json 规范校验", () => {
     expect(r.valid).toBe(true);
     expect(r.extracted.npmPackage).toBe("@acme/mcp-files");
   });
-  it("✓ remote 形态（streamable-http）", () => {
+  it("✓ remote shape (streamable-http)", () => {
     const r = validateMcpManifest({
       name: "com.example/api",
       description: "Hosted MCP endpoint",
@@ -114,7 +114,7 @@ describe("MCP server.json 规范校验", () => {
     });
     expect(r.valid).toBe(true);
   });
-  it("✓ title 优先作为展示名", () => {
+  it("✓ title takes precedence as the display name", () => {
     const r = validateMcpManifest({
       name: "io.github.acme/gmail",
       title: "Gmail",
@@ -125,8 +125,8 @@ describe("MCP server.json 规范校验", () => {
     expect(r.valid).toBe(true);
     expect(r.extracted.name).toBe("Gmail");
   });
-  // ---- 失败 ----
-  it("✗ name 缺命名空间", () => {
+  // ---- fail ----
+  it("✗ name missing namespace", () => {
     expect(
       validateMcpManifest({
         name: "just-a-name",
@@ -136,7 +136,7 @@ describe("MCP server.json 规范校验", () => {
       }).valid,
     ).toBe(false);
   });
-  it("✗ 缺 description / version", () => {
+  it("✗ missing description / version", () => {
     expect(
       validateMcpManifest({ name: "io.github.a/b", version: "1.0.0" }).valid,
     ).toBe(false);
@@ -144,7 +144,7 @@ describe("MCP server.json 规范校验", () => {
       validateMcpManifest({ name: "io.github.a/b", description: "x" }).valid,
     ).toBe(false);
   });
-  it("✗ packages 与 remotes 都缺失", () => {
+  it("✗ both packages and remotes missing", () => {
     expect(
       validateMcpManifest({
         name: "io.github.a/b",

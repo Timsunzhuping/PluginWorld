@@ -1,4 +1,4 @@
-/** 把快照数据 upsert 进 Postgres（sync 管道与 seed 脚本共用） */
+/** Upsert snapshot data into Postgres (shared by the sync pipeline and the seed script) */
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
@@ -72,7 +72,7 @@ export async function upsertPlugins(
           scoreCompliance: sql`excluded.score_compliance`,
           scoreSecurity: sql`excluded.score_security`,
           scoreDocs: sql`excluded.score_docs`,
-          // 保留已有 verifiedOwner 认领标记
+          // Preserve existing verifiedOwner claim flags
           trustFlags: sql`coalesce(plugins.trust_flags, '{}'::jsonb) || excluded.trust_flags`,
           npmPackage: sql`excluded.npm_package`,
           updatedAt: sql`now()`,
@@ -81,7 +81,7 @@ export async function upsertPlugins(
       });
   }
 
-  // README 单独批量更新（列大，避免一次性构造超大 SQL）
+  // Update READMEs in a separate pass (large column; avoids building one huge SQL statement)
   const fs = await import("node:fs");
   const path = await import("node:path");
   const readmeDir = path.join(process.cwd(), "src", "data", "seed", "readmes");
@@ -95,7 +95,7 @@ export async function upsertPlugins(
   }
   console.log(`[db] readme_html updated for ${readmeCount} plugins`);
 
-  // sync_sources 记录
+  // sync_sources records
   for (const eco of ["dsh", "claude-code", "mcp"] as const) {
     await client`
       INSERT INTO sync_sources (type, config, last_run_at, status)

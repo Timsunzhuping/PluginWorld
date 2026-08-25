@@ -15,9 +15,9 @@ import { ECOSYSTEMS } from "./types";
 import { CATEGORY_LABELS } from "./categories";
 
 /**
- * 数据访问层 —— 双模式：
- *  - DATABASE_URL 已配置 → Postgres（Drizzle + FTS，生产模式）
- *  - 未配置 → data/seed 快照（demo/静态模式，开箱即部署）
+ * Data access layer — dual mode:
+ *  - DATABASE_URL set → Postgres (Drizzle + FTS, production mode)
+ *  - unset → data/seed snapshot (demo/static mode, deployable out of the box)
  */
 
 const SEED_DIR = path.join(process.cwd(), "src", "data", "seed");
@@ -50,7 +50,7 @@ function countByEcosystem(plugins: Plugin[]): Record<Ecosystem, number> {
   return out;
 }
 
-// ---------- 行映射（DB 模式） ----------
+// ---------- Row mapping (DB mode) ----------
 
 type PluginRow = typeof schema.plugins.$inferSelect;
 
@@ -94,7 +94,7 @@ function num(v: string | null): number {
   return v == null ? 0 : Number(v);
 }
 
-// ---------- 公共 API ----------
+// ---------- Public API ----------
 
 export async function listPlugins(query: PluginQuery): Promise<PluginQueryResult> {
   if (!hasDatabase()) {
@@ -110,7 +110,7 @@ export async function listPlugins(query: PluginQuery): Promise<PluginQueryResult
   if (query.category) conds.push(sql`${query.category} = ANY(${p.categories})`);
   if (query.q?.trim()) {
     const q = query.q.trim();
-    // FTS（name+description，走 gin 索引）+ keywords 数组重叠
+    // FTS (name+description, uses the gin index) + keywords array overlap
     conds.push(
       sql`(to_tsvector('simple', coalesce(${p.name},'') || ' ' || coalesce(${p.description},'')) @@ websearch_to_tsquery('simple', ${q}) OR ${p.keywords} && string_to_array(lower(${q}), ' '))`,
     );

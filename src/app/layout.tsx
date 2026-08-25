@@ -25,11 +25,11 @@ const notoSansSC = Noto_Sans_SC({
 export const metadata: Metadata = {
   metadataBase: new URL("https://www.pluginworld.ai"),
   title: {
-    default: "PluginWorld — 跨生态 AI 插件聚合市场 | dsh · Claude Code · MCP",
+    default: "PluginWorld — The Cross-Ecosystem AI Plugin Marketplace | dsh · Claude Code · MCP",
     template: "%s | PluginWorld",
   },
   description:
-    "一个搜索框找到 DeepSeek Harness (dsh)、Claude Code、MCP 三大生态的所有插件，附统一的质量与安全评分。Plug in. The world is ready.",
+    "One search box for every plugin across DeepSeek Harness (dsh), Claude Code and MCP — with unified quality and security scores. Plug in. The world is ready.",
   keywords: [
     "AI plugins",
     "plugin marketplace",
@@ -42,9 +42,9 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     siteName: "PluginWorld",
-    title: "PluginWorld — 跨生态 AI 插件聚合市场",
+    title: "PluginWorld — The Cross-Ecosystem AI Plugin Marketplace",
     description:
-      "一个搜索框找到 dsh / Claude Code / MCP 的所有插件。Plug in. The world is ready.",
+      "One search box for every plugin across dsh, Claude Code and MCP. Plug in. The world is ready.",
     url: "https://www.pluginworld.ai",
   },
   twitter: {
@@ -60,7 +60,7 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="en">
       <body
         className={`${outfit.variable} ${plexMono.variable} ${notoSansSC.variable} flex min-h-screen flex-col antialiased`}
       >

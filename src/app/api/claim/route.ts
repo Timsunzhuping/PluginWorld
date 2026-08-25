@@ -3,11 +3,11 @@ import { eq, sql } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 import { getDb, hasDatabase, schema } from "@/lib/db";
 
-/** POST /api/claim — 开发者认领插件（需 GitHub 登录且为 owner 本人） */
+/** POST /api/claim — claim a plugin (requires GitHub sign-in as the repo owner) */
 export async function POST(req: Request) {
   const session = await getSession();
   if (!session) {
-    return NextResponse.json({ error: "请先使用 GitHub 登录" }, { status: 401 });
+    return NextResponse.json({ error: "Sign in with GitHub first" }, { status: 401 });
   }
   let body: { slug?: string };
   try {
@@ -22,7 +22,7 @@ export async function POST(req: Request) {
   if (!hasDatabase()) {
     return NextResponse.json({
       ok: true,
-      message: "Demo 模式：认领已记录到会话（配置 DATABASE_URL 后持久化）",
+      message: "Demo mode: claim recorded for this session (set DATABASE_URL to persist)",
     });
   }
 
@@ -33,13 +33,13 @@ export async function POST(req: Request) {
     .where(eq(schema.plugins.slug, body.slug))
     .limit(1);
   const plugin = rows[0];
-  if (!plugin) return NextResponse.json({ error: "插件不存在" }, { status: 404 });
+  if (!plugin) return NextResponse.json({ error: "Plugin not found" }, { status: 404 });
   if (
     !plugin.ownerGithub ||
     plugin.ownerGithub.toLowerCase() !== session.login.toLowerCase()
   ) {
     return NextResponse.json(
-      { error: `只有 @${plugin.ownerGithub ?? "?"} 本人可以认领` },
+      { error: `Only @${plugin.ownerGithub ?? "?"} can claim this plugin` },
       { status: 403 },
     );
   }
@@ -63,7 +63,7 @@ export async function POST(req: Request) {
     .values({ pluginId: plugin.id, userId, verifiedAt: new Date() })
     .onConflictDoNothing();
 
-  // trust_flags.verifiedOwner = true，安全评分 +4 在下轮 sync 重算
+  // trust_flags.verifiedOwner = true; the +4 security score lands on the next sync
   await db
     .update(schema.plugins)
     .set({
@@ -72,5 +72,5 @@ export async function POST(req: Request) {
     })
     .where(eq(schema.plugins.id, plugin.id));
 
-  return NextResponse.json({ ok: true, message: "认领成功，verified owner 标识已生效" });
+  return NextResponse.json({ ok: true, message: "Claimed — the verified owner badge is now live" });
 }

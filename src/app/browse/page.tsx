@@ -10,9 +10,9 @@ import { cn, formatCount } from "@/lib/utils";
 export const revalidate = 3600;
 
 export const metadata: Metadata = {
-  title: "Explore — 浏览全部插件",
+  title: "Explore — Browse All Plugins",
   description:
-    "按生态、分类、质量评分筛选 dsh / Claude Code / MCP 插件。全文搜索，统一评分。",
+    "Filter dsh / Claude Code / MCP plugins by ecosystem, category and quality score. Full-text search, unified scoring.",
   alternates: { canonical: "/browse" },
 };
 
@@ -51,7 +51,7 @@ export default async function BrowsePage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const raw = await searchParams;
-  // 重复的查询参数只取第一个
+  // Take the first value when a query param repeats
   const params: Search = Object.fromEntries(
     Object.entries(raw).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]),
   );
@@ -77,7 +77,7 @@ export default async function BrowsePage({
       <div className="mx-auto max-w-6xl px-5 py-12">
         <p className="label text-muted">CATEGORIES</p>
         <h1 className="mt-2 text-3xl font-bold tracking-[-0.01em] text-ink">
-          按分类浏览
+          Browse by category
         </h1>
         <div className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {stats.categories.map((cat) => (
@@ -104,7 +104,7 @@ export default async function BrowsePage({
       </div>
 
       <div className="mt-8 grid gap-8 lg:grid-cols-[220px_1fr]">
-        {/* 左侧筛选 */}
+        {/* Filters */}
         <aside>
           <h2 className="label text-muted">ECOSYSTEM</h2>
           <ul className="mt-3 space-y-1">
@@ -152,7 +152,7 @@ export default async function BrowsePage({
                   href={buildQuery(params, { category: null, page: null })}
                   className="block rounded-[8px] px-3 py-1 text-[13px] text-signal hover:bg-line/50"
                 >
-                  × 清除筛选
+                  × Clear filter
                 </Link>
               </li>
             )}
@@ -175,7 +175,7 @@ export default async function BrowsePage({
           </ul>
         </aside>
 
-        {/* 结果区 */}
+        {/* Results */}
         <div>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="font-mono text-[12px] tracking-wide text-muted">
@@ -208,11 +208,11 @@ export default async function BrowsePage({
 
           {result.items.length === 0 ? (
             <div className="mt-16 text-center">
-              <p className="text-lg font-medium text-ink">没有找到匹配的插件</p>
+              <p className="text-lg font-medium text-ink">No plugins matched</p>
               <p className="mt-2 text-[14px] text-muted">
-                换个关键词，或者{" "}
+                Try another keyword, or{" "}
                 <Link href="/submit" className="text-volt-dark underline underline-offset-2">
-                  提交你的插件
+                  submit your plugin
                 </Link>
               </p>
             </div>
@@ -224,7 +224,7 @@ export default async function BrowsePage({
             </div>
           )}
 
-          {/* 分页 */}
+          {/* Pagination */}
           {totalPages > 1 && (
             <nav className="mt-10 flex items-center justify-center gap-2">
               {page > 1 && (

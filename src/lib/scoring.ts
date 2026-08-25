@@ -1,54 +1,54 @@
 import type { ScoreBreakdown } from "./types";
 
 /**
- * 统一质量评分（开发方案 §5）
- * quality_score = 维护度30 + 流行度25 + 规范合规20 + 安全15 + 文档10
- * 全部为纯函数，便于单元测试与跨生态可比。
+ * Unified quality scoring (spec §5)
+ * quality_score = maintenance 30 + popularity 25 + spec compliance 20 + security 15 + docs 10
+ * All pure functions, for easy unit testing and cross-ecosystem comparability.
  */
 
 const DAY = 24 * 60 * 60 * 1000;
 
 export interface ScoringInput {
-  /** 最近一次 commit 时间 */
+  /** Time of the most recent commit */
   lastCommitAt: Date | null;
-  /** 生态内 star 百分位 0-1（由调用方在全量数据上计算） */
+  /** Star percentile within the ecosystem, 0-1 (computed by the caller over the full dataset) */
   starsPercentile: number;
-  /** 生态内下载量百分位 0-1，无数据传 null */
+  /** Download percentile within the ecosystem, 0-1; pass null when no data */
   downloadsPercentile: number | null;
-  /** manifest 是否通过该生态官方 schema 校验 */
+  /** Whether the manifest passes the ecosystem's official schema validation */
   specValid: boolean;
-  /** 是否提供了 manifest（有 manifest 但校验失败 ≠ 完全没有） */
+  /** Whether a manifest was provided (a manifest that fails validation ≠ no manifest at all) */
   hasManifest: boolean;
-  /** license 是否存在 */
+  /** Whether a license exists */
   hasLicense: boolean;
-  /** install script 静态扫描是否发现可疑模式 */
+  /** Whether the install-script static scan found suspicious patterns */
   suspiciousInstallScript: boolean;
-  /** owner 是否已验证（认领 / 官方组织） */
+  /** Whether the owner is verified (claimed / official organization) */
   verifiedOwner: boolean;
-  /** README 纯文本长度 */
+  /** README plain-text length */
   readmeLength: number;
-  /** README 是否包含代码示例 */
+  /** Whether the README contains code examples */
   readmeHasCodeExample: boolean;
-  /** README 是否有结构（≥2 个标题） */
+  /** Whether the README has structure (≥2 headings) */
   readmeHasStructure: boolean;
-  /** 评分基准时间（默认当前时间，注入以便测试与可重放） */
+  /** Reference time for scoring (defaults to now; injectable for tests and replayability) */
   now?: Date;
 }
 
-/** 维护度 0-30：最近 commit 时间衰减 */
+/** Maintenance 0-30: decays with time since the last commit */
 export function scoreMaintenance(
   lastCommitAt: Date | null,
   now: Date = new Date(),
 ): number {
   if (!lastCommitAt) return 0;
   const days = Math.max(0, (now.getTime() - lastCommitAt.getTime()) / DAY);
-  // 30 天内满分，之后按半衰期 ~180 天指数衰减
+  // Full score within 30 days, then exponential decay with a ~180-day half-life
   if (days <= 30) return 30;
   const decayed = 30 * Math.pow(0.5, (days - 30) / 180);
   return round1(Math.max(0, decayed));
 }
 
-/** 流行度 0-25：stars/downloads 的生态内百分位（跨生态可比） */
+/** Popularity 0-25: per-ecosystem percentile of stars/downloads (comparable across ecosystems) */
 export function scorePopularity(
   starsPercentile: number,
   downloadsPercentile: number | null,
@@ -59,14 +59,14 @@ export function scorePopularity(
   return round1(25 * (0.6 * s + 0.4 * d));
 }
 
-/** 规范合规 0-20：manifest 通过官方 schema 校验 */
+/** Spec compliance 0-20: manifest passes official schema validation */
 export function scoreCompliance(specValid: boolean, hasManifest: boolean): number {
   if (specValid) return 20;
-  if (hasManifest) return 8; // 有 manifest 但未通过校验
+  if (hasManifest) return 8; // has a manifest but failed validation
   return 0;
 }
 
-/** 安全 0-15：license + install script 扫描 + owner 验证 */
+/** Security 0-15: license + install-script scan + owner verification */
 export function scoreSecurity(input: {
   hasLicense: boolean;
   suspiciousInstallScript: boolean;
@@ -79,7 +79,7 @@ export function scoreSecurity(input: {
   return score;
 }
 
-/** 文档 0-10：README 长度/结构、有无示例 */
+/** Docs 0-10: README length/structure and presence of examples */
 export function scoreDocs(input: {
   readmeLength: number;
   readmeHasCodeExample: boolean;
@@ -114,7 +114,7 @@ export function computeScore(input: ScoringInput): {
   return { total, breakdown };
 }
 
-/** install script 静态扫描：已知恶意/可疑模式（P0 最小版本，方案 §9） */
+/** Install-script static scan: known malicious/suspicious patterns (P0 minimal version, spec §9) */
 const SUSPICIOUS_PATTERNS: RegExp[] = [
   /curl[^\n|;&]*\|\s*(ba)?sh/i, // curl | sh
   /wget[^\n|;&]*\|\s*(ba)?sh/i,
@@ -144,7 +144,7 @@ export function scanInstallScripts(manifest: unknown): boolean {
   return false;
 }
 
-/** 在一组数值上计算百分位（0-1），用于生态内 star/下载排名 */
+/** Compute a percentile (0-1) over a set of values, used for per-ecosystem star/download ranking */
 export function percentile(value: number, sortedAscending: number[]): number {
   if (sortedAscending.length === 0) return 0;
   let lo = 0;

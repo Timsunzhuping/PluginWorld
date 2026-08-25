@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // 快照模式：README HTML 与 seed 数据随 serverless bundle 一起分发
+  // Snapshot mode: README HTML and seed data ship with the serverless bundle
   outputFileTracingIncludes: {
     "/plugins/**": ["./src/data/seed/**"],
     "/api/v1/**": ["./src/data/seed/**"],

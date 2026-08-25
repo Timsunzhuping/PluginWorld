@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { ECOSYSTEM_META } from "@/lib/types";
 
 export const metadata: Metadata = {
-  title: "Submit — 收录你的插件",
+  title: "Submit — List Your Plugin",
   description:
-    "给仓库加上生态 topic，PluginWorld 每 6 小时自动收录、校验、评分。无需注册。",
+    "Add the ecosystem topic to your repo — PluginWorld indexes, validates and scores it automatically every 6 hours. No signup.",
   alternates: { canonical: "/submit" },
 };
 
@@ -16,17 +16,20 @@ const STEPS: {
   {
     eco: "dsh",
     topic: "dsh-plugin",
-    extra: "发布为 npm 包（package.json 含 dsh/cordis 信号）可获得规范合规满分。",
+    extra:
+      "Publish as an npm package (package.json with a dsh/cordis signal) to earn full compliance score.",
   },
   {
     eco: "claude-code",
     topic: "claude-code-plugin",
-    extra: "仓库根目录提供 .claude-plugin/plugin.json（或 marketplace.json）。",
+    extra:
+      "Ship .claude-plugin/plugin.json (or marketplace.json) at the repo root.",
   },
   {
     eco: "mcp",
     topic: "mcp-server",
-    extra: "同时发布到官方 MCP Registry（server.json）可获得 registry verified 标识。",
+    extra:
+      "Also publish to the official MCP Registry (server.json) to earn the registry-verified badge.",
   },
 ];
 
@@ -35,19 +38,22 @@ export default function SubmitPage() {
     <div className="mx-auto max-w-3xl px-5 py-14">
       <p className="label text-muted">SUBMIT</p>
       <h1 className="mt-2 text-3xl font-bold tracking-[-0.01em] text-ink sm:text-4xl">
-        收录你的插件
+        List your plugin
       </h1>
       <p className="mt-4 text-[15px] leading-relaxed text-muted">
-        PluginWorld 不靠人工提交冷启动——收录管道每 6 小时自动抓取 GitHub topic 与官方
-        MCP Registry，对每个仓库做规范校验、install script 静态扫描与质量评分。
-        你只需要做一件事：
+        PluginWorld doesn&apos;t rely on manual submissions. The indexing
+        pipeline crawls GitHub topics and the official MCP Registry every 6
+        hours, validating each repo against its ecosystem spec, scanning
+        install scripts and computing a quality score. You only need to do one
+        thing:
       </p>
 
       <div className="mt-8 rounded-[12px] bg-ink p-6">
         <p className="label text-faint">ONE STEP</p>
         <p className="mt-2 text-[15px] leading-relaxed text-paper">
-          在 GitHub 仓库的 <span className="font-mono text-volt">About → Topics</span>{" "}
-          中加上对应生态的 topic，下一轮同步自动收录。
+          Add the ecosystem topic under your GitHub repo&apos;s{" "}
+          <span className="font-mono text-volt">About → Topics</span> — the
+          next sync picks it up automatically.
         </p>
       </div>
 
@@ -67,42 +73,49 @@ export default function SubmitPage() {
         ))}
       </div>
 
-      <h2 className="mt-12 text-xl font-bold text-ink">提升质量评分</h2>
+      <h2 className="mt-12 text-xl font-bold text-ink">Raise your quality score</h2>
       <ul className="mt-4 space-y-2.5 text-[14.5px] leading-relaxed text-charcoal">
         <li className="flex gap-3">
           <span className="font-mono text-volt-dark">01</span>
-          保持活跃：30 天内有 commit 维护度满分，之后按 180 天半衰期衰减。
+          Stay active: a commit within 30 days earns full maintenance score,
+          decaying with a 180-day half-life after that.
         </li>
         <li className="flex gap-3">
           <span className="font-mono text-volt-dark">02</span>
-          提供合规 manifest：通过生态官方 schema 校验拿满 20 分规范分。
+          Ship a compliant manifest: passing the official ecosystem schema earns
+          the full 20 compliance points.
         </li>
         <li className="flex gap-3">
           <span className="font-mono text-volt-dark">03</span>
-          声明 license、避免可疑 install script、登录认领仓库，安全分 15 分拿满。
+          Declare a license, avoid suspicious install scripts and claim your
+          repo to max out the 15 security points.
         </li>
         <li className="flex gap-3">
           <span className="font-mono text-volt-dark">04</span>
-          README 写好结构与代码示例，文档分 10 分。
+          Write a structured README with code examples for the 10 docs points.
         </li>
       </ul>
 
-      <h2 className="mt-12 text-xl font-bold text-ink">已被收录？认领它</h2>
+      <h2 className="mt-12 text-xl font-bold text-ink">Already indexed? Claim it</h2>
       <p className="mt-3 text-[14.5px] leading-relaxed text-muted">
-        用 GitHub 登录后，在你的插件详情页点击「认领这个插件」，获得 verified owner
-        标识并直接提升安全评分。
+        Sign in with GitHub and hit &ldquo;Claim this plugin&rdquo; on your
+        plugin&apos;s page to get the verified owner badge — it directly boosts
+        your security score.
       </p>
 
-      <h2 className="mt-12 text-xl font-bold text-ink">收录有误 / 举报恶意插件</h2>
+      <h2 className="mt-12 text-xl font-bold text-ink">
+        Wrong listing / report a malicious plugin
+      </h2>
       <p className="mt-3 text-[14.5px] leading-relaxed text-muted">
-        发邮件到{" "}
+        Email{" "}
         <a
           href="mailto:report@pluginworld.ai"
           className="text-volt-dark underline underline-offset-2"
         >
           report@pluginworld.ai
-        </a>
-        ，附插件 slug。恶意插件（挂马仓库、刷 star 投毒）会被立即下架并加入黑名单。
+        </a>{" "}
+        with the plugin slug. Malicious plugins (malware repos, star-farmed
+        poisoning) are delisted immediately and blacklisted.
       </p>
     </div>
   );

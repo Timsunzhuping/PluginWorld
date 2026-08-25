@@ -12,7 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
-/** 插件主表 —— 字段命名严格对齐开发方案 §4 */
+/** Main plugins table — column names strictly follow spec §4 */
 export const plugins = pgTable(
   "plugins",
   {
@@ -35,7 +35,7 @@ export const plugins = pgTable(
     lastCommitAt: timestamp("last_commit_at", { withTimezone: true }),
     specValid: boolean("spec_valid").notNull().default(false),
     qualityScore: numeric("quality_score"),
-    // §5：每个维度落库为独立字段
+    // Spec §5: each score dimension stored as its own column
     scoreMaintenance: numeric("score_maintenance"),
     scorePopularity: numeric("score_popularity"),
     scoreCompliance: numeric("score_compliance"),
@@ -53,7 +53,7 @@ export const plugins = pgTable(
     index("plugins_ecosystem_idx").on(t.ecosystem),
     index("plugins_score_idx").on(t.qualityScore),
     index("plugins_stars_idx").on(t.stars),
-    // Postgres FTS：name + description（keywords 用数组重叠条件补充，见 lib/data.ts）
+    // Postgres FTS: name + description (keywords covered via array-overlap condition, see lib/data.ts)
     index("plugins_fts_idx").using(
       "gin",
       sql`to_tsvector('simple', coalesce(${t.name},'') || ' ' || coalesce(${t.description},''))`,
@@ -105,7 +105,7 @@ export const claims = pgTable(
   (t) => [uniqueIndex("claims_plugin_user_idx").on(t.pluginId, t.userId)],
 );
 
-// P1：用户评价
+// P1: user reviews
 export const reviews = pgTable("reviews", {
   id: uuid("id").primaryKey().defaultRandom(),
   pluginId: uuid("plugin_id")
@@ -119,7 +119,7 @@ export const reviews = pgTable("reviews", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-// view / install-copy 埋点，算 trending
+// view / install-copy tracking events, used to compute trending
 export const events = pgTable(
   "events",
   {

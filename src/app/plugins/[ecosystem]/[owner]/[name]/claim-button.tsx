@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-/** 开发者认领（Phase 3）：GitHub 登录后，owner 本人可认领插件 */
+/** Developer claim (Phase 3): repo owner can claim after GitHub sign-in */
 export function ClaimButton({
   slug,
   ownerGithub,
@@ -38,11 +38,11 @@ export function ClaimButton({
         setMessage(body.message ?? null);
       } else {
         setState("error");
-        setMessage(body.error ?? "认领失败");
+        setMessage(body.error ?? "Claim failed");
       }
     } catch {
       setState("error");
-      setMessage("网络错误，请重试");
+      setMessage("Network error — please retry");
     }
   }
 
@@ -56,19 +56,19 @@ export function ClaimButton({
       ) : isOwner ? (
         <>
           <p className="mt-3 text-[13px] leading-relaxed text-charcoal">
-            你是 @{ownerGithub}，认领后获得 verified owner 标识，提升安全评分。
+            You&apos;re @{ownerGithub}. Claim to get the verified owner badge and boost the security score.
           </p>
           <button
             onClick={claim}
             disabled={state === "busy"}
             className="mt-3 w-full cursor-pointer rounded-[8px] bg-ink px-4 py-2.5 text-[13.5px] font-medium text-paper transition-colors hover:bg-charcoal disabled:opacity-50"
           >
-            {state === "busy" ? "认领中…" : "认领这个插件"}
+            {state === "busy" ? "Claiming…" : "Claim this plugin"}
           </button>
         </>
       ) : (
         <p className="mt-3 text-[13px] leading-relaxed text-muted">
-          这是你的插件？使用 GitHub 账号 @{ownerGithub} 登录后即可认领。
+          Is this your plugin? Sign in with GitHub as @{ownerGithub} to claim it.
         </p>
       )}
       {message && state === "error" && (

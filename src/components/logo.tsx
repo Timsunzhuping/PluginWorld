@@ -1,8 +1,8 @@
 import { cn } from "@/lib/utils";
 
 /**
- * PluginWorld Logo · 图形 = 端口 Port，插头正在接入，电光绿是接通的电流。
- * viewBox 0 0 96 96，来自品牌视觉体系 V1.0。
+ * PluginWorld logo · mark = a port with a plug connecting; volt green is the live current.
+ * viewBox 0 0 96 96, from brand visual system V1.0.
  */
 export function LogoMark({
   size = 28,

@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { InstallOption } from "@/lib/install";
 import { cn } from "@/lib/utils";
 
-/** 安装命令块：多方式 tab + 一键复制（复制即「接入」埋点） */
+/** Install command block: per-method tabs + one-click copy (tracked as install-copy) */
 export function InstallCommand({
   options,
   slug,
@@ -22,7 +22,7 @@ export function InstallCommand({
       await navigator.clipboard.writeText(current.command);
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
-      // install-copy 埋点（events 表，算 trending；demo 模式为 no-op）
+      // install-copy event (events table, feeds trending; no-op in demo mode)
       fetch("/api/v1/events", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

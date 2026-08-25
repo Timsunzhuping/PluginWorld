@@ -8,33 +8,33 @@ export const ECOSYSTEM_META: Record<
   dsh: {
     label: "dsh",
     full: "DeepSeek Harness",
-    tagline: "Everything is a plugin. Cordis 架构的开源 agent harness。",
+    tagline: "Everything is a plugin. The open-source agent harness built on Cordis.",
     color: "#c6ff00",
   },
   "claude-code": {
     label: "Claude Code",
     full: "Claude Code",
-    tagline: "Anthropic 官方 agentic 编程工具的插件与技能生态。",
+    tagline: "Plugins and skills for Anthropic's agentic coding tool.",
     color: "#d9541e",
   },
   mcp: {
     label: "MCP",
     full: "Model Context Protocol",
-    tagline: "连接 AI 与外部世界的开放协议，服务器即插件。",
+    tagline: "The open protocol connecting AI to the world — servers as plugins.",
     color: "#7da300",
   },
 };
 
 export interface ScoreBreakdown {
-  /** 维护度 0-30 */
+  /** Maintenance 0-30 */
   maintenance: number;
-  /** 流行度 0-25 */
+  /** Popularity 0-25 */
   popularity: number;
-  /** 规范合规 0-20 */
+  /** Spec compliance 0-20 */
   compliance: number;
-  /** 安全 0-15 */
+  /** Security 0-15 */
   security: number;
-  /** 文档 0-10 */
+  /** Docs 0-10 */
   docs: number;
 }
 
@@ -70,7 +70,7 @@ export interface Plugin {
   qualityScore: number;
   scoreBreakdown: ScoreBreakdown;
   trustFlags: TrustFlags;
-  /** npm 包名（dsh / 部分 mcp），用于生成安装命令 */
+  /** npm package name (dsh / some mcp), used to generate install commands */
   npmPackage: string | null;
   createdAt: string;
   updatedAt: string;
@@ -79,7 +79,7 @@ export interface Plugin {
 
 export interface MarketStats {
   totalIndexed: number;
-  /** 各生态源头总量（GitHub topic total_count / registry 总数） */
+  /** Upstream totals per ecosystem (GitHub topic total_count / registry total) */
   sourceTotals: Record<Ecosystem, number>;
   byEcosystem: Record<Ecosystem, number>;
   categories: { name: string; count: number }[];

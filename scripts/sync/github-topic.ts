@@ -1,9 +1,9 @@
 /**
- * GitHub topic 抓取（方案 §6）：
- *   topic:dsh-plugin → dsh 生态
- *   topic:claude-code-plugin → Claude Code 生态
- *   topic:mcp-server → MCP 生态（与官方 Registry 合并去重）
- * Search API 按 star 降序取前 N 页；增量同步用 pushed_at 过滤。
+ * GitHub topic crawler (spec §6):
+ *   topic:dsh-plugin → dsh ecosystem
+ *   topic:claude-code-plugin → Claude Code ecosystem
+ *   topic:mcp-server → MCP ecosystem (merged/deduped with the official Registry)
+ * Search API fetches the first N pages sorted by stars desc; incremental sync filters by pushed_at.
  */
 import { GITHUB_API, fetchJson, githubHeaders, sleep } from "./lib";
 import type { Ecosystem } from "../../src/lib/types";
@@ -54,7 +54,7 @@ export async function fetchTopicRepos(
     totalCount = data.total_count;
     repos.push(...data.items.filter((r) => !r.fork && !r.archived));
     if (data.items.length < perPage) break;
-    // 未认证 Search API 限 10 req/min
+    // Unauthenticated Search API is limited to 10 req/min
     await sleep(process.env.GITHUB_TOKEN ? 800 : 6_500);
   }
 
@@ -62,7 +62,7 @@ export async function fetchTopicRepos(
   return { repos, totalCount };
 }
 
-/** manifest 抓取路径（按生态优先级尝试） */
+/** Manifest fetch paths (tried in priority order per ecosystem) */
 export function manifestPaths(ecosystem: Ecosystem): string[] {
   switch (ecosystem) {
     case "dsh":

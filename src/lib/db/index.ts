@@ -3,8 +3,8 @@ import postgres from "postgres";
 import * as schema from "./schema";
 
 /**
- * 双模式数据层的 DB 侧：设置 DATABASE_URL 时启用 Postgres（生产），
- * 未设置时站点回退到 data/seed 快照（demo / 静态模式），见 lib/data.ts。
+ * DB side of the dual-mode data layer: with DATABASE_URL set, Postgres is used (production);
+ * without it, the site falls back to the data/seed snapshot (demo/static mode), see lib/data.ts.
  */
 let _db: ReturnType<typeof drizzle<typeof schema>> | null = null;
 
@@ -18,7 +18,7 @@ export function getDb() {
   }
   if (!_db) {
     const client = postgres(process.env.DATABASE_URL, {
-      prepare: false, // 兼容 Supabase/Neon 的连接池
+      prepare: false, // compatible with Supabase/Neon connection pooling
       max: 5,
     });
     _db = drizzle(client, { schema });

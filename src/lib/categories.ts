@@ -1,4 +1,4 @@
-/** 从 GitHub topics / keywords / 描述推导统一分类 */
+/** Derive unified categories from GitHub topics / keywords / description */
 
 export const CATEGORY_LABELS: Record<string, string> = {
   "ai-agents": "AI Agents",

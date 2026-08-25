@@ -1,6 +1,6 @@
 /**
- * 公开 API 限流（P0 最小实现：进程内滑动窗口，按 IP）。
- * 生产规模化时替换为 Upstash Redis（方案 Phase 3 §9），接口保持不变。
+ * Public API rate limiting (P0 minimal implementation: in-process sliding window, per IP).
+ * At production scale, swap in Upstash Redis (spec Phase 3 §9); the interface stays the same.
  */
 
 const WINDOW_MS = 60_000;
@@ -18,7 +18,7 @@ export function rateLimit(ip: string): { ok: boolean; remaining: number } {
   }
   hits.push(now);
   buckets.set(ip, hits);
-  // 防止 map 无限增长
+  // Keep the map from growing unbounded
   if (buckets.size > 10_000) {
     for (const [key, arr] of buckets) {
       if (arr.every((t) => t <= cutoff)) buckets.delete(key);

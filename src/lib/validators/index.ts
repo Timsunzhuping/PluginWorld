@@ -6,7 +6,7 @@ import { validateMcpManifest } from "./mcp";
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
-  /** 从 manifest 提取的规范化字段 */
+  /** Normalized fields extracted from the manifest */
   extracted: {
     name?: string;
     version?: string;

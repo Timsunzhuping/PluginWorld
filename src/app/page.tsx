@@ -32,13 +32,13 @@ export default async function HomePage() {
             {universeLabel} PLUGINS TRACKED · 3 ECOSYSTEMS · ONE PORT
           </p>
           <h1 className="mt-5 max-w-3xl text-4xl font-bold leading-[1.1] tracking-[-0.02em] text-ink sm:text-6xl">
-            全球最好的插件，
+            The world&apos;s best plugins,
             <br />
-            一个接口全部接入。
+            all through one port.
           </h1>
           <p className="mt-5 max-w-xl text-[16px] leading-relaxed text-muted">
-            一个搜索框找到 DeepSeek Harness、Claude Code、MCP
-            三大生态的所有插件，附统一的质量与安全评分。
+            One search box for every plugin across DeepSeek Harness, Claude Code
+            and MCP — with unified quality and security scores.
           </p>
           <div className="mt-8 max-w-2xl">
             <SearchBar />
@@ -62,7 +62,7 @@ export default async function HomePage() {
       <section className="mx-auto max-w-6xl px-5 py-14">
         <div className="flex items-end justify-between">
           <h2 className="text-2xl font-bold tracking-[-0.01em] text-ink sm:text-3xl">
-            三大生态，一个端口
+            Three ecosystems. One port.
           </h2>
           <Link
             href="/browse"
@@ -128,7 +128,7 @@ export default async function HomePage() {
             <div className="mt-8 rounded-[12px] bg-ink p-5">
               <p className="label text-faint">FOR AI AGENTS</p>
               <p className="mt-2 text-[13.5px] leading-relaxed text-paper">
-                公开 REST API，让你的 agent 直接搜索与接入插件。
+                A public REST API built for agents — search and plug in directly.
               </p>
               <Link
                 href="/docs/api"
@@ -157,28 +157,29 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* QUALITY SCORE 说明 */}
+      {/* QUALITY SCORE */}
       <section className="mx-auto max-w-6xl px-5 py-14">
         <div className="rounded-[12px] border border-line bg-white p-8 sm:p-10">
           <div className="grid gap-8 lg:grid-cols-2">
             <div>
               <p className="label text-muted">UNIFIED QUALITY SCORE</p>
               <h2 className="mt-3 text-2xl font-bold tracking-[-0.01em] text-ink sm:text-3xl">
-                跨生态统一质量评分
+                One quality score across ecosystems
               </h2>
               <p className="mt-3 max-w-md text-[14.5px] leading-relaxed text-muted">
-                每个插件在收录时自动完成官方规范校验、install script
-                静态扫描与维护度分析，五个维度合成一个 0–100 分，跨生态可比。
+                Every plugin is validated against its official spec, scanned for
+                suspicious install scripts and analyzed for maintenance health —
+                five dimensions, one comparable 0–100 score.
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               {(
                 [
-                  ["30", "维护度", "commit 衰减 · release 频率"],
-                  ["25", "流行度", "生态内 star/下载百分位"],
-                  ["20", "规范合规", "官方 schema 校验"],
-                  ["15", "安全", "license · 脚本扫描 · owner"],
-                  ["10", "文档", "README 结构与示例"],
+                  ["30", "Maintenance", "commit decay · release cadence"],
+                  ["25", "Popularity", "star/download percentile in ecosystem"],
+                  ["20", "Compliance", "official schema validation"],
+                  ["15", "Security", "license · script scan · owner"],
+                  ["10", "Docs", "README structure & examples"],
                 ] as const
               ).map(([weight, name, desc]) => (
                 <div key={name} className="rounded-[8px] border border-line p-4">
@@ -209,21 +210,21 @@ export default async function HomePage() {
             Plug in. The world is ready.
           </h2>
           <p className="mt-3 max-w-lg text-[14.5px] leading-relaxed text-faint">
-            给仓库加上生态 topic，PluginWorld 每 6 小时自动收录、校验、评分。
-            无需注册，无需提交表单。
+            Add the ecosystem topic to your repo — PluginWorld indexes, validates
+            and scores it automatically every 6 hours. No signup. No forms.
           </p>
           <div className="mt-6 flex flex-wrap gap-3">
             <Link
               href="/submit"
               className="rounded-[8px] bg-volt px-6 py-3 text-[14.5px] font-semibold text-ink transition-colors hover:bg-[#b3e600]"
             >
-              收录我的插件
+              List my plugin
             </Link>
             <Link
               href="/docs/api"
               className="rounded-[8px] border border-line-dark px-6 py-3 text-[14.5px] text-paper transition-colors hover:border-paper"
             >
-              API 文档
+              API docs
             </Link>
           </div>
         </div>

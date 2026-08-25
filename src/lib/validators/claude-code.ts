@@ -2,11 +2,11 @@ import { z } from "zod";
 import type { ValidationResult } from "./index";
 
 /**
- * Claude Code 插件规范校验。
- * 官方规范：仓库内 .claude-plugin/plugin.json（单插件）
- * 或 .claude-plugin/marketplace.json（插件市场索引）。
- * plugin.json 必填 name；可选 version / description / author /
- * commands / agents / skills / hooks / mcpServers 等。
+ * Claude Code plugin spec validation.
+ * Official spec: .claude-plugin/plugin.json in the repo (single plugin)
+ * or .claude-plugin/marketplace.json (plugin marketplace index).
+ * plugin.json requires name; optional version / description / author /
+ * commands / agents / skills / hooks / mcpServers, etc.
  */
 
 const pluginNameRe = /^[a-z0-9]+(-[a-z0-9]+)*$/i;
@@ -48,7 +48,7 @@ export function validateClaudeCodeManifest(manifest: unknown): ValidationResult 
     return { valid: false, errors: ["manifest missing or not an object"], extracted: {} };
   }
 
-  // marketplace.json（市场索引仓库）也视为合规
+  // marketplace.json (marketplace index repo) also counts as compliant
   const asMarketplace = marketplaceJsonSchema.safeParse(manifest);
   if (asMarketplace.success && Array.isArray((manifest as { plugins?: unknown[] }).plugins)) {
     const m = asMarketplace.data;

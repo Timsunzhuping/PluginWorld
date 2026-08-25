@@ -6,7 +6,7 @@ export interface InstallOption {
   note?: string;
 }
 
-/** 按生态生成安装/接入命令（品牌语言：说「接入」不说「下载安装」） */
+/** Generate install commands per ecosystem (brand voice: "plug in") */
 export function installOptions(plugin: Plugin): InstallOption[] {
   const repo = plugin.repoUrl?.replace(/^https:\/\/github\.com\//, "") ?? null;
   switch (plugin.ecosystem) {
@@ -16,7 +16,7 @@ export function installOptions(plugin: Plugin): InstallOption[] {
         opts.push({
           label: "dsh Web UI",
           command: `npx @deepseek-ai/dsh web`,
-          note: `启动后在内置插件市场搜索 “${plugin.name}” 一键接入`,
+          note: `Launch, then search "${plugin.name}" in the built-in market to plug it in`,
         });
         opts.push({
           label: "npm",
@@ -26,7 +26,7 @@ export function installOptions(plugin: Plugin): InstallOption[] {
         opts.push({
           label: "git",
           command: `git clone https://github.com/${repo}.git`,
-          note: "该插件未发布 npm 包，从源码接入",
+          note: "No npm package published — plug in from source",
         });
       }
       return opts;
@@ -41,7 +41,7 @@ export function installOptions(plugin: Plugin): InstallOption[] {
           opts.push({
             label: "Claude Code",
             command: `/plugin marketplace add ${repo}`,
-            note: "添加后用 /plugin install <name> 接入其中的插件",
+            note: "Then run /plugin install <name> for any plugin it lists",
           });
         } else {
           opts.push({
@@ -78,7 +78,7 @@ export function installOptions(plugin: Plugin): InstallOption[] {
             null,
             2,
           ),
-          note: "适用于 Claude Desktop / Cursor 等 MCP 客户端",
+          note: "For Claude Desktop, Cursor and other MCP clients",
         });
       } else if (remotes.length > 0) {
         opts.push({
@@ -89,7 +89,7 @@ export function installOptions(plugin: Plugin): InstallOption[] {
         opts.push({
           label: "git",
           command: `git clone https://github.com/${repo}.git`,
-          note: "参考 README 配置该 MCP server",
+          note: "See the README to configure this MCP server",
         });
       }
       return opts;

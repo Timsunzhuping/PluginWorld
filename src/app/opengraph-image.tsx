@@ -4,7 +4,7 @@ export const alt = "PluginWorld — One port for every plugin";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
-/** SOCIAL BANNER：品牌营销应用 "Plug in. The world is ready." */
+/** SOCIAL BANNER: brand marketing application "Plug in. The world is ready." */
 export default function OgImage() {
   return new ImageResponse(
     (

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
 
-/** sync 管道完成后触发 ISR 全站再生（方案 §6），Bearer REVALIDATE_SECRET 鉴权 */
+/** Trigger site-wide ISR regeneration after the sync pipeline finishes (spec §6); Bearer REVALIDATE_SECRET auth */
 export async function POST(req: Request) {
   const secret = process.env.REVALIDATE_SECRET;
   if (!secret) {

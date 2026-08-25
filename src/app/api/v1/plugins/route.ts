@@ -5,7 +5,7 @@ import { ECOSYSTEMS, type Ecosystem, type SortKey } from "@/lib/types";
 
 /**
  * GET /api/v1/plugins?q=&ecosystem=&category=&sort=score|stars|trending&page=&per_page=
- * 公开只读 API（方案 §7），对齐官方 MCP Registry 风格，供 AI agent 调用。
+ * Public read-only API (spec §7), styled after the official MCP Registry, for AI agents to consume.
  */
 export async function GET(req: Request) {
   const { ok, remaining } = rateLimit(clientIp(req));

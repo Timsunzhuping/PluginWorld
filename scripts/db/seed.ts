@@ -1,7 +1,7 @@
 /**
- * 把 src/data/seed 快照灌入 Postgres：
+ * Load the src/data/seed snapshot into Postgres:
  *   npx tsx scripts/db/seed.ts
- * 前置：DATABASE_URL 已设置，且已执行 npm run db:migrate
+ * Prerequisites: DATABASE_URL is set and `npm run db:migrate` has been run.
  */
 import fs from "node:fs";
 import path from "node:path";
