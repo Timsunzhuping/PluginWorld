@@ -100,6 +100,10 @@ const SECRET_PATTERNS: [RegExp, string][] = [
   [/\bsk-[A-Za-z0-9_-]{20,}/g, "sk-REDACTED"],
   [/\bAKIA[0-9A-Z]{16}\b/g, "AKIA_REDACTED"],
   [/\bAIza[0-9A-Za-z_-]{35}\b/g, "AIza_REDACTED"],
+  [/\bhf_[A-Za-z0-9]{25,}\b/g, "hf_REDACTED"],
+  [/\bnpm_[A-Za-z0-9]{30,}\b/g, "npm_REDACTED"],
+  [/\b[sr]k_live_[A-Za-z0-9]{10,}\b/g, "sk_live_REDACTED"],
+  [/\bglpat-[A-Za-z0-9_-]{15,}\b/g, "glpat-REDACTED"],
   [/\beyJ[A-Za-z0-9_-]{40,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "JWT_REDACTED"],
 ];
 

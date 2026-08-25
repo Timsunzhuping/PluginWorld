@@ -1,0 +1,297 @@
+<h1>Sequential Thinking Multi-Agent System (MAS) <img src="https://img.shields.io/badge/A%20FRAD%20PRODUCT-WIP-yellow" alt="" /></h1>
+<p><a href="https://www.python.org/downloads/" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python Version" /></a> <a href="https://github.com/agno-agi/agno" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Framework-Agno-orange.svg" alt="Framework" /></a> <a href="https://x.com/FradSer" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/twitter/follow/FradSer?style=social" alt="Twitter Follow" /></a></p>
+<p><strong>English</strong> | <a href="https://github.com/FradSer/mcp-server-mas-sequential-thinking/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+<p>An MCP server that processes sequential thoughts through a team of specialized AI agents, each analyzing the problem from a different cognitive perspective.</p>
+<h2>What This Is</h2>
+<p>This is an <strong>MCP server</strong>, not a standalone application. It runs as a background service that extends an MCP-compatible LLM client (like Claude Desktop) with structured sequential-thinking capabilities. It exposes one tool, <code>sequentialthinking</code>, that runs every thought through a fixed multi-agent workflow: an initial synthesis, several specialist agents thinking in parallel, and a final synthesis that answers the original question.</p>
+<h2>How It Works</h2>
+<p>The system uses a fixed <code>full_exploration</code> strategy for every request. The AI complexity analyzer still runs to record diagnostic metadata (complexity score, problem type, required thinking modes), but it no longer changes the execution path — all thoughts take the same route:</p>
+<pre><code class="language-mermaid">flowchart TD
+    A[Input Thought] --&gt; B[AI Complexity Analyzer]
+    B --&gt; C[Complexity Metadata Stored]
+    C --&gt; D[Fixed Strategy: full_exploration]
+    D --&gt; E[Step 1: Initial Synthesis]
+    E --&gt; F[Step 2: Parallel Specialist Agents]
+    F --&gt; G[Step 3: Final Synthesis]
+    G --&gt; H[Unified Response]
+</code></pre>
+<h3>The Specialist Agents</h3>
+<p>Each request runs six specialist agents in parallel, plus a synthesis agent that runs twice (once at the start, once at the end). Every specialist except synthesis can optionally use web research via ExaTools.</p>
+<table>
+<thead>
+<tr>
+<th>Agent</th>
+<th>Thinking direction</th>
+<th>Focus</th>
+<th>Time budget</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Factual</td>
+<td><code>factual</code></td>
+<td>Objective facts and verified data</td>
+<td>120s</td>
+</tr>
+<tr>
+<td>Emotional</td>
+<td><code>emotional</code></td>
+<td>Intuition and gut reactions</td>
+<td>30s</td>
+</tr>
+<tr>
+<td>Critical</td>
+<td><code>critical</code></td>
+<td>Risks, weaknesses, logical flaws</td>
+<td>120s</td>
+</tr>
+<tr>
+<td>Optimistic</td>
+<td><code>optimistic</code></td>
+<td>Benefits, opportunities, value</td>
+<td>120s</td>
+</tr>
+<tr>
+<td>Creative</td>
+<td><code>creative</code></td>
+<td>New ideas and alternatives</td>
+<td>240s</td>
+</tr>
+<tr>
+<td>Meta-cognitive</td>
+<td><code>metacognitive</code></td>
+<td>Bias detection and reasoning-process evaluation</td>
+<td>90s</td>
+</tr>
+<tr>
+<td>Synthesis</td>
+<td><code>synthesis</code></td>
+<td>Integration and final answer</td>
+<td>60s</td>
+</tr>
+</tbody></table>
+<p>Key properties:</p>
+<ul>
+<li><strong>Deterministic</strong>: every request runs the same multi-step path.</li>
+<li><strong>Parallel</strong>: the specialist agents run simultaneously with <code>asyncio.gather</code>.</li>
+<li><strong>Synthesis-driven</strong>: both orchestration and the final answer come from the synthesis agent, which uses the enhanced model.</li>
+</ul>
+<h3>Model Strategy</h3>
+<p>Two models are configured per provider:</p>
+<ul>
+<li><strong>Enhanced model</strong>: used by the synthesis agent (integration tasks).</li>
+<li><strong>Standard model</strong>: used by the specialist agents.</li>
+</ul>
+<h3>Research Capabilities</h3>
+<p>ExaTools is attached to every agent except synthesis. Research is <strong>optional</strong> — it activates only when <code>EXA_API_KEY</code> is set. Without it, the system works on pure reasoning.</p>
+<h2>The <code>sequentialthinking</code> Tool</h2>
+<p>The server exposes one MCP tool.</p>
+<h3>Input</h3>
+<pre><code class="language-typescript">{
+  thought: string,               // One focused reasoning step
+  thoughtNumber: number,         // 1-based step index; increment each call
+  totalThoughts: number,         // Planned number of steps
+  nextThoughtNeeded: boolean,    // true for intermediate steps, false on final step
+  isRevision: boolean,           // true only when revising earlier conclusions
+  branchFromThought?: number,    // Set with branchId to branch from a prior step
+  branchId?: string,             // Branch identifier (required when branching)
+  needsMoreThoughts: boolean     // true only when extending beyond totalThoughts
+}
+</code></pre>
+<h3>Output</h3>
+<pre><code class="language-typescript">{
+  should_continue: boolean,      // Canonical continuation signal
+  next_thought_number: number?,  // Recommended next thoughtNumber
+  stop_reason: string,           // Why to continue/stop/retry
+  current_thought_number: number,
+  total_thoughts: number,
+  next_call_arguments?: {        // Suggested next-call arguments when applicable
+    thoughtNumber: number,
+    totalThoughts: number,
+    nextThoughtNeeded: boolean,
+    needsMoreThoughts: boolean
+  },
+  parameter_usage: Record&lt;string, string&gt;
+}
+</code></pre>
+<h3>Call Contract</h3>
+<ul>
+<li>Treat this tool as a <strong>multi-step loop</strong>, not a one-shot call.</li>
+<li>After every response, read <code>structuredContent.should_continue</code>.</li>
+<li>Keep calling until <code>should_continue</code> is <code>false</code>.</li>
+<li>Actively use reflection: when a step is weak or incorrect, send a revision step with <code>isRevision=true</code>.</li>
+<li>Prefer <code>structuredContent.next_thought_number</code> and <code>next_call_arguments</code> when building the next request.</li>
+</ul>
+<h2>Supported Providers</h2>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Env var</th>
+<th>Default enhanced model</th>
+<th>Default standard model</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DeepSeek (default)</td>
+<td><code>DEEPSEEK_API_KEY</code></td>
+<td><code>deepseek-chat</code></td>
+<td><code>deepseek-chat</code></td>
+</tr>
+<tr>
+<td>Groq</td>
+<td><code>GROQ_API_KEY</code></td>
+<td><code>openai/gpt-oss-120b</code></td>
+<td><code>openai/gpt-oss-20b</code></td>
+</tr>
+<tr>
+<td>OpenRouter</td>
+<td><code>OPENROUTER_API_KEY</code></td>
+<td><code>deepseek/deepseek-chat-v3-0324</code></td>
+<td><code>deepseek/deepseek-r1</code></td>
+</tr>
+<tr>
+<td>GitHub Models</td>
+<td><code>GITHUB_TOKEN</code></td>
+<td><code>openai/gpt-5</code></td>
+<td><code>openai/gpt-5-min</code></td>
+</tr>
+<tr>
+<td>Anthropic</td>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td><code>claude-3-5-sonnet-20241022</code></td>
+<td><code>claude-3-5-haiku-20241022</code></td>
+</tr>
+<tr>
+<td>Ollama</td>
+<td>none</td>
+<td><code>devstral:24b</code></td>
+<td><code>devstral:24b</code></td>
+</tr>
+</tbody></table>
+<h2>Installation</h2>
+<h3>Prerequisites</h3>
+<ul>
+<li>Python 3.10+</li>
+<li>An LLM API key from one of the providers above</li>
+<li>Optional: <code>EXA_API_KEY</code> for web research</li>
+<li><code>uv</code> package manager (recommended) or <code>pip</code></li>
+</ul>
+<h3>Install</h3>
+<pre><code class="language-bash">git clone https://github.com/FradSer/mcp-server-mas-sequential-thinking.git
+cd mcp-server-mas-sequential-thinking
+
+uv pip install .        # or: pip install .
+</code></pre>
+<h3>Configure an MCP Client</h3>
+<p>Add to your MCP client configuration:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "sequential-thinking": {
+      "command": "mcp-server-mas-sequential-thinking",
+      "env": {
+        "LLM_PROVIDER": "deepseek",
+        "DEEPSEEK_API_KEY": "your_api_key",
+        "EXA_API_KEY": "your_exa_key_optional"
+      }
+    }
+  }
+}
+</code></pre>
+<h3>Environment Variables</h3>
+<pre><code class="language-bash"># LLM provider (required)
+LLM_PROVIDER="deepseek"  # deepseek, groq, openrouter, github, anthropic, ollama
+DEEPSEEK_API_KEY="sk-..."
+
+# Optional: override the models per provider (prefixed by provider name)
+# DEEPSEEK_ENHANCED_MODEL_ID="deepseek-chat"
+# DEEPSEEK_STANDARD_MODEL_ID="deepseek-chat"
+
+# Optional: web research (enables ExaTools)
+# EXA_API_KEY="your_exa_api_key"
+
+# Optional: custom endpoint
+# LLM_BASE_URL="https://custom-endpoint.com"
+
+# Optional: team orchestration mode (standard/broadcast, route, coordinate)
+# TEAM_MODE="standard"
+</code></pre>
+<h3>Run the Server Directly</h3>
+<pre><code class="language-bash">mcp-server-mas-sequential-thinking        # installed script
+uv run mcp-server-mas-sequential-thinking  # or via uv
+</code></pre>
+<h2>Development</h2>
+<pre><code class="language-bash"># Install with dev dependencies
+uv pip install -e ".[dev]"
+
+# Code quality
+uv run ruff check . --fix
+uv run ruff format .
+uv run mypy .
+
+# Run tests
+uv run pytest tests/
+
+# Or use the Makefile
+make test        # all tests with coverage + quality checks
+make test-fast   # fast run without coverage
+make check-all   # all quality checks
+</code></pre>
+<h3>Test with MCP Inspector</h3>
+<pre><code class="language-bash">npx @modelcontextprotocol/inspector uv run mcp-server-mas-sequential-thinking
+</code></pre>
+<p>Open <a href="http://127.0.0.1:6274/" target="_blank" rel="noopener noreferrer">http://127.0.0.1:6274/</a> and test the <code>sequentialthinking</code> tool.</p>
+<h2>Token Consumption Warning</h2>
+<p>The multi-agent architecture consumes significantly more tokens than a single-agent tool — roughly 5-10x more per <code>sequentialthinking</code> call, because every call invokes multiple specialist agents. The tradeoff is deeper, multi-perspective analysis.</p>
+<h2>Project Structure</h2>
+<pre><code>mcp-server-mas-sequential-thinking/
+├── src/mcp_server_mas_sequential_thinking/
+│   ├── main.py                          # MCP server entry point (MCPServer)
+│   ├── processors/
+│   │   ├── multi_thinking_core.py       # Specialist agent definitions
+│   │   └── multi_thinking_processor.py  # Parallel sequence execution
+│   ├── routing/
+│   │   ├── ai_complexity_analyzer.py    # AI complexity analysis
+│   │   ├── complexity_types.py          # Complexity metric models
+│   │   └── multi_thinking_router.py     # Fixed full_exploration routing
+│   ├── services/
+│   │   ├── server_core.py               # ThoughtProcessor implementation
+│   │   ├── processing_orchestrator.py   # Agno Team orchestration
+│   │   ├── workflow_executor.py
+│   │   └── context_builder.py
+│   ├── infrastructure/
+│   │   ├── persistent_memory.py         # SQLite session storage
+│   │   └── learning_resources.py        # Agent learning machine
+│   ├── security/rate_limiter.py         # Rate limiting and request validation
+│   └── config/
+│       ├── modernized_config.py         # Provider strategies
+│       └── constants.py                 # System constants
+├── scripts/mcp_python_client_smoke.py   # Protocol smoke test
+├── tests/                               # Unit and integration tests
+├── pyproject.toml
+└── Makefile
+</code></pre>
+<h2>Changelog</h2>
+<p>See <a href="https://github.com/FradSer/mcp-server-mas-sequential-thinking/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a> for version history.</p>
+<h2>Contributing</h2>
+<p>Contributions are welcome. Please ensure:</p>
+<ol>
+<li>Code follows the project style (ruff, mypy)</li>
+<li>Commit messages use conventional commits format</li>
+<li>All tests pass before submitting a PR</li>
+<li>Documentation is updated as needed</li>
+</ol>
+<h2>License</h2>
+<p>This project does not yet declare a license. See the <a href="https://github.com/FradSer/mcp-server-mas-sequential-thinking/issues" target="_blank" rel="noopener noreferrer">LICENSE discussion</a> if you need to reuse it.</p>
+<h2>Acknowledgments</h2>
+<ul>
+<li>Built with <a href="https://github.com/agno-agi/agno" target="_blank" rel="noopener noreferrer">Agno</a> v2.x</li>
+<li>Model Context Protocol by <a href="https://www.anthropic.com/" target="_blank" rel="noopener noreferrer">Anthropic</a></li>
+<li>Research capabilities powered by <a href="https://exa.ai/" target="_blank" rel="noopener noreferrer">Exa</a> (optional)</li>
+<li>Multi-dimensional thinking inspired by Edward de Bono's work</li>
+</ul>
+<h2>Support</h2>
+<ul>
+<li>GitHub Issues: <a href="https://github.com/FradSer/mcp-server-mas-sequential-thinking/issues" target="_blank" rel="noopener noreferrer">Report bugs or request features</a></li>
+<li>Documentation: see CLAUDE.md for implementation notes</li>
+<li>MCP Protocol: <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener noreferrer">Official MCP Documentation</a></li>
+</ul>

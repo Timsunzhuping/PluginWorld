@@ -1,0 +1,272 @@
+<h1>dsh-web-search-pro</h1>
+<p>增强型、可持久化的扩展网页搜索插件 for <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a>（DSH）。</p>
+<p>一个 DSH <strong>bundle 插件</strong>，把多引擎网页搜索、平台搜索、持久化缓存、受控按站增强和 Playwright 渲染打包成模型可直接调用的 11 个工具。路由控制面借鉴 Agent-Reach 的后端探测、顺序选择和失败冷却思路，核心逻辑为本项目原生 TypeScript 实现。</p>
+<h2>安装</h2>
+<pre><code class="language-bash">dsh plugin --profile web add @anweat/dsh-browser@^0.1.8 dsh-web-search-pro@^0.1.8
+# 或本地目录 / tarball：
+dsh plugin --profile web add ../dsh-browser ./dsh-web-search-pro
+# 重启（web profile 关闭了 HMR）：
+dsh --profile web
+</code></pre>
+<blockquote>
+<p>两个插件都必须是 profile 的直接依赖：DSH 只激活直接依赖的 bundle layer，且标准 profile 可能设置 <code>autoInstallPeers: false</code>。不要只安装 Web Search Pro 后依赖 peer 自动补齐。
+依赖 <code>@deepseek-ai/*</code> 已发布到 npm（<code>^0.1.0-rc.6</code>，与社区 dsh-cc-tui 一致）。
+若你的 harness 是本地源码 checkout（如 <code>0.1.0-rc.5</code>），版本号可能有出入——用
+<code>dsh plugin --profile web add ./&lt;path&gt;</code> 并在 profile 的 <code>pnpm-workspace.yaml</code>
+里对齐版本后重装即可。</p>
+</blockquote>
+<h2>从旧版本升级</h2>
+<p>升级 Web Search Pro 时应同时升级浏览器插件。<code>dsh-web-search-pro &gt;= 0.1.8</code> 要求 <code>@anweat/dsh-browser &gt;= 0.1.8</code>；旧版 browser 不包含 <code>web_snapshot screenshot=false</code>、Web Search Pro 写操作的四级审批策略等本版契约。</p>
+<pre><code class="language-bash"># npm 安装：显式升级两个包，避免 profile 锁文件继续保留旧版 browser
+dsh plugin --profile web add @anweat/dsh-browser@^0.1.8 dsh-web-search-pro@^0.1.8
+
+# 本地 checkout 联调：两个目录一起重新挂载
+dsh plugin --profile web add ../dsh-browser ../dsh-web-search-pro
+</code></pre>
+<p>升级完成后需要<strong>完整停止并重新启动 Web profile</strong>；仅刷新网页不会重新扫描插件的 <code>client.js</code>。随后依次检查：</p>
+<ol>
+<li><code>browser_status</code>：确认 OpenCLI、<code>playwright | patchright</code> 运行时、<code>automationMode</code> 与 <code>usagePolicy</code> 符合预期。</li>
+<li><code>web_backend_status</code>：确认搜索、CLI、Agent Reach 与浏览器后端是否 ready。</li>
+<li>打开 <code>设置 → 插件 → 插件配置</code>：确认“Web Search Pro”和“浏览器自动化”两张卡片都已加载；后者负责自由度、运行时、OpenCLI 与调用缓冲。</li>
+</ol>
+<blockquote>
+<p><code>automationMode</code> 和防止过度调用的 <code>usagePolicy</code> 都属于 dsh-browser，升级不会自动改写现有配置。生产 profile 建议保留 <code>standard</code>；<code>unrestricted</code> 只用于隔离的自动化测试 profile，并且仍受并发、突发、页数/深度和 429/503 退避保护。</p>
+</blockquote>
+<p>若 Clash/TUN 使用 fake-IP DNS，原生 HTTP 后端可能看到 <code>198.18.0.0/15</code> 或 <code>fdfe:dcba:9876::/96</code>。可在可视化面板的高级设置中启用 <code>allowProxyFakeIp</code>；默认关闭。该开关只信任这两个代理网段的 <strong>DNS 解析结果</strong>，字面 fake-IP URL、localhost 和其他私网地址仍会被 SSRF 防护拒绝。</p>
+<h2>快速使用与适用情形</h2>
+<p>安装并重启后，直接在 DSH 会话里要求模型调用工具即可：</p>
+<pre><code class="language-text">请调用 web_backend_status 检查后端，然后用 web_search_pro 搜索
+"DeepSeek Harness community feedback"，指定 exa、fresh=true、返回 8 条来源。
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>情形</th>
+<th>推荐入口</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>日常网页搜索</td>
+<td><code>web_search_pro</code></td>
+<td>默认按配置顺序回退；需要强制刷新时传 <code>fresh=true</code></td>
+</tr>
+<tr>
+<td>语义研究、社区观点</td>
+<td><code>web_search_pro</code> + <code>exa</code></td>
+<td>有 API Key 时走原生 Exa API；只有 Exa MCP 连接时自动经 <code>mcporter</code> 回退</td>
+</tr>
+<tr>
+<td>已知 URL 的批量正文</td>
+<td><code>web_exa_contents</code></td>
+<td>直接调用 Exa <code>/contents</code>，必须配置 <code>EXA_API_KEY</code></td>
+</tr>
+<tr>
+<td>GitHub/B站/Reddit 等平台</td>
+<td><code>web_platform_search</code></td>
+<td>Reddit 等 OpenCLI 平台需要 Chrome 扩展在线；中文受限站点使用 AuthProfile</td>
+</tr>
+<tr>
+<td>登录后页面或私有论坛</td>
+<td><code>browserBindings</code> + AuthProfile</td>
+<td>Cookie 保存在本地 storageState，按域名授权，默认只读</td>
+</tr>
+<tr>
+<td>页面改版、懒加载</td>
+<td><code>platformRules</code> 或 RulePack</td>
+<td>优先改选择器；需要等待/点击/滚动时再使用有界 RulePack</td>
+</tr>
+<tr>
+<td>模型生成多步页面操作</td>
+<td><code>browser_recipe_run</code></td>
+<td>只读步骤直接运行；页面交互按 dsh-browser 的 <code>automationMode</code> 决定拒绝/审批/直通</td>
+</tr>
+<tr>
+<td>外部模型生成油猴脚本</td>
+<td><code>browser_script_validate</code> → <code>browser_userscript_run</code></td>
+<td>强制 <code>@match</code>、<code>@grant none</code>、禁用 <code>@require</code>；仅 <code>unrestricted</code> 跳过审批</td>
+</tr>
+<tr>
+<td>有限泛爬取</td>
+<td><code>browser_crawl</code></td>
+<td>匿名、默认同源；调用参数不能突破浏览器插件的页数/深度预算</td>
+</tr>
+<tr>
+<td>OpenCLI 站点适配器或浏览器桥</td>
+<td><code>browser_opencli_status</code> → <code>browser_opencli_catalog</code> → <code>browser_opencli_run</code></td>
+<td>先发现精确 adapter；仅 <code>unrestricted</code> 跳过通用 argv 审批</td>
+</tr>
+</tbody></table>
+<p>先运行 <code>web_backend_status</code> 判断后端是否 ready。指定单一引擎时失败会原样返回；不指定时才会按 <code>engines</code> 顺序自动回退。</p>
+<h2>工具（11 个）</h2>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>web_search_pro</code></td>
+<td>多引擎搜索 + RRF 融合 + 内存/SQLite 双层缓存 + 历史</td>
+</tr>
+<tr>
+<td><code>web_exa_contents</code></td>
+<td>原生 Exa <code>/contents</code> 批量正文抓取（1-100 URL）</td>
+</tr>
+<tr>
+<td><code>web_fetch_pro</code></td>
+<td>可读化抓取（Jina → HTTP+规则抽取 → Playwright 兜底）+ 快照缓存</td>
+</tr>
+<tr>
+<td><code>web_platform_search</code></td>
+<td>20 平台：GitHub/B站/YouTube/V2EX/小红书/Twitter/Reddit/IG/FB/RSS + 知乎/微博/豆瓣/贴吧/抖音/快手（Playwright 登录态）</td>
+</tr>
+<tr>
+<td><code>web_snapshot</code></td>
+<td>Playwright HTML + 文本落盘；<code>screenshot=false</code> 时不生成 PNG</td>
+</tr>
+<tr>
+<td><code>web_history</code> / <code>web_cache_clear</code> / <code>web_search_stats</code></td>
+<td>持久历史 / 清缓存 / 存储统计</td>
+</tr>
+<tr>
+<td><code>web_rule</code></td>
+<td>持久化按站提取规则（脚本猫式，list/upsert/remove）</td>
+</tr>
+<tr>
+<td><code>web_backend_status</code></td>
+<td>无副作用后端探测、失败/冷却诊断与 CLI 状态</td>
+</tr>
+<tr>
+<td><code>web_deps</code></td>
+<td>检测/安装搜索后端的外部依赖（bili/yt-dlp/agent-reach/mcporter）；浏览器依赖由 dsh-browser 管理</td>
+</tr>
+</tbody></table>
+<h2>浏览器脚本与自动化分层</h2>
+<p><code>dsh-browser &gt;= 0.1.8</code> 提供三类脚本入口：</p>
+<ol>
+<li><strong>内置只读脚本</strong>：<code>article-clean</code>、<code>links</code>、<code>jsonld</code>、<code>forms</code>，适合稳定抽取；先用 <code>browser_script_catalog</code> 查看。</li>
+<li><strong>Recipe</strong>：最多 25 步的结构化 Playwright 操作，支持 wait/click/fill/type/press/select/check/hover/scroll/extract/assert/screenshot；交互步骤由自动化模式决定审批。</li>
+<li><strong>外部 UserScript</strong>：适合外部模型生成站点专项逻辑。先 <code>browser_script_validate</code> 查看 SHA-256、域名范围与能力提示，再 <code>browser_userscript_run</code>；它在页面主世界运行，并非安全沙箱。</li>
+</ol>
+<p>工具自由度由 dsh-browser 的 <code>automationMode</code> 控制：<code>read-only</code> 隐藏或拒绝页面及 Web Search Pro 写操作；<code>standard</code>（默认）对交互、写 Recipe、外部脚本、OpenCLI、缓存/规则变更和安装操作审批；<code>autonomous</code> 直通页面交互、写 Recipe 以及本地缓存/规则变更，但安装、外部脚本和通用 OpenCLI 仍审批；<code>unrestricted</code> 为隔离测试 profile 提供无审批运行。所有模式仍保留域名、参数、大小和步骤上限校验，并始终应用 dsh-browser 的调用缓冲、退避与爬取预算。</p>
+<p>OpenCLI 用于已有站点 adapter 或复用 Chrome 登录会话。推荐顺序是 <strong><code>browser_opencli_catalog</code> 查精确 adapter → network/extract → DOM 操作</strong>；先运行 <code>browser_opencli_status</code>。<code>browser_opencli_run</code> 接受 argv 数组而非 shell 字符串，可覆盖 adapter、显式 session 的 <code>browser state/find/get/click/fill/type/select/keys/wait/extract/network</code> 等命令；仅 <code>unrestricted</code> 跳过审批。</p>
+<p>更完整的 AuthProfile、脚本元数据与 OpenCLI 示例见 <a href="https://github.com/anweat/dsh-web-search-pro/blob/HEAD/LOGIN.md" target="_blank" rel="noopener noreferrer">LOGIN.md</a>。</p>
+<h2>配置</h2>
+<p>三层，越靠前越日常：</p>
+<ol>
+<li><p><strong>DSH 可视化面板</strong>：打开 <code>设置 → 插件 → 插件配置 → Web Search Pro</code>。面板按搜索策略、服务凭据、运行时后端和高级规则分组；修改先保留为本地草稿，点击“保存”后写入 <code>settings.yaml</code> 并热更新，支持放弃修改和逐字段恢复部署值。</p>
+<ul>
+<li>Exa、Jina、GitHub 密钥通过 DSH Credentials 写入，面板只显示“已配置/未配置”，不会把明文密钥读回浏览器。</li>
+<li><code>platformRules</code>、<code>customPlatforms</code>、<code>browserBindings</code> 与 Playwright 设置使用 JSON 对象编辑器；格式或数值范围无效时会阻止保存。</li>
+<li>浏览器工具的审批自由度由 <code>dsh-browser.automationMode</code> 管辖，调用缓冲由 <code>dsh-browser.usagePolicy</code> 管辖；用 <code>browser_status</code> 查看当前状态。Web Search Pro 面板只管理搜索插件自己的后端开关，不会绕过浏览器插件的审批或资源策略。</li>
+<li><code>allowProxyFakeIp</code> 仅用于明确采用 Clash/TUN fake-IP DNS 的环境；普通网络保持关闭。</li>
+<li>更新带客户端面板的插件版本后需要重启 Web profile，让 DSH 客户端模块扫描器重新装载 <code>client.js</code>。</li>
+</ul>
+</li>
+<li><p><strong><code>$DSH_HOME/settings.yaml</code> → <code>web-search-pro:</code> 段</strong>（热重载，改完即生效）：</p>
+<pre><code class="language-yaml">web-search-pro:
+  exaApiKeyEnv: EXA_API_KEY # 推荐：运行环境或凭据服务，不把密钥写入配置
+  jinaApiKeyEnv: JINA_API_KEY
+  engines: [ddg, bing, exa, seam, jina]
+  parallelEngines: false
+  ttlSeconds: 3600
+  searchMaxResults: 8
+  browserBindings:
+    zhihu:
+      authProfile: china-community
+      rulePack: zhihu-enhanced
+</code></pre>
+</li>
+<li><p><strong>cordis.yml <code>config:</code></strong>（部署级默认值，见 <code>cordis.patch.yml</code>）。</p>
+</li>
+<li><p><strong>环境变量 / 凭据</strong>：<code>$EXA_API_KEY</code>、<code>$JINA_API_KEY</code>（<code>exaApiKeyEnv</code>/<code>jinaApiKeyEnv</code> 引用）。</p>
+</li>
+</ol>
+<h2>外部依赖（按需）</h2>
+<p>多数后端需要系统额外安装的工具；插件提供 <code>web_deps</code> 工具检测与安装：</p>
+<table>
+<thead>
+<tr>
+<th>依赖</th>
+<th>用途</th>
+<th>安装</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>bili-cli</td>
+<td>B站后端</td>
+<td><code>uv tool install bili-cli</code> / <code>pipx install bili-cli</code></td>
+</tr>
+<tr>
+<td>yt-dlp</td>
+<td>YouTube 后端</td>
+<td><code>uv tool install yt-dlp</code> / <code>pip install yt-dlp</code></td>
+</tr>
+<tr>
+<td>opencli</td>
+<td>小红书/Twitter/Reddit/IG/FB</td>
+<td>由 dsh-browser 内置；扩展未连接时用 <code>opencli doctor</code> 诊断</td>
+</tr>
+<tr>
+<td>agent-reach</td>
+<td>agent-reach 后端</td>
+<td><code>uv tool install agent-reach</code> / <code>pip install agent-reach</code></td>
+</tr>
+<tr>
+<td>mcporter</td>
+<td>无裸 API Key 时的 Exa MCP 回退</td>
+<td><code>npm i -g mcporter</code></td>
+</tr>
+<tr>
+<td>playwright / patchright</td>
+<td>渲染/截图后端</td>
+<td>由 dsh-browser 内置；默认 Playwright，兼容场景可显式切 Patchright；缺 Chromium 时调用 <code>browser_install</code></td>
+</tr>
+</tbody></table>
+<h2>平台与引擎</h2>
+<p><code>seam</code>（ctx.web/DeepSeek 原生）· <code>exa</code> · <code>ddg</code> · <code>bing</code> · <code>jina</code> · <code>github</code>（REST 搜索 API，免 CLI；可选 <code>$GITHUB_TOKEN</code>/<code>githubToken</code> 提升限额并解锁代码搜索）· <code>bilibili</code> · <code>v2ex</code> · <code>youtube</code>。默认顺序 <code>ddg, bing, exa, seam, jina</code>（免费优先），失败自动回退；失败后短时冷却，<code>web_backend_status</code> 可查看原因；<code>multi</code> 并行融合。</p>
+<p>Exa 优先使用原生 API 客户端：<code>web_search_pro</code> 可传 <code>exaType</code>、域名包含/排除、发布时间范围和 category。若没有裸 API Key、但启用了 CLI 后端且 Exa MCP 已连接，搜索会自动通过 <code>mcporter</code> 完成；该兼容路径只支持 query + 结果数，高级筛选和 <code>web_exa_contents</code> 仍要求 <code>EXA_API_KEY</code>。不同选项、结果数、引擎顺序和单/多引擎模式使用不同缓存指纹。</p>
+<h2>开发</h2>
+<pre><code class="language-bash">pnpm install
+pnpm test
+pnpm build        # tsc src → lib
+</code></pre>
+<p>源码在 <code>src/</code>；<code>lib/</code> 为发布产物（已提交）。</p>
+<h2>License</h2>
+<p>MIT</p>
+<h2>中文社区平台登录态</h2>
+<p>zhihu / weibo / douban / tieba / douyin / kuaishou 的免登录公开接口都被风控，
+所以走 <strong>Playwright 驱动登录态浏览器</strong>（借鉴 MediaCrawler 思路、MIT 独立实现，未用其签名算法）：</p>
+<ol>
+<li>登录一次保存登录态：<code>node scripts/save-login.mjs all login-state.json</code></li>
+<li>在 dsh-browser 配置中声明按域名隔离的 <code>authProfiles</code></li>
+<li>在 <code>browserBindings</code> 把平台绑定到 profile；站点改版时用 <code>platformRules</code> 或 dsh-browser <code>rulePacks</code></li>
+</ol>
+<p>详见 <a href="https://github.com/anweat/dsh-web-search-pro/blob/HEAD/LOGIN.md" target="_blank" rel="noopener noreferrer">LOGIN.md</a>。</p>
+<h2>历史管理</h2>
+<p>web_history 支持：kind/query/engine/platform 过滤、replay 和 JSON export。search/platform 回放保存的来源；fetch/snapshot 回放当次持久化的正文、HTML/截图路径。旧数据库会自动迁移 pages 表；历史上无法关联 queryId 的旧页面按 URL 做兼容回放。</p>
+<h2>自定义平台</h2>
+<p>在 settings.yaml 里定义任意站点（URL 模板 + 结果选择器），
+web_platform_search 就能直接搜它——不需要改代码：</p>
+<pre><code>web-search-pro:
+  customPlatforms:
+    mybili:
+      name: '我的B站'
+      url: 'https://search.bilibili.com/all?keyword={query}'
+      item: '.bili-video-card'
+      title: '.bili-video-card__info--tit'
+      link: 'a'
+    # 需要登录时优先通过 browserBindings 绑定命名 authProfile。
+    myforum:
+      name: '某论坛'
+      url: 'https://forum.example.com/search?q={query}'
+      item: '.thread'
+      title: '.thread-title a'
+      link: '.thread-title a'
+  browserBindings:
+    myforum:
+      authProfile: forum
+</code></pre>
+<p>旧版 <code>customPlatforms.*.cookie</code> 仍兼容，但会让 Cookie 明文进入配置；新配置应使用 dsh-browser 的命名 AuthProfile，状态文件不要提交到仓库。</p>

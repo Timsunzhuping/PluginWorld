@@ -1,0 +1,88 @@
+<h1>distill</h1>
+<h2>安装（DSH profile bundle）</h2>
+<pre><code class="language-sh"># 从本仓库 checkout 安装到 profile（web / headless 等），bundle 声明自动加入组合层
+dsh plugin --profile web add &lt;目录|git-url&gt;
+# 验证
+dsh --profile web --dump-config | grep distill
+</code></pre>
+<ul>
+<li>插入行 id：<code>distill</code>（cordis.patch.yml）；不注册任何面向模型的工具或技能——它只挂接 <code>agent/turn-stopping</code> 并运行后台反省。</li>
+<li><strong>宿主前提</strong>：dsh 组合必须挂载 <code>subagent-spawn-in-process</code>（注册反省子代理使用的 <code>spawn</code> 子代理提供方）与 <code>tool-skill</code>（子代理可调用的 <code>skill</code> 查看器）——两者在 base bundle 中默认存在。</li>
+<li>卸载：<code>dsh plugin --profile web remove distill</code>。</li>
+<li>安装后需重启目标 profile 的 DSH 进程（组合层变更不参与 HMR 热更新）。</li>
+</ul>
+<h2>概述</h2>
+<p>自动对话反思与技能蒸馏。</p>
+<p>需要 <code>ctx.subagents</code>（<code>inject: ['subagents']</code>）以及已注册的子代理提供方——<code>subagent-spawn-in-process</code> 插件注册了默认的 <code>spawn</code> 提供方——并且部署中包含面向模型的 <code>skill</code> 工具（<code>tool-skill</code>），反省子代理才能查看技能。反省提示词改编自 Nous Research 的 <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener noreferrer">hermes-agent</a> <code>_SKILL_REVIEW_PROMPT</code>（MIT 许可，Copyright (c) 2025 Nous Research），针对本界面做了改写；完整署名见源文件头。</p>
+<h2>行为</h2>
+<p>每个回合完成（<code>agent/turn-stopping</code> 触发）时，插件会收集自上次蒸馏检查点以来新增的人类 <code>user/message</code> 事件；数量达到 <code>minUserMessages</code> 后，派发一个后台反省子代理（Hermes Agent 后台反省的形态：受限工具集的全新子代理，在回合之后运行，从不与用户任务争抢）。子代理的提示词携带 Hermes 策展课程、消息窗口帧和可更新技能列表；其工具集白名单只保留 <code>skill</code> 查看器，最终答案通过结构化输出契约捕获。派发前会发出非持久化的 Cordis <code>distill/review-request</code> 通知，携带精确的路由、提示词、工具白名单和 token 上限；该通知不会写入会话日志。</p>
+<p>反省子代理提议以下之一：</p>
+<ul>
+<li><code>{"action": "skip"}</code> — 无值得保存的内容；本轮结束。</li>
+<li><code>{"action": "create", "skill": {"name", "description", "whenToUse?", "content"}}</code> — 一个新技能，写成带 frontmatter 的 <code>SKILL.md</code> 包，本地技能提供方会像发现手写技能一样发现它。</li>
+<li><code>{"action": "update", "skill": {...}}</code> — 对某个先前蒸馏出的技能的完整替换。</li>
+</ul>
+<p>每个提议都会经过校验（通过 <code>isSkillName</code> 校验 kebab-case 名称，描述和内容非空）。目标文件已存在时 create 被跳过。只有目标文件存在<strong>且</strong>带有插件 <code>distilled-by: dsh-distill</code> frontmatter 所有权标记时 update 才会被应用；缺失或非蒸馏所有的目标会跳过并记录警告，因此用户手写、内置和运行时注册的技能永远不会被重写。蒸馏出的文件都带该标记，且只有带标记的技能会出现在子代理的可更新列表中。无论结果如何，检查点都会推进到最后一条已反思消息，因此每轮只覆盖新消息。</p>
+<p>反思目标优先使用显式配置的 <code>provider</code>/<code>model</code> 对（两者需同时配置），否则使用已结束 agent 自身的 <code>agent.options</code> 路由。两者都不存在时本轮跳过并记录警告。子代理运行在 <code>providerName</code> 指定的子代理提供方上；提供方缺失、或运行失败、被取消、无捕获结果时只记录警告，绝不会使循环崩溃。</p>
+<h2>配置</h2>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>默认值</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>enabled</code></td>
+<td><code>true</code></td>
+<td>总开关。</td>
+</tr>
+<tr>
+<td><code>minUserMessages</code></td>
+<td><code>3</code></td>
+<td>触发一次反省所需的新增人类用户消息数。</td>
+</tr>
+<tr>
+<td><code>provider</code> / <code>model</code></td>
+<td>未设置</td>
+<td>显式辅助路由；必须同时提供。默认使用 agent 自身路由。</td>
+</tr>
+<tr>
+<td><code>maxTokens</code></td>
+<td><code>2048</code></td>
+<td>反省子代理输出 token 上限。</td>
+</tr>
+<tr>
+<td><code>timeoutMs</code></td>
+<td><code>30000</code></td>
+<td>反省的端到端截止时间。</td>
+</tr>
+<tr>
+<td><code>targetRoot</code></td>
+<td><code>project</code></td>
+<td><code>project</code> 写入 <code>&lt;git-root&gt;/.agents/skills</code>；<code>user</code> 写入 <code>~/.agents/skills</code>。</td>
+</tr>
+<tr>
+<td><code>providerName</code></td>
+<td><code>spawn</code></td>
+<td>反省子代理使用的子代理提供方注册名。</td>
+</tr>
+<tr>
+<td><code>allowUpdate</code></td>
+<td><code>true</code></td>
+<td>是否允许反省更新先前蒸馏出的技能；<code>false</code> 时只提供 create。</td>
+</tr>
+</tbody></table>
+<h2>模型体验</h2>
+<p>主对话不注册任何工具或提示，插件从不改变其表面。唯一的模型可见效果是间接的：后台运行一个带 <code>skill</code> 工具的反省子代理（它看到与主 agent 相同的目录，可在提议前查看任意技能内容），写入或更新的技能会在后续轮次出现在 <code>dsh-tool-skill</code> 目录中。反省派发通过仅运行期的 <code>distill/review-request</code> 通知暴露给观察者，不写入会话日志，也不进入对话循环；需要跨进程审计的部署应由监听方自行持久化该通知。</p>
+<h2>已知限制与后续工作</h2>
+<ul>
+<li><strong>仅整文件更新</strong> — update 会重写整个 <code>SKILL.md</code>；不支持局部补丁或支持文件（<code>references/</code> / <code>templates/</code> / <code>scripts/</code>）写入。提示词把支持文件意图并入正文或跳过。</li>
+<li><strong>所有权标记按来源选择</strong> — 本变更之前蒸馏出的技能没有 <code>distilled-by</code> 标记，会被当作用户所有（永不更新），除非用户重新创建或手动标记。</li>
+<li><strong>检查点仅限当前进程</strong> — 检查点保存在内存中；恢复或 fork 的会话从 <code>Session.firstLiveSeq</code> 开始，只处理本进程新增的消息。上一个进程中尚未达到阈值的消息不会结转。</li>
+<li><strong>既有受损日志需单独修复</strong> — 本版本不再写入 <code>session/distill-review-request</code>，但已经含有该未知事件的日志仍需为事件信封补上 <code>ignorable: true</code> 或使用宿主提供的修复工具后才能重新加载。</li>
+<li><strong>项目目标需要 git 根</strong> — 没有 <code>.git</code> 祖先时，项目目标回退到会话 cwd。</li>
+<li><strong>每个会话一次进行中的反省</strong> — 反省进行期间到达的已结束回合会被跳过；下一次结算会重新评估。</li>
+<li><strong>反省子代理依赖部署的工具</strong> — 子代理的 <code>skill</code> 工具和目录来自同一部署中的 <code>tool-skill</code>；没有它的部署仍会运行反省，但子代理在提议前无法查看技能。</li>
+</ul>

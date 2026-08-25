@@ -1,0 +1,485 @@
+<h1>Browser Bridge</h1>
+<p>通过 WebSocket 把本地工具和真实浏览器连接起来的桥，不需要 CDP。</p>
+<p>扩展安装在浏览器里，作为"手"；server 是本地的 WebSocket 枢纽；client 是发指令的入口（Rust CLI），也可通过 bridge-mcp 暴露给 Claude / Cursor 等 agent。</p>
+<h2>项目结构</h2>
+<table>
+<thead>
+<tr>
+<th>目录</th>
+<th>技术</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>extension/</code></td>
+<td>Vue 3 + TypeScript（WXT / Manifest V3）</td>
+<td>安装在浏览器里，执行指令</td>
+</tr>
+<tr>
+<td><code>server/</code></td>
+<td>Rust（tokio + tokio-tungstenite）</td>
+<td>WebSocket 枢纽，路由指令与响应</td>
+</tr>
+<tr>
+<td><code>client/</code></td>
+<td>Rust CLI（clap）</td>
+<td>发指令、打印结果</td>
+</tr>
+<tr>
+<td><code>bridge-core/</code></td>
+<td>Rust 共享库</td>
+<td>传输层（连接/自动拉起/重连）、元素定位、站点配方</td>
+</tr>
+<tr>
+<td><code>bridge-mcp/</code></td>
+<td>Rust（rmcp，MCP server）</td>
+<td>stdio 暴露全部指令为 MCP tools，供 Claude / Codex / Cursor 调用</td>
+</tr>
+</tbody></table>
+<h2>快速开始</h2>
+<h3>1. 启动 server</h3>
+<pre><code class="language-sh">cd server
+cargo run            # 默认监听 ws://127.0.0.1:9225
+# 换端口：BRIDGE_PORT=9226 cargo run
+</code></pre>
+<h3>2. 加载插件</h3>
+<pre><code class="language-sh">cd extension
+pnpm install
+pnpm dev             # 会自动打开 Chrome 并加载开发版插件
+</code></pre>
+<p>也可以 <code>pnpm build</code> 后，在 <code>chrome://extensions</code> 打开"开发者模式"，加载 <code>extension/dist/chrome-mv3</code> 目录。</p>
+<h3>3. 使用 client</h3>
+<p>client 连接失败时会<strong>自动拉起 bridge-server</strong>（需要已构建的二进制，可用 <code>BRIDGE_SERVER_BIN</code> 指定路径），自动拉起的 server 空闲 120 秒自动退出；插件断线后按 500ms→5s 退避自动重连。</p>
+<pre><code class="language-sh">cd client
+cargo run -- list-tabs
+cargo run -- navigate https://example.com
+cargo run -- click '#submit'
+cargo run -- set_value '#username' alice
+cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
+cargo run -- querydomains 'browserbridge'
+cargo run -- googlesearch 'Haze Seas'
+cargo run -- redditsearch 'rust programming'
+cargo run -- youtubesearch 'rust programming' --time week --sort popularity --max 10
+cargo run -- youtubeinfo 'https://www.youtube.com/watch?v=rQ_J9WH6CGk'
+cargo run -- youtuberinfo 'https://www.youtube.com/@xiaojunpodcast/videos'
+cargo run -- youtuberinfo '@xiaojunpodcast' --max 20
+cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
+cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
+cargo run -- get-page-markdown --url https://example.com
+cargo run -- get-a11y-tree
+</code></pre>
+<h3>指令速查表</h3>
+<table>
+<thead>
+<tr>
+<th>指令</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>list-tabs</code></td>
+<td>列出所有标签页</td>
+</tr>
+<tr>
+<td><code>new-tab [url]</code></td>
+<td>新建标签页（可指定 URL）</td>
+</tr>
+<tr>
+<td><code>activate-tab --tab &lt;id&gt;</code></td>
+<td>切换标签页并聚焦窗口</td>
+</tr>
+<tr>
+<td><code>close-tab [--tab &lt;id&gt;]</code></td>
+<td>关闭标签页（默认当前激活页）</td>
+</tr>
+<tr>
+<td><code>close-auto-tabs</code></td>
+<td>关闭 bridge 自动打开的全部标签页（不碰手动开的）</td>
+</tr>
+<tr>
+<td><code>navigate &lt;url&gt;</code></td>
+<td>导航并等待页面加载完成</td>
+</tr>
+<tr>
+<td><code>click &lt;target&gt; [--new-tab]</code></td>
+<td>点击匹配定位的元素（锚点默认当前标签页打开）</td>
+</tr>
+<tr>
+<td><code>click-at &lt;x&gt; &lt;y&gt;</code></td>
+<td>按坐标点击</td>
+</tr>
+<tr>
+<td><code>press-key &lt;key&gt;</code></td>
+<td>模拟按键（支持修饰键、<code>--wait-load</code>）</td>
+</tr>
+<tr>
+<td><code>scroll --dx --dy</code></td>
+<td>滚动窗口或指定容器</td>
+</tr>
+<tr>
+<td><code>set-value &lt;target&gt; &lt;value&gt;</code></td>
+<td>设置 input/textarea/contenteditable 的值</td>
+</tr>
+<tr>
+<td><code>check &lt;target&gt;</code></td>
+<td>勾选/取消 checkbox、radio</td>
+</tr>
+<tr>
+<td><code>select-option &lt;target&gt; --text/--value/--option-index</code></td>
+<td>选中下拉项</td>
+</tr>
+<tr>
+<td><code>clear &lt;target&gt;</code></td>
+<td>清空输入类元素</td>
+</tr>
+<tr>
+<td><code>get-value &lt;target&gt;</code></td>
+<td>读取元素当前值</td>
+</tr>
+<tr>
+<td><code>scrape &lt;item&gt; --fields '...'</code></td>
+<td>按选择器提取结构化数据</td>
+</tr>
+<tr>
+<td><code>run-script '&lt;js&gt;'</code></td>
+<td>页面里执行任意 JS，返回 JSON</td>
+</tr>
+<tr>
+<td><code>get-page-content</code></td>
+<td>读取页面标题/URL/文本</td>
+</tr>
+<tr>
+<td><code>get-page-markdown [--url &lt;url&gt;] [--selector &lt;css&gt;] [--full]</code></td>
+<td>把页面内容转换成标准 Markdown（默认自动提取正文，去掉导航/页脚等噪音）</td>
+</tr>
+<tr>
+<td><code>get-a11y-tree [--include-hidden] [--max-nodes &lt;n&gt;]</code></td>
+<td>读取页面 a11y tree，可交互节点（按钮/链接/输入框等）带 <code>target</code> 可直接喂给 <code>click</code> / <code>set_value</code></td>
+</tr>
+<tr>
+<td><code>googlesearch '&lt;关键词&gt;'</code></td>
+<td>Google 搜索，输出 <code>{ tab_id, results }</code></td>
+</tr>
+<tr>
+<td><code>redditsearch '&lt;关键词&gt;'</code></td>
+<td>Reddit 搜索，输出 <code>{ tab_id, results }</code></td>
+</tr>
+<tr>
+<td><code>youtubesearch '&lt;关键词&gt;' [--time] [--sort] [--max]</code></td>
+<td>YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 <code>--max</code> 条（默认 5），输出 <code>{ tab_id, results }</code></td>
+</tr>
+<tr>
+<td><code>youtubeinfo '&lt;视频URL或ID&gt;'</code></td>
+<td>获取指定 YouTube 视频详情：字幕全文、URL、作者、时长、点赞/评论/订阅数，输出 <code>{ tab_id, video }</code></td>
+</tr>
+<tr>
+<td><code>youtuberinfo '&lt;频道URL或handle&gt;' [--max]</code></td>
+<td>获取指定 YouTube 频道（youtuber）的视频列表：频道名、订阅数、视频名称/URL/观看数/时长/发布时间，最多返回 <code>--max</code> 条（默认 10），输出 <code>{ tab_id, channel, videos }</code></td>
+</tr>
+<tr>
+<td><code>googletrends '&lt;关键词&gt;' [--date] [--geo]</code></td>
+<td>Google Trends，输出 <code>{ tab_id, trend[], top[], rising[], regions[] }</code></td>
+</tr>
+<tr>
+<td><code>googletrends-compare &lt;词1&gt; &lt;词2&gt;... [--date] [--geo]</code></td>
+<td>Google Trends 多词对比，输出 <code>{ series[] }</code></td>
+</tr>
+<tr>
+<td><code>querydomains '&lt;关键词&gt;' [--tlds 'com,ai,xyz']</code></td>
+<td>Query.Domains 批量查域名注册情况与价格，输出 <code>{ results[] }</code>（每项含 domain / tld / status / available / price / badges）</td>
+</tr>
+</tbody></table>
+<p>多数指令支持 <code>--tab &lt;id&gt;</code> 指定标签页，默认操作当前激活页。</p>
+<p><strong>标签页管理</strong>：<code>click</code> 点击锚点链接默认在当前标签页打开（自动覆盖 <code>target="_blank"</code>），需要新开时用 <code>--new-tab</code>（由扩展创建标签页，响应会返回新标签页的 <code>tab_id</code>，便于链式操作）。<code>new-tab</code> 指令和 <code>click --new-tab</code> 打开的标签页都会被扩展记录，流程结束后可用 <code>close-auto-tabs</code> 一键清理，不会误关你手动打开的标签页。</p>
+<h3>close-auto-tabs</h3>
+<p>清理"自动打开的标签页"，需要<strong>单独执行</strong>（CLI 手动调用，或 MCP 流程在收尾时调用一次），不会误关手动打开的标签页。支持<strong>多 agent 隔离</strong>：</p>
+<ul>
+<li><strong>MCP（<code>close_auto_tabs</code> 工具）</strong>：每个 MCP 进程启动时生成独立身份（<code>mcp-&lt;pid&gt;-&lt;nanos&gt;</code>），只清理<strong>本进程创建</strong>的标签页，不会误关其他 agent 正在用的标签页；任务结束后可再调 <code>close_agent_window</code> 关闭自己的专用窗口（连同窗口内标签页一并释放）</li>
+<li><strong>CLI（<code>close-auto-tabs</code>）</strong>：作为人工管理入口，清理全部自动标签页（不管是谁创建的）</li>
+</ul>
+<p><strong>会被清理的</strong>：<code>new-tab</code> 指令和 <code>click --new-tab</code> 创建的标签页（扩展记录在 <code>chrome.storage.session</code>，service worker 重启不丢）。例如 <code>googletrends</code> 每次查询都会新开一个标签页，跑完后清理效果最明显：</p>
+<pre><code class="language-sh">cargo run -- googletrends 'ai image'
+cargo run -- close-auto-tabs   # 关闭刚才 googletrends 开的标签页
+</code></pre>
+<p><strong>不会被清理的</strong>：手动开的标签页（如 Sitemap Monitor）、以及 <code>navigate</code> / <code>googlesearch</code> / <code>redditsearch</code> 复用的当前标签页（这些不新开 tab，属于"工作标签页"，留着是正常的）。</p>
+<h3>get-page-markdown</h3>
+<p>把页面内容转换成标准 Markdown，输出 <code>{ tab_id, title, url, markdown }</code>。转换在页面内直接遍历渲染后的 DOM，SPA 动态渲染的内容也会包含；自动跳过脚本、隐藏元素与表单控件，链接/图片转成绝对 URL。转换核心基于开源 <a href="https://github.com/mixmark-io/turndown" target="_blank" rel="noopener noreferrer">Turndown</a> + <a href="https://github.com/laurent22/joplin/tree/dev/packages/turndown-plugin-gfm" target="_blank" rel="noopener noreferrer">@joplin/turndown-plugin-gfm</a>（GFM 表格 / 删除线 / 任务列表），正文提取用 <a href="https://github.com/mozilla/readability" target="_blank" rel="noopener noreferrer">@mozilla/readability</a>（Firefox 阅读模式同款）。</p>
+<pre><code class="language-sh">cargo run -- get-page-markdown                                  # 当前标签页（自动提取正文）
+cargo run -- get-page-markdown --url https://example.com/docs   # 先导航再转换
+cargo run -- get-page-markdown --selector article               # 只转换 article 容器
+cargo run -- get-page-markdown --full                           # 跳过提取，转换整页
+cargo run -- get-page-markdown --selector '#content' --tab 7    # 指定标签页 + 指定容器
+</code></pre>
+<ul>
+<li><code>--url</code>：可选，先导航到该 URL 并等待加载完成，再转换。</li>
+<li>默认行为：用 Readability 自动提取主内容（去掉导航 / 页脚 / 相关文章等噪音），提取不到或内容过少时退回整页转换。</li>
+<li><code>--selector</code>：可选，只转换匹配该 CSS 选择器的容器（如 <code>article</code> / <code>#content</code>），优先级最高。</li>
+<li><code>--full</code>：可选，跳过正文自动提取，转换整个页面。</li>
+</ul>
+<h3>get-a11y-tree</h3>
+<p>读取页面 a11y tree（无障碍树），返回 <code>{ tab_id, title, url, count, nodes[] }</code>。适合需要与页面交互（点击 / 填表 / 选择 / 勾选）前先了解页面结构、找出可交互元素的场景——比 <code>get-page-content</code> 的纯文本更能回答"页面上有什么按钮、输入框、下拉框"：</p>
+<pre><code class="language-sh">cargo run -- get-a11y-tree
+cargo run -- get-a11y-tree --max-nodes 1000   # 大页面放宽上限
+cargo run -- get-a11y-tree --include-hidden    # 连隐藏元素一起返回
+</code></pre>
+<p><code>nodes</code> 是扁平节点列表，每项含 <code>role</code>（无障碍角色）/ <code>name</code>（可访问名称）/ <code>value</code>（当前值）/ <code>states</code>（enabled / disabled / checked / expanded 等）/ <code>depth</code>（DOM 深度）/ <code>tag</code>；可交互节点额外带 <code>target</code>，可直接喂给 <code>click</code> / <code>set_value</code> / <code>check</code> / <code>select_option</code> / <code>clear</code> / <code>get_value</code>：</p>
+<pre><code class="language-sh">cargo run -- click '#submit'              # target 直接可用
+</code></pre>
+<ul>
+<li><code>--include-hidden</code>：可选，默认只返回可见元素；开启后包含 <code>hidden</code> / <code>display:none</code> / <code>visibility:hidden</code> / <code>aria-hidden</code> 的元素。</li>
+<li><code>--max-nodes</code>：可选，最多返回节点数（默认 500，范围 10-5000），防止大页面输出过大。</li>
+<li>角色与名称优先用 Chrome 的 <code>computedRole</code> / <code>computedName</code>（Chrome 135+），低版本自动回退到标签/属性推断；只遍历 light DOM，不穿透 iframe 与 shadow DOM（与元素定位行为一致）。</li>
+</ul>
+<h3>googlesearch</h3>
+<p>Google 搜索专用快捷指令，输出 <code>{ "tab_id": ..., "results": [...] }</code>，<code>tab_id</code> 是搜索所在标签页（供后续指令链式操作），<code>results</code> 每项含 <code>title</code> / <code>description</code> / <code>url</code> / <code>target</code>：</p>
+<pre><code class="language-sh">cargo run -- googlesearch 'Haze Seas'
+</code></pre>
+<p><code>target</code> 是可直接喂给 <code>click</code> 的元素定位（<code>{ by, value, index }</code>），方便后续点击某个结果。实现是 client 侧的"站点配方"：用通用原语 <code>navigate</code> + <code>scrape</code> 编排，选择器作为常量集中在 client 里（<code>#rso &gt; div</code> 容器、<code>data-sncf='1'</code> 描述等），扩展与协议保持通用。</p>
+<h3>querydomains</h3>
+<p>Query.Domains 域名批量查询，按关键词同时检查多个 TLD 的注册情况与注册价格，输出 <code>{ tab_id, query, tlds, complete, results[] }</code>：</p>
+<pre><code class="language-sh">cargo run -- querydomains 'browserbridge'
+cargo run -- querydomains 'browserbridge' --tlds 'dev,cloud,blog'   # 自定义 TLD（默认 14 个，最多 20 个）
+</code></pre>
+<p><code>results</code> 每项含 <code>domain</code> / <code>tld</code> / <code>status</code>（<code>available</code> / <code>unavailable</code> / <code>uncertain</code>）/ <code>available</code>（布尔）/ <code>price</code>（可用时的注册价，如 <code>3 USD</code>，不可用时为 <code>null</code>）/ <code>badges</code>（原始徽标：价格、注册年份、<code>29 days ago</code> 等）。实现是导航到首页 → 每次都打开 TLD 自定义模态框显式写入后缀（站点会持久化自定义列表，不重置就不是默认 14 个）→ 输入关键词回车 → 用 <code>run_script</code> 等到批量检查流（<code>/api/upstream/check</code> 的 resource entry 只在请求完成后出现）真正结束后逐行提取（圆点颜色判状态、徽标容器取价格），选择器集中在 <code>bridge-core/src/recipes/querydomains.rs</code>。个别 TLD 可能没有价格徽标（上游未返回定价），此时 <code>price</code> 为 <code>null</code>，属站点数据问题而非超时。</p>
+<h3>redditsearch</h3>
+<p>Reddit 搜索专用快捷指令，返回 <code>{ tab_id, results[] }</code>，每项含 <code>title</code> / <code>description</code> / <code>published</code>（相对时间，如 <code>1mo ago</code>）/ <code>published_at</code>（ISO 时间戳）/ <code>votes</code>（整数）/ <code>comments</code>（整数）/ <code>url</code> / <code>target</code>：</p>
+<pre><code class="language-sh">cargo run -- redditsearch 'rust programming'
+</code></pre>
+<p>结果页有两种渲染形态：<code>search-post-with-content-preview</code>（带正文预览）与 <code>search-sdui-post</code>（只有标题），配方同时收取；描述取自帖子正文预览，<code>search-sdui-post</code> 形态没有预览时为 <code>null</code>。Reddit 首页的搜索框藏在两层 shadow DOM 里，通用定位指令够不到，但配方直接导航到 <code>/search/?q=</code>，不依赖首页交互。</p>
+<h3>youtubesearch</h3>
+<p>YouTube 搜索专用快捷指令，返回 <code>{ tab_id, results[] }</code>，每项含 <code>title</code> / <code>channel</code> / <code>views</code> / <code>published</code> / <code>duration</code> / <code>url</code> / <code>target</code>（<code>target</code> 可直接喂给 <code>click</code> 打开视频）：</p>
+<pre><code class="language-sh">cargo run -- youtubesearch 'rust programming'
+cargo run -- youtubesearch 'rust programming' --time week        # 本周上传
+cargo run -- youtubesearch 'rust programming' --sort popularity  # 热门程度优先
+cargo run -- youtubesearch 'rust programming' --time month --sort popularity
+cargo run -- youtubesearch 'rust programming' --time week --max 10   # 最多返回 10 条
+</code></pre>
+<ul>
+<li><code>--time</code>：上传日期筛选，<code>any</code>（默认）/ <code>today</code> / <code>week</code> / <code>month</code> / <code>year</code></li>
+<li><code>--sort</code>：优先顺序，<code>relevance</code>（默认）/ <code>popularity</code>（热门程度）</li>
+<li><code>--max</code>：最多返回多少条结果（默认 5，至少 1）</li>
+<li>日期与排序可组合（如 <code>--time month --sort popularity</code>）</li>
+</ul>
+<p>筛选不是靠点击页面 UI，而是直接构造 YouTube 搜索 URL 的 <code>sp</code> 参数（今天 <code>EgIIAg==</code>、本周 <code>EgIIAw==</code>、本月 <code>EgIIBA==</code>、今年 <code>EgIIBQ==</code>；热门程度 <code>CAM=</code>；组合 token 实测自真实浏览器 2026 年的"过滤"面板）。<strong>不依赖页面渲染</strong>：导航返回的 HTML 里就内嵌了完整首屏数据（<code>ytInitialData</code>，约 20 条），配方直接解析它；不够 <code>--max</code> 时再取页面里的 InnerTube API key/context，用 continuation token 调 <code>/youtubei/v1/search</code> 续取（yt-dlp 同款数据源）。数据在 HTML 里就齐全，所以<strong>标签页在后台/被全屏应用遮挡也照常拿满，不弹窗、不抢焦点、不用切过去</strong>，实测 <code>--max 40</code> 约 3 秒返回。duration 直接取接口的 lengthText，不会缺失。若页面数据缺失（如验证墙/consent 页）会返回明确错误提示。</p>
+<h3>youtubeinfo</h3>
+<p>获取指定 YouTube 视频的详情，返回 <code>{ tab_id, video }</code>，<code>video</code> 含 <code>url</code> / <code>title</code> / <code>author</code> / <code>author_url</code> / <code>duration</code>（<code>HH:MM:SS</code>）/ <code>duration_seconds</code> / <code>like_count</code> / <code>comment_count</code> / <code>subscriber_count</code>（均为解析后的整数，<code>万</code>/<code>亿</code>/<code>K</code>/<code>M</code> 等缩写会换算）/ 对应的 <code>*_text</code> 原始文本 / <code>captions[]</code>（每个字幕轨道含 <code>language_code</code> / <code>name</code> / <code>kind</code> / <code>text</code> 全文）：</p>
+<pre><code class="language-sh">cargo run -- youtubeinfo 'https://www.youtube.com/watch?v=rQ_J9WH6CGk'
+cargo run -- youtubeinfo 'rQ_J9WH6CGk'                  # 直接传 11 位视频 ID
+cargo run -- youtubeinfo 'https://youtu.be/rQ_J9WH6CGk' # youtu.be 短链 / shorts / embed / live 均可
+</code></pre>
+<ul>
+<li>输入支持 11 位视频 ID、<code>watch?v=</code>、<code>youtu.be/</code>、<code>/shorts/</code>、<code>/embed/</code>、<code>/live/</code> 链接</li>
+<li>点赞数取自页面点赞按钮（<code>LIKE</code> 的 <code>title</code>，如 <code>1.2万</code>）；评论数用 InnerTube <code>next</code> continuation 接口（yt-dlp 同款数据源，不依赖滚动评论区）；订阅数取自 <code>videoOwnerRenderer</code></li>
+<li>字幕优先用页面内嵌的 <code>captionTracks</code>（timedtext json3）；若返回空（YouTube 对 <code>exp=xpe</code> 的轨道要求 PO token，页面内无法生成），按 yt-dlp 的做法改用 <strong>android_vr 客户端</strong>调 player API 取无 pot 要求的轨道</li>
+<li>同样不依赖页面渲染：数据来自 HTML 内嵌 JSON + InnerTube 接口，标签页在后台也能取到</li>
+</ul>
+<h3>youtuberinfo</h3>
+<p>获取指定 YouTube 频道（youtuber）的视频列表，返回 <code>{ tab_id, channel, videos[] }</code>。<code>channel</code> 含 <code>name</code> / <code>url</code> / <code>subscriber_count</code>（解析后的整数，<code>万</code>/<code>亿</code>/<code>K</code>/<code>M</code> 缩写会换算）/ <code>subscriber_count_text</code>（原始文本）；<code>videos</code> 每项含 <code>title</code> / <code>url</code> / <code>views</code>（原始文本）/ <code>views_count</code>（整数）/ <code>duration</code> / <code>published</code> / <code>target</code>（可直接喂给 <code>click</code> 打开视频）：</p>
+<pre><code class="language-sh">cargo run -- youtuberinfo 'https://www.youtube.com/@xiaojunpodcast/videos'
+cargo run -- youtuberinfo '@xiaojunpodcast'            # 直接传 handle
+cargo run -- youtuberinfo '@xiaojunpodcast' --max 20   # 最多返回 20 条
+</code></pre>
+<ul>
+<li>输入支持完整频道 URL（<code>/@handle</code>、<code>/c/</code>、<code>/user/</code>、<code>/channel/UC...</code> 均可，末尾带不带 <code>/videos</code> 都行）或 handle（<code>@handle</code> 或裸 handle）</li>
+<li><code>--max</code>：最多返回多少条视频（默认 10，至少 1）</li>
+<li>数据来自频道页 HTML 内嵌的 <code>ytInitialData</code> + InnerTube <code>browse</code> continuation（yt-dlp 同款数据源）：首屏直接解析，不足 <code>--max</code> 条时自动续取；不依赖页面渲染、滚动或窗口可见性，标签页在后台也能拿满</li>
+<li>订阅数同时兼容新旧版频道页结构（<code>c4TabbedHeaderRenderer</code> 与新版 <code>contentMetadataViewModel</code>）</li>
+<li>视频条目同样兼容新旧版结构：旧版 <code>videoRenderer</code> / <code>gridVideoRenderer</code> 与 2026 年新版频道页的 <code>lockupViewModel</code>（<code>richItemRenderer</code> + <code>lockupViewModel</code>）都能解析，实测新版已全面切换</li>
+<li>标题完整性兜底：频道页数据在部分会话/变体下会把超长标题截断（实测截到 100 字符甚至更短），配方会用 YouTube 官方 oEmbed 接口校验，发现疑似截断的标题自动替换成完整标题</li>
+</ul>
+<h3>googletrends</h3>
+<p>Google Trends 趋势查询，返回 <code>{ tab_id, trend[], top[], rising[] }</code>：
+Google Trends 趋势查询，返回 <code>{ tab_id, trend[], top[], rising[], regions[] }</code>：</p>
+<pre><code class="language-sh">cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
+</code></pre>
+<ul>
+<li><code>trend</code>：时间序列 <code>[{ date, value }]</code>，<code>value</code> 为 0-100 相对热度（从图表 SVG 曲线坐标反解 + y 轴刻度校准）</li>
+<li><code>top</code> / <code>rising</code>：热门查询与热度上升的查询（排名、关键词、热度、变化百分比），自动翻完所有分页</li>
+<li><code>regions</code>：按地区显示的搜索热度 <code>[{ rank, region, geo_code, interest }]</code>，<code>geo_code</code> 为 ISO 地区码，同样自动翻完分页（实测可达 66 个地区）</li>
+<li><code>--date</code> 支持 <code>today 1-m</code>（默认）/ <code>today 3-m</code> / <code>today 12-m</code> / <code>today 5-y</code> / <code>all</code>，<code>--geo</code> 默认 <code>Worldwide</code></li>
+<li>关键词表是懒加载的，需要滚动到底部才渲染，配方会自动滚动内部容器等待表格数据</li>
+<li>每次查询新开一个标签页（同标签页反复导航时图表偶发不加载，新标签页稳定），这些标签页会被扩展记录，可用 <code>close-auto-tabs</code> 清理</li>
+</ul>
+<h3>googletrends-compare</h3>
+<p>多关键词走势对比，返回 <code>{ tab_id, terms[], date, geo, series[] }</code>，每个关键词一条趋势序列。<strong>共享 0-100 刻度</strong>（100 = 所有词中的最高峰值），便于直接比较；不返回热门/上升查询表：</p>
+<pre><code class="language-sh">cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m' --geo Worldwide
+</code></pre>
+<p><code>terms</code> 也可用逗号分隔写成一个参数（<code>'ai image,GPTs'</code>）。<code>--date</code> / <code>--geo</code> 与 <code>googletrends</code> 一致。</p>
+<h3>client 结构</h3>
+<pre><code class="language-text">bridge-core/              # 共享库（CLI 与 MCP 复用）
+├── transport.rs          # 连接 / 自动拉起 server / 请求 / 可重连 Bridge
+├── target.rs             # 元素定位参数（css / text / xpath）
+└── recipes/              # 站点配方
+    ├── googlesearch.rs   # Google 搜索（选择器 + 编排）
+    ├── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
+    ├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
+    ├── youtubeinfo.rs    # YouTube 视频详情（字幕全文 + 点赞/评论/订阅数，InnerTube 接口）
+    ├── youtuberinfo.rs   # YouTube 频道视频列表（频道名/订阅数/视频列表，InnerTube 翻页）
+    └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
+client/                   # CLI（薄壳：子命令 + 分发）
+bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
+</code></pre>
+<p>加新站点搜索只需在 <code>recipes/</code> 里加一个文件，并在 <code>main.rs</code> 注册子命令，协议与扩展无需改动。</p>
+<h3>MCP</h3>
+<p><code>bridge-mcp</code> 把全部浏览器指令暴露为 MCP tools（stdio 传输），供 Claude / Codex / Cursor 等客户端直接调用。运行：</p>
+<blockquote>
+<p>从零构建、加载扩展、配置各客户端（Claude Desktop / Cursor / Claude Code）的完整步骤见 <a href="https://github.com/hanelalo/browser-bridge/blob/HEAD/MCP.md" target="_blank" rel="noopener noreferrer">MCP.md</a>。</p>
+</blockquote>
+<pre><code class="language-sh">./target/release/bridge-mcp        # 或 cargo run -p bridge-mcp
+</code></pre>
+<ul>
+<li>默认连 <code>ws://127.0.0.1:9225</code>，可用 <code>BRIDGE_SERVER</code> 覆盖；</li>
+<li>连接失败会自动拉起 <code>bridge-server</code>（空闲 120s 自动退出），断线自动重连；</li>
+<li>Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；</li>
+<li>每个 agent（<code>mcp-</code> 身份）自动拥有一个<strong>专用浏览器窗口</strong>：标签页默认开在那里，不占你正在看的窗口、不抢焦点；</li>
+<li>本进程拉起的 Chrome 会在空闲 10 分钟（<code>BRIDGE_CLOSE_CHROME_IDLE_SECS</code> 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；</li>
+<li>工具列表：<code>list_tabs</code> / <code>close_tab</code> / <code>close_auto_tabs</code> / <code>close_agent_window</code> / <code>new_tab</code> / <code>activate_tab</code> / <code>navigate</code> / <code>click</code> / <code>click_at</code> / <code>press_key</code> / <code>scroll</code> / <code>set_value</code> / <code>check</code> / <code>select_option</code> / <code>clear</code> / <code>get_value</code> / <code>scrape</code> / <code>run_script</code> / <code>get_page_content</code> / <code>get_page_markdown</code> / <code>get_a11y_tree</code> / <code>googlesearch</code> / <code>redditsearch</code> / <code>youtubesearch</code> / <code>youtubeinfo</code> / <code>youtuberinfo</code> / <code>googletrends</code> / <code>googletrends_compare</code>。</li>
+</ul>
+<h4>配置示例</h4>
+<p>先构建一次 <code>./scripts/build.sh</code>，然后把 MCP 服务指向 <code>target/release/bridge-mcp</code>（绝对路径）。</p>
+<p>Claude Desktop（<code>claude_desktop_config.json</code>）：</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "browser-bridge": {
+      "command": "/绝对路径/browser-bridge/target/release/bridge-mcp",
+      "args": []
+    }
+  }
+}
+</code></pre>
+<p>Cursor（<code>.cursor/mcp.json</code>）：</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "browser-bridge": {
+      "command": "/绝对路径/browser-bridge/target/release/bridge-mcp",
+      "args": []
+    }
+  }
+}
+</code></pre>
+<p>前提：Chrome 里已加载扩展（<code>chrome://extensions</code> 加载 <code>extension/dist/chrome-mv3</code>）。Chrome 没开也没关系——MCP 首次调用会自动拉起默认 Chrome 和 bridge-server，扩展会自动连上，无需手动启动任何进程。</p>
+<h2>构建产物（发布）</h2>
+<p>开发时用 <code>cargo run</code> / <code>pnpm dev</code>；正式使用前执行一键构建：</p>
+<pre><code class="language-sh">./scripts/build.sh
+</code></pre>
+<p>产物：</p>
+<table>
+<thead>
+<tr>
+<th>产物</th>
+<th>路径</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>bridge-server</code></td>
+<td><code>target/release/bridge-server</code></td>
+<td>常驻 WebSocket 枢纽，直接运行</td>
+</tr>
+<tr>
+<td><code>bridge-client</code></td>
+<td><code>target/release/bridge-client</code></td>
+<td>发指令的 CLI，直接运行</td>
+</tr>
+<tr>
+<td><code>bridge-mcp</code></td>
+<td><code>target/release/bridge-mcp</code></td>
+<td>MCP server，配给 Claude Desktop / Cursor 等</td>
+</tr>
+<tr>
+<td>扩展</td>
+<td><code>extension/dist/chrome-mv3</code></td>
+<td><code>chrome://extensions</code> 加载已解压目录</td>
+</tr>
+</tbody></table>
+<h3>元素定位</h3>
+<p>统一支持三种方式，均可加 <code>--index</code> 指定第几个匹配：</p>
+<table>
+<thead>
+<tr>
+<th><code>--by</code></th>
+<th>含义</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>css</code>（默认）</td>
+<td>CSS 选择器</td>
+<td><code>click '#submit'</code></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td>元素自身可见文本（精确优先，退化为包含）</td>
+<td><code>click '登录' --by text</code></td>
+</tr>
+<tr>
+<td><code>xpath</code></td>
+<td>XPath 表达式</td>
+<td><code>click '//button[@id="x"]' --by xpath</code></td>
+</tr>
+</tbody></table>
+<h3>scrape 字段映射</h3>
+<p><code>scrape</code> 按 CSS 选择器提取结构化数据（静态查询，CSP 安全）。字段语法：<code>字段名:选择器[@属性]</code>，默认取文本，<code>@属性</code> 取属性值（如 <code>a@href</code> 对链接返回绝对 URL）：</p>
+<pre><code class="language-sh">cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
+</code></pre>
+<p>兼容旧写法 <code>--title h3 --link a --desc .VwiC3b</code>（对应输出 <code>title</code>/<code>url</code>/<code>description</code>），同时传 <code>--fields</code> 时以 <code>fields</code> 为准。</p>
+<h3>run_script</h3>
+<p>在页面里执行任意 JS 表达式（可返回 Promise），结果 JSON 序列化返回，用于探索页面结构、复杂提取等场景。实现基于 <code>chrome.userScripts</code>（USER_SCRIPT 世界豁免页面 CSP）：Chrome 135+ 走 <code>userScripts.execute</code>（当前页面即可用）；低版本退回注册式 user script（Chrome 120+，首次使用后需刷新一次目标标签页）。</p>
+<p>完整协议见 <a href="https://github.com/hanelalo/browser-bridge/blob/HEAD/docs/protocol.md" target="_blank" rel="noopener noreferrer">docs/protocol.md</a>。</p>
+<h2>协议</h2>
+<p>见 <a href="https://github.com/hanelalo/browser-bridge/blob/HEAD/docs/protocol.md" target="_blank" rel="noopener noreferrer">docs/protocol.md</a>。client 只要按协议走 WebSocket，语言不限（后续 TS / Python client 直接实现同一协议即可）。</p>
+<h2>配置</h2>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>server 端口</td>
+<td>9225</td>
+<td>环境变量 <code>BRIDGE_PORT</code></td>
+</tr>
+<tr>
+<td>server 空闲退出</td>
+<td>0（不退出）</td>
+<td>环境变量 <code>BRIDGE_IDLE_TIMEOUT</code>（秒）；客户端自动拉起时默认 120</td>
+</tr>
+<tr>
+<td>插件连接地址</td>
+<td><code>ws://127.0.0.1:9225</code></td>
+<td>构建时 <code>WXT_PUBLIC_BRIDGE_URL=ws://... pnpm build</code></td>
+</tr>
+<tr>
+<td>client 服务地址</td>
+<td><code>ws://127.0.0.1:9225</code></td>
+<td><code>--server</code> 或环境变量 <code>BRIDGE_SERVER</code></td>
+</tr>
+<tr>
+<td>client 自动拉起</td>
+<td>已构建的 <code>bridge-server</code></td>
+<td><code>BRIDGE_SERVER_BIN</code> 指定路径，否则按同目录 / target / PATH 查找</td>
+</tr>
+<tr>
+<td>MCP 关闭拉起的 Chrome 空闲时间</td>
+<td>600（10 分钟）</td>
+<td><code>BRIDGE_CLOSE_CHROME_IDLE_SECS</code>（秒）；server 断开或 MCP 会话结束时也会关闭自己拉起的 Chrome</td>
+</tr>
+<tr>
+<td>Chrome 版本</td>
+<td>120+</td>
+<td><code>run_script</code> 需要 <code>chrome.userScripts</code>（135+ 体验最佳）</td>
+</tr>
+</tbody></table>
+<h2>安全说明</h2>
+<ul>
+<li>server 只监听 <code>127.0.0.1</code>，不要让公网访问。</li>
+<li>插件声明了 <code>host_permissions: &lt;all_urls&gt;</code> 才能操作任意页面——这是个人工具的便利；如果要对外分发，应改成按站点授权。</li>
+<li>服务端目前接受任意角色的连接；如需更强隔离，可在握手阶段加 token。</li>
+<li><code>run_script</code> / <code>scrape</code> 可以读写页面，属于强能力；不要把它暴露给不可信来源。</li>
+</ul>
+<h2>License</h2>
+<p>本项目使用 <a href="https://github.com/hanelalo/browser-bridge/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a> 开源。Copyright (c) 2026 hanelalo。</p>
+<p>你可以自由使用、修改、分发本项目（含商用），但需保留版权声明和许可协议原文。本项目按 "AS IS" 提供，不附带任何明示或默示的担保。</p>

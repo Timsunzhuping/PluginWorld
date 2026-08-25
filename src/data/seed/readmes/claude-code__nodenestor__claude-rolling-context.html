@@ -1,0 +1,448 @@
+<h1>Rolling Context for Claude Code</h1>
+<p><a href="https://github.com/NodeNestor/claude-rolling-context/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" /></a>
+<a href="https://www.python.org" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/python-3.7+-blue.svg" alt="Python 3.7+" /></a>
+<img src="https://img.shields.io/badge/dependencies-zero-orange.svg" alt="Zero Dependencies" /></p>
+<p>A transparent proxy that gives Claude Code <strong>rolling context compression</strong> — old messages get automatically summarized while recent messages stay fully verbatim. You never hit the context wall, and you never lose important details.</p>
+<p><strong>Zero config.</strong> Uses your existing Claude Code auth. No API key needed. Just install and forget.</p>
+<blockquote>
+<p>Claude Code's built-in <code>/compact</code> replaces your <strong>entire</strong> conversation with a lossy summary. After a few compactions, you're summarizing a summary of a summary. This plugin only compresses old messages — recent context stays untouched.</p>
+</blockquote>
+<p>It's also a cost story: every token you carry in context gets re-billed on <strong>every turn</strong> (at cache-read rates), so an unmanaged session's input cost grows with the <em>square</em> of its length. Capping the prefix makes it linear — <a href="#the-economics-why-capping-the-prefix-matters" target="_blank" rel="noopener noreferrer">the math</a> works in relative units and holds for every model, and it matters more the bigger the context window, not less.</p>
+<h2><code>/compact</code> vs Rolling Context</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>/compact</code> (built-in)</th>
+<th>Rolling Context</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>What gets compressed</td>
+<td>Everything</td>
+<td>Only old messages</td>
+</tr>
+<tr>
+<td>Recent context</td>
+<td>Summarized (lossy)</td>
+<td><strong>Kept verbatim</strong></td>
+</tr>
+<tr>
+<td>When it runs</td>
+<td>Manual or near the context limit</td>
+<td>Automatic, background</td>
+</tr>
+<tr>
+<td>Latency impact</td>
+<td>Blocks until done</td>
+<td>Zero — async</td>
+</tr>
+<tr>
+<td>After multiple compressions</td>
+<td>Summary of summary of summary</td>
+<td>Fresh rolling merge each time</td>
+</tr>
+<tr>
+<td>Input cost over a long session</td>
+<td>Grows with the square of session length</td>
+<td>Grows linearly</td>
+</tr>
+<tr>
+<td>Original transcript</td>
+<td>Replaced</td>
+<td>Preserved (JSONL unchanged)</td>
+</tr>
+</tbody></table>
+<h2>The economics: why capping the prefix matters</h2>
+<p>No price cards needed — the argument works in <strong>relative units</strong> that hold for every Claude model. Take the model's fresh-input-token rate as <code>1×</code>. The API bills:</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Relative cost</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Fresh input tokens</td>
+<td><code>1×</code></td>
+</tr>
+<tr>
+<td>Prompt-cache <strong>read</strong></td>
+<td><code>0.1×</code></td>
+</tr>
+<tr>
+<td>Prompt-cache <strong>write</strong></td>
+<td><code>1.25×</code> (5-min TTL) / <code>2×</code> (1-hour TTL)</td>
+</tr>
+<tr>
+<td>Output tokens</td>
+<td><code>~5×</code></td>
+</tr>
+</tbody></table>
+<p>Claude Code re-sends the entire conversation on every turn. Even with caching working perfectly, each turn costs <code>prefix size × 0.1</code>. So a session's total input cost is <strong>the sum of the prefix over all turns</strong>:</p>
+<ul>
+<li><strong>Unmanaged context</strong> (big window, auto-compact only near the limit): the prefix grows every turn, so total cost grows with the <em>square</em> of session length. A 1M window doesn't fix this — it just lets the prefix run to 900K+ before anything stops it, and every one of those tokens costs <code>0.1×</code> again on every single turn.</li>
+<li><strong>Rolling context</strong>: the prefix is capped between <code>TARGET</code> and <code>TRIGGER</code>, so total cost grows <em>linearly</em>.</li>
+</ul>
+<p><strong>The cache-miss blast radius matters even more in interactive use.</strong> The prompt cache has a TTL. Read a diff, think for a while, get coffee — and the next turn re-<em>writes</em> the whole prefix at <code>1.25×</code>. At a 900K prefix, one cold turn bills the equivalent of ~1.1M fresh input tokens. With the prefix capped at ~100K, the identical cold turn is ~9× cheaper. Compression doesn't just shrink the average turn — it caps the worst one.</p>
+<p><strong>What compression itself costs:</strong> each cycle re-writes the new (much smaller) prefix once, and in native mode the summarization request is itself a cache read — a few hundred fresh tokens, measured (see below). Ballpark: sessions that accumulate past ~100K of context — a couple of hours of real work — come out ahead, and the gap compounds from there. Short sessions are a wash; don't expect magic on a 20-minute task.</p>
+<p><strong>On Pro/Max subscriptions</strong> none of this is dollars, but the same math applies in a different currency: rate-limit accounting weights cache reads far below fresh input, so the identical curves decide how fast you burn your 5-hour window.</p>
+<blockquote>
+<p><strong>Honest note:</strong> if cost were the <em>only</em> goal, lowering Claude Code's auto-compact threshold (<code>CLAUDE_CODE_AUTO_COMPACT_WINDOW</code>) buys a similar spend curve for free. What it can't buy is quality under repetition: built-in compaction replaces the whole conversation with a lossy summary every time it fires — at a low threshold it fires often, and you're soon working from a summary of a summary of a summary. The rolling design exists so aggressive compression doesn't cost you the session: recent work stays verbatim, and old work lives in one continuously-merged timeline instead of N generations of loss.</p>
+</blockquote>
+<h2>How It Works</h2>
+<pre><code>Claude Code  ──►  Rolling Context Proxy (:5588)  ──►  Anthropic API
+                         │
+                         ├─ context &lt; 100K tokens? pass through unchanged
+                         │
+                         └─ context &gt; 100K tokens?
+                              1. summarize old messages in the background
+                                 (native mode: your session's own model,
+                                  served almost entirely from prompt cache)
+                              2. keep ~40K tokens of recent messages verbatim
+                              3. inject compressed context on next request
+                              4. never blocks, never adds latency
+</code></pre>
+<p>Instead of replacing everything, this plugin:</p>
+<ol>
+<li><strong>Keeps recent messages untouched</strong> — recent context stays verbatim</li>
+<li><strong>Only compresses when needed</strong> — triggers at 100K (real API token count), compresses old messages, grows naturally until next trigger</li>
+<li><strong>Merges summaries</strong> — each compression cycle merges with the previous summary, building a rolling timeline</li>
+<li><strong>Never blocks</strong> — compression runs in the background, applied on the next request</li>
+<li><strong>Full transcripts preserved</strong> — Claude Code still saves everything to JSONL in <code>~/.claude/projects/</code></li>
+</ol>
+<h2>Install</h2>
+<h3>Option 1: Claude Code Plugin (recommended)</h3>
+<p>Run these two commands inside Claude Code:</p>
+<pre><code>/plugin marketplace add https://github.com/NodeNestor/nestor-plugins
+/plugin install rolling-context
+</code></pre>
+<p>Restart your terminal and start a new Claude Code session. On the <strong>first start</strong>, the plugin configures <code>ANTHROPIC_BASE_URL</code> and starts the proxy. Since the env var only takes effect on the next terminal, <strong>restart your terminal once more</strong> — after that, everything works automatically. No pip install needed — pure Python stdlib.</p>
+<h3>Option 2: Manual install</h3>
+<p><strong>Linux / macOS:</strong></p>
+<pre><code class="language-bash">git clone https://github.com/NodeNestor/claude-rolling-context.git ~/claude-rolling-context
+cd ~/claude-rolling-context
+bash install.sh
+</code></pre>
+<p><strong>Windows (PowerShell):</strong></p>
+<pre><code class="language-powershell">git clone https://github.com/NodeNestor/claude-rolling-context.git $HOME\claude-rolling-context
+cd $HOME\claude-rolling-context
+powershell -ExecutionPolicy Bypass -File install.ps1
+</code></pre>
+<p>The installer configures <code>ANTHROPIC_BASE_URL</code> and registers the plugin. Restart your terminal and you're done. Requires Python 3.7+ (no pip install needed — pure stdlib).</p>
+<h2>How Compression Works</h2>
+<p>When the message array exceeds the trigger threshold:</p>
+<pre><code>BEFORE (hit 100K trigger):
+  [msg1] [msg2] [msg3] ... [msg60] [msg61] ... [msg100]
+  |&lt;——————————————— ~105K tokens ——————————————&gt;|
+
+AFTER (compressed):
+  [rolling summary] [ack] [msg61] ... [msg100]
+  |&lt;— ~5K summary —&gt;|    |&lt;—— verbatim ————————&gt;|
+
+NEXT CYCLE (grows back to 100K, triggers again):
+  [rolling summary] [ack] [msg61] ... [msg140]
+  |&lt;——————————————— ~105K tokens ——————————————&gt;|
+  → new summary merges old summary + msg61-msg100
+  → keeps msg101-msg140 verbatim
+</code></pre>
+<p>The summary preserves a structured record of everything that happened:</p>
+<ul>
+<li><strong>Active Goal</strong> — what the user is currently asking for, constraints, do/don't rules</li>
+<li><strong>Previous Goals</strong> — completed or shifted-away-from goals (kept brief)</li>
+<li><strong>Timeline</strong> — chronological numbered steps: every file change, decision, error, and user instruction</li>
+<li><strong>Current State</strong> — what's done, in progress, and next</li>
+<li><strong>Key Details</strong> — file paths, configs, decisions that must survive compression</li>
+</ul>
+<p>Goals evolve naturally across rolling compressions — the latest request stays prominent while completed goals move to the previous section. User instructions are never lost.</p>
+<h3>How the summary is generated (native mode)</h3>
+<p>By default the proxy doesn't build a separate summarization request. It <strong>clones the exact request Claude Code just sent</strong> — same model, system prompt, and tools, with the conversation truncated at the cut point — and appends one user message asking for the summary (the same way Claude Code's own <code>/compact</code> works). Two big wins:</p>
+<ul>
+<li><strong>It's a prompt-cache read.</strong> The cloned prefix was just sent by the chat request, so the API serves it from cache. Measured in practice: a ~72K-token compression request cost ~400 fresh input tokens.</li>
+<li><strong>It's genuine Claude Code session traffic.</strong> Pro/Max subscription OAuth tokens are classified server-side — standalone requests that don't look like Claude Code get routed to the overage lane and rejected with 429. The cloned request passes because it <em>is</em> the session's own request shape.</li>
+</ul>
+<p>Setting <code>ROLLING_CONTEXT_MODEL</code> pins a different summarizer model (the request shape stays native, but a different model means no prompt-cache reuse). Configuring any <code>ROLLING_CONTEXT_SUMMARIZER_*</code> variable switches to a standalone flattened request instead — see below.</p>
+<h3>Using any API or a local model for compression</h3>
+<p>Summarization can run on a completely separate endpoint — any Anthropic-format API, or any OpenAI-compatible one (Ollama, LM Studio, vLLM, OpenRouter, DeepSeek, Groq, ...):</p>
+<pre><code class="language-bash"># Separate Anthropic API key (billed there instead of your subscription)
+export ROLLING_CONTEXT_SUMMARIZER_KEY=sk-ant-api03-...
+
+# Local model via Ollama / LM Studio / vLLM (OpenAI-compatible)
+export ROLLING_CONTEXT_SUMMARIZER_URL=http://127.0.0.1:11434
+export ROLLING_CONTEXT_SUMMARIZER_FORMAT=openai
+export ROLLING_CONTEXT_MODEL=qwen3:8b   # required for openai format
+
+# OpenRouter (or any hosted OpenAI-compatible API)
+export ROLLING_CONTEXT_SUMMARIZER_URL=https://openrouter.ai/api
+export ROLLING_CONTEXT_SUMMARIZER_FORMAT=openai
+export ROLLING_CONTEXT_SUMMARIZER_KEY=sk-or-...
+export ROLLING_CONTEXT_MODEL=deepseek/deepseek-chat
+</code></pre>
+<h3>Non-Anthropic endpoints (GLM/Z.ai, DeepSeek, OpenRouter, a local gateway)</h3>
+<p>Point Claude Code at your endpoint the usual way and install as normal. The hook
+chains it — <code>ANTHROPIC_BASE_URL</code> becomes the proxy, and your endpoint becomes
+<code>ROLLING_CONTEXT_UPSTREAM</code> — and <strong>both</strong> the chat traffic and the background
+compaction go there. No extra configuration.</p>
+<p>Third-party endpoints implement the <code>/v1/messages</code> shape to varying depth. Native
+mode clones the request Claude Code just sent, which can include <code>cache_control</code>
+breakpoints and <code>tool_choice</code>; if your endpoint rejects one of those, the proxy
+retries the compaction as a plain flattened summary using the session's own model
+rather than giving up for the cooldown period. Both paths are covered by
+<code>tests/</code> , which runs the real proxy against a mock endpoint — including a
+deliberately strict one that rejects those fields.</p>
+<p>Check it landed — the startup banner names the compaction endpoint separately
+from the chat endpoint, and they should match:</p>
+<pre><code>Forwarding to: https://api.z.ai/api/anthropic
+Compacting via: https://api.z.ai/api/anthropic (third-party — flattened fallback armed)
+</code></pre>
+<p><strong>On auto-compact.</strong> Rolling Context doesn't disable Claude Code's auto-compact;
+it keeps the reported context low enough that auto-compact never gets near its
+threshold. If auto-compact still fires on a custom endpoint, compaction is
+failing — read <code>~/.claude/rolling-context-debug.log</code> rather than raising the
+threshold. Claude Code sizes the window from the model name and falls back to
+200K for names it doesn't know; for a non-<code>claude-*</code> model you can state the real
+window with <code>CLAUDE_CODE_MAX_CONTEXT_TOKENS</code>, which is cleaner than encoding it
+in the model name.</p>
+<h2>Architecture</h2>
+<p>The proxy is <strong>fully stateless</strong> — no sessions, no databases, no tracking. It works by hashing message content:</p>
+<ol>
+<li>When a response comes back from the API with a high token count, the proxy compresses the messages and stores the result keyed by content hashes</li>
+<li>On the next request, it hashes the incoming messages and checks for a matching compression</li>
+<li>If found, it swaps in the compressed version transparently</li>
+</ol>
+<p>This means:</p>
+<ul>
+<li><strong>Multiple conversations work automatically</strong> — each conversation has unique content, unique hashes, no collision</li>
+<li><strong>Subagents and branches just work</strong> — the proxy doesn't care about sessions, only content</li>
+<li><strong>No state to corrupt</strong> — restart the proxy anytime, worst case is one extra compression cycle</li>
+<li><strong>Claude Code sees nothing different</strong> — the proxy is invisible, JSONL transcripts are unmodified</li>
+</ul>
+<h2>Turning it off</h2>
+<p>Some sessions want the whole repo in view — deep planning, refactor design, an
+optimization pass where the model should see everything. Compression is not
+what you want there.</p>
+<pre><code>/rolling-context:off      # this conversation only, other sessions unaffected
+/rolling-context:on       # back on
+
+/rolling-context:off --global   # every session on this machine
+/rolling-context:on --global
+
+/rolling-context:status   # what is the machine-wide setting?
+</code></pre>
+<p>Both scopes apply from the <strong>next request</strong> — no Claude Code restart, no proxy
+restart. Machine-wide off wins over a session that opted in.</p>
+<p><strong>Turning it off never throws work away.</strong> Compressions already computed stay in
+the proxy's memory; they just stop being injected, and no new compression is
+triggered. Turn it back on and the session resumes with everything it had, so a
+conversation that ran hot before the toggle never pays to compress that history
+twice.</p>
+<h3>Changing the default</h3>
+<p>A fresh install compresses out of the box. If you would rather opt in per
+session, flip the default in <code>~/.claude-rolling-context/config.json</code>:</p>
+<pre><code class="language-json">{ "enabled": false }
+</code></pre>
+<p>Sessions that have not run <code>/rolling-context:off</code> or <code>:on</code> follow this;
+an explicit toggle in a session always wins over it. A missing or malformed
+config falls back to on, so a typo can never silently disable your install.
+<code>/rolling-context:status</code> prints the current default and the config path.</p>
+<h3>Subagents follow the session that spawned them</h3>
+<p><code>/rolling-context:off</code> covers the subagents your session launches, so a
+planning session where agents explore the repo keeps full context everywhere —
+not just in the main thread.</p>
+<p>The command prints a marker into the transcript, and the proxy latches it
+against the <code>X-Claude-Code-Session-Id</code> header Claude Code sends on every
+request. A subagent gets its own transcript, so it never carries the marker,
+but it inherits its parent's session id — which is what carries the setting in.
+Other sessions on the same machine are unaffected either way.</p>
+<p>The latch also outlives the marker: if a conversation is <code>/compact</code>ed and the
+marker is summarized away, the session keeps its setting.</p>
+<p>One caveat: the latch lives in the proxy's memory, bounded to the 512 most
+recent sessions. Restart the proxy (or blow past 512 sessions) and it forgets,
+so a session falls back to the machine-wide setting until its next marker is
+seen. That costs savings for a request, never correctness — and re-running
+<code>/rolling-context:off</code> restores it.</p>
+<h2>Configuration</h2>
+<p>All settings via environment variables (all optional — defaults work great):</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ROLLING_CONTEXT_TRIGGER</code></td>
+<td><code>100000</code></td>
+<td>Compress when context exceeds this many tokens</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_TARGET</code></td>
+<td><code>40000</code></td>
+<td>Keep this many tokens of recent messages after compression</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_MODEL</code></td>
+<td><em>(session model)</em></td>
+<td>Summarizer model; unset = the session's own model (prompt-cache hit)</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_PORT</code></td>
+<td><code>5588</code></td>
+<td>Proxy listen port</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_UPSTREAM</code></td>
+<td><code>https://api.anthropic.com</code></td>
+<td>Upstream API URL (chain to another proxy!)</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_SUMMARIZER_URL</code></td>
+<td><em>(upstream)</em></td>
+<td>Custom endpoint for summarization (local model, other API)</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_SUMMARIZER_KEY</code></td>
+<td><em>(uses Claude Code auth)</em></td>
+<td>API key for custom summarizer endpoint</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_SUMMARIZER_FORMAT</code></td>
+<td><code>anthropic</code></td>
+<td><code>openai</code> = /v1/chat/completions for OpenAI-compatible endpoints</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_FAILURE_COOLDOWN</code></td>
+<td><code>300</code></td>
+<td>Seconds to wait before retrying after a failed compression</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_DISABLE</code></td>
+<td><em>(unset)</em></td>
+<td><code>1</code> = off everywhere; wins over <code>/rolling-context:on --global</code></td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_HOME</code></td>
+<td><code>~/.claude-rolling-context</code></td>
+<td>Where the machine-wide off flag lives</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_MAX_CONCURRENT</code></td>
+<td><code>4</code></td>
+<td>Background compactions allowed at once across all conversations. A conversation with no summary yet is admitted past this (up to 2x) rather than be starved</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_LOG_LEVEL</code></td>
+<td><code>INFO</code></td>
+<td><code>DEBUG</code> for per-request match detail (verbose, and it writes conversation content to disk)</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_LOG_MAX_MB</code></td>
+<td><code>10</code></td>
+<td>Rotate <code>rolling-context-debug.log</code> at this size</td>
+</tr>
+<tr>
+<td><code>ROLLING_CONTEXT_LOG_BACKUPS</code></td>
+<td><code>3</code></td>
+<td>Rotated files kept, so the log is capped at <code>(1 + backups) x max_mb</code></td>
+</tr>
+</tbody></table>
+<h3>Is it actually firing?</h3>
+<p>Every 25 requests at or over the trigger, the proxy logs how often it injected:</p>
+<pre><code>[STATS] prefix injected on 61/72 requests at or over the trigger (85%)
+</code></pre>
+<p>A conversation's first turns are always misses — nothing has been compressed
+yet, and compression happens in the background after a response, so there is a
+short warmup before the first summary exists. After that, every turn should
+carry it. A rate that stays low once sessions are warm means something is wrong;
+before v1.11.4 it sat near 21% because one conversation compacting blocked all
+the others (issue #8).</p>
+<h3>Logs</h3>
+<p>Two files live in <code>~/.claude</code>:</p>
+<ul>
+<li><code>rolling-context-debug.log</code> — the proxy's own log, rotated and capped by the
+settings above (30 MB total by default).</li>
+<li><code>rolling-context-proxy.log</code> — the proxy's stdout, captured by the start hook.
+It carries <code>WARNING</code> and above only, so it stays small; it exists to catch
+crashes that never reach the logger.</li>
+</ul>
+<p>Before v1.11.3 the proxy logged at <code>DEBUG</code> unconditionally into an unrotated
+file <em>and</em> duplicated every line into the second one. A long-lived proxy could
+reach several gigabytes (issue #7). If you are upgrading, delete the old files
+once — nothing prunes them retroactively.</p>
+<p><strong>Stop the proxy first.</strong> A running proxy holds both files open, so deleting
+them frees no disk at all until the process exits — the space only comes back
+on restart. Reported by @drewdrewthis after clearing a 6.86 GB log and finding
+the disk unchanged:</p>
+<pre><code class="language-bash"># stop the proxy (it restarts automatically on the next Claude Code session)
+kill "$(cat ~/.claude/rolling-context-proxy.pid)" 2&gt;/dev/null
+rm -f ~/.claude/rolling-context-proxy.log ~/.claude/rolling-context-debug.log
+</code></pre>
+<h2>Proxy Chaining</h2>
+<p>Already using another proxy (model router, API gateway, etc.)? Rolling Context auto-detects this and chains through it:</p>
+<pre><code>Claude Code  ──►  Rolling Context (:5588)  ──►  Your Proxy  ──►  Anthropic API
+</code></pre>
+<p>If <code>ANTHROPIC_BASE_URL</code> is already set when you install, the plugin automatically saves it as <code>ROLLING_CONTEXT_UPSTREAM</code> and inserts itself in front. No manual config needed.</p>
+<p>You can also set it explicitly:</p>
+<pre><code class="language-bash">export ROLLING_CONTEXT_UPSTREAM=http://localhost:8080  # your existing proxy
+</code></pre>
+<h2>Health Check</h2>
+<pre><code class="language-bash">curl http://127.0.0.1:5588/health
+</code></pre>
+<p>Returns who is on the port (<code>service</code>, <code>version</code>, <code>pid</code>) and compression stats:
+how many compressions, tokens saved, etc.</p>
+<p>This is also how the start hook decides whether to start anything. It does not
+trust the PID file: a crashed proxy leaves that file behind, and the OS is free
+to give its number to an unrelated process, so "the PID is alive" was answering
+yes while nothing was listening — the hook logged <code>Proxy already running</code> and
+every session failed with <code>ConnectionRefused</code> until someone deleted the file by
+hand (issue #9, reported by @drewdrewthis). Asking the port cannot go stale.</p>
+<p><strong>If sessions fail with <code>API Error: Connection refused</code></strong>, read
+<code>~/.claude/rolling-context-hook.log</code> — since v1.11.7 the hook waits for the
+proxy to answer before it exits, and says which of these happened:</p>
+<table>
+<thead>
+<tr>
+<th>Log line</th>
+<th>What it means</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Proxy healthy on :5588</code></td>
+<td>Started and serving.</td>
+</tr>
+<tr>
+<td><code>PID file present but nothing is serving</code></td>
+<td>The recorded proxy died; restarted automatically.</td>
+</tr>
+<tr>
+<td><code>... is alive but is not our proxy — recycled PID</code></td>
+<td>Another process inherited the old PID. Left alone, proxy restarted.</td>
+</tr>
+<tr>
+<td><code>port 5588 is held by something that is not this proxy</code></td>
+<td>Free that port, or set <code>ROLLING_CONTEXT_PORT</code>.</td>
+</tr>
+<tr>
+<td><code>proxy did not answer on :5588 within ~8s</code></td>
+<td>It failed to start — see <code>~/.claude/rolling-context-proxy.log</code>.</td>
+</tr>
+</tbody></table>
+<h2>Debug</h2>
+<pre><code class="language-bash">curl http://127.0.0.1:5588/debug/compressions
+</code></pre>
+<p>Returns the stored compression entries with their full summary content — useful for verifying what the rolling summary captured and whether user goals/instructions survived compression.</p>
+<h2>Uninstall</h2>
+<p>Run the uninstall script — it handles both manual and marketplace installs, stops the proxy, cleans env vars, and removes all plugin registrations.</p>
+<p><strong>Linux / macOS:</strong></p>
+<pre><code class="language-bash">cd ~/claude-rolling-context &amp;&amp; bash uninstall.sh
+</code></pre>
+<p><strong>Windows (PowerShell):</strong></p>
+<pre><code class="language-powershell">cd $HOME\claude-rolling-context; powershell -ExecutionPolicy Bypass -File uninstall.ps1
+</code></pre>
+<p>If you installed via marketplace and already deleted the repo, you can run it from the cache:</p>
+<pre><code class="language-powershell">cd $HOME\.claude\plugins\cache\rolling-context-marketplace\rolling-context\&lt;version&gt;
+powershell -ExecutionPolicy Bypass -File uninstall.ps1
+</code></pre>
+<h2>License</h2>
+<p>MIT</p>

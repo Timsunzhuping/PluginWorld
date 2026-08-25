@@ -174,7 +174,7 @@ async function main() {
     if (existing) {
       existing.registryServer = server;
       registryMerged++;
-    } else if (registryOnly < 150 && (server.repository?.url || server.remotes?.length)) {
+    } else if (registryOnly < 300 && (server.repository?.url || server.remotes?.length)) {
       const raw = registryToRaw(server);
       const key = raw.repoFullName?.toLowerCase() ?? `registry:${server.name}`;
       if (!mcpByRepo.has(key)) {

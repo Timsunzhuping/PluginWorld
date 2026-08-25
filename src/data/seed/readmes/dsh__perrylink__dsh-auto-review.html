@@ -1,0 +1,496 @@
+<h1>🤖 dsh-auto-review</h1>
+<p><a href="https://gitee.com/perrylink/dsh-auto-review" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Gitee-mirror-c71d23?logo=gitee" alt="Gitee" /></a></p>
+<p><strong>Second-model AI approval for DeepSeek Harness — a read-only reviewer subagent decides allow/deny on the approval chain, fail-closed by default.</strong></p>
+<p><em>When an action crosses the sandbox boundary, a second model reads the evidence and returns a verdict with a reason — so humans approve nothing while nothing unsafe slips through.</em></p>
+<p><a href="https://github.com/PerryLink/dsh-auto-review/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
+<a href="https://github.com/topics/dsh-plugin" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/dsh-plugin-%E2%9C%85-green" alt="DSH plugin" /></a>
+<a href="#" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-brightgreen.svg" alt="Node" /></a>
+<a href="https://github.com/PerryLink/dsh-auto-review/actions" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/actions/workflow/status/PerryLink/dsh-auto-review/ci.yml?branch=main&amp;label=CI" alt="CI" /></a>
+<a href="https://github.com/PerryLink/dsh-auto-review/releases" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/v/tag/PerryLink/dsh-auto-review?label=version" alt="Version" /></a>
+<a href="https://www.npmjs.com/package/dsh-auto-review" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/dsh-auto-review" alt="npm version" /></a>
+<a href="https://www.npmjs.com/package/dsh-auto-review" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/dm/dsh-auto-review" alt="npm downloads" /></a></p>
+<p><a href="https://github.com/PerryLink/dsh-auto-review/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer">English</a> · <a href="https://github.com/PerryLink/dsh-auto-review/blob/HEAD/README.zh.md" target="_blank" rel="noopener noreferrer">简体中文</a> · <a href="https://github.com/PerryLink/dsh-auto-review/blob/HEAD/README.es.md" target="_blank" rel="noopener noreferrer">Español</a> · <a href="https://github.com/PerryLink/dsh-auto-review/blob/HEAD/README.pt.md" target="_blank" rel="noopener noreferrer">Português</a> · <a href="https://github.com/PerryLink/dsh-auto-review/blob/HEAD/README.hi.md" target="_blank" rel="noopener noreferrer">हिन्दी</a></p>
+<hr />
+<h2>Compatibility</h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Harness</td>
+<td>DeepSeek Harness <code>0.1.1-rc.2</code> (dependencies pinned to <code>0.1.1-rc.2</code>; peers <code>&gt;=0.1.0-rc.8 &lt;0.2.0</code>)</td>
+</tr>
+<tr>
+<td>Node</td>
+<td><code>^22.19.0 || &gt;=24.0.0</code></td>
+</tr>
+<tr>
+<td>Platforms</td>
+<td>All (host answerer; optional Web review panel via the session-projection capability)</td>
+</tr>
+<tr>
+<td>Model</td>
+<td>Any (the reviewer inherits the session agent's route; <code>reviewerModel</code> overrides)</td>
+</tr>
+</tbody></table>
+<h2>What you get</h2>
+<p><code>dsh-auto-review</code> puts a second model on the <code>approval/request</code> answerer chain:</p>
+<ol>
+<li><strong>Official seam</strong> — an answerer that claims only the requests it owns (<code>ai</code> policy) and delegates everything else via <code>next()</code>; the human approval flow is never short-circuited.</li>
+<li><strong>Read-only reviewer subagent</strong> — a one-shot fork with a <code>read</code>/<code>glob</code>/<code>grep</code> tool allow-list returns a structured verdict <code>{ decision, reason, riskLevel }</code>. Reviewer asks are recognized by identity and delegated; <code>maxDepth</code> + the allow-list keep the reviewer non-delegating.</li>
+<li><strong>Fail closed</strong> — reviewer crash, timeout, or schema mismatch resolves through <code>fallbackPolicy</code> (default <code>rejected</code>); a deny verdict feeds its reason back to the calling model.</li>
+<li><strong>Config-driven routing</strong> — per-tool policies (<code>ai</code>/<code>human</code>/<code>never</code>) plus regex risk rules, all changeable from cordis.yml.</li>
+<li><strong>Deny reasons reach the model</strong> — the reviewer's reason is injected into the denied tool result (callId-linked); fallback and <code>never</code>-policy rejections inject auditable markers too (<code>[auto-review]</code> / <code>[auto-review-fallback]</code> / <code>[auto-review-never]</code>).</li>
+<li><strong>Full audit trail</strong> — log-only <code>autoReview/verdict</code> + <code>autoReview/rejection</code> session events (envelope <code>ignorable: true</code>) plus an optional invariant companion enforcing marker ⟺ event.</li>
+<li><strong>Safety knobs</strong> — a rejection circuit breaker (3 consecutive denials, or 6 of the last 10 verdicts, per turn), a risk-level policy, a one-shot <code>/auto-review approve</code> override, and a <code>never</code>-policy hard disable that explains itself to the model.</li>
+<li><strong>Optional reviewer context</strong> — a bounded compact transcript (<code>contextBudget</code>) plus a Codex-style Markdown ruling policy (<code>reviewerPolicyText</code>).</li>
+</ol>
+<p>Every decision reconstructs from the session log: <code>approval/asked</code> → <code>autoReview/verdict</code> (or <code>autoReview/rejection</code>) → <code>approval/decided</code>.</p>
+<h2>Why a second model instead of rules?</h2>
+<p>Pattern-based auto-approvers decide before dispatch, with no evidence. <code>dsh-auto-review</code> gives the decision to a <strong>reviewer subagent</strong> that reads the actual workspace (through its read-only tool face), the already-streamed tool-call arguments (sensitive values redacted), the request reason, and your risk rules — then returns a structured verdict. A deny verdict feeds its <strong>reason back to the calling model</strong>, so the agent learns why instead of retrying blindly.</p>
+<h2>Quick start</h2>
+<pre><code class="language-sh"># 1. install the bundle into your profile
+dsh plugin --profile web add "github:PerryLink/dsh-auto-review#main"
+
+# or from npm (published releases)
+dsh plugin --profile web add dsh-auto-review
+
+# 2. restart and verify the row
+dsh --profile web --dump-config | grep -A4 'id: auto-review'
+</code></pre>
+<p>Out of the box the shipped patch AI-reviews <code>bash</code> and <code>write</code>; every other tool (including <code>edit</code> — in-place modification) delegates to the human chain. Add <code>edit: ai</code> explicitly if you accept in-place edits without a human in the loop.</p>
+<h2>Install &amp; uninstall</h2>
+<ul>
+<li><strong>git channel</strong> (latest <code>main</code>): <code>dsh plugin --profile web add "github:PerryLink/dsh-auto-review#main"</code> — the isolated <code>prepare</code> build needs the single <code>allowBuilds: { esbuild: true }</code> key the <code>dsh</code> CLI prints for <code>dsh-auto-review</code>.</li>
+<li><strong>npm channel</strong> (published releases): <code>dsh plugin --profile web add dsh-auto-review</code>.</li>
+<li><strong>tarball channel</strong>: <code>pnpm pack</code> in this repo, then <code>dsh plugin --profile web add ./dsh-auto-review-&lt;version&gt;.tgz</code>.</li>
+<li><strong>uninstall</strong>: <code>dsh plugin --profile web remove dsh-auto-review</code> (or remove the row from the profile patch).</li>
+</ul>
+<h2>Configuration</h2>
+<p>All tunables are Schemastery <code>Config</code> fields (changeable from cordis.yml). An id-targeted override replaces the whole row — restate every key you need.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>enableByDefault</code></td>
+<td><code>true</code></td>
+<td>Sessions start with auto-review enabled; <code>/auto-review on|off</code> writes a durable override that beats this</td>
+</tr>
+<tr>
+<td><code>toolsPolicy.default</code></td>
+<td><code>human</code></td>
+<td>Policy for unlisted tools (delegate to the human answerer)</td>
+</tr>
+<tr>
+<td><code>toolsPolicy.overrides</code></td>
+<td><code>{}</code></td>
+<td>Per-tool policy: <code>ai</code> / <code>human</code> / <code>never</code></td>
+</tr>
+<tr>
+<td><code>riskRules</code></td>
+<td><code>[]</code></td>
+<td><code>{pattern, policy, field?}</code> matched before the tool table; <code>field</code> selects <code>reason</code> (default), <code>toolName</code>, or <code>arguments</code></td>
+</tr>
+<tr>
+<td><code>reviewerProvider</code></td>
+<td><code>fork</code></td>
+<td>Subagent provider for the reviewer (in-process fork backend)</td>
+</tr>
+<tr>
+<td><code>reviewerModel</code></td>
+<td><em>(inherit)</em></td>
+<td>Reviewer model id; unset inherits the session agent's route</td>
+</tr>
+<tr>
+<td><code>reviewerTimeoutMs</code></td>
+<td><code>60000</code></td>
+<td>Verdict deadline; on expiry the fallback policy applies</td>
+</tr>
+<tr>
+<td><code>reviewerTools</code></td>
+<td><code>[read, glob, grep]</code></td>
+<td>The reviewer child's tool allow-list (must be non-empty)</td>
+</tr>
+<tr>
+<td><code>fallbackPolicy</code></td>
+<td><code>rejected</code></td>
+<td>Reviewer failure: <code>rejected</code> (fail closed) / <code>delegate</code> / <code>allow-once</code></td>
+</tr>
+<tr>
+<td><code>maxReviewsPerTurn</code></td>
+<td><code>10</code></td>
+<td>Real AI-verdict budget per open turn; beyond it, requests delegate</td>
+</tr>
+<tr>
+<td><code>maxFailuresPerTurn</code></td>
+<td><code>10</code></td>
+<td>Reviewer-failure budget per open turn</td>
+</tr>
+<tr>
+<td><code>reasonMaxChars</code></td>
+<td><code>2000</code></td>
+<td>Cap for reviewer reasons and the redacted argument preview</td>
+</tr>
+<tr>
+<td><code>reviewerGuidance</code></td>
+<td><em>(none)</em></td>
+<td>Optional advisory guidance appended to the reviewer prompt</td>
+</tr>
+<tr>
+<td><code>reviewerPolicyText</code></td>
+<td><em>(none)</em></td>
+<td>Markdown ruling policy injected into the reviewer prompt (Codex-style)</td>
+</tr>
+<tr>
+<td><code>denyGuidance</code></td>
+<td><em>(anti-circumvention text)</em></td>
+<td>Guidance appended to every injected deny reason</td>
+</tr>
+<tr>
+<td><code>contextBudget</code></td>
+<td><code>{turns: 0, maxChars: 4000}</code></td>
+<td>Compact transcript budget for the reviewer prompt; <code>turns: 0</code> disables</td>
+</tr>
+<tr>
+<td><code>riskPolicy</code></td>
+<td><code>{maxAutoAllow: high, onHighRisk: delegate}</code></td>
+<td><code>allow</code> verdicts above <code>maxAutoAllow</code> delegate or deny</td>
+</tr>
+<tr>
+<td><code>circuitBreaker</code></td>
+<td><code>{consecutiveDenies: 3, windowDenies: 6, windowSize: 10, action: delegate}</code></td>
+<td>Rejection circuit breaker</td>
+</tr>
+<tr>
+<td><code>overrideTtlMs</code></td>
+<td><code>300000</code></td>
+<td>How long a <code>/auto-review approve</code> override stays usable</td>
+</tr>
+<tr>
+<td><code>language</code></td>
+<td><code>en</code></td>
+<td>UI language of the <code>/auto-review</code> command output (<code>en</code> | <code>zh</code>)</td>
+</tr>
+<tr>
+<td><code>allowUnmarkedAudit</code></td>
+<td><code>false</code></td>
+<td>Force session-log audit on hosts that drop the <code>ignorable</code> marker (dangerous: unmarked events make sessions unresumable elsewhere); default is detect-and-degrade</td>
+</tr>
+</tbody></table>
+<p>Example (annotated full form: <code>fixtures/config/config-full.yaml</code>):</p>
+<pre><code class="language-yaml">- insert:
+    - id: auto-review
+      name: dsh-auto-review
+      config:
+        toolsPolicy:
+          overrides: { bash: ai, write: ai }
+        riskRules:
+          - pattern: '(?i)(rm\s+(-[a-z]+\s+)*/|git\s+push\s+--force)'
+            policy: never
+          - pattern: 'write'
+            policy: never
+            field: toolName
+        reviewerTimeoutMs: 30000
+        fallbackPolicy: delegate
+        riskPolicy: { maxAutoAllow: medium, onHighRisk: delegate }
+        circuitBreaker: { consecutiveDenies: 3, windowDenies: 6, windowSize: 10, action: delegate }
+</code></pre>
+<h2>Tools &amp; surfaces</h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Kind</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>auto-review</code></td>
+<td>answerer</td>
+<td><code>approval/request</code> waterfall answerer — claims <code>ai</code>-policy requests, delegates the rest via <code>next()</code></td>
+</tr>
+<tr>
+<td><code>/auto-review</code></td>
+<td>command</td>
+<td><code>on|off|status|approve [n]</code> — durable per-session override, budgets, and cumulative statistics</td>
+</tr>
+<tr>
+<td>deny-reason injection</td>
+<td>listener</td>
+<td><code>tools/post-execute</code> — verdict / fallback / <code>never</code> reasons fed back to the denied tool result</td>
+</tr>
+<tr>
+<td><code>autoReview</code></td>
+<td>session projection</td>
+<td>Folded from the log-only <code>autoReview/*</code> events</td>
+</tr>
+<tr>
+<td>Web review panel</td>
+<td>client</td>
+<td>Session-header action: switch, budgets, statistics, recent verdicts, one-shot approve</td>
+</tr>
+<tr>
+<td><code>dsh-eval</code></td>
+<td>CLI</td>
+<td>YAML-driven agent evaluation engine (<code>bin/dsh-eval.mjs</code>)</td>
+</tr>
+<tr>
+<td>invariant companion</td>
+<td>invariant</td>
+<td><code>dsh-auto-review/invariant</code> (optional; needs the <code>invariants</code> service)</td>
+</tr>
+</tbody></table>
+<h2>Session command</h2>
+<pre><code>/auto-review on|off|status|approve [n]
+</code></pre>
+<p><code>on</code>/<code>off</code> append the durable <code>autoReview/state</code> override (the fold survives restart/resume — replay IS the state) and inject a switch notice the model sees (logged as a <code>user/message</code> event). <code>status</code> reports the effective state, both per-turn budgets (AI verdicts and reviewer failures), a tripped circuit breaker when one is active, and the session's cumulative statistics (allows/denies/fallbacks/never rejects, mean duration, recent verdicts). <code>approve [n]</code> records a single-use <code>autoReview/override</code> for the n-th most recent denial (1 = most recent): the next same-tool review within <code>overrideTtlMs</code> carries the authorization as reviewer context — the reviewer still decides, and the override is consumed by that review regardless of its outcome.</p>
+<h2>Web review panel</h2>
+<p>In the Web GUI (web profile), the package contributes a session-header action (<strong>AI Review</strong>) that opens a panel with the session's auto-review state: the switch with on/off buttons (they execute <code>/auto-review on|off</code>), both per-turn budgets, cumulative statistics (including hard-disable rejections), the circuit trip, the recent verdicts, and one-shot <strong>approve</strong> buttons for recent denials (they execute <code>/auto-review approve [n]</code>).</p>
+<p>How it is wired:</p>
+<ul>
+<li>The host registers an <code>autoReview</code> <strong>session projection</strong> (folded from the log-only <code>autoReview/*</code> events) and serves it through the session-projection channel.</li>
+<li>The browser half is a <strong>client module</strong> (auto-discovered from the <code>dsh.client</code> declaration) registered on the <code>conversation.session.header.actions</code> seat.</li>
+<li>No extra patch rows are needed: the panel loads whenever the plugin is installed in a profile whose web build provides the session-projection capability (the web profile does). Without that capability the panel reports itself unavailable; the answerer is unaffected.</li>
+</ul>
+<p>The panel reads only whole projection values — it never receives the raw session event stream.</p>
+<h2>How it works</h2>
+<pre><code class="language-text">                       approval/request waterfall (answerer chain)
+                        │
+┌───────────────────────┴──────────────────────┐
+│ dsh-auto-review answerer                     │
+│  · session enabled?  · policy = ai?         │   no ── next() ──▶ human answerer (UI)
+│  · risk rules → toolsPolicy → default       │
+└───────────────────────┬──────────────────────┘
+                        │ yes
+                        ▼
+        ┌───────────────────────────────────┐
+        │ reviewer subagent (fork, one-shot)│
+        │  · toolFilter: read/glob/grep     │
+        │  · outputSchema: {decision,       │
+        │    reason, riskLevel}             │
+        │  · timeout + req.signal abort     │
+        └───────────────┬───────────────────┘
+                        │ verdict / failure (fail-closed fallback)
+                        ▼
+ allow → allowed-once        deny → rejected + reason injected into the
+                                       denied tool result (callId-linked)
+                        │   never → rejected + [auto-review-never] feedback
+                        │            (hard disable, no reviewer runs)
+                        ▼
+ audit: approval/asked → autoReview/verdict | autoReview/rejection
+        → approval/decided (session events, log-only, invariant-checked)
+</code></pre>
+<p><strong>Composition order.</strong> The answerer runs at its registration position in the waterfall: if a human UI answerer is composed BEFORE the <code>auto-review</code> row, humans answer first and the reviewer only sees what is delegated downstream. Verify with <code>dsh --profile &lt;name&gt; --dump-config</code> and place the <code>auto-review</code> row before your human answerer rows when you want ai-policy tools routed to the reviewer first.</p>
+<h2>dsh-eval — agent evaluation engine</h2>
+<p>Beyond the approval reviewer, <code>dsh-auto-review</code> ships <code>dsh-eval</code>: a YAML-driven agent evaluation platform that runs real headless DSH sessions (one isolated agent + scratch workspace per case, the official Minimal persona as the baseline system prompt), collects the tool-call trace from the session event log, and evaluates structured assertions plus an optional second-model review — the same reviewer seam as the approval answerer.</p>
+<pre><code class="language-yaml"># eval/cases/demo.yaml (abridged)
+suite:
+  name: my-suite
+  cases:
+    - id: math-output
+      input: Solve 17 × 24 and reply with only the final number, nothing else.
+      expect:
+        output: { contains: "408" }
+    - id: glob-trace
+      seedFrom: '.'
+      input: Use the glob tool with pattern "src/**" to list the source files…
+      expect:
+        toolCalls: [{ tool: glob, arguments: { contains: { pattern: "src" } } }]
+        results: [{ tool: glob, contains: "index.ts" }]
+</code></pre>
+<p>Run it (a DeepSeek API key must be in the environment):</p>
+<pre><code class="language-sh">dsh-eval eval/cases --model deepseek-v4-flash --timeout-ms 240000 --out .eval-reports
+</code></pre>
+<h3>Assertion families</h3>
+<p>The <code>expect</code> block supports six assertion families; each assertion is evaluated independently and reports its own pass/fail with expected/actual values, so a failing case explains itself without a rerun.</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>DSL keys</th>
+<th>What it gates</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Tool trace</td>
+<td><code>toolCalls</code>, <code>toolCallsExact</code>, <code>noToolCalls</code>, <code>results</code></td>
+<td>ordered tool-call sequence (subsequence with skips), exact name sequence, per-tool result (<code>isError</code>/<code>contains</code>/<code>regex</code>)</td>
+</tr>
+<tr>
+<td>Output &amp; budget</td>
+<td><code>output</code>, <code>turnEnds</code>, <code>maxTokens</code></td>
+<td>final-output substring/regex, turn outcome, token budget</td>
+</tr>
+<tr>
+<td>Prompt regression</td>
+<td><code>prompt</code></td>
+<td>the rendered system prompt must match a committed <code>baseline</code> (or a <code>baselineFrom</code> file); any drift is reported as a <strong>side-by-side diff</strong>, with <code>allowedChanges</code> regexes to whitelist intended edits</td>
+</tr>
+<tr>
+<td>Stress metrics</td>
+<td><code>stress</code></td>
+<td>P99 step latency (<code>maxP99Ms</code>), worst time-to-first-token (<code>maxTtftMs</code>), aggregate token generation speed (<code>minTokensPerSecond</code>)</td>
+</tr>
+<tr>
+<td>Fairness</td>
+<td><code>bias</code></td>
+<td>bias radar over the final output: per-category regex counts (<code>categories</code>), hard <code>forbid</code> patterns, <code>maxHits</code>/<code>maxCategoryHits</code> caps</td>
+</tr>
+<tr>
+<td>Second-model review</td>
+<td><code>review</code></td>
+<td>a supplementary pass/fail verdict from the reviewer subagent (a separate layer, same seam as the approval reviewer)</td>
+</tr>
+</tbody></table>
+<pre><code class="language-yaml">- id: regression-gate
+  input: Answer in one sentence.
+  expect:
+    prompt:
+      baseline: "You are a helpful software engineer assistant."
+      allowedChanges: ["copyright-year"]
+    stress:
+      maxP99Ms: 8000
+      maxTtftMs: 3000
+      minTokensPerSecond: 20
+    bias:
+      categories: { gender: ["[Hh]e is (un)?stable"] }
+      forbid: ["[Ss]crew that"]
+      maxCategoryHits: 0
+</code></pre>
+<p>CI gate: the process exits 0 only when every case of every suite passed — failing evaluations fail the build. Each case leaves a replayable session JSONL and a trace JSON beside <code>report.md</code>/<code>report.json</code>; assertion results (including the prompt side-by-side diff), token usage, stress/bias metrics, and the review verdict are all written into the report files.</p>
+<pre><code class="language-yaml">- name: dsh-eval
+  run: npx dsh-eval eval/cases --model deepseek-v4-flash --timeout-ms 240000 --out .eval-reports
+  env:
+    DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+</code></pre>
+<p><code>dsh-eval</code> differs from <a href="https://github.com/openai/codex-research" target="_blank" rel="noopener noreferrer">openai/codex-research</a>: codex-research scores agent trajectories for research comparison; <code>dsh-eval</code> is a declarative pass/fail regression harness — YAML cases, structured trace/prompt/stress/bias assertions, an optional second-model review, and a CI exit code — for gating any DSH agent, not research ranking.</p>
+<h2>Permissions &amp; data</h2>
+<ul>
+<li><strong>Permissions</strong>: the workshop manifest declares <code>session:append</code>, <code>approval:answer</code>, <code>subagent:spawn</code>, <code>command:register</code>, and <code>tools:observe</code>.</li>
+<li><strong>Data</strong>: nothing is stored on disk; the report ring buffer is in-memory and bounded. No network requests of its own.</li>
+<li><strong>Session log</strong>: <code>autoReview/*</code> events carry reviewer identity, verdict, reason, risk, and duration — appended with the envelope's <code>ignorable: true</code> marker so any build loads the log. Hosts whose <code>Session.append</code> predates the marker (every released rc line through <code>0.1.1-rc.2</code> — no release stamps it yet) are detected before the first append (peer-version pre-check, then a probe of the returned envelope) and audit degrades to an in-memory mirror with marker-free feedback, so sessions stay loadable everywhere.</li>
+</ul>
+<h2>Security boundaries</h2>
+<ul>
+<li><strong>The reviewer is a model.</strong> Its verdicts are advisory policy, not a security kernel; prefer <code>human</code>/<code>never</code> rules for irreversible operations.</li>
+<li><strong>Fail closed.</strong> Every abnormal path (provider missing, capability gaps, start rejection, timeout, non-<code>completed</code> stop reason, missing/malformed verdict, audit-correlation failure) resolves through <code>fallbackPolicy</code>, default <code>rejected</code> — and the rejection feeds an auditable reason back to the model. <code>allow-once</code> grants unconditionally; it exists only for unattended deployments whose admin accepts that risk.</li>
+<li><strong>Read-only reviewer.</strong> The reviewer's <code>toolFilter</code> allow-list (<code>read</code>/<code>glob</code>/<code>grep</code>) cannot write, edit, run bash, fetch the network, or delegate (<code>maxDepth</code> = its own depth). Its session log is persisted and auditable.</li>
+<li><strong>Sensitive arguments are redacted</strong> (key-name matching: <code>token</code>, <code>password</code>, <code>api_key</code>, <code>Authorization</code>, credentials, private keys …) before entering the reviewer prompt; the plugin never executes the reviewed arguments. Redaction is key-based, not content-based — do not AI-review tools whose argument values you cannot afford to show a model.</li>
+<li><strong>Hard disables explain themselves.</strong> A <code>never</code> tool or risk rule rejects deterministically AND records a log-only <code>autoReview/rejection</code> event, then injects a <code>[auto-review-never]</code> marker into the denied tool result — the model learns the action is hard-disabled instead of retrying it (invariant-checked: marker ⟺ event).</li>
+<li><strong>Rejection circuit breaker.</strong> A run of denials in one turn trips the breaker (<code>consecutiveDenies</code> / <code>windowDenies</code> inside <code>windowSize</code>), recorded as a log-only <code>autoReview/circuit</code> event; later requests follow its <code>action</code> (<code>delegate</code> / <code>reject</code> / <code>abort-turn</code>).</li>
+<li><strong>Reviewer context is presented transcript.</strong> <code>contextBudget</code> feeds already-presented session content to the reviewer. With the default same-route reviewer model that content stays inside one provider; configure <code>reviewerModel</code> to a different provider only if you accept presenting that transcript to it.</li>
+<li><strong><code>never</code> is one-way at this layer.</strong> A <code>never</code> tool or risk rule rejects before the human chain sees the request — a lockdown knob, not a default.</li>
+</ul>
+<h2>Known limitations</h2>
+<ul>
+<li>The reviewer needs a working LLM route (inherited by default); without one every review falls back per <code>fallbackPolicy</code> — never a silent grant.</li>
+<li><code>reviewerTools</code> names must exist as global tools in the profile; an unknown name fails the reviewer child loudly at the earliest point and falls back.</li>
+<li>Risk rules match the request <code>reason</code>, the <code>toolName</code>, or the redacted call <code>arguments</code> per their <code>field</code>; other conditions belong in <code>toolsPolicy.overrides</code>.</li>
+<li>The <code>/auto-review approve</code> override authorizes the next same-tool review, not the exact historical call; a different action on the same tool consumes it.</li>
+<li>The verdict events are log-only; the Web review panel reads the folded <code>autoReview</code> projection (the raw event stream never reaches browser plugins).</li>
+<li><code>autoReview/state</code> and <code>autoReview/verdict</code> are appended with the envelope's <code>ignorable: true</code> marker on hosts that honor it, so any harness build loads the log — readers that do not know the out-of-repo types simply skip those records. On released rc hosts (rc.1–rc.8) the runtime detects the dropped marker and never writes these events (the in-memory mirror keeps the command, budgets, breaker, and <code>approve</code> working for the session); sessions already polluted by pre-0.5.1 versions can be repaired with <code>scripts/repair-session-logs.mjs</code> from <code>dsh-permission-rules</code> (its default target set covers all five <code>autoReview/*</code> event types).</li>
+<li>The git channel needs the single <code>allowBuilds</code> key the <code>dsh</code> CLI prints for <code>dsh-auto-review</code> itself. The repo ships its own <code>pnpm-workspace.yaml</code> with <code>allowBuilds: { esbuild: true }</code>; <code>typescript</code> + <code>tsdown</code> are regular <code>dependencies</code>.</li>
+<li>The optional invariant companion needs the <code>invariants</code> service (agent-spine compositions such as headless/ACP); the plain web profile does not provide it, so the row ships commented out in the bundle patch.</li>
+</ul>
+<h2>Related work</h2>
+<ul>
+<li><a href="https://github.com/Andy8647/dsh-auto-approval" target="_blank" rel="noopener noreferrer">Andy8647/dsh-auto-approval</a> — two-state allow/deny classifier on the <code>tools/pre-execute</code> waterfall with file-log audit. <code>dsh-auto-review</code> deliberately differs: official <strong>answerer</strong> chain, always delegates what it does not own, read-only second model with a structured verdict, deny reasons fed back to the model, session-log audit.</li>
+<li><a href="https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/acp/acp" target="_blank" rel="noopener noreferrer">ACP automation bridge</a> — one-shot machine decisions for its own ACP-owned agents. <code>dsh-auto-review</code> is session- and tool-policy-scoped for the interactive harness; it never infers durable grants.</li>
+</ul>
+<h2>Development</h2>
+<pre><code class="language-sh">pnpm install                # node ^22.19 || &gt;=24
+pnpm run typecheck          # tsc: src + tests against the local harness checkout
+pnpm test                   # vitest: 233 tests, 20 files
+pnpm run build              # tsc declarations + tsdown bundles (lib/, incl. the client bundle)
+pnpm run verify:self-contained
+pnpm pack                   # the published tarball
+</code></pre>
+<p>Repository layout: <code>src/index.ts</code> (plugin contract) · <code>src/config.ts</code> (Schemastery schema + resolution) · <code>src/runtime.ts</code> (answerer, command, deny-reason injection) · <code>src/review.ts</code> (reviewer orchestration, prompt, sanitization) · <code>src/events.ts</code> (session-event vocabulary + folds) · <code>src/audit.ts</code> (host <code>ignorable</code>-marker capability detection) · <code>src/projection.ts</code> + <code>src/projection-types.ts</code> (the <code>autoReview</code> session projection) · <code>src/invariant.ts</code> (invariant companion) · <code>src/eval/</code> (the dsh-eval engine) · <code>eval/</code> (shipped evaluation composition) · <code>bin/dsh-eval.mjs</code> (CLI launcher) · <code>src/client/</code> (browser half) · <code>test/</code> · <code>fixtures/</code>.</p>
+<h2>Topics</h2>
+<p><code>deepseek-harness</code>, <code>dsh</code>, <code>dsh-plugin</code>, <code>cordis</code>, <code>approval</code>, <code>auto-review</code>, <code>second-model</code>, <code>ai-safety</code>, <code>sandbox</code>, <code>subagent</code></p>
+<h2>Contributors</h2>
+<ul>
+<li><a href="https://github.com/PerryLink" target="_blank" rel="noopener noreferrer">@PerryLink</a> — creator and maintainer: the approval answerer, the reviewer subagent, risk policy and circuit breaker, the session-projection review panel, the invariant companion, dsh-eval, and the five-language docs.</li>
+<li><a href="https://github.com/weipeng1999" target="_blank" rel="noopener noreferrer">@weipeng1999</a> — proposed independent reviewer provider/model routing (<a href="https://github.com/PerryLink/dsh-auto-review/issues/11" target="_blank" rel="noopener noreferrer">#11</a>, <a href="https://github.com/PerryLink/dsh-auto-review/discussions/12" target="_blank" rel="noopener noreferrer">discussion #12</a>), which shipped as <code>reviewerProvider</code> / <code>reviewerModel</code>.</li>
+<li><a href="https://github.com/alexchenzl" target="_blank" rel="noopener noreferrer">@alexchenzl</a> — listed the plugin on the DSH plugin directory (<a href="https://github.com/PerryLink/dsh-auto-review/issues/10" target="_blank" rel="noopener noreferrer">#10</a>).</li>
+</ul>
+<h2>PerryLink DSH Plugin Family</h2>
+<p>This project is one of the DeepSeek Harness plugins maintained by <a href="https://github.com/PerryLink" target="_blank" rel="noopener noreferrer">PerryLink</a>. If this one helps you, the others likely will too:</p>
+<table>
+<thead>
+<tr>
+<th>Plugin</th>
+<th>One-liner</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/PerryLink/dsh-mcp-panel" target="_blank" rel="noopener noreferrer">dsh-mcp-panel</a></td>
+<td>Read-only MCP runtime panel: /mcp command + Settings tab with status, tools and errors</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-doublecheck" target="_blank" rel="noopener noreferrer">dsh-doublecheck</a></td>
+<td>Engineering-discipline guard: requirements grill, test gates, adversary review</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-background-agents" target="_blank" rel="noopener noreferrer">dsh-background-agents</a></td>
+<td>Durable background child agents with a Web UI sidebar, messaging and interrupt</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-lsp-actions" target="_blank" rel="noopener noreferrer">dsh-lsp-actions</a></td>
+<td>LSP diagnostics, formatting, completion, code actions and rename over language servers</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-output-styles" target="_blank" rel="noopener noreferrer">dsh-output-styles</a></td>
+<td>Claude Code outputStyles-equivalent runtime style switching</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-checkpoint-rewind" target="_blank" rel="noopener noreferrer">dsh-checkpoint-rewind</a></td>
+<td>Claude Code /rewind-equivalent: snapshots, session forks, one-shot restore</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-permission-rules" target="_blank" rel="noopener noreferrer">dsh-permission-rules</a></td>
+<td>Claude Code-style declarative allow/deny/ask permission rules with audit</td>
+</tr>
+<tr>
+<td><strong><a href="https://github.com/PerryLink/dsh-auto-review" target="_blank" rel="noopener noreferrer">dsh-auto-review</a></strong></td>
+<td>Second-model auto-review on the approval chain, fail-closed by default</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-memento" target="_blank" rel="noopener noreferrer">dsh-memento</a></td>
+<td>Approval-gated cross-session memory: ctx.memory seam + SQLite + memory tool</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-skill-pack-security" target="_blank" rel="noopener noreferrer">dsh-skill-pack-security</a></td>
+<td>Security-audit skill pack: secret scan, dependency and supply-chain review</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-session-pin" target="_blank" rel="noopener noreferrer">dsh-session-pin</a></td>
+<td>Pin sessions in the Web sidebar with durable ordering</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-composer-history" target="_blank" rel="noopener noreferrer">dsh-composer-history</a></td>
+<td>Terminal-style input history for the web composer: arrows, Ctrl+R search</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-github" target="_blank" rel="noopener noreferrer">dsh-github</a></td>
+<td>GitHub PR/issues integration for DSH, every write gated by approval</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-plugin-guide" target="_blank" rel="noopener noreferrer">dsh-plugin-guide</a></td>
+<td>Plugin-development knowledge base as an on-demand agent skill</td>
+</tr>
+<tr>
+<td><a href="https://github.com/PerryLink/dsh-claude-move" target="_blank" rel="noopener noreferrer">dsh-claude-move</a></td>
+<td>Migrate Claude Code sessions, memory, skills and CLAUDE.md into DSH</td>
+</tr>
+</tbody></table>
+<h2>License</h2>
+<p><a href="https://github.com/PerryLink/dsh-auto-review/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a> © 2026 dsh-auto-review contributors</p>

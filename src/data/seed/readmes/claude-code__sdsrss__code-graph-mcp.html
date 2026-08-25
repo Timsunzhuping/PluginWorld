@@ -1,0 +1,958 @@
+<h1>code-graph-mcp</h1>
+<p>A high-performance code knowledge graph server implementing the <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener noreferrer">Model Context Protocol (MCP)</a>. Indexes codebases into a structured AST knowledge graph with semantic search, call graph traversal, and HTTP route tracing — designed to give AI coding assistants deep, structured understanding of your code.</p>
+<h2>Features</h2>
+<ul>
+<li><strong>Multi-language parsing</strong> — Tree-sitter AST extraction across tiers of depth:<ul>
+<li><strong>Full</strong> (calls + imports + inheritance): TypeScript/TSX, JavaScript, Go, Python, Rust, Java. HTTP route extraction additionally covers TypeScript/TSX + JavaScript (Express/Connect), Go (<code>net/http</code>), Python (Flask/FastAPI), and Rust axum (<code>.route()</code> chains with inline <code>.nest()</code> prefixes; named handlers only) — actix/rocket and Java Spring are not yet route-extracted</li>
+<li><strong>Smoke-tested</strong> (calls + imports + inheritance): C#, Kotlin, Ruby, PHP, Swift, Dart</li>
+<li><strong>Limited</strong> (functions + calls + <code>#include</code> imports + gtest test markers + C++ base-class inheritance + <code>Class::method</code> scope qualification): C, C++</li>
+<li><strong>Scripting</strong>: Bash (functions + commands + <code>source</code>/<code>.</code> imports), Markdown (headings)</li>
+<li><strong>File-FTS only</strong> (no AST symbol extraction): HTML, CSS, JSON</li>
+<li><strong>Test markers</strong> — detected from the AST for Rust (<code>#[test]</code> / <code>#[cfg(test)]</code>), JavaScript/TypeScript/TSX (<code>describe</code>/<code>it</code>/<code>test</code> blocks and their callbacks) and C/C++ (gtest <code>TEST</code> macros). Go, Python, Java and the rest fall back to path/name heuristics (<code>tests/</code>, <code>src/test/java/</code>, <code>*_test.*</code>, <code>*.test.js</code>, <code>test_*</code>, <code>*Test</code>)</li>
+<li><strong>Value/type references</strong> — a <code>references</code> relation for symbols that are used without being called, imported or inherited (path-qualified constants, type-position uses, functions passed as values): Rust, TypeScript/TSX, JavaScript, Python, Go, Java, C, C++</li>
+</ul>
+</li>
+<li><strong>Semantic code search</strong> — Hybrid BM25 full-text + vector semantic search with Reciprocal Rank Fusion (RRF), powered by sqlite-vec</li>
+<li><strong>Call graph traversal</strong> — Recursive CTE queries to trace callers/callees with cycle detection</li>
+<li><strong>HTTP route tracing</strong> — Map route paths to backend handler functions (Express, Flask/FastAPI, Go <code>net/http</code>, Rust axum)</li>
+<li><strong>Dead code detection</strong> — Find unreferenced symbols with smart Orphan/Exported-Unused classification</li>
+<li><strong>Impact analysis</strong> — Determine the blast radius of code changes by tracing all dependents</li>
+<li><strong>Incremental indexing</strong> — Merkle tree change detection with file system watcher for real-time updates. Smart event filtering skips metadata-only changes (chmod, xattr)</li>
+<li><strong>Context compression</strong> — Token-aware snippet extraction for LLM context windows (L0→full code, L1→summaries, L2→file groups, L3→directory overview). Compact JSON output saves 15-20% tokens</li>
+<li><strong>Embedding model</strong> — Optional local embedding via Candle (feature-gated <code>embed-model</code>). Context reordered to prioritize structural relations over code for better embedding quality</li>
+<li><strong>Self-healing</strong> — Automatic SQLite corruption recovery with rebuild. Startup repair for incomplete indexing (Phase 3 failures)</li>
+<li><strong>MCP protocol</strong> — JSON-RPC 2.0 over stdio, plug-and-play with Claude Code, Cursor, Windsurf, and other MCP clients</li>
+<li><strong>Claude Code Plugin</strong> — First-class plugin with skills (<code>explore</code>, <code>index</code>), a <code>code-explorer</code> agent, auto-indexing hooks, StatusLine integration, and self-updating</li>
+</ul>
+<h2>Why code-graph-mcp?</h2>
+<p>Unlike naive full-text search or simple AST dumps, code-graph-mcp builds a <strong>structured knowledge graph</strong> that understands the relationships between symbols across your entire codebase.</p>
+<h3>Incremental by Design</h3>
+<p>BLAKE3 Merkle tree tracks every file's content hash. On re-index, only changed files are re-parsed — unchanged directory subtrees are skipped entirely via mtime cache. When a function signature changes, <strong>dirty propagation</strong> automatically regenerates context for all downstream callers across files.</p>
+<h3>Hybrid Search, Not Just Grep</h3>
+<p>Combines BM25 full-text ranking (FTS5) with vector semantic similarity (sqlite-vec) via <strong>Reciprocal Rank Fusion (RRF)</strong> with raw score blending — so searching "handle user login" finds the right function even if it's named <code>authenticate_session</code>. Results are auto-compressed to fit LLM context windows.</p>
+<h3>Scope-Aware Relation Extraction</h3>
+<p>The parser doesn't just find function calls — it tracks them within their proper scope context. Extracts calls, imports, inheritance, interface implementations, exports (ESM <code>export</code> <strong>and</strong> CommonJS <code>module.exports = { … }</code> / <code>exports.name = …</code>), value/type references, and HTTP route bindings. Same-file targets are preferred over cross-file matches to minimize false-positive edges.</p>
+<h3>HTTP Request Flow Tracing</h3>
+<p>Unique to code-graph-mcp: trace from <code>GET /api/users</code> → route handler → service layer → database call in a single query. Supports Express/Connect, Flask/FastAPI, Go <code>net/http</code>, and Rust axum.</p>
+<h3>Zero External Dependencies at Runtime</h3>
+<p>Single binary, embedded SQLite, bundled sqlite-vec extension, optional local embedding model via Candle — no database server, no cloud API, no Docker required. Runs entirely on your machine.</p>
+<h3>Built for AI Assistants</h3>
+<p>Every design decision — from token-aware compression to node_id-based snippet expansion — is optimized for LLM context windows. Works out of the box with Claude Code, Cursor, Windsurf, and any MCP-compatible client.</p>
+<h2>Performance</h2>
+<p>Every row below is a line <code>code-graph-mcp benchmark</code> prints, measured on this
+repository (278 files, 5,065 nodes, 10,731 edges) with a release build. Run the
+same command on your own project — the numbers that matter are yours, and these
+scale with tree size and machine.</p>
+<table>
+<thead>
+<tr>
+<th><code>benchmark</code> line</th>
+<th>This repo, v0.123.0</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Full index</td>
+<td><strong>~1.9s</strong> (≈145 files/second, single-threaded)</td>
+</tr>
+<tr>
+<td>Incremental (noop)</td>
+<td><strong>~30ms</strong> no-change detection via BLAKE3 Merkle tree</td>
+</tr>
+<tr>
+<td>Query latency P50 / P99</td>
+<td><strong>~575us / ~1.9ms</strong></td>
+</tr>
+<tr>
+<td>DB size</td>
+<td><strong>~21.8MB</strong> (≈4.4MB per 1,000 nodes)</td>
+</tr>
+<tr>
+<td>Avg tokens/node</td>
+<td><strong>~239</strong></td>
+</tr>
+</tbody></table>
+<h2>Efficiency: code-graph vs Traditional Tools</h2>
+<p>How many TOOL CALLS each question takes, comparing code-graph-mcp against Grep</p>
+<ul>
+<li>Read + Glob. These are call counts, not token measurements: the left column is
+the round trips the traditional approach needs before it can answer, the right
+column is the single call that answers it. Token cost follows call count only
+loosely — how much source lands in the context window depends on the files, so
+this table does not claim a token ratio.</li>
+</ul>
+<h3>Tool Call Reduction</h3>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th align="center">Traditional</th>
+<th align="center">code-graph</th>
+<th align="center">Savings</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Project architecture overview</td>
+<td align="center">5-8 calls</td>
+<td align="center">1 call (<code>project_map</code>)</td>
+<td align="center"><strong>~85%</strong></td>
+</tr>
+<tr>
+<td>Find function by concept</td>
+<td align="center">3-5 calls</td>
+<td align="center">1 call (<code>semantic_code_search</code>)</td>
+<td align="center"><strong>~75%</strong></td>
+</tr>
+<tr>
+<td>Trace 2-level call chain</td>
+<td align="center">8-15 calls</td>
+<td align="center">1 call (<code>get_call_graph</code>)</td>
+<td align="center"><strong>~90%</strong></td>
+</tr>
+<tr>
+<td>Pre-change impact analysis</td>
+<td align="center">10-20+ calls</td>
+<td align="center">1 call (<code>get_ast_node</code> + <code>include_impact</code>)</td>
+<td align="center"><strong>~95%</strong></td>
+</tr>
+<tr>
+<td>Module structure &amp; exports</td>
+<td align="center">5+ calls</td>
+<td align="center">1 call (<code>module_overview</code>)</td>
+<td align="center"><strong>~80%</strong></td>
+</tr>
+<tr>
+<td>File dependency mapping</td>
+<td align="center">3-5 calls</td>
+<td align="center">1 call (<code>module_overview</code> + <code>include_deps</code>)</td>
+<td align="center"><strong>~75%</strong></td>
+</tr>
+<tr>
+<td>Similar code detection</td>
+<td align="center">N/A</td>
+<td align="center">1 call (<code>get_ast_node</code> + <code>include_similar</code>)</td>
+<td align="center"><strong>unique</strong></td>
+</tr>
+</tbody></table>
+<h3>Session token savings</h3>
+<p><code>tests/effectiveness_bench.rs</code> is the only reproducible number here, and it is
+worth being precise about what it measures. For each of five navigation tasks it
+runs the real CLI on a fixture project and compares the response size in bytes
+against a <strong>hand-set</strong> <code>baseline_bytes</code> for the Grep+Read approach. Bytes stand
+in for tokens; the baselines are estimates committed once and held fixed, so its
+value is regression tracking over releases, not a measurement of your project.</p>
+<pre><code class="language-bash">cargo build --no-default-features
+cargo test --test effectiveness_bench --no-default-features -- --ignored --nocapture
+</code></pre>
+<p>On the fixture at v0.123.0 that prints <code>942 / 23000 = 0.04x</code>, and the test fails
+if the overall ratio ever exceeds 0.60. Earlier revisions of this README carried
+an "Overall Session Efficiency" table (~80% fewer calls, ~95% fewer lines read,
+40-60% session savings) whose first rows had no source at all; they are gone
+rather than dressed up.</p>
+<h3>What code-graph Uniquely Enables</h3>
+<ul>
+<li><strong>Impact analysis</strong> — "Changing <code>conn</code> affects 33 functions across 4 files, 78 tests at HIGH risk" — impossible to derive manually with Grep</li>
+<li><strong>Transitive call tracing</strong> — Follow <code>main</code> → <code>run_serve</code> → <code>handle_message</code> → <code>handle_tools_call</code> → <code>conn</code> in one query</li>
+<li><strong>Semantic search</strong> — Find <code>authenticate_session</code> when searching "handle user login"</li>
+<li><strong>Dependency strength</strong> — Not just "file A imports file B", but "file A uses 38 symbols from file B"</li>
+</ul>
+<h3>When Traditional Tools Are Still Better</h3>
+<table>
+<thead>
+<tr>
+<th>Use Case</th>
+<th>Best Tool</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Exact string / constant search</td>
+<td>Grep</td>
+</tr>
+<tr>
+<td>Reading a file to edit it</td>
+<td>Read</td>
+</tr>
+<tr>
+<td>Finding files by name pattern</td>
+<td>Glob</td>
+</tr>
+</tbody></table>
+<h2>Architecture</h2>
+<pre><code>src/
+├── domain.rs     # Shared constants, relation types, env-var config
+├── resolve.rs    # Shared symbol resolution + ambiguity verdicts (CLI and MCP)
+├── outcome.rs    # Retrieval-adoption metrics from session transcripts
+├── cli/          # Every `code-graph-mcp &lt;cmd&gt;` subcommand (one file per command)
+├── mcp/          # MCP protocol layer (JSON-RPC, tool registry, server)
+│   └── server/   # McpServer with IndexingState + CacheState sub-structs
+├── parser/       # Tree-sitter parsing, relation extraction, LanguageConfig dispatch
+├── indexer/      # 3-phase pipeline, Merkle tree, file watcher
+├── storage/      # SQLite schema (v10), CRUD, FTS5, migrations
+├── graph/        # Recursive CTE call graph queries
+├── search/       # RRF fusion search combining BM25 + vector
+├── embedding/    # Candle embedding model (optional, masked mean pooling)
+├── snapshot/     # Portable graph snapshots (create / verify / install)
+├── sandbox/      # Context compressor with token estimation
+└── utils/        # Language detection, config
+</code></pre>
+<h2>Installation</h2>
+<h3>Option 1: Claude Code Plugin (Recommended)</h3>
+<p>Install as a Claude Code plugin for the best experience — includes skills, the <code>code-explorer</code> agent, auto-indexing hooks, StatusLine health display, and automatic updates:</p>
+<pre><code class="language-bash"># Step 1: Add the marketplace
+/plugin marketplace add sdsrss/code-graph-mcp
+
+# Step 2: Install the plugin
+/plugin install code-graph-mcp
+</code></pre>
+<p>What you get:</p>
+<ul>
+<li><strong>MCP Server</strong> — All code-graph tools available to Claude</li>
+<li><strong>Skills</strong> — <code>explore</code> (structure-first navigation before reading files) and <code>index</code> (health-check / re-index / full rebuild); see <a href="#plugin-skills" target="_blank" rel="noopener noreferrer">Plugin Skills</a></li>
+<li><strong>Code Explorer Agent</strong> — Deep code understanding expert via <code>code-explorer</code></li>
+<li><strong>Auto-indexing Hook</strong> — Incremental index on every file edit (PostToolUse)</li>
+<li><strong>StatusLine</strong> — Real-time health display (nodes, files, watch status) — compatible with other plugins' StatusLine via composite multiplexer</li>
+<li><strong>Auto-update</strong> — Checks for a new version at session start (throttled to at most one check every 2 minutes). Between forced checks the re-check interval is 30 minutes after an "up to date" answer and 6 hours while an update is already pending. Updates install silently.</li>
+</ul>
+<h4>Manual Update</h4>
+<pre><code class="language-bash">npm update -g @sdsrs/code-graph
+</code></pre>
+<p>Then reconnect the MCP server in Claude Code with <code>/mcp</code>.</p>
+<blockquote>
+<p><strong>Note:</strong> Auto-update is disabled in the source repo directory (dev mode). Use manual update when developing the plugin itself.</p>
+</blockquote>
+<h4>Turning auto-update off</h4>
+<table>
+<thead>
+<tr>
+<th>Environment variable</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CODE_GRAPH_NO_AUTO_UPDATE=1</code></td>
+<td>Skips the update check entirely — no version check, no download, and no updater process is started. A <strong>missing</strong> binary is still installed on first run, so the MCP server can't be left with no engine. Update manually with the command above.</td>
+</tr>
+</tbody></table>
+<p>Set it in the <code>env</code> block of <code>~/.claude/settings.json</code> (the environment of the
+process hosting the MCP server), then reconnect with <code>/mcp</code>.</p>
+<p>An update that keeps failing also stops hammering: after 5 failed attempts at
+the <em>same</em> release the updater drops to one retry per day (and retries
+immediately when a newer release is published), instead of re-downloading on
+every session. While it is in that state the statusline shows <code>⚠ update stuck</code>
+and <code>code-graph-mcp doctor</code> prints the manual update command.</p>
+<h4>Invited-memory mode (quieter prompts)</h4>
+<p>By default, every user prompt the plugin deems code-related gets a small context injection from <code>code-graph</code> CLI output. If you'd rather rely on MEMORY.md + explicit tool calls, opt into invited-memory mode:</p>
+<ol>
+<li>Adopt the plugin contract into your project (idempotent, self-heals):<pre><code class="language-bash">code-graph-mcp adopt
+</code></pre>
+This writes a sentinel-wrapped managed block into <code>&lt;cwd&gt;/CLAUDE.md</code> (auto-loaded each session) plus <code>&lt;cwd&gt;/.claude/plugin_code_graph_mcp.md</code> (the full decision table, opened on demand). Run <code>code-graph-mcp unadopt</code> to remove both; content outside the managed block is kept.</li>
+<li>Set the activation env var in <code>~/.claude/settings.json</code>:<pre><code class="language-json">{
+  "env": { "CODE_GRAPH_QUIET_HOOKS": "1" }
+}
+</code></pre>
+</li>
+<li>Restart Claude Code. Session startup skips the project-map injection, UserPromptSubmit stops auto-injecting context, and the MCP <code>instructions</code> become a short pointer to the MEMORY.md file.</li>
+</ol>
+<h3>Option 2: Claude Code MCP Server Only</h3>
+<p>Register as an MCP server without the plugin features:</p>
+<pre><code class="language-bash">claude mcp add code-graph-mcp -- npx -y @sdsrs/code-graph
+</code></pre>
+<h3>Option 3: Cursor / Windsurf / Other MCP Clients</h3>
+<p>Add to your MCP settings file (e.g. <code>~/.cursor/mcp.json</code>):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "code-graph": {
+      "command": "npx",
+      "args": ["-y", "@sdsrs/code-graph"]
+    }
+  }
+}
+</code></pre>
+<h3>Option 4: npx (No Install)</h3>
+<p>Run directly without installing:</p>
+<pre><code class="language-bash">npx -y @sdsrs/code-graph
+</code></pre>
+<h3>Option 5: npm (Global Install)</h3>
+<p>Install globally, then run anywhere:</p>
+<pre><code class="language-bash">npm install -g @sdsrs/code-graph
+code-graph-mcp
+</code></pre>
+<h2>Uninstallation</h2>
+<h3>Claude Code Plugin</h3>
+<pre><code class="language-bash"># Uninstall the plugin
+/plugin uninstall code-graph-mcp
+
+# (Optional) Remove the marketplace
+/plugin marketplace remove code-graph-mcp
+
+# (Optional) Clean up all config and cache data
+node ~/.claude/plugins/cache/code-graph-mcp/code-graph-mcp/*/scripts/lifecycle.js uninstall
+</code></pre>
+<h3>Claude Code MCP Server</h3>
+<pre><code class="language-bash">claude mcp remove code-graph-mcp
+</code></pre>
+<h3>Cursor / Windsurf / Other MCP Clients</h3>
+<p>Remove the <code>code-graph</code> entry from your MCP settings file (e.g. <code>~/.cursor/mcp.json</code>).</p>
+<h3>npm (Global)</h3>
+<p>Run the teardown <strong>first</strong>, while the CLI still exists — npm 7 removed the
+<code>preuninstall</code>/<code>postuninstall</code> lifecycle scripts, so nothing runs on your behalf
+during <code>npm uninstall</code>. Doing it in the other order leaves the hook entries in
+<code>~/.claude/settings.json</code> and the ~40 MB binary cache behind, with no command
+left on disk to remove them.</p>
+<pre><code class="language-bash">code-graph-mcp uninstall     # restore statusline, strip hooks, drop the cache
+npm uninstall -g @sdsrs/code-graph
+</code></pre>
+<h2>MCP Tools</h2>
+<p><code>tools/list</code> advertises exactly these seven. Several older niche tools were folded into flags on them, so one call now covers what used to take a separate tool:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>project_map</code></td>
+<td>Full project architecture: modules, dependencies, entry points, hot functions. <code>include_centrality</code> adds architectural chokepoints</td>
+</tr>
+<tr>
+<td><code>semantic_code_search</code></td>
+<td>Hybrid BM25 + vector search (RRF) for AST nodes. Supports <code>compact</code> mode</td>
+</tr>
+<tr>
+<td><code>get_call_graph</code></td>
+<td>Trace upstream/downstream call chains for a function. Pass <code>route_path='GET /api/x'</code> to trace an HTTP route → handler → downstream instead</td>
+</tr>
+<tr>
+<td><code>get_ast_node</code></td>
+<td>One symbol with signature, body and relations. <code>include_impact</code> adds the blast radius, <code>include_similar</code> embedding-similar nodes, <code>include_references</code> callers/callees. Supports <code>compact</code> mode</td>
+</tr>
+<tr>
+<td><code>module_overview</code></td>
+<td>Symbols in a directory or file, grouped by type and caller count. <code>include_dead</code> lists unreferenced symbols under the path; <code>include_deps</code> adds the file dependency graph (single-file paths only)</td>
+</tr>
+<tr>
+<td><code>ast_search</code></td>
+<td>Search AST nodes by text and/or structural filters (type, return type, params)</td>
+</tr>
+<tr>
+<td><code>find_references</code></td>
+<td>Find all references to a symbol (callers, importers, inheritors, implementors, value/type references). Supports <code>compact</code> mode</td>
+</tr>
+</tbody></table>
+<p><strong>Hidden aliases.</strong> These names are not in <code>tools/list</code> but still dispatch via <code>tools/call</code>, so existing clients keep working: <code>trace_http_chain</code> / <code>find_http_route</code> (→ <code>get_call_graph</code> with <code>route_path</code>), <code>read_snippet</code> (→ <code>get_ast_node</code>), <code>dependency_graph</code>, <code>find_similar_code</code>, <code>find_dead_code</code>, plus the management tools <code>start_watch</code>, <code>stop_watch</code>, <code>get_index_status</code> and <code>rebuild_index</code>. <code>impact_analysis</code> is <strong>removed</strong> — calling it returns <code>Unknown tool</code>; use <code>get_ast_node</code> with <code>include_impact=true</code>, or the CLI's <code>impact --json</code> for the full report.</p>
+<h2>CLI Commands</h2>
+<p>All tools are also available as CLI subcommands for shell scripts, hooks, and terminal workflows:</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>MCP Equivalent</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search &lt;query&gt;</code></td>
+<td><code>semantic_code_search</code></td>
+<td>FTS5 search by concept</td>
+</tr>
+<tr>
+<td><code>ast-search [query]</code></td>
+<td><code>ast_search</code></td>
+<td>Structural search with <code>--type</code>/<code>--returns</code>/<code>--params</code> filters</td>
+</tr>
+<tr>
+<td><code>callgraph &lt;symbol&gt;</code></td>
+<td><code>get_call_graph</code></td>
+<td>Show call graph (callers/callees)</td>
+</tr>
+<tr>
+<td><code>impact &lt;symbol&gt;</code></td>
+<td><code>get_ast_node</code> (<code>include_impact=true</code>)</td>
+<td>Impact analysis (callers, routes, risk level)</td>
+</tr>
+<tr>
+<td><code>show &lt;symbol&gt;</code></td>
+<td><code>get_ast_node</code></td>
+<td>Show symbol details (code, type, signature)</td>
+</tr>
+<tr>
+<td><code>map</code></td>
+<td><code>project_map</code></td>
+<td>Project architecture map</td>
+</tr>
+<tr>
+<td><code>overview &lt;path&gt;</code></td>
+<td><code>module_overview</code></td>
+<td>Module symbols grouped by file and type</td>
+</tr>
+<tr>
+<td><code>deps &lt;file&gt;</code></td>
+<td><code>module_overview</code> (<code>include_deps=true</code>)</td>
+<td>File-level dependency graph</td>
+</tr>
+<tr>
+<td><code>trace &lt;route&gt;</code></td>
+<td><code>get_call_graph</code> (<code>route_path=…</code>)</td>
+<td>Trace HTTP route → handler → downstream calls</td>
+</tr>
+<tr>
+<td><code>similar &lt;symbol&gt;</code></td>
+<td><code>get_ast_node</code> (<code>include_similar=true</code>)</td>
+<td>Find semantically similar code (requires embeddings)</td>
+</tr>
+<tr>
+<td><code>refs &lt;symbol&gt;</code></td>
+<td><code>find_references</code></td>
+<td>Find all references to a symbol</td>
+</tr>
+<tr>
+<td><code>dead-code [path]</code></td>
+<td><code>module_overview</code> (<code>include_dead=true</code>)</td>
+<td>Find unused code (orphans and exported-unused)</td>
+</tr>
+<tr>
+<td><code>grep &lt;pattern&gt;</code></td>
+<td>—</td>
+<td>AST-context grep (ripgrep + containing function/class)</td>
+</tr>
+<tr>
+<td><code>incremental-index</code></td>
+<td>—</td>
+<td>Run incremental index update (auto-creates DB if needed)</td>
+</tr>
+<tr>
+<td><code>health-check</code></td>
+<td><code>get_index_status</code></td>
+<td>Query index status and freshness</td>
+</tr>
+<tr>
+<td><code>benchmark</code></td>
+<td>—</td>
+<td>Benchmark index speed, query latency, token savings</td>
+</tr>
+<tr>
+<td><code>affected [files…]</code></td>
+<td>—</td>
+<td>Changed files → the test files to re-run (<code>--stdin</code>, <code>--depth</code>)</td>
+</tr>
+<tr>
+<td><code>tour [path]</code></td>
+<td>—</td>
+<td>Dependency-ordered reading order for a repo or subtree</td>
+</tr>
+<tr>
+<td><code>centrality</code></td>
+<td><code>project_map</code> (<code>include_centrality=true</code>)</td>
+<td>Rank architectural chokepoints (betweenness over the call graph)</td>
+</tr>
+<tr>
+<td><code>cycles</code></td>
+<td>—</td>
+<td>Detect circular import dependencies (file-level)</td>
+</tr>
+<tr>
+<td><code>surprising</code></td>
+<td>—</td>
+<td>Surface unexpected cross-module couplings (uncertain edges)</td>
+</tr>
+<tr>
+<td><code>report</code></td>
+<td>—</td>
+<td>Consolidated code-health report (summary + all analyses)</td>
+</tr>
+<tr>
+<td><code>stats</code></td>
+<td>—</td>
+<td>Aggregate session metrics from <code>.code-graph/usage.jsonl</code></td>
+</tr>
+<tr>
+<td><code>outcome</code></td>
+<td>—</td>
+<td>Retrieval adoption from session transcripts (field-MRR; read-only)</td>
+</tr>
+<tr>
+<td><code>rebuild-index</code></td>
+<td><code>rebuild_index</code></td>
+<td>Drop and rebuild the index from scratch (requires <code>--confirm</code>)</td>
+</tr>
+<tr>
+<td><code>reindex</code></td>
+<td>—</td>
+<td>Incremental refresh; <code>--from-snapshot</code> refetches the published snapshot</td>
+</tr>
+<tr>
+<td><code>snapshot create|inspect</code></td>
+<td>—</td>
+<td>Build or inspect a portable graph snapshot</td>
+</tr>
+<tr>
+<td><code>doctor</code></td>
+<td>—</td>
+<td>Diagnose and repair environment issues</td>
+</tr>
+<tr>
+<td><code>adopt</code></td>
+<td>—</td>
+<td>Install the steering block into the project <code>CLAUDE.md</code> + detail doc</td>
+</tr>
+<tr>
+<td><code>unadopt</code></td>
+<td>—</td>
+<td>Remove the steering block + detail doc</td>
+</tr>
+<tr>
+<td><code>serve</code></td>
+<td>—</td>
+<td>Start the MCP JSON-RPC server on stdio (the default with no subcommand)</td>
+</tr>
+</tbody></table>
+<p>Common options: <code>--json</code> (JSON output), <code>--compact</code> (compact output), <code>--limit N</code>, <code>--depth N</code>, <code>--file &lt;path&gt;</code>.</p>
+<p>As of <strong>v0.37.0</strong> the CLI is <a href="https://docs.rs/clap" target="_blank" rel="noopener noreferrer">clap</a>-based: <strong>every subcommand has <code>--help</code></strong> for its full flag list (<code>code-graph-mcp &lt;command&gt; --help</code>), value flags accept both <code>--flag value</code> and <code>--flag=value</code>, and unknown flags or malformed arguments fail fast with a clear error and a non-zero exit code (<code>2</code>) instead of being silently ignored. For example, <code>trace</code> hides downstream middleware with <code>--no-middleware</code> (shown by default), and <code>snapshot</code> is a <code>create</code>/<code>inspect</code> subcommand pair.</p>
+<h2>Plugin Skills</h2>
+<p>Installing the plugin ships two skills that Claude loads on its own when the
+situation matches — there are no slash commands to remember:</p>
+<table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Loaded when</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>explore</code></td>
+<td>Starting work in unfamiliar code, or before editing a module</td>
+<td>Routes the question to <code>overview</code> / <code>map</code> / <code>callgraph</code> / <code>search</code> / <code>impact</code> instead of reading files one at a time</td>
+</tr>
+<tr>
+<td><code>index</code></td>
+<td>Search returns empty or stale results, or after a large restructuring</td>
+<td>Walks <code>health-check</code>, incremental re-index, and full rebuild</td>
+</tr>
+</tbody></table>
+<p>Both are thin routers over the CLI subcommands documented above, so anything a
+skill does is also runnable by hand.</p>
+<h2>Supported Languages (19)</h2>
+<table>
+<thead>
+<tr>
+<th>Language</th>
+<th>Extensions</th>
+<th>Relations Extracted</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>TypeScript</td>
+<td>.ts, .tsx</td>
+<td>calls, imports, exports, inherits, implements, routes_to, references</td>
+</tr>
+<tr>
+<td>JavaScript</td>
+<td>.js, .jsx, .mjs, .cjs</td>
+<td>calls, imports, exports (ESM + CommonJS), inherits, routes_to, references</td>
+</tr>
+<tr>
+<td>Go</td>
+<td>.go</td>
+<td>calls, imports, inherits, routes_to, references</td>
+</tr>
+<tr>
+<td>Python</td>
+<td>.py, .pyi</td>
+<td>calls, imports, inherits, routes_to, references</td>
+</tr>
+<tr>
+<td>Rust</td>
+<td>.rs</td>
+<td>calls, imports, implements, routes_to (axum), references</td>
+</tr>
+<tr>
+<td>Java</td>
+<td>.java</td>
+<td>calls, imports, inherits, implements, references</td>
+</tr>
+<tr>
+<td>C#</td>
+<td>.cs</td>
+<td>calls, imports, inherits, implements</td>
+</tr>
+<tr>
+<td>Kotlin</td>
+<td>.kt, .kts</td>
+<td>calls, imports, inherits</td>
+</tr>
+<tr>
+<td>Ruby</td>
+<td>.rb</td>
+<td>calls, imports, inherits</td>
+</tr>
+<tr>
+<td>PHP</td>
+<td>.php</td>
+<td>calls, imports, inherits, implements</td>
+</tr>
+<tr>
+<td>Swift</td>
+<td>.swift</td>
+<td>calls, imports, inherits</td>
+</tr>
+<tr>
+<td>Dart</td>
+<td>.dart</td>
+<td>calls, imports, inherits, implements</td>
+</tr>
+<tr>
+<td>C</td>
+<td>.c, .h</td>
+<td>calls, imports, references</td>
+</tr>
+<tr>
+<td>C++</td>
+<td>.cpp, .cc, .cxx, .hpp, .hh, .hxx</td>
+<td>calls, imports, inherits, references</td>
+</tr>
+<tr>
+<td>Bash</td>
+<td>.sh, .bash</td>
+<td>functions, commands, <code>source</code>/<code>.</code> imports</td>
+</tr>
+<tr>
+<td>Markdown</td>
+<td>.md, .mdx, .markdown</td>
+<td>headings</td>
+</tr>
+<tr>
+<td>HTML</td>
+<td>.html, .htm</td>
+<td>file-FTS only (no AST symbols)</td>
+</tr>
+<tr>
+<td>CSS</td>
+<td>.css</td>
+<td>file-FTS only (no AST symbols)</td>
+</tr>
+<tr>
+<td>JSON</td>
+<td>.json</td>
+<td>file-FTS only (no AST symbols)</td>
+</tr>
+</tbody></table>
+<p><strong>Known limitations:</strong></p>
+<ul>
+<li><strong>Rust has no <code>inherits</code> edges</strong> — the language has no class inheritance, so <code>impl Trait for Type</code> is recorded as <code>implements</code> and an <code>inherits</code>-filtered query returns empty for Rust.</li>
+<li><strong>Kotlin/Swift interface conformance</strong> is recorded as <code>inherits</code> (both use a single <code>: Type</code> grammar for base classes and protocols/interfaces), so <code>implements</code>-filtered queries return empty for these two languages.</li>
+<li><strong>Cross-file dead-code detection</strong> may false-positive a type whose only cross-file reference sits beyond the 4096-byte stored-content cap per node (documented accepted limitation, v0.97.1).</li>
+</ul>
+<h2>Team-shared graph snapshot</h2>
+<p>Skip the full local index for team members and CI runners by publishing a
+~3-5MB graph snapshot with each GitHub release.</p>
+<p><strong>Setup (one-time):</strong></p>
+<ol>
+<li>Copy <code>node_modules/@sdsrs/code-graph/claude-plugin/templates/code-graph-snapshot.yml</code>
+into your repo's <code>.github/workflows/</code>.</li>
+<li>Push a release tag. The workflow uploads
+<code>code-graph-snapshot-&lt;sha&gt;.db.zst</code> as a release asset.</li>
+</ol>
+<p><strong>Verify:</strong></p>
+<pre><code class="language-bash">npx -y -p @sdsrs/code-graph code-graph-mcp snapshot inspect ./code-graph-snapshot-&lt;sha&gt;.db.zst
+</code></pre>
+<p>After setup, the auto-fetch is <strong>opt-in per consumer</strong>: an untrusted repo could
+otherwise seed a misleading graph, so an unconfigured clone prints a hint and
+skips the install. Enable it with one of the trust signals below. These live in
+the <em>environment</em> (never in <code>.code-graph.toml</code>) so a committed/PR-injected config
+file cannot set them.</p>
+<table>
+<thead>
+<tr>
+<th>Environment variable</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CODE_GRAPH_SNAPSHOT_TRUST_ORIGIN=1</code></td>
+<td>Trust the auto-detected GitHub-release snapshot for this repo's <code>origin</code> remote, allowing auto-install.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_SNAPSHOT_PIN=&lt;blake3 hex&gt;</code></td>
+<td>Pin the expected artifact digest (64-char blake3 hex). When set it is the <strong>sole</strong> integrity authority — the download must match it, no network sidecar is consulted — and it also implicitly trusts the origin path.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_SNAPSHOT_TRUST_URL=1</code></td>
+<td>Honor a <code>.code-graph.toml [snapshot] url</code> override (an arbitrary, non-origin URL). Off by default because a committed URL could redirect the graph to an attacker-chosen database.</td>
+</tr>
+</tbody></table>
+<p>Integrity <strong>fail-closes</strong>: with no pin set and no fetchable <code>&lt;url&gt;.blake3</code> sidecar,
+install is refused rather than accepting unverified content. Set a pin, or have
+the publisher serve the <code>.blake3</code> sidecar alongside the snapshot. (<code>file://</code>
+sources, used in tests, are exempt.)</p>
+<h2>Offline / air-gapped usage</h2>
+<p>The optional embedding model (needed for vector semantic search) is downloaded
+lazily on first use. To control that in a restricted environment:</p>
+<table>
+<thead>
+<tr>
+<th>Environment variable</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CODE_GRAPH_MODEL_DIR=&lt;dir&gt;</code></td>
+<td>Load <code>model.safetensors</code> from <code>&lt;dir&gt;</code> instead of downloading (highest-priority lookup). If the file isn't there, it warns and falls back to the normal search paths.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_DISABLE_MODEL_DOWNLOAD=1</code></td>
+<td>Disable the automatic background model download. An already-cached model is still loaded and used; the server otherwise stays in FTS5-only mode.</td>
+</tr>
+</tbody></table>
+<h3>Installing the model by hand</h3>
+<p><code>CODE_GRAPH_MODEL_DIR</code> is the supported manual route. Hand-populating the
+<em>default</em> cache dir (<code>&lt;platform cache&gt;/code-graph/models</code>) does <strong>not</strong> work:
+that dir is only trusted once <code>extract_and_promote</code> has written a <code>.model-id</code>
+marker, so a manually filled copy is treated as not-current and re-downloaded.</p>
+<pre><code class="language-bash"># Download + verify against the published checksum, then extract flat
+# (the archive has no wrapping folder: model.safetensors, tokenizer.json, config.json).
+curl -sL -o models.tar.gz \
+  https://github.com/sdsrss/code-graph-mcp/releases/download/v&lt;version&gt;/models.tar.gz
+curl -sL https://github.com/sdsrss/code-graph-mcp/releases/download/v&lt;version&gt;/models.tar.gz.sha256
+sha256sum -c models.tar.gz.sha256
+mkdir -p ~/.cache/code-graph/models-manual
+tar -xzf models.tar.gz -C ~/.cache/code-graph/models-manual
+export CODE_GRAPH_MODEL_DIR=~/.cache/code-graph/models-manual
+</code></pre>
+<p>On Windows use <code>%LOCALAPPDATA%\code-graph\models-manual</code>, and give <code>tar</code> a POSIX
+path for <code>-C</code> (<code>/c/Users/&lt;you&gt;/...</code>) — <code>tar -C C:\...</code> fails with
+"Cannot connect to C: resolve failed". The model is pinned by content hash, so
+a manual install must be redone on each version bump.</p>
+<h3>Diagnosing a model that never downloads</h3>
+<p><code>code-graph-mcp doctor</code> reports the model state, distinguishing "model files
+present but not loaded" (weights on disk — e.g. installed by the npm plugin —
+just no MCP server session yet) from "no download has been attempted" and from
+"download FAILED after N attempt(s): …" with the underlying error. The raw record is
+<code>&lt;platform cache&gt;/code-graph/model-download.json</code>. On a network that performs
+TLS inspection, the download retries automatically against the OS certificate
+store after the bundled roots are rejected.</p>
+<h2>Storage</h2>
+<p>Uses SQLite with:</p>
+<ul>
+<li>FTS5 for full-text search</li>
+<li>sqlite-vec extension for vector similarity search</li>
+<li>Merkle tree hashes for incremental change detection</li>
+</ul>
+<p>Data is stored in <code>.code-graph/index.db</code> under the project root (auto-created, gitignored).</p>
+<h2>Environment variables</h2>
+<p>Every <code>CODE_GRAPH_*</code> variable the code reads, in one place — the alternative was
+reading the source to find out a switch existed. All of them are optional; the
+defaults are what you get by doing nothing.</p>
+<p><strong>Switches you may actually want</strong></p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CODE_GRAPH_NO_AUTO_UPDATE=1</code></td>
+<td>Never check GitHub for a new release.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_NO_AUTO_ADOPT=1</code></td>
+<td>Do not write the steering block into a project's <code>CLAUDE.md</code> on SessionStart.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_NO_TEMPLATE_REFRESH=1</code></td>
+<td>Keep hand edits to the generated steering block — it is otherwise refreshed to the current template.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_QUIET_HOOKS=1</code></td>
+<td>Hooks inject a one-line pointer instead of the full decision table.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_VERBOSE_HOOKS=1</code></td>
+<td>The opposite: opt into the noisy form.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_NO_BLOCK_GREP=1</code></td>
+<td>Never turn a <code>grep</code> hint into a block — prefix a single command with it to get past one.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_NO_INJECT=1</code></td>
+<td>No post-tool AST context injection.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_NO_RECENT_IMPACT=1</code></td>
+<td>Skip the recent-impact section of the SessionStart briefing.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_HOOK_INDEX=on|off</code></td>
+<td>Force the incremental-index hook on or off instead of letting it decide.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_MODEL_DIR=&lt;dir&gt;</code></td>
+<td>Load the embedding model from here (air-gapped installs).</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_DISABLE_MODEL_DOWNLOAD=1</code></td>
+<td>Never fetch the model; fail instead.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_MAX_FILE_SIZE=&lt;bytes&gt;</code></td>
+<td>Skip files larger than this (default 1 MiB).</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_MAX_CODE_LEN=&lt;bytes&gt;</code></td>
+<td>Truncate stored per-node source at this length.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_PARSE_TIMEOUT_MS=&lt;ms&gt;</code></td>
+<td>Per-file parse timeout.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_RESYNC_BUDGET=&lt;n&gt;</code></td>
+<td>Files a read command may re-index before answering (default 8). <code>CODE_GRAPH_GREP_SYNC_BUDGET</code> is the older name, still honoured by <code>grep</code>.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_RG_ARGV_BUDGET=&lt;bytes&gt;</code></td>
+<td>Cap on the argv <code>grep</code> builds for ripgrep.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_INTEGRITY_MAX_BYTES=&lt;bytes&gt;</code></td>
+<td>Index size above which <code>health-check</code> skips <code>PRAGMA quick_check</code>.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_SNAPSHOT_TRUST_URL=1</code></td>
+<td>Install a snapshot from an arbitrary URL. <strong>A snapshot is a database — treat it like running a script.</strong></td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_SNAPSHOT_TRUST_ORIGIN=1</code></td>
+<td>Install a snapshot whose origin does not match this repository.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_SNAPSHOT_PIN=&lt;digest&gt;</code></td>
+<td>Accept exactly this snapshot digest (an alternative to the two switches above).</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_PROJECT_TYPE=&lt;type&gt;</code></td>
+<td>Override project-type detection for the steering block.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_FAIL_ON_RISK=1</code></td>
+<td>Make the PR impact comment fail the check on HIGH risk (CI).</td>
+</tr>
+</tbody></table>
+<details>
+<summary>Internal and test-only — set by the plugin's own processes, or by the test suite. Setting them by hand is not supported.</summary><table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Set by</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CODE_GRAPH_STATUSLINE_CWD</code></td>
+<td>statusline-composite</td>
+<td>Forwards Claude Code's authoritative cwd to each statusline provider.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_INSTALL_LOCK_HELD</code></td>
+<td>launcher</td>
+<td>Tells a child that the parent already holds the install lock, so it does not deadlock.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_AUTO_UPDATE_SILENT</code></td>
+<td>session-init</td>
+<td>Runs the update check without console output.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_NO_ANSWER_IN_DENY</code></td>
+<td>lifecycle</td>
+<td>Keeps <code>cg-answer</code> out of the deny path.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_FORCE_PLUGIN_MCP</code></td>
+<td>launcher</td>
+<td>Serve MCP even from a context that would otherwise decline.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_FORCE_STATUSLINE</code></td>
+<td><code>lifecycle install</code></td>
+<td>Reclaim the statusline slot from another provider.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_INTERNAL</code></td>
+<td>this repo's own hooks</td>
+<td>Marks a tool call as self-generated so it is excluded from adoption metrics.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_DOGFOOD</code></td>
+<td>dev sessions</td>
+<td>Tags MCP usage as dev self-test traffic.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_DEV</code></td>
+<td>dev checkouts</td>
+<td>Dev mode: changes binary resolution and disables auto-update.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_EMIT_CONFIDENCE</code></td>
+<td>debugging</td>
+<td>Emit per-result confidence from semantic search.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_BIN</code></td>
+<td><code>scripts/e2e-validate.js</code></td>
+<td>Binary under test.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_AUTO_UPDATE_E2E=1</code></td>
+<td>release smoke test</td>
+<td>Opts into the live auto-update E2E, skipped by default.</td>
+</tr>
+</tbody></table>
+</details><h2>Build from Source</h2>
+<h3>Prerequisites</h3>
+<ul>
+<li>Rust 1.95.0 (2021 edition) — the toolchain CI and the release build pin
+(<code>dtolnay/rust-toolchain@1.95.0</code> in <code>.github/workflows/</code>). No older toolchain
+is tested: <code>Cargo.lock</code> is lockfile <strong>version 4</strong>, which Cargo 1.75 cannot
+read at all, and no <code>rust-version</code> floor is declared in <code>Cargo.toml</code>.</li>
+<li>A C compiler (for bundled SQLite / sqlite-vec)</li>
+</ul>
+<h3>Build</h3>
+<pre><code class="language-bash"># Default build — FTS5-only (~10 MB binary, no embedding model)
+cargo build --release
+
+# With local embedding model (~150 MB binary; downloads ~120 MB model lazily on first semantic search)
+cargo build --release --features embed-model
+</code></pre>
+<blockquote>
+<p>Direct <code>cargo install</code> users get the FTS5-only build by default. npm/npx/plugin
+users get the full hybrid (FTS5 + vector) build automatically — release CI
+compiles with <code>--features embed-model</code> for shipped binaries.</p>
+</blockquote>
+<h3>Configure (from source)</h3>
+<p>Add the compiled binary to your MCP settings:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "code-graph": {
+      "command": "/path/to/target/release/code-graph-mcp"
+    }
+  }
+}
+</code></pre>
+<h2>Development</h2>
+<pre><code class="language-bash"># Run tests
+cargo test
+
+# Run tests without embedding model
+cargo test --no-default-features
+
+# Check compilation
+cargo check
+
+# Run performance benchmarks (indexing, search, call graph)
+cargo bench --no-default-features
+</code></pre>
+<h2>License</h2>
+<p>See <a href="https://github.com/sdsrss/code-graph-mcp/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a> for details.</p>

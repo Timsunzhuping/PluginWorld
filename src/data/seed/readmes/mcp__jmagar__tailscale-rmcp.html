@@ -1,0 +1,691 @@
+<h1>tailscale-rmcp</h1>
+<p>Tailscale device, route, DNS, key, user, and ACL management over MCP and CLI.</p>
+<p>It exposes one MCP tool, <code>tailscale</code>, plus the <code>rtailscale</code> CLI. Agents can
+list devices, inspect routes, read API keys, ACL policy, DNS settings, and
+users, authorize devices, and delete devices when the destructive gate is
+explicitly enabled.</p>
+<p><strong>30-second path:</strong> set <code>TAILSCALE_API_KEY</code>, then run
+<code>npx -y @dinglebear/rtailscale devices --json</code> -&gt; start loopback HTTP with
+<code>TAILSCALE_MCP_HOST=127.0.0.1 npx -y @dinglebear/rtailscale serve</code> -&gt; call <code>tools/call</code>
+with <code>{"action":"devices"}</code>.</p>
+<p><strong>Status:</strong> operational RMCP upstream-client server. Write-capable for device
+authorization; destructive device deletion requires both server opt-in and
+caller confirmation. HTTP MCP supports loopback dev mode, static bearer tokens,
+and Google OAuth through <code>lab-auth</code>.</p>
+<p><strong>Not for:</strong> replacing the Tailscale admin console, bypassing Tailscale account
+permissions, operating multiple unrelated tailnets from one trust boundary,
+storing API keys for callers, arbitrary WireGuard control, or passing Tailscale
+API keys through MCP tool arguments.</p>
+<h2>Contents</h2>
+<ul>
+<li><a href="#naming" target="_blank" rel="noopener noreferrer">Naming</a></li>
+<li><a href="#capabilities-and-boundaries" target="_blank" rel="noopener noreferrer">Capabilities And Boundaries</a></li>
+<li><a href="#install" target="_blank" rel="noopener noreferrer">Install</a></li>
+<li><a href="#quickstart" target="_blank" rel="noopener noreferrer">Quickstart</a></li>
+<li><a href="#client-configuration" target="_blank" rel="noopener noreferrer">Client Configuration</a></li>
+<li><a href="#runtime-surfaces" target="_blank" rel="noopener noreferrer">Runtime Surfaces</a></li>
+<li><a href="#mcp-tool-reference" target="_blank" rel="noopener noreferrer">MCP Tool Reference</a></li>
+<li><a href="#cli-reference" target="_blank" rel="noopener noreferrer">CLI Reference</a></li>
+<li><a href="#configuration" target="_blank" rel="noopener noreferrer">Configuration</a></li>
+<li><a href="#authentication" target="_blank" rel="noopener noreferrer">Authentication</a></li>
+<li><a href="#safety-and-trust-model" target="_blank" rel="noopener noreferrer">Safety And Trust Model</a></li>
+<li><a href="#architecture" target="_blank" rel="noopener noreferrer">Architecture</a></li>
+<li><a href="#distribution-contract" target="_blank" rel="noopener noreferrer">Distribution Contract</a></li>
+<li><a href="#development" target="_blank" rel="noopener noreferrer">Development</a></li>
+<li><a href="#verification" target="_blank" rel="noopener noreferrer">Verification</a></li>
+<li><a href="#deployment" target="_blank" rel="noopener noreferrer">Deployment</a></li>
+<li><a href="#troubleshooting" target="_blank" rel="noopener noreferrer">Troubleshooting</a></li>
+<li><a href="#related-servers" target="_blank" rel="noopener noreferrer">Related Servers</a></li>
+<li><a href="#documentation" target="_blank" rel="noopener noreferrer">Documentation</a></li>
+<li><a href="#license" target="_blank" rel="noopener noreferrer">License</a></li>
+</ul>
+<h2>Naming</h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>This repo</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Repository</td>
+<td><code>tailscale-rmcp</code></td>
+</tr>
+<tr>
+<td>Rust crate</td>
+<td><code>tailscale-rmcp</code></td>
+</tr>
+<tr>
+<td>Binary / CLI</td>
+<td><code>rtailscale</code></td>
+</tr>
+<tr>
+<td>npm package</td>
+<td><code>@dinglebear/rtailscale</code></td>
+</tr>
+<tr>
+<td>npm binary aliases</td>
+<td><code>tailscale-rmcp</code>, <code>rtailscale</code></td>
+</tr>
+<tr>
+<td>MCP tool</td>
+<td><code>tailscale</code></td>
+</tr>
+<tr>
+<td>Config home</td>
+<td><code>~/.tailscale-mcp</code> on hosts, <code>/data</code> in containers</td>
+</tr>
+<tr>
+<td>Env prefixes</td>
+<td><code>TAILSCALE_*</code>, <code>TAILSCALE_MCP_*</code>, <code>TAILSCALE_RMCP_*</code> for npm launcher controls</td>
+</tr>
+</tbody></table>
+<p>The repo, crate, and npm package use the RMCP family name. The shipped binary is
+<code>rtailscale</code> to avoid shadowing the official <code>tailscale</code> CLI.</p>
+<h2>Capabilities And Boundaries</h2>
+<ul>
+<li>List devices and inspect a single device by node ID or legacy numeric device
+ID.</li>
+<li>Read subnet routes, API keys, ACL policy, DNS/MagicDNS settings, and tailnet
+users.</li>
+<li>Authorize a device for the tailnet.</li>
+<li>Delete a device only when <code>TAILSCALE_ALLOW_DESTRUCTIVE=true</code> and the caller
+also passes explicit confirmation.</li>
+<li>Provide setup and doctor commands for local plugin/runtime checks.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>This repo owns</th>
+<th>Tailscale owns</th>
+<th>Explicitly out of scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>MCP/CLI projection, request validation, HTTP MCP auth policy, response shaping, setup checks, and destructive gates.</td>
+<td>Tailnet state, device identities, ACL semantics, DNS behavior, API key issuance, user membership, and upstream authorization.</td>
+<td>Replacing the admin console, storing caller credentials, multi-tailnet tenancy, arbitrary WireGuard control, policy editing beyond exposed actions, and local Tailscale daemon management.</td>
+</tr>
+</tbody></table>
+<h2>Install</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Command</th>
+<th>Best for</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>npm / npx</td>
+<td><code>npx -y @dinglebear/rtailscale --help</code></td>
+<td>Local MCP clients and quick trials.</td>
+<td>Downloads the matching <code>rtailscale</code> binary from GitHub Releases.</td>
+</tr>
+<tr>
+<td>Release installer</td>
+<td><code>curl -fsSL https://raw.githubusercontent.com/dinglebear-ai/rtailscale/main/scripts/install.sh | bash</code></td>
+<td>Host installs without Node.</td>
+<td>Installs <code>rtailscale</code> for the current Linux host.</td>
+</tr>
+<tr>
+<td>Docker / Compose</td>
+<td><code>docker compose up -d</code></td>
+<td>Shared HTTP MCP deployments.</td>
+<td>Reads <code>.env</code> and exposes container port <code>40040</code>.</td>
+</tr>
+<tr>
+<td>Build from source</td>
+<td><code>cargo build --release</code></td>
+<td>Development and audits.</td>
+<td>Produces <code>target/release/rtailscale</code>.</td>
+</tr>
+<tr>
+<td>Plugin</td>
+<td><code>claude plugin install plugins/tailscale</code></td>
+<td>Claude Code local plugin setup from this checkout.</td>
+<td>Ships the skill, <code>.mcp.json</code>, and a bundled binary. No hooks — run <code>rtailscale setup check</code> yourself if you want the environment verified.</td>
+</tr>
+</tbody></table>
+<h3>npm / npx</h3>
+<p>Run the stdio MCP server or CLI without a manual binary install:</p>
+<pre><code class="language-bash">npx -y @dinglebear/rtailscale --help
+npx -y @dinglebear/rtailscale mcp
+npx -y @dinglebear/rtailscale devices --json
+</code></pre>
+<p>The npm package downloads <code>rtailscale</code> during <code>postinstall</code>. Override download
+behavior only when testing packaging:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>TAILSCALE_RMCP_SKIP_DOWNLOAD=1</code></td>
+<td>Skip postinstall binary download.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_RMCP_VERSION</code> or <code>TAILSCALE_RMCP_BINARY_VERSION</code></td>
+<td>Select the GitHub Release tag.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_RMCP_REPO</code></td>
+<td>Select the GitHub repo used for release downloads.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_RMCP_RELEASE_BASE_URL</code></td>
+<td>Select a custom release base URL.</td>
+</tr>
+</tbody></table>
+<h3>Build From Source</h3>
+<pre><code class="language-bash">git clone https://github.com/dinglebear-ai/rtailscale
+cd rtailscale
+cargo build --release
+./target/release/rtailscale --help
+</code></pre>
+<p>Minimum supported Rust version: 1.86.</p>
+<h2>Quickstart</h2>
+<h3>1. Get A Tailscale API Key</h3>
+<p>Create an API key at
+<a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener noreferrer">https://login.tailscale.com/admin/settings/keys</a>. Use the minimum capability
+needed for the actions you plan to expose.</p>
+<h3>2. Configure The Tailnet</h3>
+<pre><code class="language-bash">export TAILSCALE_API_KEY="tskey-api-..."
+export TAILSCALE_TAILNET="-"          # personal, or "example.com" for orgs
+</code></pre>
+<p>Every Tailscale account belongs to a tailnet. <code>TAILSCALE_TAILNET=-</code> targets the
+default personal tailnet; organization tailnets usually use the org domain.</p>
+<h3>3. Run A Safe CLI Call</h3>
+<pre><code class="language-bash">npx -y @dinglebear/rtailscale devices --json
+</code></pre>
+<h3>4. Start Loopback HTTP MCP</h3>
+<pre><code class="language-bash">TAILSCALE_MCP_HOST=127.0.0.1 npx -y @dinglebear/rtailscale serve
+</code></pre>
+<p>In another shell:</p>
+<pre><code class="language-bash">curl -sf http://127.0.0.1:40040/health
+</code></pre>
+<h3>5. Make A First MCP Call</h3>
+<pre><code class="language-bash">curl -s -X POST http://127.0.0.1:40040/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tailscale","arguments":{"action":"devices"}}}'
+</code></pre>
+<h2>Client Configuration</h2>
+<h3>Claude Code Stdio</h3>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "tailscale": {
+      "command": "npx",
+      "args": ["-y", "tailscale-rmcp", "mcp"],
+      "env": {
+        "TAILSCALE_API_KEY": "tskey-api-...",
+        "TAILSCALE_TAILNET": "-"
+      }
+    }
+  }
+}
+</code></pre>
+<h3>Claude Code HTTP</h3>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "tailscale": {
+      "type": "http",
+      "url": "http://127.0.0.1:40040/mcp",
+      "headers": {
+        "Authorization": "Bearer ${TAILSCALE_MCP_TOKEN}"
+      }
+    }
+  }
+}
+</code></pre>
+<h3>Codex / Labby Gateway</h3>
+<p>Register Tailscale through Labby as an HTTP upstream when sharing one
+long-running server, or run it directly as stdio for local-only use.</p>
+<pre><code class="language-toml">[mcp_servers.tailscale]
+command = "npx"
+args = ["-y", "tailscale-rmcp", "mcp"]
+</code></pre>
+<h3>Generic MCP JSON</h3>
+<pre><code class="language-json">{
+  "command": "rtailscale",
+  "args": ["mcp"],
+  "env": {
+    "TAILSCALE_API_KEY": "tskey-api-...",
+    "TAILSCALE_TAILNET": "-"
+  }
+}
+</code></pre>
+<p>Do not put <code>TAILSCALE_API_KEY</code>, OAuth secrets, passwords, SSH keys, or upstream
+bearer tokens in MCP tool arguments. Use env, config files, or the MCP client's
+secret storage. MCP callers never provide credentials, tokens, keys, or secrets
+as action arguments.</p>
+<h2>Runtime Surfaces</h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th align="right">Status</th>
+<th>Entry point</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>MCP stdio</td>
+<td align="right">Supported</td>
+<td><code>rtailscale mcp</code>, <code>npx -y @dinglebear/rtailscale mcp</code></td>
+<td>Local child-process MCP clients.</td>
+</tr>
+<tr>
+<td>MCP HTTP</td>
+<td align="right">Supported</td>
+<td><code>rtailscale serve</code>, <code>POST /mcp</code></td>
+<td>Streamable HTTP MCP for local or shared server deployments.</td>
+</tr>
+<tr>
+<td>CLI</td>
+<td align="right">Supported</td>
+<td><code>rtailscale &lt;command&gt;</code></td>
+<td>Scriptable parity and debugging.</td>
+</tr>
+<tr>
+<td>REST API</td>
+<td align="right">Not shipped</td>
+<td>N/A</td>
+<td>Tailscale already owns the REST API.</td>
+</tr>
+<tr>
+<td>Web UI</td>
+<td align="right">Not shipped</td>
+<td>N/A</td>
+<td>Tailscale already owns the admin console.</td>
+</tr>
+</tbody></table>
+<h2>MCP Tool Reference</h2>
+<p>One MCP tool is exposed: <code>tailscale</code>. Pass the required <code>action</code> argument to
+select the operation.</p>
+<h3>Read Actions</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+<th>Required params</th>
+<th>Optional params</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>devices</code></td>
+<td>List all devices in the tailnet.</td>
+<td>none</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>device</code></td>
+<td>Return one device.</td>
+<td><code>id</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>device_routes</code></td>
+<td>Return subnet routes for one device.</td>
+<td><code>id</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>keys</code></td>
+<td>List API keys in the tailnet.</td>
+<td>none</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>acl</code></td>
+<td>Return ACL policy JSON.</td>
+<td>none</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>dns</code></td>
+<td>Return DNS nameservers, search paths, and MagicDNS preferences.</td>
+<td>none</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>users</code></td>
+<td>List tailnet users.</td>
+<td>none</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>help</code></td>
+<td>Return built-in action documentation.</td>
+<td>none</td>
+<td>none</td>
+</tr>
+</tbody></table>
+<h3>Write Actions</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+<th>Required params</th>
+<th>Optional params</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>authorize_device</code></td>
+<td>Approve a device for the tailnet.</td>
+<td><code>id</code></td>
+<td>none</td>
+</tr>
+</tbody></table>
+<h3>Destructive Actions</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Description</th>
+<th>Required params</th>
+<th>Optional params</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>delete_device</code></td>
+<td>Permanently remove a device.</td>
+<td><code>id</code>, <code>confirm=true</code></td>
+<td>none</td>
+</tr>
+</tbody></table>
+<p>Device IDs may be stable node IDs such as <code>n1234abc</code> or legacy numeric device
+IDs. Use <code>action=devices</code> first to discover IDs.</p>
+<h2>CLI Reference</h2>
+<p>The binary calls the same service layer as the MCP tool:</p>
+<pre><code class="language-bash">rtailscale devices [--json]
+rtailscale device &lt;id&gt; [--json]
+rtailscale routes &lt;device-id&gt; [--json]
+rtailscale keys [--json]
+rtailscale acl [--json]
+rtailscale dns [--json]
+rtailscale users [--json]
+rtailscale authorize &lt;device-id&gt; [--json]
+rtailscale delete-device &lt;device-id&gt; --confirm [--json]
+rtailscale doctor [--json]
+rtailscale setup check [--json]
+rtailscale setup repair [--json]
+rtailscale setup plugin-hook [--no-repair] [--json]
+rtailscale serve            # HTTP MCP (also the no-argument default)
+rtailscale mcp              # stdio MCP
+</code></pre>
+<p>All commands currently print JSON. <code>--json</code> is accepted for parity with the rest
+of the RMCP family.</p>
+<h2>Configuration</h2>
+<p>Host installs read <code>~/.tailscale-mcp/.env</code> before loading config. Containers
+read <code>/data/.env</code>. Process environment overrides both.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>TAILSCALE_API_KEY</code></td>
+<td>unset</td>
+<td>Tailscale API key.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_TAILNET</code></td>
+<td><code>-</code></td>
+<td>Tailnet: org domain or <code>-</code> for personal.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_ALLOW_DESTRUCTIVE</code></td>
+<td><code>false</code></td>
+<td>Enable <code>delete_device</code> server-side.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_HOST</code></td>
+<td><code>0.0.0.0</code></td>
+<td>HTTP bind host.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_PORT</code></td>
+<td><code>40040</code></td>
+<td>HTTP bind port.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_SERVER_NAME</code></td>
+<td><code>tailscale-rmcp</code></td>
+<td>Advertised MCP server name.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_NO_AUTH</code></td>
+<td><code>false</code></td>
+<td>Disable auth only for loopback development.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_TOKEN</code></td>
+<td>unset</td>
+<td>Static bearer token for HTTP MCP.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_NOAUTH</code></td>
+<td><code>false</code></td>
+<td>Trust an upstream gateway to enforce auth.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_AUTH_MODE</code></td>
+<td><code>bearer</code></td>
+<td><code>bearer</code> or <code>oauth</code>.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_PUBLIC_URL</code></td>
+<td>unset</td>
+<td>Public URL for OAuth discovery.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_GOOGLE_CLIENT_ID</code></td>
+<td>unset</td>
+<td>Google OAuth client ID.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_GOOGLE_CLIENT_SECRET</code></td>
+<td>unset</td>
+<td>Google OAuth client secret.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_AUTH_ADMIN_EMAIL</code></td>
+<td>unset</td>
+<td>Admin email for OAuth bootstrap.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_ALLOWED_HOSTS</code></td>
+<td>unset</td>
+<td>Extra accepted Host header values.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_ALLOWED_ORIGINS</code></td>
+<td>unset</td>
+<td>Extra accepted CORS origins.</td>
+</tr>
+<tr>
+<td><code>TAILSCALE_MCP_HOME</code></td>
+<td>platform appdata</td>
+<td>Override the config/log home used by <code>setup</code> and file logging.</td>
+</tr>
+</tbody></table>
+<p>The Tailscale API base URL is not configurable; it is fixed at
+<code>https://api.tailscale.com/api/v2</code> in <code>src/tailscale.rs</code>.</p>
+<h2>Authentication</h2>
+<p>Stdio MCP runs as a local trusted child process and does not use HTTP auth.</p>
+<p>HTTP MCP auth policy:</p>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>Condition</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Loopback dev</td>
+<td><code>TAILSCALE_MCP_HOST</code> starts with <code>127.</code> or auth is explicitly disabled on loopback</td>
+<td>Local unauthenticated development is allowed.</td>
+</tr>
+<tr>
+<td>Mounted bearer</td>
+<td>Non-loopback with <code>TAILSCALE_MCP_TOKEN</code></td>
+<td>Requires <code>Authorization: Bearer &lt;token&gt;</code> and action scopes.</td>
+</tr>
+<tr>
+<td>Mounted OAuth</td>
+<td><code>TAILSCALE_MCP_AUTH_MODE=oauth</code></td>
+<td>Uses Google OAuth/JWT through <code>lab-auth</code>.</td>
+</tr>
+<tr>
+<td>Trusted gateway</td>
+<td><code>TAILSCALE_NOAUTH=true</code></td>
+<td>Assumes a reverse proxy or gateway already enforced auth.</td>
+</tr>
+</tbody></table>
+<p>Non-loopback HTTP startup is rejected unless bearer auth, OAuth, or
+<code>TAILSCALE_NOAUTH=true</code> is configured.</p>
+<h2>Safety And Trust Model</h2>
+<ul>
+<li>Tailscale API keys are loaded from config/env only.</li>
+<li>MCP callers select actions and IDs, not upstream credentials.</li>
+<li><code>delete_device</code> has a two-key interlock:
+<code>TAILSCALE_ALLOW_DESTRUCTIVE=true</code> on the server and caller-provided
+<code>confirm=true</code>.</li>
+<li>Missing IDs and unknown actions fail before upstream calls.</li>
+<li>Non-loopback HTTP deployments must use bearer auth, OAuth, or a trusted
+authenticated gateway.</li>
+<li>This bridge does not sandbox Tailscale itself. Tailscale remains responsible
+for API permissions and tailnet state changes.</li>
+</ul>
+<h2>Architecture</h2>
+<pre><code class="language-text">TailscaleClient  (src/tailscale.rs)  REST transport and API error handling
+       |
+TailscaleService (src/app.rs)        action behavior and destructive gates
+       |
+MCP shim         (src/mcp.rs)        JSON args -&gt; service -&gt; Value
+CLI shim         (src/cli.rs)        argv -&gt; service -&gt; stdout
+</code></pre>
+<h2>Distribution Contract</h2>
+<ul>
+<li><code>Cargo.toml</code>, <code>Cargo.lock</code>, <code>packages/tailscale-rmcp/package.json</code>,
+<code>.release-please-manifest.json</code>, and <code>server.json</code> must agree on the released
+version.</li>
+<li>GitHub Releases publish the <code>rtailscale</code> binary consumed by the npm launcher.</li>
+<li>The npm package name is <code>@dinglebear/rtailscale</code>; binary aliases are
+<code>tailscale-rmcp</code> and <code>rtailscale</code>.</li>
+<li>Docker/OCI metadata uses <code>ghcr.io/dinglebear-ai/rtailscale:&lt;version&gt;</code> (see
+<code>docker-compose.prod.yml</code>). The image path still uses the pre-transfer owner
+namespace even though the repo now lives at <code>dinglebear-ai/rtailscale</code>.</li>
+<li><code>plugins/tailscale/.mcp.json</code> must launch <code>npx -y @dinglebear/rtailscale mcp</code> so
+stdio clients start the MCP transport rather than the HTTP server.</li>
+<li><code>plugins/tailscale/</code> ships no Claude Code hooks; <code>scripts/validate-plugin-layout.sh</code>
+fails if a <code>hooks/</code> directory reappears.</li>
+<li>The root README is curated. Source of truth for action behavior and config
+defaults is <code>src/</code>, plus the package, plugin, and registry manifests.</li>
+</ul>
+<h2>Development</h2>
+<pre><code class="language-bash">cargo fmt --check
+cargo test
+cargo clippy -- -D warnings
+cargo build --release
+npm --prefix packages/tailscale-rmcp run check
+</code></pre>
+<h2>Verification</h2>
+<pre><code class="language-bash">just validate-plugin
+npm --prefix packages/tailscale-rmcp run check
+cargo check
+cargo test
+git diff --check
+</code></pre>
+<p>Runtime smoke:</p>
+<pre><code class="language-bash">TAILSCALE_API_KEY=tskey-api-... \
+TAILSCALE_TAILNET=- \
+rtailscale devices --json
+</code></pre>
+<p>HTTP smoke:</p>
+<pre><code class="language-bash">TAILSCALE_MCP_HOST=127.0.0.1 rtailscale serve
+curl -sf http://127.0.0.1:40040/health
+</code></pre>
+<h2>Deployment</h2>
+<p>Use loopback for local development:</p>
+<pre><code class="language-bash">TAILSCALE_MCP_HOST=127.0.0.1 rtailscale serve
+</code></pre>
+<p>Use Docker Compose for shared HTTP deployment:</p>
+<pre><code class="language-bash">cp .env.example .env
+docker compose up -d
+</code></pre>
+<p>When binding to a non-loopback address, configure <code>TAILSCALE_MCP_TOKEN</code>,
+<code>TAILSCALE_MCP_AUTH_MODE=oauth</code>, or <code>TAILSCALE_NOAUTH=true</code> behind an
+authenticated gateway.</p>
+<h2>Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Check</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>TAILSCALE_API_KEY</code> is missing</td>
+<td>Set it in env or <code>~/.tailscale-mcp/.env</code>.</td>
+</tr>
+<tr>
+<td>Device calls return unauthorized</td>
+<td>Refresh the API key in Tailscale admin settings.</td>
+</tr>
+<tr>
+<td>HTTP <code>/mcp</code> returns unauthorized</td>
+<td>Set <code>TAILSCALE_MCP_TOKEN</code> and send <code>Authorization: Bearer &lt;token&gt;</code>.</td>
+</tr>
+<tr>
+<td>Stdio client hangs or logs JSON errors</td>
+<td>Ensure client config runs <code>tailscale-rmcp mcp</code>, not the default HTTP server mode.</td>
+</tr>
+<tr>
+<td><code>delete_device</code> is rejected</td>
+<td>Set <code>TAILSCALE_ALLOW_DESTRUCTIVE=true</code> server-side and pass <code>confirm=true</code> after verifying the target.</td>
+</tr>
+<tr>
+<td>Port conflict</td>
+<td>Set <code>TAILSCALE_MCP_PORT</code> or stop the process already using <code>40040</code>.</td>
+</tr>
+</tbody></table>
+<h2>Related Servers</h2>
+<ul>
+<li><a href="https://github.com/dinglebear-ai/soma" target="_blank" rel="noopener noreferrer">soma</a> - RMCP runtime and scaffold for provider-backed MCP servers.</li>
+<li><a href="https://github.com/dinglebear-ai/runifi" target="_blank" rel="noopener noreferrer">unifi-rmcp</a> - UniFi controller REST API bridge.</li>
+<li><a href="https://github.com/dinglebear-ai/unraid" target="_blank" rel="noopener noreferrer">unraid</a> - Unraid monorepo; <code>unraid-rs/</code> is the GraphQL bridge for NAS and server management.</li>
+<li><a href="https://github.com/dinglebear-ai/rapprise" target="_blank" rel="noopener noreferrer">apprise-rmcp</a> - Apprise notification fan-out bridge for many delivery backends.</li>
+<li><a href="https://github.com/dinglebear-ai/rgotify" target="_blank" rel="noopener noreferrer">gotify-rmcp</a> - Gotify push notification bridge for sends, messages, apps, and clients.</li>
+<li><a href="https://github.com/dinglebear-ai/rarcane" target="_blank" rel="noopener noreferrer">arcane-rmcp</a> - Arcane Docker management bridge for containers and related resources.</li>
+<li><a href="https://github.com/dinglebear-ai/yarr" target="_blank" rel="noopener noreferrer">yarr</a> - Media-stack bridge for Sonarr, Radarr, Prowlarr, Plex, and related services.</li>
+<li><a href="https://github.com/dinglebear-ai/rytdl" target="_blank" rel="noopener noreferrer">ytdl-rmcp</a> - Media download and metadata workflow server.</li>
+<li><a href="https://github.com/dinglebear-ai/synapse" target="_blank" rel="noopener noreferrer">synapse-rmcp</a> - Local Synapse workflow server for scout and flux actions.</li>
+<li><a href="https://github.com/dinglebear-ai/cortex" target="_blank" rel="noopener noreferrer">cortex</a> - Syslog and homelab log aggregation MCP server.</li>
+<li><a href="https://github.com/dinglebear-ai/axon" target="_blank" rel="noopener noreferrer">axon</a> - RAG, crawl, scrape, extract, and semantic search project.</li>
+<li><a href="https://github.com/dinglebear-ai/labby" target="_blank" rel="noopener noreferrer">labby</a> - Homelab control plane and MCP gateway project.</li>
+<li><a href="https://github.com/dinglebear-ai/lumen" target="_blank" rel="noopener noreferrer">lumen</a> - Local semantic code search MCP server.</li>
+</ul>
+<h2>Documentation</h2>
+<ul>
+<li><code>CLAUDE.md</code> is the curated local operating guide for contributors and agents.</li>
+<li><code>docs/SETUP.md</code> is curated plugin/setup guidance.</li>
+<li><code>docs/OAUTH.md</code> is curated OAuth setup guidance.</li>
+<li><code>plugins/tailscale/skills/tailscale/SKILL.md</code> is the agent usage guide.</li>
+<li><code>src/</code> is the source of truth for current actions, config defaults, auth
+behavior, and CLI parsing.</li>
+<li>Package, plugin, Docker, and registry manifests are curated distribution
+contracts and should be checked with the verification commands above.</li>
+</ul>
+<h2>License</h2>
+<p>Original Dinglebear-authored portions of this project are licensed under <a href="https://github.com/jmagar/tailscale-rmcp/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">AGPL-3.0-only</a>. Separate commercial licensing is available for organizations that need terms outside the AGPL. Third-party material remains under its original license. See <a href="https://github.com/dinglebear-ai/rtailscale/blob/main/LICENSING.md" target="_blank" rel="noopener noreferrer">LICENSING.md</a>.</p>

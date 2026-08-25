@@ -1,0 +1,155 @@
+<h1>Claude Model Router Hook</h1>
+<p><strong>Effort-first model routing for Claude Code. Heuristics-first, opt-in autoswitch.</strong></p>
+<p><a href="https://github.com/tzachbon/claude-model-router-hook/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+<img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="Platform" />
+<img src="https://img.shields.io/badge/shell-bash-blue" alt="Shell" /></p>
+<p></p>
+<p>A Claude Code hook system that classifies every prompt into a task class and effort level, then routes it to the right model. Warning is the default; autoswitch is opt-in. Sub-agent routing is enforced at spawn time so spawned agents also land on the right tier.</p>
+<h2>Features</h2>
+<ul>
+<li>Classifies each prompt into a task class and effort level with a heuristics-first classifier; no API key required</li>
+<li>Warns by default; opt-in autoswitch writes the recommended model to <code>~/.claude/settings.json</code> for new sessions only</li>
+<li>Enforces sub-agent routing at spawn time via a <code>PreToolUse</code> hook, and injects the tier rules into every session via <code>SessionStart</code></li>
+<li>Effort-first routing with boundary damping, so near-threshold prompts warn instead of flipping the model</li>
+<li>Prefix any prompt with <code>~</code> or <code>&lt;</code> to bypass classification and keep the current model</li>
+</ul>
+<h2>How It Works</h2>
+<p>Three hooks run inside Claude Code, all backed by a shared Python router package:</p>
+<p><strong><code>user_prompt_submit.py</code></strong> (<code>UserPromptSubmit</code>) classifies the incoming prompt into a task class and effort level, then compares the recommendation against your current model. In the default <code>warn</code> mode it injects an advisory message. In autoswitch mode it writes the recommended model to <code>~/.claude/settings.json</code> so the next session starts on the right tier; running sessions are never switched mid-flight.</p>
+<p><strong><code>pre_tool_use.py</code></strong> (<code>PreToolUse</code> on <code>Agent</code>/<code>Task</code>) enforces sub-agent routing at spawn time. Generic spawns are rewritten to the matching <code>routed-*</code> agent variant, custom agent types get a model-only recommendation, and an explicit model set by the caller is always respected. Controlled by <code>subagent_enforcement</code> (<code>on</code> | <code>advisory</code> | <code>off</code>, default <code>on</code>).</p>
+<p><strong><code>session_init.py</code></strong> (<code>SessionStart</code>) injects the task-class rules below into every session so you and your sub-agents share one routing table.</p>
+<p><img src="https://raw.githubusercontent.com/tzachbon/claude-model-router-hook/HEAD/assets/sub-agent-routing.png" alt="Sub-agent spawned with the routed model" /></p>
+<h3>Routing model</h3>
+<p>Routing is effort-first: the classifier picks an effort level, then the model that fits it. <code>effort_warn_distance</code> damps borderline cases so a prompt near a class boundary warns rather than flipping the model. The classifier is heuristics-first (keyword and pattern matching) with an optional headless <code>claude -p --model haiku</code> fallback for ambiguous prompts. The fallback needs no API key (it uses your Claude Code auth), caches results by prompt hash in the plugin data dir, and can be disabled with <code>classifier.cli_fallback: false</code>. Everything fails open: any error passes the prompt through unmodified.</p>
+
+<h2>Model Tier Rules</h2>
+<p>These rules apply to YOU and to every sub-agent you spawn.</p>
+<h3>Task classes and default targets</h3>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Target model</th>
+<th>Effort</th>
+<th>When to use</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>mechanical</td>
+<td>haiku</td>
+<td>none</td>
+<td>Git ops, renames, formatting, lint, file moves, version bumps, quick lookups, short imperative tasks.</td>
+</tr>
+<tr>
+<td>implementation</td>
+<td>sonnet</td>
+<td>medium</td>
+<td>Writing or editing code, building features, creating components or APIs, writing tests, standard feature work.</td>
+</tr>
+<tr>
+<td>debugging</td>
+<td>sonnet</td>
+<td>high</td>
+<td>Diagnosing failures, flaky tests, races, regressions, stack traces, bisecting, reproducing bugs.</td>
+</tr>
+<tr>
+<td>architecture</td>
+<td>opus</td>
+<td>high</td>
+<td>Architecture decisions, tradeoff analysis, redesigns, deep multi-file analysis, sustained reasoning over large context.</td>
+</tr>
+<tr>
+<td>extreme</td>
+<td>fable</td>
+<td>high</td>
+<td>Multi-system migrations, codebase-wide rewrites, long-horizon plans, RFCs and design docs, platform-scale work.</td>
+</tr>
+<tr>
+<td>abstain</td>
+<td>(no routing)</td>
+<td>-</td>
+<td>Prompt does not clearly match any class; current model and effort pass through unmodified.</td>
+</tr>
+</tbody></table>
+<h3>Sub-agent model selection (MANDATORY)</h3>
+<p>When calling the Agent tool, set the model parameter to match the task class
+above. Never default all sub-agents to opus. Match the model to the work:
+mechanical work goes to haiku, standard coding to sonnet, deep analysis to
+opus, and only platform-scale efforts to fable.</p>
+<h2>Installation</h2>
+<h3>Plugin install (recommended)</h3>
+<pre><code class="language-bash">claude plugin marketplace add tzachbon/claude-model-router-hook
+claude plugin install claude-model-router-hook@claude-model-router-hook
+</code></pre>
+<p>Hooks are registered automatically. Restart Claude Code to activate.</p>
+<h3>Manual</h3>
+<pre><code class="language-bash">git clone https://github.com/tzachbon/claude-model-router-hook.git
+cd claude-model-router-hook
+./install.sh
+</code></pre>
+<p>The plugin registers its <code>SessionStart</code>, <code>UserPromptSubmit</code>, and <code>PreToolUse</code> hooks through its bundled <code>hooks.json</code>; there is nothing to wire into <code>settings.json</code> by hand. Restart Claude Code to activate.</p>
+<h2>Override</h2>
+<p>Prefix any prompt with <code>~</code> or <code>&lt;</code> to skip classification entirely and keep the current model active.</p>
+<h2>Configuration</h2>
+<p>Config lives in <code>~/.claude/model-router.json</code> (global) and <code>.claude/model-router.json</code> inside a project (project wins), merged over built-in defaults. Both files are optional. The schema is v2; a v1 config is migrated in memory at load time and your files are never rewritten. Example:</p>
+<pre><code class="language-json">{
+  "version": 2,
+  "apply_mode": "warn",
+  "allow_fable_autoswitch": false,
+  "subagent_enforcement": "on",
+  "classifier": { "cli_fallback": true },
+  "thresholds": { "effort_warn_distance": 2 }
+}
+</code></pre>
+<p>Key knobs:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>apply_mode</code></td>
+<td><code>warn</code></td>
+<td><code>warn</code> advises only; autoswitch writes the recommended model to <code>~/.claude/settings.json</code> for new sessions only, never the live one.</td>
+</tr>
+<tr>
+<td><code>allow_fable_autoswitch</code></td>
+<td><code>false</code></td>
+<td>Extra gate: even in autoswitch mode, routing up to <code>fable</code> only writes when this is on.</td>
+</tr>
+<tr>
+<td><code>subagent_enforcement</code></td>
+<td><code>on</code></td>
+<td><code>on</code> rewrites/injects sub-agent routing in <code>PreToolUse</code>; <code>advisory</code> recommends only; <code>off</code> disables it.</td>
+</tr>
+<tr>
+<td><code>classifier.cli_fallback</code></td>
+<td><code>true</code></td>
+<td>Enables the optional headless <code>claude -p --model haiku</code> classifier fallback for ambiguous prompts.</td>
+</tr>
+<tr>
+<td><code>thresholds.effort_warn_distance</code></td>
+<td><code>2</code></td>
+<td>Boundary damping: prompts within this effort distance of a class edge warn instead of switching.</td>
+</tr>
+</tbody></table>
+<h2>Log</h2>
+<p>Activity is written to <code>~/.claude/hooks/model-router-hook.log</code>:</p>
+<pre><code>[2026-03-07 12:00:00] action=AUTOSWITCH-&gt;opus model=sonnet effort=medium klass=architecture target_effort=high prompt="evaluate the tradeoffs betwee..."
+[2026-03-07 12:01:00] action=SUGGEST-&gt;sonnet model=haiku effort=none klass=implementation target_effort=medium prompt="build the settings panel comp..."
+[2026-03-07 12:02:00] action=OVERRIDE prompt="~ keep opus for this one"
+</code></pre>
+<p><code>action=</code> comes first, followed by any <code>model</code> / <code>effort</code> / <code>klass</code> / <code>target_effort</code> fields, then the truncated prompt snippet. <code>AUTOSWITCH-&gt;</code> lines record a settings write (autoswitch mode); <code>SUGGEST-&gt;</code> lines record a warn-mode advisory; <code>OVERRIDE</code> marks a bypassed prompt. A prompt that already matches its tier exits silently and writes no line.</p>
+<h2>Known limitations</h2>
+<ul>
+<li>Multi-hook <code>updatedInput</code> merge order (A-3): when more than one <code>PreToolUse</code> hook returns an <code>updatedInput</code> for the same tool call, the order in which Claude Code merges them is undocumented platform behavior. The router writes its rewrite defensively, but a competing hook that also rewrites the spawn can win depending on merge order.</li>
+</ul>
+<h2>Credits</h2>
+<p>Based on <a href="https://github.com/coyvalyss1/model-matchmaker" target="_blank" rel="noopener noreferrer">model-matchmaker</a> by <a href="https://github.com/coyvalyss1" target="_blank" rel="noopener noreferrer">@coyvalyss1</a>.</p>
+<h2>Contributing</h2>
+<p>See <a href="https://github.com/tzachbon/claude-model-router-hook/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a>.</p>
+<h2>License</h2>
+<p>MIT. See <a href="https://github.com/tzachbon/claude-model-router-hook/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>.</p>

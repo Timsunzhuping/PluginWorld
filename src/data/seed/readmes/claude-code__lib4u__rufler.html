@@ -1,0 +1,1377 @@
+<img width="2582" height="1384" src="https://github.com/user-attachments/assets/1c45f01d-27bc-49c0-9cfb-3d455822def6" />
+# Rufler<p><strong>One command. One YAML file. A whole autonomous AI swarm.</strong></p>
+<p><code>rufler</code> is a Python wrapper around <a href="https://github.com/ruvnet/ruflo" target="_blank" rel="noopener noreferrer"><code>ruflo</code></a> (the TypeScript AI agent orchestration CLI from the <code>claude-flow</code> family) that turns a dozen bootstrap commands into a single, declarative <code>rufler_flow.yml</code> file.</p>
+<p>Instead of memorizing <code>ruflo init → daemon start → memory init → swarm init → hive-mind init → hive-mind spawn --claude --objective=...</code>, you write a YAML file that describes your project, your agent team and your task, and run:</p>
+<pre><code class="language-bash">rufler run
+</code></pre>
+<p>rufler handles preflight checks, daemon lifecycle, swarm/memory/hive-mind init, objective composition, logging, multi-task sequencing, AI-driven task decomposition, background supervision and live log following.</p>
+<hr />
+<h2>Why rufler and not ruflo directly?</h2>
+<p><code>ruflo</code> is powerful but low-level. It exposes ~26 commands and 140+ subcommands that all have to be called in the right order with the right flags. For day-to-day driving of an autonomous Claude-Code swarm, that's a lot of ceremony.</p>
+<table>
+<thead>
+<tr>
+<th>Problem with raw <code>ruflo</code></th>
+<th>How <code>rufler</code> fixes it</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>6–10 shell commands to boot a project (<code>init</code> → <code>daemon start</code> → <code>memory init</code> → <code>swarm init</code> → <code>hive-mind init</code> → <code>hive-mind spawn --claude --objective=...</code>)</td>
+<td><strong>One command: <code>rufler run</code></strong> reads your YAML and runs the whole pipeline.</td>
+</tr>
+<tr>
+<td>Objective prompt must be assembled by hand — project name, task body, every agent's role and prompt, autonomy flags</td>
+<td><strong>Auto-composed objective</strong> from <code>rufler_flow.yml</code> — agents are sorted lead → senior → junior and injected into a single coherent prompt.</td>
+</tr>
+<tr>
+<td>No native multi-task support — you spawn one hive per task manually</td>
+<td><strong>Multi-task mode</strong> (<code>task.multi: true</code>) — run a list of subtasks sequentially or in parallel from one YAML.</td>
+</tr>
+<tr>
+<td>No task decomposition</td>
+<td><strong>AI decomposition</strong> (<code>task.decompose: true</code>) — rufler calls <code>claude -p</code> to split a big <code>main</code> task into N subtasks before spawning the swarm.</td>
+</tr>
+<tr>
+<td>Backgrounding is fragile: detaching from terminal, redirecting stdout, closing fds</td>
+<td><strong>Built-in supervisor</strong> (<code>rufler.logwriter</code>) — detached runs write a clean NDJSON log and never leak fds or tie up your terminal.</td>
+</tr>
+<tr>
+<td>No uniform log — <code>ruflo</code>/Claude emit mixed ANSI text + stream-JSON + plain logs</td>
+<td><strong>Normalized NDJSON</strong>: every line is a JSON object with <code>ts</code>, <code>src</code> (<code>claude</code> / <code>ruflo</code> / <code>rufler</code>), detected <code>level</code> and cleaned <code>text</code>. Trivial to parse, tail, grep.</td>
+</tr>
+<tr>
+<td>No way to see "what's the swarm doing right now?" without 3 different commands</td>
+<td><strong><code>rufler follow</code></strong> — <code>tail -f</code> with makeup: live dashboard of session, tasks, tokens, last tool activity, recent events.</td>
+</tr>
+<tr>
+<td>Preflight failures are silent until something crashes mid-run</td>
+<td><strong><code>rufler check</code></strong> and <code>rufler doctor</code>-style start gate — validates node, claude, ruflo and config before touching anything.</td>
+</tr>
+<tr>
+<td>No graceful teardown</td>
+<td><strong><code>rufler stop</code></strong> — shuts down autopilot, hive-mind, daemon and records post-task metrics in one call.</td>
+</tr>
+<tr>
+<td>Flags like <code>--dangerously-skip-permissions</code> get silently dropped when <code>--objective</code> is huge</td>
+<td><strong>Belt-and-suspenders</strong>: rufler also writes <code>.claude/settings.local.json</code> with <code>permissions.defaultMode=bypassPermissions</code> so headless runs never stall on a prompt.</td>
+</tr>
+<tr>
+<td>YAML config? There isn't one.</td>
+<td><strong><code>rufler_flow.yml</code></strong> — checked into your repo, reviewable in PRs, diffable over time.</td>
+</tr>
+<tr>
+<td>Third-party skills have to be cloned / vendored / copied by hand</td>
+<td><strong><a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> integration</strong> — list GitHub repos, <code>owner/repo</code> shorthands, or paste full <code>skills add …</code> commands under <code>skills.custom</code>; rufler runs <code>npx skills add</code> for you and verifies every <code>SKILL.md</code> before the swarm starts.</td>
+</tr>
+</tbody></table>
+<p>In short: <code>ruflo</code> is the engine, <code>rufler</code> is the ignition + dashboard + cruise control.</p>
+<hr />
+<h2>Features</h2>
+<ul>
+<li><strong>Single-file project config</strong> — <code>rufler_flow.yml</code> describes project, memory, swarm, task and the agent team.</li>
+<li><strong>One-command boot</strong> — <code>rufler run</code> runs checks → init → daemon → memory → swarm → hive-mind → spawn.</li>
+<li><strong>Docker-like run lifecycle</strong> — <code>rufler run</code> (foreground, Ctrl+C kills) / <code>rufler run -d</code> (detached background), just like <code>docker run</code>. Every invocation gets an 8-char hex id.</li>
+<li><strong>Cross-project registry</strong> — <code>~/.rufler/registry.json</code> tracks every run from every project. <code>rufler ps</code> / <code>rufler ps -a</code> / <code>rufler logs &lt;id&gt;</code> / <code>rufler follow &lt;id&gt;</code> / <code>rufler stop &lt;id&gt;</code> all work from any directory.</li>
+<li><strong>Project rollup</strong> — <code>rufler projects</code> shows the last-run timestamp and total runs per project name, surviving <code>rufler rm</code> and pruning.</li>
+<li><strong>Rich status model</strong> — <code>running</code> / <code>exited</code> / <code>failed(rc)</code> / <code>stopped</code> / <code>dead</code>, computed from pid liveness + log tail + finish marker.</li>
+<li><strong>Token usage tracking</strong> — <code>rufler tokens</code> reports input/output/cache tokens per run, per project, and grand total across all projects. Per-project totals are cumulative and survive <code>rufler rm</code>.</li>
+<li><strong>Agent inspection</strong> — <code>rufler agents</code> lists every agent in the flow with type, role, seniority, depends_on and a 150-char prompt preview (<code>--full</code> for the full body).</li>
+<li><strong>Soft agent DAG</strong> — declare <code>depends_on: [architect]</code> on an agent and rufler injects GATE/HANDOFF blocks into the objective so downstream agents poll shared memory for an upstream brief and approval before starting work. Cycles, self-deps and unknown names are rejected at load time.</li>
+<li><strong>Task tracking</strong> — every task gets a sub-id (<code>a1b2c3d4.01</code>), persistent status (queued / running / exited / failed / stopped / skipped), per-task token accounting, and timing. <code>rufler tasks</code> shows it all; <code>rufler tasks &lt;sub-id&gt; -v</code> prints a detailed card.</li>
+<li><strong>Resume on restart</strong> — <code>rufler run</code> automatically detects the previous run for the same project, skips already-completed tasks, and reuses decomposed task files. No wasted claude calls. <code>--new</code> forces a clean start, <code>--from N</code> resumes from a specific task slot.</li>
+<li><strong>Soft resume via memory</strong> — the composed objective tells agents to probe the shared memory namespace for prior progress before restarting work, so an interrupted run can pick up where it left off.</li>
+<li><strong>Mono, multi and decomposed tasks</strong> — run one big task, an explicit list of subtasks, or let Claude decompose <code>main</code> into N subtasks.</li>
+<li><strong>Sequential and parallel run modes</strong> for multi-task groups.</li>
+<li><strong>Task chaining</strong> (<code>task.chain: true</code>) — in sequential multi-task mode, each new <code>claude -p</code> session receives a compressed retrospective of all previous tasks (body + report), so it has full context without sharing a session. Per-task override with <code>chain: false</code> on individual group items.</li>
+<li><strong>Deep Think</strong> (<code>task.deep_think: true</code>) — before decomposing or executing, rufler spawns a read-only <code>claude -p</code> session (configurable model, default opus) that scans the project structure, reads key files, and writes a structured analysis to <code>.rufler/analysis.md</code>. The analysis is injected into the decomposer and/or the agent objective so every downstream step has project-aware context. Cached on re-run; <code>--new</code> forces rescan.</li>
+<li><strong>Iterative refinement</strong> (<code>task.iterations: N</code>) — run the whole deep_think → decompose → execute → report cycle N times. Each iteration's reports are injected into the next iteration's deep_think so the plan refines instead of restarting blind. Optional <strong>judge agent</strong> (<code>iteration_judge: true</code>) evaluates the project at every iteration boundary and short-circuits the loop when a score threshold is reached. Per-iteration artifacts are namespaced under <code>.rufler/iter-NN/</code>, task logs get iter prefixes, no collisions.</li>
+<li><strong>Detached background mode</strong> with a proper supervisor process and NDJSON logs.</li>
+<li><strong>Live dashboard</strong> via <code>rufler follow</code> — 4-panel TUI with task list, session stats, AI conversation stream (thinking, text, tool calls), and system events. Tails all per-task logs in multi-task mode.</li>
+<li><strong>Custom decomposer prompt</strong> — override the task-splitter prompt inline or from an <code>.md</code> file.</li>
+<li><strong>Typed dataclass config</strong> — schema validation, role/seniority checks, unknown-key tolerance.</li>
+<li><strong>External prompts</strong> — agents and tasks can be inline OR loaded from <code>.md</code> files, so prompts stay out of YAML.</li>
+<li><strong><a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> integration</strong> — pull third-party Claude Code skills straight from the yml. Drop a repo URL, an <code>owner/repo</code> shorthand, or paste a full <code>skills add …</code> command into <code>skills.custom</code>; rufler shells out to <code>npx skills add</code> pre-run, verifies each <code>SKILL.md</code> landed, and reports results in the plan banner. Mix-and-match with local paths and ruflo's built-in packs in the same list.</li>
+<li><strong>MCP server management</strong> — declare MCP servers in <code>mcp.servers</code> and rufler registers them with Claude Code via <code>claude mcp add</code> during init. Supports stdio, http, and sse transports with env vars and headers. <code>rufler mcp</code> inspects what's declared vs registered.</li>
+<li><strong>Automatic reports</strong> — after each task (<code>on_task_complete</code>) and after all tasks (<code>on_complete</code>), rufler spawns a short claude session to write a markdown report. Enabled by default; custom prompts supported inline or from <code>.md</code> files.</li>
+<li><strong>Graceful shutdown</strong> — <code>rufler stop</code> ends the session cleanly and writes post-task hooks.</li>
+</ul>
+<hr />
+<h2>Installation</h2>
+<h3>Prerequisites</h3>
+<ul>
+<li><strong>Python 3.9+</strong></li>
+<li><strong>Node.js 20+</strong> and <strong>npm 9+</strong></li>
+<li><strong>Claude Code CLI</strong> (<code>claude</code> on <code>$PATH</code>) — see <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer">claude.ai/code</a></li>
+<li><strong>ruflo</strong> — rufler will resolve it via <code>$RUFLER_RUFLO_BIN</code>, local <code>node_modules</code>, <code>$PATH</code>, npm global bin, or <code>npx -y ruflo@latest</code> as a last resort. You can also run <code>npm i -g ruflo</code>.</li>
+</ul>
+<h3>Install rufler</h3>
+<p>From source (until it's on PyPI):</p>
+<pre><code class="language-bash">git clone https://github.com/lib4u/rufler.git
+cd rufler
+pip install -e .
+</code></pre>
+<p>Verify:</p>
+<pre><code class="language-bash">rufler --help
+rufler check
+</code></pre>
+<p><code>rufler check</code> will tell you exactly which dependency (node / claude / ruflo) is missing and how to install it.</p>
+<hr />
+<h2>Quickstart</h2>
+<pre><code class="language-bash"># 1. Create a sample flow file in the current directory
+rufler init
+
+# 2. Edit rufler_flow.yml — change project name, task, agents
+$EDITOR rufler_flow.yml
+
+# 3. Dry run — prints the composed objective and the plan, runs nothing
+rufler run --dry-run
+
+# 4. Launch the swarm (foreground, streams to terminal AND to NDJSON log)
+rufler run
+
+# 5. Or launch detached in the background
+rufler run -d
+
+# 6. Watch it work
+rufler follow           # live dashboard
+rufler status           # one-shot status
+rufler progress         # autopilot task progress
+rufler logs             # recent autopilot events
+
+# 7. Clean shutdown
+rufler stop
+</code></pre>
+<hr />
+<h2>Commands</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>rufler check</code></td>
+<td>Verify that <code>node</code>, <code>claude</code> and <code>ruflo</code> are available and report how each was resolved.</td>
+</tr>
+<tr>
+<td><code>rufler init</code></td>
+<td>Create a sample <code>rufler_flow.yml</code> in the current directory.</td>
+</tr>
+<tr>
+<td><code>rufler agents [ID]</code></td>
+<td>List agents declared in the flow (name, type, role, seniority, depends_on, 150-char prompt preview). With an id → reads the flow file from that run's registry entry. <code>--full</code> prints full prompt bodies.</td>
+</tr>
+<tr>
+<td><code>rufler run [FLOW_FILE]</code></td>
+<td>Validate config, run ruflo init/daemon/memory/swarm/hive-mind, spawn the Claude swarm. Foreground by default; Ctrl+C kills. Add <code>-d</code> to detach. Resumes from last completed task by default; <code>--new</code> to start fresh, <code>--from N</code> to resume from slot N.</td>
+</tr>
+<tr>
+<td><code>rufler build [FLOW_FILE]</code></td>
+<td>Same preparation pipeline as <code>rufler run</code> (checks → ruflo init → daemon → memory → swarm → hive-mind → skills install) <strong>without</strong> launching Claude. Useful to apply yml changes (skills, memory, swarm) to an existing project. <code>--skip-init</code> skips the ruflo init + daemon step for quick re-builds.</td>
+</tr>
+<tr>
+<td><code>rufler skills</code></td>
+<td>Inspect installed skills in <code>&lt;project&gt;/.claude/skills/</code> and show the yml snapshot. <code>--available</code> lists packs/skills in ruflo's bundled source tree. <code>--delete</code> wipes non-symlinked skill dirs from the project (with confirmation; <code>-y</code> to skip).</td>
+</tr>
+<tr>
+<td><code>rufler mcp</code></td>
+<td>List MCP servers declared in <code>rufler_flow.yml</code>. <code>--active</code> shows what's actually registered in <code>~/.claude.json</code> for this project. Servers are added via <code>claude mcp add</code> during <code>rufler run</code>/<code>build</code>.</td>
+</tr>
+<tr>
+<td><code>rufler ps [ID]</code></td>
+<td>Docker-style list of runs. No args → running only. <code>-a</code> → all. <code>--prune</code> / <code>--prune-older-than-days N</code> → clean stale entries. With an ID → detailed view of one run (status, tasks, claude procs, log tail).</td>
+</tr>
+<tr>
+<td><code>rufler tasks [ID]</code></td>
+<td>List tasks for a run with sub-ids, status, tokens, timing. Without id → latest run in cwd. <code>-a</code> → all runs. <code>--status running</code> → filter. Pass a task sub-id (e.g. <code>a1b2c3d4.01 -v</code>) for a detailed card with token breakdown and recent log events. <code>--rm</code> removes tasks from the registry; <code>--rm-all</code> removes all tasks in cwd; <code>--rm-files</code> also deletes task files and logs from disk.</td>
+</tr>
+<tr>
+<td><code>rufler projects</code></td>
+<td>Per-project rollup: last run id, when it last ran, total runs. Survives <code>rufler rm</code> and pruning.</td>
+</tr>
+<tr>
+<td><code>rufler logs [ID]</code></td>
+<td>Tail recent autopilot events. <code>--raw</code> prints the NDJSON log directly. <code>-f</code> / <code>--follow</code> streams new lines live. Pass a task sub-id (e.g. <code>a1b2c3d4.01</code>) to see only that task's log slice.</td>
+</tr>
+<tr>
+<td><code>rufler follow [ID]</code></td>
+<td>Live TUI dashboard: task progress (with status icons), AI conversation stream (thinking, text, tool calls), session stats, and system events. Tails all per-task logs automatically.</td>
+</tr>
+<tr>
+<td><code>rufler status [ID]</code></td>
+<td>System + swarm + hive-mind + autopilot status in one call.</td>
+</tr>
+<tr>
+<td><code>rufler watch [ID]</code></td>
+<td>Poll <code>rufler status</code> on a loop until Ctrl-C.</td>
+</tr>
+<tr>
+<td><code>rufler progress [ID]</code></td>
+<td>Autopilot task progress + recent iteration log.</td>
+</tr>
+<tr>
+<td><code>rufler stop [ID]</code></td>
+<td>Shutdown autopilot, hive-mind and daemon; record post-task hook; end session. <code>--kill</code> sends SIGTERM to the supervisor pids.</td>
+</tr>
+<tr>
+<td><code>rufler rm [ID]...</code></td>
+<td>Remove registry entries. <code>--all-finished</code> / <code>--older-than-days N</code> for bulk cleanup. Refuses running entries.</td>
+</tr>
+<tr>
+<td><code>rufler tokens [ID]</code></td>
+<td>Token usage report — without id: per-project table + grand total. With an id: detailed breakdown. <code>--by-task</code> shows per-task token breakdown. <code>--rescan</code> re-parses run logs from disk.</td>
+</tr>
+</tbody></table>
+<p>Every run-scoped command (<code>logs</code>, <code>follow</code>, <code>status</code>, <code>watch</code>, <code>progress</code>, <code>stop</code>) accepts an optional run id prefix as a positional argument. Without an id it resolves to the run started from the current working directory.</p>
+<h3><code>rufler run</code> flags</h3>
+<pre><code>rufler run [FLOW_FILE] [OPTIONS]
+
+Arguments:
+  FLOW_FILE                    Positional path to flow yml. Overrides -c.
+
+Options:
+  -c, --config PATH            Path to rufler_flow.yml  [default: rufler_flow.yml]
+  --dry-run                    Print the plan and composed objective, don't execute.
+  --skip-checks                Skip node/claude/ruflo preflight.
+  --skip-init                  Skip ruflo init + daemon + memory init (useful for re-runs).
+  --non-interactive/--interactive
+                               Run Claude Code headless (-p stream).
+  --yolo/--no-yolo             Pass --dangerously-skip-permissions.
+  -d, --background/--foreground
+                               Detach from terminal (implies --non-interactive --yolo).
+  --log-file PATH              Override execution.log_file from yml.
+  --new                        Start all tasks from scratch: re-decompose and ignore
+                               previous progress.
+  --from N                     Resume from task slot N (1-based), skipping tasks before it.
+</code></pre>
+<p>CLI flags always override the <code>execution:</code> section of <code>rufler_flow.yml</code>.</p>
+<p>By default <code>rufler run</code> <strong>resumes</strong> from where a previous run stopped. It reuses existing decomposed task files (skipping the claude call) and skips tasks that already completed successfully (<code>rc=0</code>). Use <code>--new</code> to force a clean start.</p>
+<hr />
+<h2><code>rufler_flow.yml</code> reference</h2>
+<p>Minimal example:</p>
+<pre><code class="language-yaml">project:
+  name: my-service
+  description: Small Go HTTP service.
+
+task:
+  main: |
+    Build a Go HTTP server on :8080 with a /health endpoint and unit tests.
+  autonomous: true
+
+agents:
+  - name: coder
+    type: coder
+    role: worker
+    seniority: senior
+    prompt: Implement the server and tests.
+</code></pre>
+<p>Full schema:</p>
+<pre><code class="language-yaml">project:
+  name: my-project                    # required-ish; drives objective header
+  description: Free-form description.
+
+memory:
+  backend: hybrid                     # hybrid | sqlite | ...
+  namespace: my-project
+  init: true
+  checkpoint_interval_minutes: 5      # how often agents flush state to memory (0 = disable timer, still on events)
+
+swarm:
+  topology: hierarchical-mesh         # hierarchical | mesh | hierarchical-mesh | adaptive
+  max_agents: 8
+  strategy: specialized
+  consensus: raft                     # raft | byzantine | gossip | crdt | quorum
+
+task:
+  # --- mono mode ---
+  main: |                             # inline main task
+    Build X, test Y, verify Z.
+  main_path: ./tasks/main.md          # OR load from file
+  autonomous: true
+  max_iterations: 100
+  timeout_minutes: 180
+
+  # --- multi mode ---
+  multi: false                        # set true to enable group / decompose
+  run_mode: sequential                # sequential | parallel
+  group:                              # explicit list of subtasks
+    - name: backend
+      file_path: tasks/backend.md
+    - name: frontend
+      content: |                      # inline alternative to file_path
+        Build the React frontend...
+
+  # --- decompose mode (AI decomposition) ---
+  decompose: false                    # true → call claude -p to split `main`
+  decompose_count: 4                  # how many subtasks to generate
+  decompose_dir: .rufler/tasks        # where to write generated .md files
+  decompose_file: .rufler/tasks/decomposed_tasks.yml
+  decompose_prompt: |                 # optional inline decomposer prompt override
+    You split tasks. Placeholders: {n} and {main}.
+    Output YAML: tasks: [ {name, title, content} ]
+  decompose_prompt_path: ./prompts/decompose.md   # OR load decomposer prompt from file
+  decompose_model: sonnet             # model for the decompose call (default sonnet)
+  decompose_effort: high             # thinking effort for decomposer (low/medium/high/max)
+
+  # --- deep think (project analysis before decompose/execute) ---
+  deep_think: false                   # true → read-only claude session scans the project first
+  deep_think_model: opus              # model for analysis (opus recommended for deep reasoning)
+  deep_think_effort: max             # thinking effort for deep think (low/medium/high/max; default max)
+  deep_think_output: .rufler/analysis.md  # cached; reused on re-run, --new to regenerate
+  deep_think_timeout: 600             # seconds
+  deep_think_budget: 1.50            # optional max spend in USD for the deep think session
+  deep_think_allowed_tools: "Read,Glob,Grep,Bash"  # restrict --allowedTools (default: not set → ALL tools including MCP)
+  deep_think_prompt: |                # optional inline override
+    Analyze this project for: {main}
+  deep_think_prompt_path: ./prompts/analyze.md    # OR load from file
+
+  # --- task chaining (sequential multi-task only) ---
+  chain: false                        # true → inject compressed retrospective of previous tasks into the next task's prompt
+  chain_max_tokens: 2000              # word budget for the compressed retrospective (body + report combined)
+  chain_include_report: true          # include the per-task report in the retrospective (requires on_task_complete.report)
+
+  # --- iterative refinement (repeat the whole pipeline N times) ---
+  iterations: 1                       # 1 = one-shot (default, unchanged behaviour); &gt;1 = loop deep_think→decompose→execute×N
+  iteration_scope: full               # full | decompose_only | tasks_only (what regenerates each iter)
+  iteration_refine: true              # inject prior iterations' reports into next deep_think
+  iteration_judge: false              # true → judge agent decides whether to stop early
+  iteration_judge_model: opus         # model for the judge claude -p session
+  iteration_judge_effort: max         # thinking effort for the judge (low/medium/high/max)
+  iteration_judge_timeout: 600        # seconds
+  iteration_judge_threshold: 0.9      # stop when verdict=done AND score &gt;= threshold (0.0-1.0)
+  iteration_judge_prompt: |           # optional custom judge prompt (placeholders: {main_task}, {project}, {iter_num}, {total_iters}, {threshold}, {accumulated_reports})
+  # iteration_judge_prompt_path: ./prompts/judge.md   # OR load from file
+  iteration_stop_on_success: false    # fallback when judge disabled: break when all tasks rc=0
+
+  # --- reports (two levels) ---
+  on_task_complete:                     # after EACH task completes
+    report: true                        # default: enabled
+    report_path: .rufler/reports/{task}.md  # {task} replaced with task name
+    # report_prompt: |                  # optional custom prompt
+    #   Summarize what this task accomplished.
+    # report_prompt_path: ./prompts/task-report.md
+
+  on_complete:                          # after ALL tasks complete
+    report: true                        # default: enabled
+    report_path: .rufler/report.md
+    # report_prompt: |                  # optional custom prompt
+    #   Write a final project completion report.
+    # report_prompt_path: ./prompts/final-report.md
+
+execution:
+  non_interactive: false
+  yolo: false                         # pass --dangerously-skip-permissions
+  background: false                   # detach from terminal
+  log_file: .rufler/run.log
+
+# MCP servers — registered with Claude Code via `claude mcp add -s project`
+mcp:
+  servers:
+    - name: my-db                       # server name (unique, required)
+      command: npx                      # executable (required for stdio)
+      args: ["-y", "@anthropic/mcp-postgres"]
+      env:
+        DATABASE_URL: "postgresql://localhost/mydb"
+
+    - name: sentry                      # HTTP transport example
+      transport: http                   # stdio (default) | http | sse
+      url: "https://mcp.sentry.dev/mcp"
+
+    - name: corridor                    # HTTP with auth headers
+      transport: http
+      url: "https://app.corridor.dev/api/mcp"
+      headers:
+        Authorization: "Bearer ${CORRIDOR_TOKEN}"
+
+agents:
+  - name: architect
+    type: system-architect            # any ruflo agent type, or custom string
+    role: specialist                  # queen | specialist | worker | scout
+    seniority: lead                   # lead | senior | junior
+    prompt: |                         # inline prompt
+      Define package layout and interfaces.
+    # OR
+    prompt_path: ./prompts/architect.md
+
+  - name: coder
+    type: coder
+    role: worker
+    seniority: senior
+    prompt: Implement the design.
+    depends_on: [architect]           # soft DAG — see "Agent dependencies" below
+
+# Per-task chain override (inside group items):
+#   - name: review
+#     file_path: tasks/review.md
+#     chain: false                    # this task does NOT receive the retrospective (overrides task.chain)
+</code></pre>
+<h3>Validation rules</h3>
+<ul>
+<li><code>agent.role</code> ∈ <code>{queen, specialist, worker, scout}</code></li>
+<li><code>agent.seniority</code> ∈ <code>{lead, senior, junior}</code></li>
+<li>Each agent needs <code>prompt</code> OR <code>prompt_path</code>.</li>
+<li><code>agent.depends_on</code> must be a list of known agent names. Self-deps and cycles are rejected at load time. <code>null</code> and <code>[]</code> are equivalent (no deps). Duplicates are deduped.</li>
+<li><code>task.run_mode</code> ∈ <code>{sequential, parallel}</code>.</li>
+<li><code>mcp.servers[*].transport</code> ∈ <code>{stdio, http, sse}</code>. stdio requires <code>command</code>, http/sse require <code>url</code>. Duplicate names are rejected.</li>
+<li><code>task.group</code> may be a list or a dict — both are accepted.</li>
+<li>Unknown keys inside <code>group</code> items are ignored (forward-compatible).</li>
+</ul>
+<hr />
+<h2>Multi-task mode</h2>
+<h3>Explicit group</h3>
+<pre><code class="language-yaml">task:
+  multi: true
+  run_mode: sequential
+  group:
+    - name: backend
+      file_path: tasks/backend.md
+    - name: frontend
+      file_path: tasks/frontend.md
+    - name: e2e
+      file_path: tasks/e2e.md
+</code></pre>
+<p>Run:</p>
+<pre><code class="language-bash">rufler run
+</code></pre>
+<p>rufler spawns a hive for <code>backend</code>, waits for its NDJSON log to emit <code>log ended</code>, then spawns <code>frontend</code>, then <code>e2e</code>.</p>
+<h3>Parallel group</h3>
+<pre><code class="language-yaml">task:
+  multi: true
+  run_mode: parallel
+  group:
+    - name: service_a
+      file_path: tasks/a.md
+    - name: service_b
+      file_path: tasks/b.md
+</code></pre>
+<pre><code class="language-bash">rufler run -d            # parallel mode only makes sense detached
+</code></pre>
+<p>Each subtask gets its own background supervisor and its own NDJSON log under <code>.rufler/</code>.</p>
+<h3>AI-decomposed subtasks</h3>
+<pre><code class="language-yaml">task:
+  multi: true
+  decompose: true
+  decompose_count: 4
+  main: |
+    Build a URL shortener: REST API, SQLite storage, CLI client, tests.
+</code></pre>
+<p>On <code>rufler run</code>, rufler calls <code>claude -p</code> with the decomposer prompt, parses the YAML response, writes <code>.tasks/task_{1..4}.md</code> and a companion <code>.tasks/decomposed_tasks.yml</code>, then runs the group sequentially.</p>
+<p>You can override the decomposer prompt inline (<code>decompose_prompt</code>) or from a file (<code>decompose_prompt_path</code>). Templates may reference <code>{n}</code> (count) and <code>{main}</code> (main task) as placeholders — literal <code>{</code> / <code>}</code> in the template are safe.</p>
+<h3>When to use which mode</h3>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>Recommended mode</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>You already wrote the N subtasks as <code>.md</code> files and the order / scope matters for review</td>
+<td><strong>mono → single task</strong> OR <strong>explicit <code>group</code></strong></td>
+<td>Reproducible, diffable in PRs, no LLM randomness. You control everything.</td>
+</tr>
+<tr>
+<td>One focused goal, no real decomposition needed</td>
+<td><strong>mono</strong> (<code>multi: false</code>, <code>main</code> or <code>main_path</code>)</td>
+<td>Lowest overhead — one hive, one log, one objective.</td>
+</tr>
+<tr>
+<td>Hand-written skeleton with clear hand-off between stages (schema → api → tests → ci)</td>
+<td><strong><code>group</code></strong> + <code>run_mode: sequential</code></td>
+<td>Subsequent subtasks read prior agents' output from shared memory; order is load-bearing.</td>
+</tr>
+<tr>
+<td>Independent subtasks that can race (<code>service_a</code>, <code>service_b</code>, <code>docs</code>)</td>
+<td><strong><code>group</code></strong> + <code>run_mode: parallel</code> + <code>rufler run -d</code></td>
+<td>Each subtask gets its own supervisor and NDJSON log; you only need <code>-d</code> because parallel needs detached supervisors.</td>
+</tr>
+<tr>
+<td>Big fuzzy goal, you want Claude to propose a split before executing</td>
+<td><strong><code>decompose: true</code></strong></td>
+<td>rufler calls <code>claude -p</code> with the decomposer prompt, writes <code>.tasks/task_{1..N}.md</code> + a companion yml, then runs them as a group.</td>
+</tr>
+<tr>
+<td><code>decompose: true</code> but you want to pin the split style (always "schema → api → tests → ci")</td>
+<td><strong><code>decompose_prompt</code></strong> (inline) or <strong><code>decompose_prompt_path</code></strong> (md file) with <code>{n}</code> / <code>{main}</code> placeholders</td>
+<td>The default prompt is generic; a custom template makes decomposition deterministic across runs of the same project.</td>
+</tr>
+<tr>
+<td>You want to <strong>review</strong> the generated split before running the swarm</td>
+<td><code>decompose: true</code> + <code>rufler run --dry-run</code></td>
+<td>Decomposition runs, files are written, plan banner is printed, then rufler stops before spawning. Inspect <code>.tasks/*.md</code>, then re-run without <code>--dry-run</code>.</td>
+</tr>
+<tr>
+<td>Subtasks are independent enough for parallel but you don't want to hand-write them</td>
+<td><code>decompose: true</code> + <code>run_mode: parallel</code> + <code>rufler run -d</code></td>
+<td>Works fine — decomposer writes the group, supervisor spawns them in parallel.</td>
+</tr>
+<tr>
+<td>A previous run crashed halfway through a group</td>
+<td><strong><code>group</code></strong> (or already-decomposed <code>.tasks/decomposed_tasks.yml</code>) + re-run</td>
+<td>Rufler's composed objective tells agents to probe shared memory for prior progress, so the swarm picks up where it left off instead of restarting from zero.</td>
+</tr>
+<tr>
+<td>You need a soft DAG between agents inside each subtask (architect → coder → tester)</td>
+<td>Either mode + <code>depends_on:</code> on the agents</td>
+<td>Orthogonal to <code>group</code> vs <code>decompose</code> — <code>depends_on</code> injects GATE/HANDOFF clauses into the objective regardless of how the subtask came to be.</td>
+</tr>
+<tr>
+<td>CI or one-shot experiment where reproducibility matters more than convenience</td>
+<td><strong><code>group</code></strong> with committed <code>.md</code> files</td>
+<td>Avoid <code>decompose</code> — every run would re-ask the LLM and risk a different split.</td>
+</tr>
+</tbody></table>
+<p>Rule of thumb: <strong>write <code>group</code> when the split is part of your spec; use <code>decompose</code> when the split itself is the question you're asking Claude.</strong></p>
+<h3>Deep Think (project analysis)</h3>
+<p>By default, <code>decompose: true</code> splits a task "blindly" — the decomposer LLM doesn't see the project's actual files, structure, or existing code. This leads to subtasks that may duplicate existing work, target wrong files, or miss dependencies.</p>
+<p><strong><code>task.deep_think: true</code></strong> fixes this by adding a read-only analysis phase before everything else:</p>
+<pre><code>0a. deep think   → claude -p --model opus (Read, Glob, Grep, Bash only) → .rufler/analysis.md
+0b. decompose    → claude -p --model sonnet (analysis injected as context) → subtasks
+1-N. execute     → hive spawn (analysis injected into every objective)
+</code></pre>
+<pre><code class="language-yaml">task:
+  main: "Add /users CRUD endpoint to the REST API"
+  deep_think: true
+  deep_think_model: opus         # deep reasoning model (default opus)
+  deep_think_effort: max         # thinking effort (low/medium/high/max)
+  deep_think_budget: 1.50       # optional max spend in USD
+  decompose: true
+  decompose_count: 4
+  decompose_effort: high        # thinking effort for the decomposer
+</code></pre>
+<p>The analysis agent scans the project and writes a structured report:</p>
+<ol>
+<li><strong>Project Overview</strong> — language, framework, dependencies</li>
+<li><strong>Directory Structure</strong> — layout with descriptions</li>
+<li><strong>Existing Implementation</strong> — what's already built (with file paths)</li>
+<li><strong>Gaps &amp; Missing Pieces</strong> — what's NOT implemented relative to the task</li>
+<li><strong>Dependencies &amp; Impact</strong> — which files will be affected, risk areas</li>
+<li><strong>Recommended Approach</strong> — step-by-step plan informed by the analysis</li>
+</ol>
+<p>This report is then:</p>
+<ul>
+<li><strong>Injected into the decomposer prompt</strong> (when <code>decompose: true</code>) — so subtasks are project-aware</li>
+<li><strong>Injected into every agent objective</strong> — so agents don't waste time re-discovering what exists</li>
+</ul>
+<p><strong>Caching.</strong> The analysis is saved to <code>deep_think_output</code> (default <code>.rufler/analysis.md</code>). On re-run, the cached file is reused. Pass <code>--new</code> to force a fresh scan.</p>
+<p><strong>Model selection.</strong> Use <code>deep_think_model</code> to pick the model for analysis — both aliases (<code>opus</code>, <code>sonnet</code>) and full model IDs (<code>claude-opus-4-6</code>) are accepted. Opus is recommended for thorough reasoning; Sonnet is faster and cheaper for simpler projects.</p>
+<p><strong>Effort &amp; budget.</strong> <code>deep_think_effort</code> controls reasoning depth (<code>low</code>/<code>medium</code>/<code>high</code>/<code>max</code>; default <code>max</code>). <code>deep_think_budget</code> sets an optional USD spending cap for the analysis session. Similarly, <code>decompose_effort</code> controls the decomposer's reasoning depth (default <code>high</code>).</p>
+<p><strong>MCP access.</strong> By default deep think has access to <strong>all tools</strong> — file tools, Bash, and every registered MCP server. To restrict the session to specific tools only, set <code>deep_think_allowed_tools</code>:</p>
+<pre><code class="language-yaml">task:
+  deep_think: true
+  deep_think_allowed_tools: "Read,Glob,Grep,Bash"  # lock down to read-only file tools
+</code></pre>
+<p>When set, this passes <code>--allowedTools</code> to <code>claude -p</code>, limiting the session to the listed tools. When omitted (default), no restriction is applied — deep think can use everything available, including MCP.</p>
+<p><strong>Without decompose.</strong> Deep Think is also useful in mono mode — the analysis is injected directly into the single objective:</p>
+<pre><code class="language-yaml">task:
+  main_path: tasks/feature.md
+  deep_think: true
+  deep_think_model: sonnet      # cheaper for simple analysis
+  # decompose: false (default)
+</code></pre>
+<h3>Task chaining</h3>
+<p>In sequential multi-task mode each subtask runs in its own <code>claude -p</code> session — a fresh process with no memory of the previous session's conversation. By default the only link between tasks is the shared memory namespace (agents are <em>asked</em> to read/write checkpoints, but it's a soft contract).</p>
+<p><strong><code>task.chain: true</code></strong> makes the link explicit and hard: after each task completes, rufler compresses its body and report into a compact text block and injects it into the next task's prompt as a <code>PREVIOUS TASK RETROSPECTIVE</code> section. The new Claude session sees exactly what was asked, what was done, and what the report said — without relying on memory polling.</p>
+<pre><code class="language-yaml">task:
+  multi: true
+  run_mode: sequential
+  chain: true
+  chain_max_tokens: 2000        # word budget for the retrospective (default 2000)
+  chain_include_report: true    # include per-task report in the retrospective (default true)
+  group:
+    - name: design
+      file_path: tasks/design.md
+    - name: implement
+      file_path: tasks/implement.md
+    - name: review
+      file_path: tasks/review.md
+      chain: false              # this task does NOT receive the retrospective
+</code></pre>
+<p><strong>How compression works.</strong> The compressor is deterministic (no AI call) and fast:</p>
+<ol>
+<li>Strips HTML tags, horizontal rules, bold/italic markers</li>
+<li>Flattens fenced code blocks into one-line summaries (<code>[code:python: def hello()…]</code>)</li>
+<li>Downgrades markdown headers to <code>[Header]</code> form</li>
+<li>Collapses blank lines and whitespace</li>
+<li>Truncates to <code>chain_max_tokens</code> words</li>
+</ol>
+<p>The token budget is split between the task body (~2/3) and the report (~1/3). If <code>chain_include_report</code> is false or no report exists, the full budget goes to the body.</p>
+<p><strong>Per-task override.</strong> Set <code>chain: false</code> on any group item to skip retrospective injection for that specific task, or <code>chain: true</code> on a single item when the global <code>task.chain</code> is false.</p>
+<p><strong>When to use chaining:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Use chain?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Tasks build on each other (design → implement → review)</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Tasks are independent (service_a, service_b)</td>
+<td>No — use parallel mode instead</td>
+</tr>
+<tr>
+<td>You already rely on shared memory and it works well</td>
+<td>Optional — chain adds redundancy</td>
+</tr>
+<tr>
+<td>Prompt budget is tight (very long task bodies + many tasks)</td>
+<td>Tune <code>chain_max_tokens</code> down</td>
+</tr>
+</tbody></table>
+<h3>Iterative refinement</h3>
+<p>A single <code>rufler run</code> normally executes the pipeline once: deep_think → decompose → execute → report. For complex tasks that benefit from a "polish pass" — filling gaps, hardening tests, fixing what broke in review — set <code>task.iterations: N</code> and the <strong>entire pipeline repeats N times</strong>. Each iteration's accumulated reports are fed into the next iteration's deep_think so the analyzer sees what's already done and targets the remaining gaps instead of restarting blind.</p>
+<pre><code class="language-yaml">task:
+  main: "Build a production-ready X with tests and graceful shutdown"
+  deep_think: true
+  multi: true
+  decompose: true
+  decompose_count: 4
+
+  iterations: 5                   # run the full cycle up to 5 times
+  iteration_scope: full           # full | decompose_only | tasks_only
+  iteration_refine: true          # prior reports → next deep_think
+  iteration_judge: true           # let a judge agent decide when to stop
+  iteration_judge_threshold: 0.9
+</code></pre>
+<p><strong>What each iteration actually does:</strong></p>
+<pre><code>iter 1:  deep_think → decompose (4 subtasks) → execute → per-iter report → judge
+iter 2:  deep_think (sees iter 1 report) → decompose (4 fresh gap-focused subtasks) → execute → report → judge
+iter 3:  ...
+</code></pre>
+<p>From iteration 2 onwards, the deep_think prompt is prepended with a <code>PRIOR ITERATIONS</code> block containing every per-iteration final report and every per-task report written so far. The framing tells the analyzer: <em>this is iteration N of M, prior iterations already built X, verify what's actually on disk, and produce a refinement plan — not a fresh analysis.</em></p>
+<h4><code>iteration_scope</code> — what regenerates</h4>
+<table>
+<thead>
+<tr>
+<th>Scope</th>
+<th>deep_think</th>
+<th>decompose</th>
+<th>execute</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>full</code> (default)</td>
+<td>every iter</td>
+<td>every iter</td>
+<td>every iter</td>
+</tr>
+<tr>
+<td><code>decompose_only</code></td>
+<td>iter 1 only</td>
+<td>every iter</td>
+<td>every iter</td>
+</tr>
+<tr>
+<td><code>tasks_only</code></td>
+<td>iter 1 only</td>
+<td>iter 1 only</td>
+<td>every iter</td>
+</tr>
+</tbody></table>
+<p><code>full</code> is the usual choice when you want the analyzer to re-scan the repo each pass. Use <code>decompose_only</code> when the project analysis is stable (short run, no architectural drift between iterations) but you want Claude to re-propose subtasks after seeing what was built. Use <code>tasks_only</code> when you've hand-written the <code>group</code> and just want repeated execution passes over the same subtasks (useful for flaky / long-running tasks that sometimes finish incomplete).</p>
+<h4>Judge agent — automatic early stopping</h4>
+<p>With <code>iteration_judge: true</code>, rufler spawns a short <strong>read-only</strong> <code>claude -p</code> session at every iteration boundary. The judge reads the original TASK, the current state of the repo (Read/Glob/Grep/Bash), and every accumulated report, then emits a strict JSON verdict:</p>
+<pre><code class="language-json">{
+  "verdict": "done",
+  "score": 0.92,
+  "reasoning": "All acceptance criteria met; tests pass at src/api/users_test.go:48",
+  "remaining_work": ""
+}
+</code></pre>
+<p>The loop breaks when <code>verdict == "done"</code> AND <code>score &gt;= iteration_judge_threshold</code>. Otherwise it continues to the next iteration.</p>
+<p>Failure modes are handled conservatively:</p>
+<ul>
+<li>Judge claude missing, timeout, subprocess error, non-zero rc → <strong>loop continues</strong> (fail open, don't stop thinking you're done when you aren't)</li>
+<li>JSON parse failure → verdict derived from score if present, else "continue"</li>
+<li>Score clamped to <code>[0.0, 1.0]</code></li>
+<li>Every verdict is saved to <code>.rufler/iter-NN/judge.md</code> with full reasoning, raw output, and parse diagnostics</li>
+</ul>
+<p>Custom judge prompt via <code>iteration_judge_prompt</code> (inline) or <code>iteration_judge_prompt_path</code> (file). Placeholders: <code>{main_task}</code>, <code>{project}</code>, <code>{iter_num}</code>, <code>{total_iters}</code>, <code>{threshold}</code>, <code>{accumulated_reports}</code>.</p>
+<p>Fallback for runs without a judge: <code>iteration_stop_on_success: true</code> breaks the loop as soon as every real task in an iteration returned <code>rc=0</code>. Cheaper than a judge but will stop early even when the code technically runs but doesn't actually satisfy the task.</p>
+<h4>On-disk layout for <code>iterations &gt; 1</code></h4>
+<p>Per-iteration artifacts are namespaced under <code>.rufler/iter-NN/</code> so no file is ever overwritten between passes:</p>
+<pre><code>.rufler/
+├── iter-01/
+│   ├── analysis.md              # deep_think output for this iteration
+│   ├── decomposed_tasks.yml     # companion yml for iter 1's subtasks
+│   ├── tasks/task_1.md          # decomposer-written subtask bodies
+│   ├── tasks/task_2.md
+│   ├── reports/task_1.md        # per-task completion reports
+│   ├── reports/task_2.md
+│   ├── report.md                # per-iter final report
+│   └── judge.md                 # judge verdict + reasoning + raw output
+├── iter-02/
+│   └── …same shape…
+├── iter-03/
+│   └── …
+├── run.i01-task_1.log           # claude stdout per task (iter-prefixed)
+├── run.i02-task_1.log           # iter 2's task_1 → separate log, no overwrite
+├── run.judge.i01.log            # judge-agent claude stdout
+└── run.judge.i02.log
+</code></pre>
+<p>Task names in the registry are iter-prefixed (<code>i01-task_1</code>, <code>i02-task_1</code>, …) so <code>rufler tasks</code> and <code>rufler follow</code> show every iteration's work distinctly. Slots are global across iterations.</p>
+<p>When <code>iterations: 1</code> (the default), none of this namespacing kicks in — paths, log names, and registry entries are identical to pre-iteration behaviour. Single-pass runs see zero change.</p>
+<h4>Caveats and cost control</h4>
+<ul>
+<li><strong>Cost scales linearly.</strong> Five iterations = 5× deep_think + 5× decompose + 5× full swarm spawn + 5× report + 5× judge. On Opus this can easily be hours and tens of dollars — run <code>rufler run --dry-run</code> first, and keep the judge enabled for early exit.</li>
+<li><strong>Foreground parallel is still foreground.</strong> <code>run_mode: parallel</code> with <code>iterations &gt; 1</code> runs each iteration's parallel batch (which in foreground blocks sequentially anyway) and waits for the batch to finish before moving on. For true parallelism across tasks within an iteration, use <code>rufler run -d</code>.</li>
+<li><strong>Resume is iter-1 only.</strong> The resume logic (<code>find_resumable_run</code>, <code>completed_task_names</code>) applies on iteration 1. From iteration 2 onwards, every task in the new iteration runs unconditionally — that's the point of refinement. Use <code>--new</code> to also force iter 1 to start clean.</li>
+<li><strong>No per-iter <code>Ctrl+C</code> semantics yet.</strong> Ctrl+C / <code>rufler stop</code> kill everything, including a potentially healthy iteration that was about to finish. A graceful "stop after this iteration" mechanism isn't implemented — tell the judge to set a tight threshold, or edit <code>iterations</code> before the next run.</li>
+</ul>
+<h4>When to use iterations</h4>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>Use iterations?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>One focused task, you trust a single pass</td>
+<td>No — <code>iterations: 1</code></td>
+</tr>
+<tr>
+<td>"Build X and polish it to prod quality"</td>
+<td>Yes — 3-5 iterations with judge</td>
+</tr>
+<tr>
+<td>Fixing flaky output by retrying the same group</td>
+<td>Yes — <code>iteration_scope: tasks_only</code>, no judge needed</td>
+</tr>
+<tr>
+<td>Analysis is expensive and the repo is stable</td>
+<td><code>iteration_scope: decompose_only</code> + judge</td>
+</tr>
+<tr>
+<td>Budget-sensitive</td>
+<td>Either skip iterations or rely heavily on <code>iteration_judge_threshold: 0.85</code> to exit early</td>
+</tr>
+<tr>
+<td>CI / reproducibility-critical</td>
+<td>No — iterations introduce judge / LLM variance between runs</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Runs, projects and statuses</h2>
+<p>rufler keeps a central docker-like registry at <code>~/.rufler/registry.json</code> so you can manage every run from any directory.</p>
+<h3>The run lifecycle</h3>
+<pre><code class="language-bash">rufler run             # foreground: Ctrl+C kills the swarm, exits 130
+rufler run -d          # detached: supervisor survives terminal close
+# =&gt; rufler id: a1b2c3d4
+</code></pre>
+<p>Every <code>rufler run</code> gets an <strong>8-char hex id</strong> (like <code>a1b2c3d4</code>). The id is printed at startup and is how every other command addresses the run.</p>
+<h3><code>rufler ps</code> — list runs</h3>
+<pre><code class="language-bash">rufler ps                          # currently running (like `docker ps`)
+rufler ps -a                       # everything ever run (like `docker ps -a`)
+rufler ps a1b2                     # detail view of one run by id prefix
+rufler ps --prune                  # drop entries for projects whose base dir is gone
+rufler ps --prune-older-than-days 7
+</code></pre>
+<p>Columns: <code>ID | PROJECT | MODE | STATUS | TASKS | CREATED | LAST RUN | BASE DIR</code>.</p>
+<p><code>STATUS</code> is docker-style — <code>Up 2m</code>, <code>Exited (0) 1h ago</code>, <code>Failed (2) 23h ago</code>, <code>Stopped 5m ago</code>, <code>Dead</code>. <code>CREATED</code> is relative time since the run started; <code>LAST RUN</code> is relative time since it last changed state (finished_at for completed runs, started_at for live ones).</p>
+<h3>Run statuses</h3>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>running</code></td>
+<td>At least one registered pid is alive</td>
+</tr>
+<tr>
+<td><code>exited</code></td>
+<td>Process ended cleanly with <code>rc=0</code></td>
+</tr>
+<tr>
+<td><code>failed (N)</code></td>
+<td>Process ended with non-zero exit code</td>
+</tr>
+<tr>
+<td><code>stopped</code></td>
+<td>User ended the run cleanly (<code>rufler stop</code> or Ctrl+C on foreground)</td>
+</tr>
+<tr>
+<td><code>dead</code></td>
+<td>Supervisor vanished without leaving a finish marker (e.g. killed with <code>-9</code>, crashed, power loss)</td>
+</tr>
+</tbody></table>
+<p>Status is recomputed on every read from three signals: pid liveness, the <code>log ended rc=N</code> marker in the NDJSON log tail, and the <code>finished_at</code> timestamp written by rufler itself. Nothing is cached — what you see is always the current truth.</p>
+<h3><code>rufler projects</code> — project rollup</h3>
+<pre><code class="language-bash">rufler projects
+</code></pre>
+<p>Columns: <code>PROJECT | LAST RUN | AGE | RUNS | BASE DIR</code>. One row per unique <code>project.name</code>, sorted by last launch time. This rollup is stored separately from individual runs and <strong>survives <code>rufler rm</code>, <code>rufler ps --prune</code> and age-based pruning</strong> — so you can always see when a project was last touched, even if all its individual run entries have been cleaned up.</p>
+<h3><code>rufler rm</code> — cleanup</h3>
+<pre><code class="language-bash">rufler rm a1b2 e5f6            # remove specific runs
+rufler rm --all-finished       # remove everything that's not running
+rufler rm --older-than-days 30 # bulk prune
+</code></pre>
+<p><code>rm</code> refuses to delete runs that are currently <code>running</code> — use <code>rufler stop &lt;id&gt;</code> first.</p>
+<h3><code>rufler tasks</code> — task tracking</h3>
+<pre><code class="language-bash">rufler tasks                       # tasks of the latest run in cwd
+rufler tasks a1b2                  # tasks of a specific run
+rufler tasks -a                    # all tasks across all runs
+rufler tasks --status running      # filter by status
+rufler tasks a1b2c3d4.01 -v       # detailed card for one task
+</code></pre>
+<p><strong>Delete tasks:</strong></p>
+<pre><code class="language-bash">rufler tasks a1b2c3d4.05 --rm         # remove one task from the registry
+rufler tasks a1b2c3d4 --rm            # remove ALL tasks in that run
+rufler tasks --rm-all                  # remove all tasks across all runs in cwd
+rufler tasks --rm-all --rm-files       # also delete .rufler/tasks/*.md and log files
+rufler tasks a1b2c3d4 --rm --rm-files  # delete one run's tasks + files
+</code></pre>
+<p><code>--rm</code> / <code>--rm-all</code> only touch the registry bookkeeping by default. Add <code>--rm-files</code> to also delete on-disk task files (<code>.rufler/tasks/*.md</code>) and their logs.</p>
+<p>Table columns: <code>TASK ID | SLOT | NAME | STATUS | SOURCE | STARTED | DURATION | TOKENS | LOG</code>.</p>
+<p>Every task gets a <strong>sub-id</strong> in the format <code>&lt;run_id&gt;.&lt;slot&gt;</code> (e.g. <code>a1b2c3d4.01</code>). Status is derived lazily from log markers + pid liveness + registry data — never cached.</p>
+<table>
+<thead>
+<tr>
+<th>Task status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>queued</code></td>
+<td>Run is still alive, task hasn't started yet</td>
+</tr>
+<tr>
+<td><code>running</code></td>
+<td><code>task_start</code> marker found, no <code>task_end</code>, pid alive</td>
+</tr>
+<tr>
+<td><code>exited</code></td>
+<td><code>task_end</code> with <code>rc=0</code></td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td><code>task_end</code> with <code>rc != 0</code></td>
+</tr>
+<tr>
+<td><code>stopped</code></td>
+<td>Run stopped before task finished</td>
+</tr>
+<tr>
+<td><code>skipped</code></td>
+<td>Run finished but task never started</td>
+</tr>
+</tbody></table>
+<p>The <strong>detail view</strong> (<code>-v</code>) shows full metadata, per-task token breakdown (input / output / cache_read / cache_creation), and the last 10 log events for that task.</p>
+<h3><code>rufler tokens --by-task</code> — per-task token breakdown</h3>
+<pre><code class="language-bash">rufler tokens --by-task              # per-task tokens for the latest run
+rufler tokens --by-task a1b2c3d4     # per-task tokens for a specific run
+</code></pre>
+<h3>Task resume on restart</h3>
+<p>When you stop a run mid-way and restart:</p>
+<pre><code class="language-bash">rufler run -d            # starts 4 tasks, task_1 and task_2 complete
+# Ctrl+C / rufler stop
+rufler run -d            # auto-resumes from task_3
+# =&gt; resuming: skipping 2 completed tasks, starting from task_3
+</code></pre>
+<p>Resume works at two levels:</p>
+<ol>
+<li><strong>Decomposed task files</strong> — if <code>.rufler/tasks/decomposed_tasks.yml</code> already exists, rufler loads tasks from it instead of calling claude again. No wasted tokens on re-decomposition.</li>
+<li><strong>Completed tasks</strong> — rufler finds the previous run for this project/directory in the registry, checks which tasks finished with <code>rc=0</code>, and skips them. Comparison is by task <strong>name</strong> (not slot), so adding/removing tasks in the yml correctly triggers re-execution.</li>
+</ol>
+<p>Flags:</p>
+<ul>
+<li><code>rufler run</code> — resume by default</li>
+<li><code>rufler run --new</code> — ignore previous progress, re-decompose, start all tasks from scratch</li>
+<li><code>rufler run --from 3</code> — skip tasks 1-2 explicitly, start from slot 3</li>
+</ul>
+<h3><code>rufler follow</code> — live TUI dashboard</h3>
+<pre><code class="language-bash">rufler follow              # auto-picks the running (or latest) run in cwd
+rufler follow a1b2         # follow a specific run by id
+</code></pre>
+<p>Four-panel dashboard:</p>
+<pre><code>╭─ rufler follow ─────────────────────── [running] ── 00:04:23 ─╮
+│ model: claude-opus-4-6    swarm: hive-17762684    workers: 4   │
+╰───────────────────────────────────────────────────────────────╯
+╭─ Tasks  2/4 ────────────╮╭─ Session ─────────────────────────╮
+│ ✓ task_1     done  1m12s││ model   claude-opus-4-6           │
+│ ▶ task_2     running 52s││ tokens  in=98 out=829             │
+│   task_3     queued     ││ turns   14                        │
+│   task_4     queued     ││ last    Write                     │
+╰─────────────────────────╯╰───────────────────────────────────╯
+╭─ Conversation (task_2) ──────────────────────────────────────╮
+│ 14:23  think  Planning the API routes — need UserList...     │
+│ 14:23  text   I'll create the handler files with types...    │
+│ 14:24  tool   Write(src/api/routes.go)                       │
+│ 14:24  result File created successfully                      │
+╰──────────────────────────────────────────────────────────────╯
+╭─ Log ────────────────────────────────────────────────────────╮
+│ 14:22  OK    task_end task_1 done                            │
+│ 14:22  INFO  task_start task_2                               │
+│ 14:23  INFO  session init (claude-opus-4-6)                  │
+╰──────────────────────────────────────────────────────────────╯
+</code></pre>
+<ul>
+<li><strong>Tasks</strong> — task list with status icons (✓ ▶ ○ ✗), duration, per-task tokens</li>
+<li><strong>Session</strong> — model, token totals, turns, last tool</li>
+<li><strong>Conversation</strong> — AI stream for the active task: thinking (3-5 lines), text (full), tool calls with params, tool results</li>
+<li><strong>Log</strong> — system events: task markers, hooks, errors, rate limits</li>
+</ul>
+<p>In multi-task mode, follow tails <strong>all per-task log files</strong> simultaneously (not just the primary <code>run.log</code>).</p>
+<h3>Soft resume via shared memory (periodic checkpointing)</h3>
+<p>In addition to the task-level resume above, every composed objective ends with two auto-injected sections that force agents to continuously persist state to AgentDB:</p>
+<p><strong><code># RESUME AWARENESS</code></strong> — tells agents, before they start, to search the shared memory namespace (from <code>memory.namespace</code>) for prior progress using standard keys (<code>checkpoint:latest</code>, <code>progress</code>, <code>decisions</code>, <code>blockers</code>, <code>completed</code>, <code>last_step</code>). If they find state from a prior interrupted run, they continue from there instead of redoing work.</p>
+<p><strong><code># CHECKPOINT DISCIPLINE</code></strong> — tells agents to write a checkpoint to shared memory:</p>
+<ul>
+<li><strong>Every <code>memory.checkpoint_interval_minutes</code> minutes</strong> of wall-clock work (default: 5, <code>0</code> disables the timer).</li>
+<li><strong>Immediately after</strong> every file write, test run, build, sub-task, or design decision.</li>
+</ul>
+<p>The objective prescribes exact key names so recovery is deterministic:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>checkpoint:latest</code></td>
+<td>Rolling pointer — compact JSON of <code>{current_step, done_steps[], next_step, open_questions[], last_ts}</code></td>
+</tr>
+<tr>
+<td><code>checkpoint:&lt;unix_ts&gt;</code></td>
+<td>Timestamped snapshot for history</td>
+</tr>
+<tr>
+<td><code>progress</code></td>
+<td>One-line human summary: what is done, what is next</td>
+</tr>
+<tr>
+<td><code>decisions</code></td>
+<td>Append-only list of design decisions</td>
+</tr>
+<tr>
+<td><code>blockers</code></td>
+<td>Anything stuck on; cleared when unstuck</td>
+</tr>
+</tbody></table>
+<p>So an interrupted run leaves behind: its NDJSON log, any files it wrote to disk, and a constantly-refreshed checkpoint in AgentDB memory. The next <code>rufler run</code> picks up that memory state and reconstructs context from it. Rule of thumb baked into the prompt: <em>if you just spent &gt;2 minutes on something you could not reconstruct from the repo alone, it MUST go into memory before your next tool call.</em></p>
+<hr />
+<h2>Inspecting agents</h2>
+<p><code>rufler agents</code> reads the flow file and prints one row per declared agent — name, type, role, seniority, and a single-line 150-character preview of the prompt (whether it was inline or loaded from <code>prompt_path</code>).</p>
+<pre><code class="language-bash"># Agents from ./rufler_flow.yml in the current directory
+rufler agents
+
+# Agents from a specific past run (looks up its flow_file via the registry)
+rufler agents a1b2c3d4
+
+# Print full prompt bodies instead of the 150-char preview
+rufler agents --full
+</code></pre>
+<p>Use this to sanity-check that every agent's <code>prompt_path</code> actually resolves and to eyeball the prompts you wired up before launching <code>rufler run</code>.</p>
+<hr />
+<h2>Agent dependencies (soft DAG)</h2>
+<p>You can declare that an agent must wait for other agents to finish before it starts:</p>
+<pre><code class="language-yaml">agents:
+  - name: architect
+    type: system-architect
+    role: specialist
+    seniority: lead
+    prompt: Design the system.
+
+  - name: coder
+    type: coder
+    role: worker
+    seniority: senior
+    prompt: Implement the design.
+    depends_on: [architect]
+
+  - name: qa
+    type: tester
+    role: worker
+    seniority: junior
+    prompt: Write tests.
+    depends_on: [coder]
+</code></pre>
+<p>This builds a soft DAG: <code>architect → coder → qa</code>.</p>
+<h3>How it's enforced</h3>
+<p>rufler does <strong>not</strong> spawn agents in separate processes — the whole team lives inside one hive-mind. Instead, <code>build_objective</code> injects two prompt sections per agent:</p>
+<ul>
+<li><strong><code>### GATE</code></strong> — appended to every agent that has <code>depends_on</code>. Tells the agent: before doing <strong>any</strong> work, read these keys from the shared memory namespace; if any are missing, poll <code>memory_search</code> every ~30s; never bypass a gate even if you "know what to do":<ul>
+<li><code>instructions:&lt;task&gt;:&lt;upstream&gt;-&gt;&lt;self&gt;</code> — the work brief from upstream</li>
+<li><code>approval:&lt;task&gt;:&lt;upstream&gt;-&gt;&lt;self&gt;</code> — must equal <code>approved</code></li>
+</ul>
+</li>
+<li><strong><code>### HANDOFF</code></strong> — appended to every agent that has downstream agents waiting on it. Tells the agent it must publish a brief and an <code>approved</code> flag for each downstream agent, in that order, before its own work is considered done. If it must reject a downstream, it writes <code>value='rejected: &lt;reason&gt;'</code>.</li>
+</ul>
+<p>Memory keys are scoped per task name (<code>&lt;task&gt;</code> segment), so multi-task runs sharing the same memory namespace can't pick up each other's briefs or approvals.</p>
+<h3>What's validated at load time</h3>
+<ul>
+<li><code>depends_on</code> referencing an unknown agent name → <code>ValueError</code>.</li>
+<li>An agent depending on itself → <code>ValueError</code>.</li>
+<li>Cycles (e.g. <code>a → b → a</code>) → <code>ValueError</code> printing the cycle path.</li>
+<li><code>depends_on: null</code> is normalised to <code>[]</code>. Duplicates are deduped while preserving order.</li>
+</ul>
+<h3>Caveats</h3>
+<p>This is <strong>soft</strong> enforcement — a contract written in the prompt, not a process scheduler. Claude Code with <code>autonomous: true</code> and the checkpoint discipline section above respects it well in practice, but there is no OS-level guarantee that a downstream agent won't peek ahead. If you need hard ordering, split the work into multi-task <code>sequential</code> mode — each task runs in its own <code>claude -p</code> process, and rufler only spawns the next task after the previous task's NDJSON log emits <code>log ended</code>.</p>
+<p>You can verify the dependency graph at any time:</p>
+<pre><code class="language-bash">rufler agents             # DEPENDS ON column shows each agent's upstreams
+rufler run --dry-run      # prints the full composed objective with GATE/HANDOFF blocks
+</code></pre>
+<hr />
+<h2>Global skills (<code>.claude/skills/</code>)</h2>
+<p>Claude Code reads skill definitions from <code>.claude/skills/&lt;name&gt;/SKILL.md</code> at session start. rufler knows about three sources of skills and lets you mix them in one yml block:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>yml field</th>
+<th>Where it comes from</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ruflo bundled packs</td>
+<td><code>packs:</code> / <code>all:</code></td>
+<td><code>core</code>, <code>agentdb</code>, <code>github</code>, <code>flowNexus</code>, <code>browser</code>, <code>v3</code>, <code>dualMode</code> packs shipped inside the ruflo npm package</td>
+</tr>
+<tr>
+<td>ruflo standalone skills</td>
+<td><code>extra:</code></td>
+<td>Individual skill dir names under ruflo's bundled <code>.claude/skills/</code> source tree</td>
+</tr>
+<tr>
+<td><strong><code>custom:</code> (unified)</strong></td>
+<td><code>custom:</code></td>
+<td>Local paths <strong>and</strong> <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> installs — one list, path-first resolution</td>
+</tr>
+</tbody></table>
+<pre><code class="language-yaml">skills:
+  enabled: true
+  clean: false              # false (default) = keep ruflo init's ~30 defaults
+                            # true            = wipe non-symlinked skill dirs after
+                            #                   `ruflo init` so yml is the single
+                            #                   source of truth
+  all: false                # true = every pack (overrides `packs`)
+  packs: []                 # subset of {core, agentdb, github, flowNexus, browser, v3, dualMode}
+  extra: []                 # individual skill dir names from ruflo's bundled source
+                            # tree (e.g. ["my-bundled-skill"])
+  custom:                   # Unified list — local paths + skills.sh installs.
+                            # rufler tries the filesystem first; unknown strings
+                            # fall back to `npx skills add &lt;source&gt;`. See below.
+    - ./skills/my-skill                    # local dir
+    - ~/shared/claude-skills/reviewer      # local dir
+    - npx skills add https://github.com/samber/cc-skills-golang --skill golang-error-handling
+    - source: vercel-labs/skills           # dict form (explicit skills.sh)
+      skill: azure-ai
+</code></pre>
+<h3>The default behavior (empty yml <code>skills:</code> section)</h3>
+<p><code>rufler init</code> creates a flow file where <code>skills:</code> is enabled but empty: <code>packs: []</code>, <code>extra: []</code>, <code>custom: []</code>, <code>clean: false</code>. On <code>rufler run</code> / <code>rufler build</code>, this means:</p>
+<ul>
+<li><code>ruflo init --force</code> plants its standard bundle of ~30 default skills (core Claude Code + ruflo skills).</li>
+<li>rufler <strong>adds nothing on top</strong> (no packs declared, no extras, no custom).</li>
+<li><code>clean: false</code> tells rufler <strong>not</strong> to touch what ruflo just planted.</li>
+</ul>
+<p>Net result: a fresh project gets ruflo's full default skill set out of the box, and you only need to edit <code>skills:</code> if you want to restrict the set (<code>clean: true</code>) or add your own (<code>custom:</code>) or pull in extra packs (<code>packs:</code>).</p>
+<h3>How each field is resolved</h3>
+<ul>
+<li><strong><code>packs</code></strong> — <code>core</code>, <code>agentdb</code>, <code>github</code>, <code>v3</code> are proxied to <code>ruflo init skills --&lt;pack&gt; --force</code> (reuses ruflo's own installer). <code>flowNexus</code>, <code>browser</code>, <code>dualMode</code> are copied directly from ruflo's bundled <code>.claude/skills/</code> source tree.</li>
+<li><strong><code>extra</code></strong> — individual skill directory names under ruflo's bundled source tree (copied, not symlinked).</li>
+<li><strong><code>custom</code></strong> — unified list mixing local paths and <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> installs. Each string entry is resolved <strong>path-first</strong>: absolute → used as-is, <code>~</code> → expanded, relative → resolved against the directory containing the yml file. If the resolved path is an existing directory it's copied into <code>&lt;project&gt;/.claude/skills/&lt;basename&gt;</code>. If the string isn't a directory, rufler falls back to a skills.sh install via <code>npx skills add &lt;source&gt;</code>. You can also embed a full <code>npx skills add …</code> command line or a dict (<code>{source, skill?, agent?, copy?}</code>) — see the next section.</li>
+<li><strong>Where ruflo is found (for <code>extra</code> and manual packs)</strong> — <code>$RUFLER_RUFLO_BIN</code> → local <code>node_modules/.bin/ruflo</code> → <code>$PATH</code> → npm global bin. If ruflo is only reachable via <code>npx</code> (no stable on-disk path), <code>extra</code> and manual packs print a warning and skip — install ruflo locally or globally for those to work. <code>custom</code> is unaffected — it doesn't need ruflo's source tree.</li>
+</ul>
+<h3><code>clean: true</code> — yml as the single source of truth</h3>
+<p>By default, <code>ruflo init</code> always plants ~30 default skills regardless of yml. If you want the installed skill set to exactly match what your yml declares, set <code>clean: true</code>. rufler will then, after <code>ruflo init</code> runs and before installing from yml, wipe every non-symlinked directory under <code>&lt;project&gt;/.claude/skills/</code>. Symlinks (e.g. ones you created manually for dev work) are preserved.</p>
+<pre><code class="language-yaml">skills:
+  enabled: true
+  clean: true             # wipe ruflo's defaults
+  packs: [core]           # ...and install only what's listed here
+  custom:
+    - ./skills/my-skill
+</code></pre>
+<h3>Native <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> integration (inside <code>custom:</code>)</h3>
+<p><a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> is an open ecosystem of reusable agent skills hosted on GitHub and installed via the <code>skills</code> CLI (<code>npx skills add &lt;source&gt;</code>). rufler has native support — drop the repo reference straight into <code>custom:</code> and rufler runs the CLI for you before the swarm launches. No second section to maintain.</p>
+<p>rufler resolves each <code>custom:</code> string <strong>path-first</strong>: if the string points at a real directory on disk, it's copied locally; otherwise it's treated as a skills.sh install. Three forms are accepted per entry — pick whichever is most convenient:</p>
+<pre><code class="language-yaml">skills:
+  enabled: true
+  custom:
+    # Local paths (absolute / ~ / relative to this yml)
+    - ./skills/my-skill
+    - ~/shared/claude-skills/reviewer
+
+    # 1. Pasted command — copy the exact line from https://skills.sh and
+    #    drop it in. rufler parses `npx skills add …` / `skills add …`
+    #    with the real CLI flags.
+    - npx skills add https://github.com/samber/cc-skills-golang --skill golang-error-handling
+    - skills add owner/repo -s azure-ai -a claude-code --no-copy
+
+    # 2. Dict form — most explicit, good for code-reviewed configs.
+    - source: vercel-labs/skills
+      skill: azure-ai         # passed as `-s azure-ai` to the skills CLI
+      agent: claude-code      # target agent (default: claude-code)
+      copy: true              # pass --copy instead of symlink (default: true)
+
+    # 3. Bare string with no filesystem match — falls back to skills.sh
+    #    as if you'd written `npx skills add owner/repo`. Use the dict
+    #    or command form for explicit skills.sh installs to avoid
+    #    accidental ambiguity with local paths.
+</code></pre>
+<blockquote>
+<p><strong>Legacy</strong>: earlier versions of rufler had a separate <code>skills_sh:</code> section. It's still accepted on load (entries are transparently merged into <code>custom:</code>), but new configs should use <code>custom:</code> exclusively.</p>
+</blockquote>
+<p>Recognised flags in the pasted-command form: <code>-s</code> / <code>--skill</code> / <code>--skill=…</code>, <code>-a</code> / <code>--agent</code> / <code>--agent=…</code>, <code>--copy</code>, <code>--no-copy</code>, <code>-y</code> / <code>--yes</code> (tolerated — rufler always passes it anyway). A leading <code>npx</code> is stripped. <code>-g</code> / <code>--global</code> is rejected at load time because rufler installs skills per-project only.</p>
+<p>Under the hood, each entry becomes:</p>
+<pre><code class="language-bash">cd &lt;project&gt; &amp;&amp; npx -y skills add &lt;source&gt; -a &lt;agent&gt; -y [--copy] [-s &lt;skill&gt;]
+</code></pre>
+<p>Installs land in <code>&lt;project&gt;/.claude/skills/&lt;skill-name&gt;/</code> — the same directory ruflo/rufler use for everything else, so Claude Code picks them up on session start alongside packs/extras/custom.</p>
+<h4>Why <code>--copy</code> is the default</h4>
+<p>skills.sh supports both symlink and copy installs. rufler defaults to <code>--copy</code> because:</p>
+<ul>
+<li>Symlinks point at a shared cache outside the project and break when the project is cloned, zipped, or committed.</li>
+<li>Copies are self-contained, diffable, and review-friendly.</li>
+<li>You can opt into symlinks per entry with <code>copy: false</code>.</li>
+</ul>
+<h4>Preflight check — fail fast</h4>
+<p>When any entry in <code>custom:</code> resolves to a skills.sh install, <code>rufler check</code> adds a <code>skills.sh</code> row that probes the CLI:</p>
+<pre><code class="language-bash">rufler check
+</code></pre>
+<pre><code>rufler dependency check
+┌───────────┬──────┬────────┬────────────────────────────┐
+│ Tool      │ OK   │ Source │ Version / Hint             │
+├───────────┼──────┼────────┼────────────────────────────┤
+│ node      │ OK   │ -      │ v20.x                      │
+│ claude    │ OK   │ path   │ 1.0.x                      │
+│ ruflo     │ OK   │ local  │ 3.5.x                      │
+│ skills.sh │ OK   │ npx    │ skills CLI reachable       │
+└───────────┴──────┴────────┴────────────────────────────┘
+</code></pre>
+<p>If <code>npx</code> is missing or the <code>skills</code> package won't resolve, this check fails before anything touches your project — no more finding out mid-run that a skill didn't install.</p>
+<h4>Post-install verification — SKILL.md required</h4>
+<p>Every directory that appears under <code>.claude/skills/</code> as a result of a skills.sh install is inspected for a <code>SKILL.md</code> file. If one is missing, rufler warns:</p>
+<pre><code>skills.sh: installed dirs with NO SKILL.md — Claude Code may not discover them: some-dir
+</code></pre>
+<p>This catches broken or partial packages in the upstream repo before the swarm launches with a half-installed skill.</p>
+<h4>Validation</h4>
+<ul>
+<li><code>source</code> is required and must be a non-empty string.</li>
+<li><code>skill</code>, <code>agent</code>, <code>copy</code> are optional. Unknown fields in a dict entry → <code>ValueError</code> at load time.</li>
+<li>Entries are deduped by <code>(source, skill)</code> pair, preserving order.</li>
+<li><code>npx skills add</code> failures (non-zero exit, timeout 180s, <code>npx</code> missing) are surfaced as warnings and the run continues — use <code>rufler check</code> to catch them upfront.</li>
+</ul>
+<h3><code>rufler skills</code> — inspect and reset</h3>
+<pre><code class="language-bash"># Show what's currently installed in &lt;project&gt;/.claude/skills/
+# plus a snapshot of the yml config (enabled / clean / packs / extra / custom)
+rufler skills
+
+# List every skill pack / standalone skill available in ruflo's bundled source
+rufler skills --available
+
+# Wipe every non-symlinked dir under &lt;project&gt;/.claude/skills/
+# (prompts for confirmation; -y / --yes to skip the prompt)
+rufler skills --delete
+rufler skills --delete -y
+</code></pre>
+<p>Use <code>rufler skills --delete</code> when you've been iterating on your yml and want a clean slate before <code>rufler build</code> / <code>rufler run</code>.</p>
+<h3>Validation</h3>
+<ul>
+<li>Unknown pack name → <code>ValueError</code> with the list of known packs.</li>
+<li><code>packs</code>, <code>extra</code> must be lists of strings; blank entries are dropped; duplicates are deduped while preserving order.</li>
+<li><code>custom</code> is a mixed list: strings (local path / skills.sh shorthand / pasted <code>npx skills add …</code> command) OR dicts (<code>{source, skill?, agent?, copy?}</code>). Unknown dict fields → <code>ValueError</code>. Local-path strings are deduped by resolved path; skills.sh entries are deduped by <code>(source, skill)</code>. Order is preserved.</li>
+<li><code>skills.enabled: false</code> skips the install step entirely (including <code>clean</code>).</li>
+<li>Omitting the section defaults to <code>enabled=true</code>, <code>clean=false</code>, empty lists — i.e. whatever <code>ruflo init</code> installs, nothing added, nothing removed.</li>
+</ul>
+<h3>Caveat: skills are session-global</h3>
+<p>Claude Code discovers skills at session start — all agents in the hive-mind see the same <code>.claude/skills/</code> directory. rufler cannot bind a specific skill to a specific agent at the process level; per-agent scoping would have to be enforced in each agent's prompt.</p>
+<hr />
+<h2>Token usage tracking</h2>
+<p>rufler parses every NDJSON run log it writes, sums Anthropic API token usage across all <code>claude</code> assistant turns, and persists the totals in two places:</p>
+<ol>
+<li><strong>Per run</strong> — <code>RunEntry</code> carries <code>input_tokens / output_tokens / cache_read / cache_creation</code>. Refreshed automatically when a foreground run finishes and on <code>rufler stop</code>.</li>
+<li><strong>Per project</strong> — <code>ProjectEntry</code> carries cumulative <code>total_input_tokens / total_output_tokens / total_cache_read / total_cache_creation</code>. <strong>These survive <code>rufler rm</code> and <code>--prune</code></strong>, so you keep your project's lifetime token spend even after individual run entries are gone.</li>
+</ol>
+<p>Updates are idempotent: re-running token accounting on the same log never double-counts the rollup (only the delta vs the previously-recorded entry total is added).</p>
+<h3><code>rufler tokens</code></h3>
+<pre><code class="language-bash"># Per-project rollup + grand total across all projects
+rufler tokens
+
+# Detailed breakdown of one run
+rufler tokens a1b2c3d4
+
+# Force re-parse of run logs from disk (slower, accurate)
+rufler tokens --rescan
+rufler tokens a1b2c3d4 --rescan
+</code></pre>
+<p>Without an id you get a per-project table and a grand total:</p>
+<pre><code>        token usage by project
+┏━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ PROJECT    ┃  INPUT ┃ OUTPUT ┃ CACHE READ ┃ CACHE CREATION ┃   TOTAL ┃
+┡━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ my-app     │  3,210 │  1,845 │   142,330  │          1,200 │ 148,585 │
+│ scraper    │    980 │    412 │    18,422  │            210 │  20,024 │
+└────────────┴────────┴────────┴────────────┴────────────────┴─────────┘
+grand total: 168,609 (168.6K) — in=4.2K out=2.3K cache_read=160.8K cache_creation=1.4K
+</code></pre>
+<p>With an id you get the breakdown for that single run, with raw counts. <code>rufler ps</code> now also shows a <code>TOKENS</code> column for every run, and <code>rufler projects</code> shows project-cumulative totals so you can spot which projects are the most expensive at a glance.</p>
+<h3>How counts are derived</h3>
+<p>The parser walks NDJSON log files, looking for <code>src=claude, type=assistant</code> records. Claude stream-json emits <strong>multiple <code>assistant</code> events per turn</strong> (one per content block), all sharing the same <code>message.id</code>. The parser deduplicates by <code>message.id</code>, keeping only the last event per turn.</p>
+<p>Token semantics:</p>
+<ul>
+<li><code>input_tokens</code> / <code>output_tokens</code> — <strong>per-turn deltas</strong> → summed across turns</li>
+<li><code>cache_read_input_tokens</code> / <code>cache_creation_input_tokens</code> — <strong>session-cumulative</strong> → max taken</li>
+</ul>
+<p>Multi-task runs scan per-task log files automatically (with deduplication if a task points at the same log). <code>rufler tasks</code> uses byte-range slicing (<code>task_start.offset</code> → <code>task_end.offset</code>) to attribute tokens to individual tasks within a shared sequential log. Missing logs contribute 0.</p>
+<hr />
+<h2>Background runs and the NDJSON log</h2>
+<p>rufler always writes an NDJSON run log. In foreground mode it uses <code>logwriter --tee</code> (streams to your terminal AND the log). In <code>-d</code> mode it spawns a detached supervisor:</p>
+<pre><code class="language-bash">rufler run -d
+# =&gt; PID 12345, log: .rufler/run.log
+</code></pre>
+<p>Every line in the log is a JSON object:</p>
+<pre><code class="language-json">{"ts": 1776190000.12, "src": "rufler", "level": "info", "text": "log started: ruflo hive-mind spawn --count=5 ..."}
+{"ts": 1776190001.44, "src": "claude", "type": "assistant", "message": {...}}
+{"ts": 1776190002.10, "src": "ruflo", "level": "info", "text": "hive-mind: session initialized"}
+{"ts": 1776190500.77, "src": "rufler", "level": "ok", "text": "log ended rc=0 elapsed=500.6s"}
+</code></pre>
+<ul>
+<li><code>src=claude</code> — raw Claude Code stream-json (preserved as-is, envelope added)</li>
+<li><code>src=ruflo</code> — normalized ruflo/stderr output, ANSI + box-drawing stripped, <code>level</code> auto-detected</li>
+<li><code>src=rufler</code> — rufler's own supervisor markers (start, end, elapsed, exit code)</li>
+</ul>
+<p>Follow live:</p>
+<pre><code class="language-bash">rufler follow               # pretty dashboard
+tail -f .rufler/run.log     # raw NDJSON
+jq 'select(.level=="error")' .rufler/run.log    # grep errors
+</code></pre>
+<hr />
+<h2>Examples</h2>
+<p>The <code>examples/</code> directory ships several ready-to-run flows:</p>
+<table>
+<thead>
+<tr>
+<th>Example</th>
+<th>What it demonstrates</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>examples/rufler_flow.yml</code></td>
+<td>Basic Go WebSocket server with a 5-agent team</td>
+</tr>
+<tr>
+<td><code>examples/rust-cli</code></td>
+<td>Rust CLI project flow</td>
+</tr>
+<tr>
+<td><code>examples/python-fastapi</code></td>
+<td>FastAPI backend flow</td>
+</tr>
+<tr>
+<td><code>examples/nextjs-saas</code></td>
+<td>Next.js SaaS project flow</td>
+</tr>
+<tr>
+<td><code>examples/md-prompts</code></td>
+<td>Prompts loaded from <code>.md</code> files instead of inline</td>
+</tr>
+<tr>
+<td><code>examples/multi-task-group</code></td>
+<td>Explicit multi-task group (backend / frontend / e2e)</td>
+</tr>
+<tr>
+<td><code>examples/multi-task-decompose</code></td>
+<td>AI-decomposed multi-task flow</td>
+</tr>
+<tr>
+<td><code>examples/autonomous-background</code></td>
+<td>Detached background run with NDJSON log</td>
+</tr>
+</tbody></table>
+<p>Run any of them:</p>
+<pre><code class="language-bash">cd examples/multi-task-decompose
+rufler run --dry-run      # inspect plan first
+rufler run -d             # launch detached
+rufler follow               # watch it work
+</code></pre>
+<p>Or point at a flow from anywhere:</p>
+<pre><code class="language-bash">rufler run ./examples/rust-cli/rufler_flow.yml
+</code></pre>
+<hr />
+<h2>Environment variables</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>RUFLER_RUFLO_BIN</code></td>
+<td>Absolute path to a <code>ruflo</code> binary. Highest priority in resolution.</td>
+</tr>
+<tr>
+<td><code>RUFLER_RUFLO_SPEC</code></td>
+<td>npm spec for the <code>npx -y</code> fallback. Default: <code>ruflo@latest</code>.</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>How it works (under the hood)</h2>
+<ol>
+<li><strong><code>rufler check</code></strong> — resolves <code>node</code>, <code>claude</code>, <code>ruflo</code> (local → PATH → npm global → <code>npx</code>) and reports what it found.</li>
+<li><strong><code>rufler run</code></strong> —<ol>
+<li>Loads and validates <code>rufler_flow.yml</code> into typed dataclasses.</li>
+<li>If <code>task.deep_think</code>, spawns a read-only <code>claude -p</code> session that writes project analysis to <code>.rufler/analysis.md</code> (or <code>.rufler/iter-NN/analysis.md</code> in iteration mode).</li>
+<li>If <code>task.decompose</code>, calls <code>claude -p</code> to decompose <code>main</code> into N subtasks and writes <code>.tasks/*.md</code> + companion yml.</li>
+<li>Writes <code>.claude/settings.local.json</code> with <code>permissions.defaultMode=bypassPermissions</code> as a safety net.</li>
+<li>Runs <code>ruflo init --force</code> (unless <code>--skip-init</code>), <code>daemon start</code>, <code>memory init</code>, <code>swarm init</code>, <code>hive-mind init</code>.</li>
+<li>For each task in the group (or the single mono task), composes an objective prompt — project header, task body, all agents sorted lead→senior→junior, autonomy footer.</li>
+<li>Spawns <code>ruflo hive-mind spawn --count=N --role=... --claude --dangerously-skip-permissions=true --objective=&lt;composed&gt;</code>.</li>
+<li>In foreground: streams to terminal via <code>python -m rufler.logwriter --tee</code>. In <code>-d</code>: detaches via <code>Popen(start_new_session=True)</code> with stdio → <code>/dev/null</code> and stdout/stderr piped into the supervisor.</li>
+<li>Sequential multi-task mode polls the log tail for the <code>log ended</code> marker (scanning only bytes added after spawn, to avoid stale markers).</li>
+<li>If <code>task.iterations &gt; 1</code>, steps 2–9 are wrapped in a loop. Each iteration's reports are collected and injected into the next iteration's deep_think. After every iteration an optional judge agent evaluates stop conditions; the loop breaks early on <code>verdict=done AND score &gt;= threshold</code>.</li>
+</ol>
+</li>
+<li><strong><code>rufler stop</code></strong> — post-task hook + autopilot disable + hive-mind shutdown + daemon stop + session-end.</li>
+</ol>
+<hr />
+<h2>Development</h2>
+<pre><code class="language-bash">git clone https://github.com/lib4u/rufler.git
+cd rufler
+pip install -e .
+
+# Run from source
+python -m rufler.cli --help
+python -m rufler.cli run --dry-run --skip-checks
+</code></pre>
+<p>Project layout:</p>
+<pre><code>rufler/
+├── rufler/
+│   ├── cli.py           # Typer app: run / ps / tasks / logs / follow / stop / rm / tokens
+│   ├── config.py        # dataclass schema + YAML loader + objective composer
+│   ├── registry.py      # ~/.rufler/registry.json — RunEntry + TaskEntry with fcntl lock
+│   ├── runner.py        # thin wrapper around ruflo subcommands
+│   ├── checks.py        # node/claude/ruflo resolution
+│   ├── decomposer.py    # AI task decomposition via claude -p
+│   ├── logwriter.py     # NDJSON supervisor (foreground tee + detached)
+│   ├── follow.py        # live 4-panel TUI dashboard (multi-log tailing)
+│   ├── task_markers.py  # task_start/task_end NDJSON markers + boundary scanner
+│   ├── tokens.py        # per-turn token parser with message.id dedup
+│   ├── run_steps.py     # decompose / plan / finalize helpers
+│   ├── templates.py     # `rufler init` sample
+│   ├── tasks/           # task tracking subpackage
+│   │   ├── resolve.py   # status derivation, resume logic, per-task tokens
+│   │   ├── display.py   # Rich tables, detail cards, log tail rendering
+│   │   ├── deep_think.py # project analysis phase (iter-aware prompt)
+│   │   ├── judge.py     # iteration judge — read-only verdict on stop/continue
+│   │   └── report.py    # per-task + final report agents
+│   ├── skills/          # skill install/display subpackage
+│   └── process/         # daemonization, pid management, log paths
+├── tests/
+│   ├── test_basics.py      # registry, tokens, tasks, resume, CLI
+│   ├── test_chain.py       # task chain retrospective compression
+│   ├── test_deep_think.py  # deep_think prompt + subprocess wiring
+│   └── test_iterations.py  # iteration config, per-iter paths, judge JSON parsing
+└── examples/            # ready-to-run rufler_flow.yml files
+</code></pre>
+<hr />
+<h2>License</h2>
+<p>MIT.</p>

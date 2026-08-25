@@ -1,0 +1,362 @@
+<h1>DJZS  Deterministic Pre-Execution Audit for Agents</h1>
+<p>DJZS audits the <strong>reasoning</strong> behind an autonomous agent's move <em>before</em> capital is
+committed, and returns one of three verdicts  <strong>PASS</strong>, <strong>WAIT</strong>, or <strong>FAIL</strong> with the
+specific reasoning defects flagged and a reproducible hash of the decision.</p>
+<p>The wedge: transaction-security tools answer <em>"is this transaction safe to sign?"</em>. DJZS answers
+a different question  <em>"should this position be taken at all?"</em>. A perfectly safe transaction can
+still rest on broken reasoning; DJZS is the layer that catches the bad thesis.</p>
+<hr />
+<h2>Use it now — the live MCP gate</h2>
+<p><code>verify_pm_trade</code> is deployed as a Model Context Protocol tool (streamable HTTP) on a
+Cloudflare Worker. Add it to an MCP-capable agent in one line:</p>
+<pre><code>claude mcp add --transport http djzs-trust https://mcp.djzs.ai/mcp
+</code></pre>
+<p>Then call <code>verify_pm_trade</code> with a free-text prediction-market trade thesis. It extracts the
+reasoning, audits it against the calibrated DJZS-M taxonomy, and returns
+<code>PASS → PROCEED</code> / <code>FAIL</code> / <code>WAIT → HALT</code>, with the flagged defects and a <code>verdict_hash</code>.</p>
+<p><strong>First external audit on record.</strong> An outside agent audited a benchmark thesis
+(<code>pm-block-008</code>) through the deployed tool and received:</p>
+<pre><code>verdict:       FAIL
+flags:         DJZS-M03 (PROBABILITY_UNSOURCED), DJZS-M04 (CONSENSUS_NO_EDGE)
+risk_score:    40
+disagreements: []
+verdict_hash:  0x85918814b3dffa31b00d6892c2e00b2001efd35f7e0044b4cd3789fe1df14937
+</code></pre>
+<p>Behavioral parity against the offline batteries (verdict + flags + extracted input) is green.
+Hash parity is a pending re-mint the calibration key lapsed during deployment so the live
+hash above stands as the record until it is re-run.</p>
+<hr />
+<h2>Pay it over HTTP x402 - the ecosystem rail</h2>
+<p>Beyond the MCP transport above, <code>verify_pm_trade</code> is now payable over the <strong>HTTP x402</strong>
+transport, live on Base mainnet:</p>
+<pre><code>POST https://mcp.djzs.ai/x402/verify
+</code></pre>
+<p>An unpaid request returns an HTTP 402 challenge (<code>exact</code> scheme, <code>eip155:8453</code>, USDC, 2.00
+USDC to the treasury); the client signs an EIP-3009 authorization and retries. This is the
+same rail <strong>Base MCP</strong>, <strong>MetaMask Agent Wallet</strong>, and <code>x402-axios</code> speak, so any HTTP x402
+client can pay the gate directly - no MCP integration required.</p>
+<p>Free-refusal is preserved on both transports: an out-of-scope intent is answered 402 and
+never settled, so a refused audit costs nothing. Verified end to end on Base Sepolia
+(paid settlement plus an on-chain zero-delta refusal) before the mainnet deploy.</p>
+<h2>Architecture C — extraction reports, the engine decides</h2>
+<p>DJZS separates the model-bound step from the trusted step:</p>
+<pre><code>free-text intent
+      │
+      ▼
+EXTRACTION  (LLM, N=3 consensus)          reports observable FACTS, never a verdict
+  · per-field state unanimity across the 3 samples; any disagreement → unknown
+  · quote gates: a claimed "absent" must quote the intent verbatim, or it demotes to unknown
+  · evidence-unanimity: a critical-driving "absent" needs the same quote across all samples
+      │
+      ▼
+AuditInput  (each fact is tri-state: present / absent / unknown)
+      │
+      ▼
+DETERMINISTIC ENGINE  (pure code — no model, no network, no clock)
+  rules fire → weighted score → verdict
+      │
+      ▼
+PASS · WAIT · FAIL   +   verdict_hash
+</code></pre>
+<p><strong>Why this shape:</strong> the verdict rules are model-independent. The LLM only turns messy text into a
+structured struct; the audit <em>rules</em> that decide the verdict are frozen code. Swap the model and
+the extraction quality changes the rules, weights, and hash do not.</p>
+<p><strong>Determinism by construction.</strong> The same <code>AuditInput</code> always yields the same verdict and the same
+hash:</p>
+<pre><code>verdict_hash = sha256(canonicalize({ verdict, risk_score, flags: codes.sorted(), unknown_fields }))
+</code></pre>
+<p><strong>WAIT is never silent.</strong> An under-specified thesis — one where a decision-critical fact is
+<code>unknown</code> — resolves to WAIT, mapped to <strong>HALT</strong> for the caller, with <code>unknown_fields</code> returned so
+the agent knows exactly what to clarify. Abstention is a first-class outcome, never a guessed
+PASS or FAIL.</p>
+<hr />
+<h2>Taxonomies (frozen)</h2>
+<h3>DJZS-M — Prediction Market (<code>DJZS-PM-v1.0</code>) the calibrated, live path</h3>
+<p>Weights sum to <strong>100</strong>; FAIL threshold <strong>25</strong>. All four codes are implemented and calibrated.</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Name</th>
+<th>Severity</th>
+<th align="right">Weight</th>
+<th>Detects</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DJZS-M01</td>
+<td>NARRATIVE_RESOLUTION_GAP</td>
+<td>CRITICAL</td>
+<td align="right">30</td>
+<td>Thesis reasons about a narrative adjacent to the actual resolution question.</td>
+</tr>
+<tr>
+<td>DJZS-M02</td>
+<td>FALSIFICATION_ABSENT</td>
+<td>CRITICAL</td>
+<td align="right">30</td>
+<td>No stated condition that would prove the thesis wrong before resolution.</td>
+</tr>
+<tr>
+<td>DJZS-M03</td>
+<td>PROBABILITY_UNSOURCED</td>
+<td>HIGH</td>
+<td align="right">25</td>
+<td>Market or model probability asserted without verifiable basis.</td>
+</tr>
+<tr>
+<td>DJZS-M04</td>
+<td>CONSENSUS_NO_EDGE</td>
+<td>MEDIUM</td>
+<td align="right">15</td>
+<td>Thesis restates consensus at an extreme price with no differentiated edge.</td>
+</tr>
+</tbody></table>
+<p><strong>M04 is advisory-grade.</strong> On its own it does not block a lone M04 rides a PASS with the flag on
+the certificate (weight 15 is below the FAIL threshold). It contributes to a block only by stacking
+with another finding (e.g. M03 + M04 = 40 → FAIL, as in the first audit above).</p>
+<p><code>verify_pm_trade</code> is <strong>PM-only</strong>: if the intent does not extract as a prediction-market thesis
+(including the undetermined case), it returns <code>in_scope: false</code> rather than silently running a
+perpetuals audit.</p>
+<h3>DJZS-LF — Perpetuals / general reasoning (<code>DJZS-LF-v1.1</code>)</h3>
+<p>Weights sum to <strong>200</strong>. The taxonomy is frozen at <strong>11 codes</strong>; <strong>3 are wired live</strong> in the engine
+today (marked ●). The rest are defined and weighted but not yet firing — coverage is stated
+honestly rather than implied.</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Name</th>
+<th>Category</th>
+<th>Severity</th>
+<th align="right">Weight</th>
+<th align="center">Live</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DJZS-S01</td>
+<td>CIRCULAR_LOGIC</td>
+<td>Structural</td>
+<td>CRITICAL</td>
+<td align="right">30</td>
+<td align="center"></td>
+</tr>
+<tr>
+<td>DJZS-S02</td>
+<td>LAYER_INVERSION</td>
+<td>Structural</td>
+<td>HIGH</td>
+<td align="right">25</td>
+<td align="center"></td>
+</tr>
+<tr>
+<td>DJZS-S03</td>
+<td>DEPENDENCY_GHOST</td>
+<td>Structural</td>
+<td>MEDIUM</td>
+<td align="right">18</td>
+<td align="center"></td>
+</tr>
+<tr>
+<td>DJZS-E01</td>
+<td>ORACLE_UNVERIFIED</td>
+<td>Epistemic</td>
+<td>HIGH</td>
+<td align="right">25</td>
+<td align="center">●</td>
+</tr>
+<tr>
+<td>DJZS-E02</td>
+<td>CONFIDENCE_INFLATION</td>
+<td>Epistemic</td>
+<td>MEDIUM</td>
+<td align="right">18</td>
+<td align="center"></td>
+</tr>
+<tr>
+<td>DJZS-I01</td>
+<td>FOMO_LOOP</td>
+<td>Incentive</td>
+<td>MEDIUM</td>
+<td align="right">16</td>
+<td align="center">●</td>
+</tr>
+<tr>
+<td>DJZS-I02</td>
+<td>MISALIGNED_REWARD</td>
+<td>Incentive</td>
+<td>MEDIUM</td>
+<td align="right">16</td>
+<td align="center"></td>
+</tr>
+<tr>
+<td>DJZS-I03</td>
+<td>DATA_UNVERIFIED</td>
+<td>Incentive</td>
+<td>MEDIUM</td>
+<td align="right">16</td>
+<td align="center"></td>
+</tr>
+<tr>
+<td>DJZS-X01</td>
+<td>EXECUTION_UNBOUND</td>
+<td>Execution</td>
+<td>CRITICAL</td>
+<td align="right">15</td>
+<td align="center">●</td>
+</tr>
+<tr>
+<td>DJZS-X02</td>
+<td>RACE_CONDITION</td>
+<td>Execution</td>
+<td>HIGH</td>
+<td align="right">9</td>
+<td align="center"></td>
+</tr>
+<tr>
+<td>DJZS-T01</td>
+<td>STALE_REFERENCE</td>
+<td>Temporal</td>
+<td>LOW</td>
+<td align="right">12</td>
+<td align="center"></td>
+</tr>
+</tbody></table>
+<p>Both weight tables are hash-locked (<code>WEIGHTS_HASH</code> / <code>TAXONOMY_HASH</code>, and the PM equivalents, are
+exported constants); changing a weight is a deliberate re-derive, not a hot patch.</p>
+<hr />
+<h2>MCP tools</h2>
+<p>The deployed Worker exposes three tools over streamable HTTP at <code>/mcp</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>verify_pm_trade</code></td>
+<td>Pre-execution audit of a prediction-market thesis (the gate described above).</td>
+</tr>
+<tr>
+<td><code>query_pol_certificates</code></td>
+<td>Read prior ProofOfLogic certificates from the Irys datachain.</td>
+</tr>
+<tr>
+<td><code>query_agent_trust</code></td>
+<td>LIVE on-chain trust score (subgraph-indexed): totalAudits, failRate, latest verdict, action PROCEED/HALT/NO_HISTORY.</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Honest v1 posture</h2>
+<p>What the tool does <strong>not</strong> do yet — recorded deliberately, to be re-ruled before the gate is
+broadly promoted:</p>
+<ul>
+<li><strong>No ProofOfLogic write on the tool.</strong> <code>verify_pm_trade</code> returns a <code>verdict_hash</code> but does not yet
+anchor a certificate. Existing Irys certificates are prior-architecture lineage, not output of
+this tool.</li>
+<li><strong>Taxonomy hashes not in the response.</strong> The four hash constants are exported from the frozen
+tables but are not yet included in the tool's JSON response.</li>
+</ul>
+<p>The response contract today is: <code>verdict</code>, <code>action</code>, <code>risk_score</code>, <code>flags</code>, <code>unknown_fields</code>,
+<code>disagreements</code> (the per-field sample-agreement telemetry), <code>verdict_hash</code>, <code>extraction_failsafe</code>,
+<code>in_scope</code>, and taxonomy versions.</p>
+<hr />
+<h2>Legacy HTTP API (backward-compatible)</h2>
+<p>Before the MCP gate, DJZS ran as a paid HTTP audit service. Those endpoints remain for
+backward compatibility the MCP gate above is the current surface. The tiers are metered in
+USDC on Base Mainnet via an <code>x-payment-proof</code> header:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Endpoint</th>
+<th align="right">Price</th>
+<th>Memo limit</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Micro</td>
+<td><code>POST /api/audit/micro</code></td>
+<td align="right">$0.10</td>
+<td>2,000 chars</td>
+</tr>
+<tr>
+<td>Founder</td>
+<td><code>POST /api/audit/founder</code></td>
+<td align="right">$1.00</td>
+<td>5,000 chars</td>
+</tr>
+<tr>
+<td>Treasury</td>
+<td><code>POST /api/audit/treasury</code></td>
+<td align="right">$10.00</td>
+<td>unlimited</td>
+</tr>
+</tbody></table>
+<p><code>POST /api/audit</code> aliases the Micro tier, and an escrow-settled variant (<code>POST /api/audit/escrow</code>)
+takes on-chain escrow in place of a payment header. These tiers run the older detection path, not
+the Architecture C engine — treat their output as legacy.</p>
+<hr />
+<h2>On-chain artifacts</h2>
+<p>The A2A manifest (<code>agent.json</code>) attests four DJZS contracts on Base Mainnet, each marked
+<code>verified</code>. Source for each lives in <code>contracts/</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Contract</th>
+<th>Address</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DJZSLogicTrustScore</td>
+<td><code>0xB3324D07A8713b354435FF0e2A982A504e81b137</code></td>
+<td><code>contracts/DJZSLogicTrustScore.sol</code></td>
+</tr>
+<tr>
+<td>DJZSEscrowLock</td>
+<td><code>0xB041760147a60F63Ca701da9e431412bCc25Cfb7</code></td>
+<td><code>contracts/DJZSEscrowLock.sol</code></td>
+</tr>
+<tr>
+<td>DJZSAgentRegistry</td>
+<td><code>0xe40d5669Ce8e06A91188B82Ce7292175E2013E41</code></td>
+<td><code>contracts/DJZSAgentRegistry.sol</code></td>
+</tr>
+<tr>
+<td>DJZSStaking</td>
+<td><code>0xA362947D23D52C05a431E378F30C8A962De91e8A</code></td>
+<td><code>contracts/DJZSStaking.sol</code></td>
+</tr>
+</tbody></table>
+<p>Addresses are as recorded in <code>agent.json</code>; verify any of them on BaseScan.</p>
+<p>A fifth contract, <code>contracts/DJZSProofOfLogicNFT.sol</code>, exists as source only — it is not in the
+deployed manifest, and this document makes no claim that certificate NFTs are live or mintable.</p>
+<p>Prior ProofOfLogic certificates live on the Irys datachain and are readable via the
+<code>query_pol_certificates</code> MCP tool. They are prior-architecture lineage, not output of
+<code>verify_pm_trade</code>.</p>
+<hr />
+<h2>Read the log</h2>
+<p>The commit history is the product's own audit trail: each verdict-bearing change ships with a
+<code>PENDING</code> note naming what is still unproven, and the next commit that closes it discharges that
+note explicitly. Every claim a recall number, a parity result, a live verdict hash — is cited to
+a specific run at the moment it is pushed, not asserted after the fact. If you want to know what is
+proven versus deferred, <code>git log</code> is the source of truth and this file is downstream of it.</p>
+<hr />
+<h2>Repository map</h2>
+<ul>
+<li><code>server/engine-v2/</code> — Architecture C: <code>deterministic-engine.ts</code> (the frozen decider),
+<code>extraction-layer.ts</code> (N=3 consensus extraction), <code>audit-input-schema.ts</code>, <code>hash.ts</code>, and the
+<code>calibration/</code> bench + scorer.</li>
+<li><code>shared/audit-schema.ts</code> — the DJZS-LF perpetuals taxonomy (source of the table above).</li>
+<li><code>shared/pm-taxonomy.ts</code> — the DJZS-M prediction-market taxonomy.</li>
+<li><code>djzs-trust-mcp/</code> — the Cloudflare Worker: the MCP server and the <code>verify_pm_trade</code> tool,
+importing the engine and shared taxonomies frozen via a build alias.</li>
+<li><code>server/</code> (older tiers) — the prior HTTP audit path and its ProofOfLogic / settlement plumbing,
+retained for backward compatibility. Its legacy detection tier historically used a Venice-hosted
+model; the Architecture C path does not depend on it.</li>
+</ul>
+<hr />
+<p><em>The deterministic core runs with zero external dependencies. The extraction step is the only
+model-bound component, isolated to a single swappable function.</em></p>

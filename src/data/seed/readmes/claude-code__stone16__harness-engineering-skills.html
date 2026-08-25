@@ -1,0 +1,187 @@
+<p><a href="https://github.com/stone16/harness-engineering-skills/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer">English</a> | <a href="https://github.com/stone16/harness-engineering-skills/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">中文</a></p><h1>Harness Engineering Skills</h1>
+<p>Stometa's public curated Claude Code skillset — a small, opinionated set of skills we use ourselves, published periodically.</p>
+<p><a href="https://opensource.org/licenses/Apache-2.0" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
+<a href="https://claude.ai/claude-code" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Claude_Code-Plugin-blueviolet" alt="Claude Code" /></a>
+<a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/peer-Codex_CLI-74aa9c" alt="Peer: Codex" /></a>
+<a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/peer-Gemini_CLI-4285F4" alt="Peer: Gemini" /></a></p>
+<h2>At a glance</h2>
+<p><strong>What it is</strong>: A Claude Code plugin with two engineering skills — <code>review-loop</code> (cross-model code review) and <code>harness</code> (multi-agent task orchestration). This repository is their public canonical source; changes are reviewed and released here.</p>
+<p><strong>What it does</strong>: Coordinates a Plan → Generate → Evaluate → Retro pipeline with hard, engine-enforced constraints: two isolated sessions, a fresh sub-agent per checkpoint, an engine script as the sole gatekeeper, and a cross-vendor peer review before any PR lands.</p>
+<p><strong>What problems it solves</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Failure mode</th>
+<th>How it shows up</th>
+<th>What Harness does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Context drift</strong></td>
+<td>Planning, coding, and review share one growing context — the model drifts further with each turn</td>
+<td>Two-session split + fresh sub-agent per checkpoint (eigenbehavior reset)</td>
+</tr>
+<tr>
+<td><strong>Self-certification</strong></td>
+<td>The LLM that wrote the code also judges whether it passes</td>
+<td>Engine script rejects any <code>pass-checkpoint</code> where the evaluator session id matches a prior checkpoint in the same task</td>
+</tr>
+<tr>
+<td><strong>Echo-chamber review</strong></td>
+<td>The same model reviews its own work and misses its own blind spots</td>
+<td><code>review-loop</code> enforces a different-vendor peer (Codex or Gemini) and runs a fresh-session final approval before closing</td>
+</tr>
+</tbody></table>
+<h2>Workflow at a glance</h2>
+<p>Two phases, <strong>hard context boundary</strong> between them. Each phase contains its own fresh-sub-agent iteration loop. The engine script is the only entity that can advance phase state — the LLM cannot self-certify.</p>
+<pre><code class="language-mermaid">flowchart TB
+    YOU(["You"])
+
+    subgraph P["① Plan  ·  Session 1"]
+        direction LR
+        PL["Planner"] &lt;--&gt;|"draft ↔ revise"| SE["Spec Evaluator\nfresh sub-agent"]
+    end
+
+    subgraph E["② Execute  ·  Session 2 (one fresh sub-agent per checkpoint)"]
+        direction TB
+        GN["Generator\nfresh sub-agent"] &lt;--&gt;|"implement ↔ verify"| EV["Evaluator\nfresh sub-agent"]
+        EV --&gt;|"all CPs pass"| RL["Cross-model peer review\nCodex ∣ Gemini"]
+    end
+
+    PR[/"Open PR"/]
+    RT[("Persistent retro\nlearnings → next task")]
+
+    YOU --&gt;|"harness plan"| P
+    P -. "context isolation" .-&gt; E
+    RL --&gt; PR --&gt; RT
+    RT -.-&gt;|"accumulated learnings"| YOU
+
+    classDef fresh stroke:#d97706,stroke-width:2px
+    class SE,GN,EV fresh
+</code></pre>
+<p><strong>Legend</strong> — orange-bordered nodes are <strong>fresh independent sub-agents</strong> (drift firewall); dashed arrows are cross-session / cross-task information flows that carry no shared context.</p>
+<h3>Hosts and roles</h3>
+<p>The model running each role is decoupled from the model hosting the session — that's why the same pipeline works whether you start in Claude Code or Codex.</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Who plays it</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Orchestrator host</strong> (Session 1 + 2)</td>
+<td>Claude Code CLI <strong>or</strong> Codex CLI</td>
+<td>Symmetric. Recommended split: Claude Code for Session 1, Codex for Session 2.</td>
+</tr>
+<tr>
+<td><strong>Spec Evaluator</strong></td>
+<td>Claude (sub-agent or via <code>claude-agent-invoke.sh</code>)</td>
+<td>Stable across hosts.</td>
+</tr>
+<tr>
+<td><strong>Generator</strong></td>
+<td>Active host LLM (Claude or Codex)</td>
+<td>Inherits the host.</td>
+</tr>
+<tr>
+<td><strong>Evaluator / E2E / Retro</strong></td>
+<td>Claude (sub-agent or via <code>claude-agent-invoke.sh</code>)</td>
+<td>Engine rejects same-context self-evaluation.</td>
+</tr>
+<tr>
+<td><strong><code>review-loop</code> peer</strong> (cross-model gate)</td>
+<td><code>codex</code> CLI <strong>or</strong> <code>gemini</code> CLI — allowlisted</td>
+<td>Claude is <strong>not</strong> a peer here by design — same-vendor review would defeat the cross-model purpose.</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>Heads-up on the peer allowlist: the bundled <code>review-loop</code> skill enforces <code>peer ∈ {codex, gemini}</code> in preflight. If Claude is hosting, the peer is naturally a different vendor; if Codex is hosting, picking <code>codex</code> still gives you a fresh isolated context (different <code>CODEX_HOME</code>, no MCP, stripped credentials), and <code>gemini</code> gives you a true cross-vendor read.</p>
+</blockquote>
+<h2>What makes Harness different</h2>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Typical multi-agent loop</th>
+<th>This Harness skill</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Context drift</strong></td>
+<td>One growing context across plan → code → review</td>
+<td>Two-session split + fresh sub-agent per checkpoint (eigenbehavior reset)</td>
+</tr>
+<tr>
+<td><strong>Self-certification</strong></td>
+<td>LLM judges its own output</td>
+<td><code>harness-engine.sh</code> blocks <code>pass-checkpoint</code> until the latest <code>evaluation.md</code> has <code>verdict: PASS</code> <strong>and</strong> the evaluator session id was not reused by any prior checkpoint. The same self-certification gate applies to <code>pass-cohort</code>: cohort status (<code>passed</code> / <code>partial-pass</code>) is computed from per-CP <code>evaluation.md</code> verdicts and engine-side state, never from LLM claims about cohort completion.</td>
+</tr>
+<tr>
+<td><strong>Echo-chamber review</strong></td>
+<td>Same model reviews itself</td>
+<td><code>review-loop</code> enforces a different-vendor peer (Codex or Gemini) and runs a <strong>fresh-session final approval pass</strong> so the closing verdict isn't biased by the iterative repair conversation</td>
+</tr>
+<tr>
+<td><strong>Black-box state</strong></td>
+<td>State implicit in chat history</td>
+<td>All state on disk (<code>.harness/&lt;task-id&gt;/</code>, <code>git-state.json</code>), one engine script owns the phase machine, every transition is auditable</td>
+</tr>
+<tr>
+<td><strong>No memory across tasks</strong></td>
+<td>Each task starts cold</td>
+<td>Persistent <code>.harness/retro/</code> (git-tracked) accumulates error patterns, rule proposals, and skill defects — closes the cybernetic feedback loop</td>
+</tr>
+<tr>
+<td><strong>Tool-use bias</strong></td>
+<td>Lock-in to one CLI / one vendor</td>
+<td>Orchestrator host and review peer are independently swappable; the same engine and gates run on Claude Code or Codex</td>
+</tr>
+</tbody></table>
+<h2>Skills</h2>
+<h3><code>review-loop</code></h3>
+<p>Cross-LLM iterative code review. Spawns a peer reviewer (Codex CLI or Gemini CLI) to independently review your changes. Claude evaluates the peer's findings, implements accepted fixes, and re-submits until both sides agree on the final code state. The human doesn't need to participate — watch progress via <code>.review-loop/&lt;session&gt;/summary.md</code>.</p>
+<h3><code>harness</code></h3>
+<p>Cybernetics-based multi-agent orchestration for complex tasks. Coordinates a <strong>Planner → Generator → Evaluator → Retro</strong> pipeline with fresh sub-agents per checkpoint (drift prevention) and persistent retro learning across tasks. Recommended flow: Claude Code plans the spec (Session 1), Codex executes autonomously (Session 2), and <code>review-loop</code> (Codex or Gemini CLI as peer) provides the cross-model quality gate before PR.</p>
+<h2>Install</h2>
+<pre><code class="language-bash">claude plugin marketplace add https://github.com/stone16/harness-engineering-skills
+claude plugin install harness-engineering-skills@stometa
+</code></pre>
+<p>Verify:</p>
+<pre><code class="language-bash">claude plugin list | grep harness-engineering-skills
+</code></pre>
+<h2>Prerequisites</h2>
+<ul>
+<li><strong>Required</strong>: <code>git</code>, <code>python3</code>, Claude Code with the <a href="https://github.com/anthropics/claude-code" target="_blank" rel="noopener noreferrer"><code>superpowers</code></a> plugin installed.</li>
+<li><strong>Peer reviewer</strong> (one of): <a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer"><code>codex</code> CLI</a> or <a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener noreferrer"><code>gemini</code> CLI</a> — only needed if you use <code>review-loop</code> or <code>harness</code>'s cross-model review.</li>
+<li><strong>Optional</strong>: <code>gh</code> CLI for PR-scoped review detection.</li>
+</ul>
+<h2>Usage</h2>
+<h3><code>review-loop</code> (standalone)</h3>
+<p>Inside a Claude Code session, once the plugin is installed:</p>
+<pre><code>/review-loop
+</code></pre>
+<p>Variants: <code>review loop with gemini</code>, <code>review loop, max 3 rounds</code>, <code>review loop for PR 42</code>, <code>review loop for commit abc123</code>.</p>
+<p>The peer reviewer is one of <code>codex</code> or <code>gemini</code> — set globally via <code>.review-loop/config.json</code> (<code>peer_reviewer</code>), or per-invocation. The loop iterates until peer and host reach <code>CONSENSUS</code>, then runs a fresh-session final approval pass before writing <code>summary.md</code>.</p>
+<h3><code>harness</code> (orchestrated task)</h3>
+<p>Two recommended entry patterns — both produce the identical pipeline shown in the diagram above:</p>
+<p><strong>Pattern A — Claude Code drives planning, Codex drives execution (recommended):</strong></p>
+<pre><code># Session 1, in Claude Code
+harness plan &lt;task-id&gt;          # interactive spec creation + spec review
+
+# Session 2, in Codex (fresh process, planning context discarded by design)
+harness execute &lt;task-id&gt;       # checkpoints → E2E → review-loop → full-verify → PR → retro
+</code></pre>
+<p><strong>Pattern B — single host (Claude Code or Codex) for everything:</strong></p>
+<pre><code>harness plan &lt;task-id&gt;
+harness continue                # same host runs both phases
+</code></pre>
+<p>Pick the cross-model peer once in <code>.harness/config.json</code>:</p>
+<pre><code class="language-json">{ "cross_model_review": true, "cross_model_peer": "gemini" }
+</code></pre>
+<p><code>harness</code> will not let <code>pass-checkpoint</code>, <code>pass-e2e</code>, <code>pass-review-loop</code>, or <code>pass-full-verify</code> succeed unless the corresponding artifacts exist with the right verdict — the engine is the gatekeeper, not the LLM.</p>
+<h2>License</h2>
+<p>Apache-2.0 — see <a href="https://github.com/stone16/harness-engineering-skills/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>.</p>
+<h2>Origin and related</h2>
+<p>This repository owns the public <code>review-loop</code> and <code>harness</code> implementations. Placement, evidence, and Promotion principles for future Stometa Skills are documented in <a href="https://github.com/stone16/stometa-skills" target="_blank" rel="noopener noreferrer"><code>stometa-skills</code></a>. Issues and pull requests are welcome on the <a href="https://github.com/stone16/harness-engineering-skills/issues" target="_blank" rel="noopener noreferrer">GitHub tracker</a>.</p>

@@ -1,0 +1,233 @@
+<h1>🧠 SuperBrain</h1>
+<p><strong>Session memory for Claude Code — a second brain that builds itself.</strong></p>
+<p>Every Claude Code session — across every project, on every machine — is captured into a plain Obsidian markdown vault you fully own. Zero config, no LLM of its own, no cloud. SuperBrain observes the sessions you're already running and writes the journal you never have time to.</p>
+<p><a href="https://github.com/m3talux/superbrain/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-black.svg" alt="License: MIT" /></a>
+<a href="https://github.com/m3talux/superbrain/blob/HEAD/package.json" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/node-%E2%89%A520-black.svg" alt="Node" /></a>
+<a href="https://github.com/m3talux/superbrain/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/m3talux/superbrain/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="#vault-structure" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/storage-plain%20Obsidian%20markdown-blueviolet.svg" alt="Storage" /></a>
+<a href="https://obsidian.md" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/works%20with-Obsidian-7c3aed.svg" alt="Works with Obsidian" /></a></p>
+<hr />
+<blockquote>
+<p><strong>Status:</strong> in active development. Interfaces and behavior may change before a tagged release.</p>
+</blockquote>
+<h2>Why</h2>
+<p>Every Claude Code session ends and the reasoning vanishes. Decisions, trade-offs, the "we tried X and it didn't work" history — gone with the terminal scrollback. CLAUDE.md fixes the <em>rules</em>; SuperBrain fixes the <em>journal</em>. The Claude Code memory ecosystem has split in two, and neither half is what you actually want:</p>
+<ul>
+<li><strong>Automatic but opaque</strong> (claude-mem, mcp-memory-service): great zero-config capture, but it lives in a SQLite/Chroma blob you can't browse, edit, or own.</li>
+<li><strong>Obsidian but manual</strong> (basic-memory, claudesidian, obsidian-second-brain): a beautiful markdown vault, but <em>you</em> have to remember to run commands or hope the model decides to call a tool.</li>
+</ul>
+<p><strong>No mature tool does all of:</strong> globally installed → automatic capture → into a plain Obsidian vault → with incremental daily notes → that you fully own and can <code>git</code>-sync. SuperBrain is that missing bridge.</p>
+<p>This isn't vibes: ~23 prior-art projects and the current Claude Code platform were surveyed, and every architectural decision was challenged before a line was written.</p>
+<h2>Quick start</h2>
+<pre><code class="language-text"># In Claude Code:
+/plugin marketplace add m3talux/superbrain
+/plugin install superbrain
+</code></pre>
+<p>That's it. On the <strong>first session</strong> the plugin runs a one-time setup (installs its
+search dependencies in the background) and tells you it's doing so; capture is
+fully active from the next session. SuperBrain writes to its own vault at
+<code>~/.superbrain/vault</code> — a fixed, predictable location with no environment
+variables to set. Point Obsidian at that folder and you're done.</p>
+<p>If you already have an Obsidian vault you want to bring along, see
+<a href="#vault-setup" target="_blank" rel="noopener noreferrer">Vault setup</a> below — <code>/superbrain:migrate</code> is the preferred path.</p>
+<p>Installed at <strong>user scope</strong>, the plugin's hooks register for <em>every</em> project automatically — there is nothing else to do, ever.</p>
+<blockquote>
+<p>If SuperBrain saves you context, please star ⭐ — it's the only signal we have.</p>
+</blockquote>
+<h2>Supported platforms</h2>
+<ul>
+<li><strong>macOS</strong> — Apple Silicon + Intel. CI-tested.</li>
+<li><strong>Linux</strong> — Ubuntu 22.04+ verified; other distros likely fine. CI-tested.</li>
+<li><strong>Windows</strong> — native Windows support is in progress: the cross-platform
+spawn wrapper, path-separator handling, and platform-aware bootstrap hints
+are in place, but the test suite is not yet fully Windows-portable and
+Windows isn't on the CI matrix. See
+<a href="#install-troubleshooting" target="_blank" rel="noopener noreferrer">Install troubleshooting</a> for the first-install
+failure modes and the fixes.</li>
+</ul>
+<p>Tested on Node 20 LTS and Node 22.</p>
+<h2>How it works</h2>
+<pre><code class="language-mermaid">flowchart LR
+  A[Tool use / prompt] --&gt;|PostToolUse, UserPromptSubmit&lt;br/&gt;async, no LLM| B[NDJSON log&lt;br/&gt;+ salient markers]
+  B --&gt; C{Checkpoint?&lt;br/&gt;PreCompact / SessionEnd /&lt;br/&gt;Stop if pending}
+  C --&gt;|detached, lock-serialized| D[sb-distill&lt;br/&gt;claude -p]
+  D --&gt; E[Router]
+  E --&gt; F[(Obsidian vault&lt;br/&gt;notes only)]
+  D -.-&gt;|incremental rebuild| I[Daily note for today]
+  I --&gt; F
+  C -.-&gt;|byte cursor| B
+</code></pre>
+<ol>
+<li><strong>Observe</strong> — <code>PostToolUse</code> / <code>UserPromptSubmit</code> hooks append a compact event line to a per-session NDJSON log. <strong>No LLM</strong> on this path, so it can never rate-limit, stall, or disrupt your turn.</li>
+<li><strong>Pin salience</strong> — a deterministic scorer drops a structured marker into the log at the moments that matter (a commit, a file-churn spike, a context switch), so the later summary is anchored to <em>what happened</em> instead of re-derived from noise.</li>
+<li><strong>Distill at checkpoints</strong> — at <code>PreCompact</code>, <code>SessionEnd</code>, or a pending-gated <code>Stop</code>, one detached, lock-serialized <code>claude -p</code> reads the delta since a byte-offset cursor, classifies it, and writes routed notes via an in-process vault writer.</li>
+<li><strong>Update the day's journal</strong> — each distill incrementally rebuilds today's <code>daily/&lt;date&gt;.md</code> from the per-session state (digest line + routed-note links + threads). Deterministic concat, no extra LLM call.</li>
+</ol>
+<h2>Features</h2>
+<p><strong>Capture</strong></p>
+<ul>
+<li>✅ Globally installed, zero per-project setup, <strong>no API key</strong> (reuses your Claude Code auth)</li>
+<li>✅ <strong>One-shot project discovery</strong> on first session in an unknown repo: walks the tree, reads the manifests + CLAUDE.md + README, asks one Sonnet call to produce a substantive <code>projects/&lt;slug&gt;.md</code> (stack / architecture / top-level folders / key files / docs / conventions / open questions). Once per project, ever. Never overwrites an existing note.</li>
+<li>✅ Automatic capture that does <strong>not</strong> degrade on multi-day sessions</li>
+<li>✅ Plain Obsidian markdown — wikilinks, frontmatter, fully <code>git</code>-portable, zero lock-in</li>
+<li>✅ Smart router: decisions / project facts / people / gotchas / triage capture</li>
+<li>✅ Incremental daily notes — rebuilt deterministically from per-session state on every distill, no extra LLM call, no cron, no daemon</li>
+<li>✅ Append-or-create, <strong>never</strong> blind-overwrites a note you edited in Obsidian; soft-delete to <code>.trash/</code></li>
+<li>✅ Idempotent &amp; resumable (byte cursor + per-session NDJSON event log); silent failures surface once on next session</li>
+<li>✅ One-command migration off a legacy custom scribe (archives, never deletes)</li>
+</ul>
+<p><strong>Search &amp; recall</strong></p>
+<ul>
+<li>✅ Local hybrid search — FTS5 (BM25) + sqlite-vec, fused with Reciprocal Rank Fusion</li>
+<li>✅ Tiered autonomous recall: BM25 pointers injected on <strong>every prompt</strong> (no model load, no daemon); a user-visible hybrid brief on session start</li>
+<li>✅ <strong>Project-scoped by default</strong>: autonomous recall and the session brief are filtered to the repo you're in, so one project's notes never surface in another (vault-wide deep search stays available via the recall skill and <code>superbrain_search</code> MCP)</li>
+<li>✅ <code>superbrain-recall</code> skill + stdio MCP server (<code>superbrain_search</code>) for model-invoked deep search</li>
+<li>✅ Incremental index on write + self-healing reconcile on session start (Obsidian-edit / git-pull drift)</li>
+<li>✅ All-local embeddings (MiniLM, fetched once &amp; cached); automatic BM25 fallback — search is never hard-down</li>
+</ul>
+<p><strong>Personalization &amp; journaling</strong></p>
+<ul>
+<li>✅ Daily notes — hybrid digest + linked index, idempotently regenerated per day</li>
+<li>✅ Lessons — durable, generalizable rules learned from your pushback</li>
+<li>✅ Preferences — a deduplicated profile auto-injected at SessionStart (never edits your <code>CLAUDE.md</code>)</li>
+</ul>
+<p><strong>Planned</strong></p>
+<ul>
+<li>Auto-generated Maps-of-Content (<code>maps/</code>) + a lint pass.</li>
+</ul>
+<h2>Manual capture with <code>/superbrain:inject</code></h2>
+<p>Auto-capture handles everything SuperBrain can observe inside a Claude session. When you want to record something it didn't see — a random side thought, a meeting summary from elsewhere, a note imported from another system — use the inject command:</p>
+<pre><code>/superbrain:inject I just realized the auth-config endpoint probably needs a TTL field
+/superbrain:inject --from-file ~/Downloads/meeting-summary.md
+/superbrain:inject --project wcloud "transport is HTTP, not gRPC"
+</code></pre>
+<p>What it does:</p>
+<ul>
+<li><strong>Short single-blob input</strong> lands verbatim in <code>capture/</code>. No LLM call.</li>
+<li><strong>Longer or multi-topic input</strong> is split via SuperBrain's inject distiller into the right files: decisions to <code>decisions/</code>, project facts to the matching <code>projects/&lt;slug&gt;.md</code>, references to people to <code>people/</code>, everything else to <code>capture/</code>.</li>
+<li>Today's daily note is updated either way.</li>
+<li>Every injected note carries <code>source: inject</code> provenance so it's trivially auditable.</li>
+</ul>
+<p>Safety rails: inject never creates new project notes (use <code>/superbrain:discover</code> for that), never reshapes preferences, and never silently loses your input — if the distiller returns nothing, your text is written verbatim to <code>capture/</code>.</p>
+<h2>Vault structure</h2>
+<pre><code>~/.superbrain/vault/
+├── projects/      one note per project — status, decisions, current focus
+├── people/        one note per person — role, context, threads
+├── decisions/     atomic, date-prefixed ADR-style notes
+├── daily/         auto-written daily activity
+├── lessons/       durable, generalizable rules learned from your pushback
+├── capture/       raw inbound; triage tag for `/superbrain:inject` items
+├── sessions/      per-session flight recorder — raw turn log + checkpoint digest (pruned after 30 days)
+├── meta/          preferences.md — deduplicated profile auto-injected at SessionStart
+├── maps/          auto-generated Maps-of-Content   (planned)
+└── index.md       catalog — the primary navigation surface
+</code></pre>
+<p>System telemetry (NOT in the vault — lives next to it in <code>~/.superbrain/</code>):</p>
+<pre><code>~/.superbrain/
+├── sessions/          per-session NDJSON event streams + cursors
+├── transcripts/       full session transcripts (when captured)
+└── index.db           hybrid search index (FTS5 + sqlite-vec)
+</code></pre>
+<p>Generated files are namespaced (<code>daily/</code>, <code>index.md</code>) so the auto-rebuilders never touch notes you authored.</p>
+<h2>Vault setup</h2>
+<p>SuperBrain's vault lives at <code>~/.superbrain/vault</code> — fixed, predictable, no env vars. Two ways to bring an existing Obsidian vault into the picture:</p>
+<h3>Migrate (preferred)</h3>
+<pre><code class="language-text">/superbrain:migrate                  # auto-detects your vault
+/superbrain:migrate ~/Documents/MyVault   # explicit path
+/superbrain:migrate --dry-run        # preview without writing
+</code></pre>
+<p><code>/superbrain:migrate</code> reads your existing Obsidian vault (the source is <strong>never modified</strong>) and copies its content into <code>~/.superbrain/vault</code>, fitting it into SuperBrain's structure (<code>projects/</code>, <code>decisions/</code>, <code>people/</code>, <code>daily/</code>, etc.). From then on, SuperBrain owns and extends a vault it fully understands — its router, daily notes, and index all behave predictably. <strong>This is the recommended path</strong> for almost every user.</p>
+<h3>Adopt (advanced — only when migration isn't an option)</h3>
+<pre><code class="language-text">/superbrain:adopt ~/Documents/MyEstablishedVault
+</code></pre>
+<p><code>/superbrain:adopt</code> does <strong>not</strong> copy anything; it records your existing path as the vault location and starts writing into it directly. Use this only when you have a heavily established Obsidian setup whose structure you do not want to change — broken into folders, plugins, layouts, or conventions SuperBrain isn't designed around.</p>
+<p>The trade-off: SuperBrain will work <em>on top of</em> whatever's already there rather than <em>alongside</em> a structure it owns. The router may write into folders that don't match your existing convention; auto-generated daily notes will live alongside your hand-authored notes; the search-index reconciler will still self-heal but has more drift to manage. Migration sidesteps all of that.</p>
+<p>When in doubt: <strong>migrate, don't adopt.</strong></p>
+<h2>Configuration</h2>
+<p>SuperBrain is configured by command, not by environment. There are no
+required env vars. The single optional one:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>Optional escape hatch — distillation uses the Anthropic API instead of your Claude Code subscription. Useful if you want the distill spawns to bypass subscription quota.</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p><strong>Heads-up (2026-06-15):</strong> background <code>claude -p</code> / Agent-SDK usage on subscription plans draws from a separate capped monthly credit after this date. If captures stop, SuperBrain surfaces a one-time notice on session start — set <code>ANTHROPIC_API_KEY</code> to switch to the API path.</p>
+</blockquote>
+<h2>Syncing your vault</h2>
+<p>SuperBrain <strong>deliberately does not push your vault anywhere.</strong> It writes plain
+markdown into a local folder and nothing leaves the machine. This is a design
+choice, not a missing feature: a network operation in the capture path could
+hang, stall on an auth prompt, or fail — exactly the failure mode the
+"never disrupt the session" guarantee exists to prevent. Backup and
+multi-machine sync are a solved problem, and dedicated tools do it better and
+safer than a hook can.</p>
+<p>What SuperBrain <em>does</em> guarantee is that it composes cleanly with whatever sync
+you choose: writes are append-or-create and idempotent, and the search index
+<strong>self-heals on session start</strong> after the vault changes underneath it (an
+external <code>git pull</code>, an Obsidian edit, a Syncthing update). So you can layer any
+of the following on top with no special configuration:</p>
+<ul>
+<li><strong>Adopted an existing Obsidian vault?</strong> If it's already backed by the
+<a href="https://github.com/Vinzent03/obsidian-git" target="_blank" rel="noopener noreferrer">Obsidian Git</a> community plugin (or
+Obsidian Sync), you already have sync — SuperBrain just writes into it and
+your existing setup ships the changes. Nothing to do.</li>
+<li><strong>Using the owned default (<code>~/.superbrain/vault</code>)?</strong> Pick one:<ul>
+<li><p>Make it a git repo and use <strong>Obsidian Git</strong> for scheduled commit/push.</p>
+</li>
+<li><p>Point <strong>Syncthing</strong> or a file-sync tool at the folder.</p>
+</li>
+<li><p>Or a DIY scheduled job — e.g. a <code>cron</code> / <code>launchd</code> entry running, say every
+15 minutes:</p>
+<pre><code class="language-bash">cd ~/.superbrain/vault &amp;&amp; git add -A \
+  &amp;&amp; git commit -q -m "vault sync $(date -u +%FT%TZ)" \
+  &amp;&amp; git pull --rebase --autostash &amp;&amp; git push
+</code></pre>
+</li>
+</ul>
+</li>
+</ul>
+<p>Whichever you choose, treat it as <strong>backup / sync owned by you</strong>, not by the
+plugin. Running the same vault from two machines concurrently can still produce
+git conflicts in regenerated files (<code>index.md</code>, today's <code>daily/</code>) — Obsidian
+Git's conflict UX or a single-writer-at-a-time habit avoids that. SuperBrain's
+job is to stay idempotent and drift-tolerant so any of these Just Work; it is
+not to own your remote.</p>
+<h2>Install troubleshooting</h2>
+<p>SuperBrain runs a one-time <code>npm ci</code> + <code>npm rebuild better-sqlite3</code> on first session start. If <code>~/.superbrain/last-failure.txt</code> reports a bootstrap failure, the message includes a platform-specific hint. Common cases:</p>
+<ul>
+<li><strong><code>npm ci</code> failed</strong> — network / proxy issue. Retry. If you're behind a corporate proxy, configure <code>npm config set proxy ...</code> and retry.</li>
+<li><strong>better-sqlite3 native build failed (Windows)</strong> — install <a href="https://github.com/nodejs/node-gyp#on-windows" target="_blank" rel="noopener noreferrer">Visual Studio Build Tools</a> + Python 3 and retry, or switch to Node 20 LTS which has more prebuilt binaries.</li>
+<li><strong>better-sqlite3 native build failed (Linux)</strong> — <code>sudo apt install build-essential python3</code> and retry.</li>
+<li><strong>better-sqlite3 native build failed (macOS)</strong> — <code>xcode-select --install</code> and retry.</li>
+<li><strong>better-sqlite3 binding wouldn't load under your Node version</strong> — Node 25's ABI 141 has no published prebuild at the time of writing; downgrade to Node 22 or 20 LTS.</li>
+</ul>
+<p>SuperBrain re-tries bootstrap on every session start, so once the underlying issue is fixed, the next session picks it up automatically.</p>
+<h2>Design principles</h2>
+<p>Enforced, tested invariants — not aspirations:</p>
+<ul>
+<li><strong>Never disrupt the session.</strong> Every hook exits 0 no matter what; <code>PreCompact</code> never blocks compaction; a crashing hook is impossible by construction.</li>
+<li><strong>Never lose data.</strong> Append-or-create only; a note you edited in Obsidian is never clobbered; deletes go to <code>.trash/</code>.</li>
+<li><strong>Never silently die.</strong> Failures land in a sentinel surfaced once on the next <code>SessionStart</code>.</li>
+<li><strong>Idempotent &amp; self-healing.</strong> Byte cursor + per-session NDJSON event log; a missed or killed run is recovered next session.</li>
+<li><strong>No daemon, no scheduler, no API key.</strong> One detached process per checkpoint — nothing to supervise, nothing to leak.</li>
+</ul>
+<h2>Development</h2>
+<pre><code class="language-bash">npm ci
+npm run typecheck     # tsc --noEmit, zero errors
+npm run build         # → dist/
+npm test              # full suite (unit + integration + fresh-clone E2E)
+npm run release:check # build is reproducible: committed dist/ matches source
+</code></pre>
+<p>Contributions welcome — see <a href="https://github.com/m3talux/superbrain/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a>.</p>
+<h2>Acknowledgements</h2>
+<p>Standing on the shoulders of: Andrej Karpathy's <em>LLM Wiki</em> pattern, <a href="https://github.com/thedotmack/claude-mem" target="_blank" rel="noopener noreferrer">claude-mem</a> (global-plugin distribution + context injection), <a href="https://github.com/basicmachines-co/basic-memory" target="_blank" rel="noopener noreferrer">basic-memory</a> (Obsidian-native markdown memory), <a href="https://github.com/eugeniughelbur/obsidian-second-brain" target="_blank" rel="noopener noreferrer">obsidian-second-brain</a> (AI-first note rules), and <a href="https://github.com/coleam00/claude-memory-compiler" target="_blank" rel="noopener noreferrer">claude-memory-compiler</a> (session-triggered rollups).</p>
+<h2>License</h2>
+<p><a href="https://github.com/m3talux/superbrain/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a> © m3talux</p>

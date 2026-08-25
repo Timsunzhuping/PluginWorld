@@ -1,0 +1,475 @@
+<h1>OpenGuardrails</h1>
+<p><strong>The vendor-neutral protocol for AI agent safety &amp; security — and the neutral benchmark that ranks the vendors.</strong></p>
+<p>Integrate safety &amp; security once, enforce it across every agent and LLM — instead of wiring every vendor to every tool by hand.</p>
+<p>Apache-2.0 · <a href="https://openguardrails.com" target="_blank" rel="noopener noreferrer">openguardrails.com</a></p>
+<hr />
+<p>This monorepo is the home of the <strong>OpenGuardrails (OGR) specification and its
+reference integrations</strong>. The specification is the normative contract every
+integration and detector speaks; the integrations, benchmark, examples, skill,
+and website live alongside it so changes can be reviewed and tested together.</p>
+<p>OGR is <strong>not a guardrail product</strong>: it defines the wire and referees the
+leaderboard. Vendors compete on detection quality behind a common plug; users
+get one way to configure and compose safety &amp; security across every agent they
+run.</p>
+<ul>
+<li>We define the <strong>wire</strong> — the layer model, events, verdicts, composition,
+taxonomy.</li>
+<li>We <strong>referee</strong> the benchmark.</li>
+<li>We do <strong>not</strong> build detection capability — vendors compete behind the contract.</li>
+</ul>
+<h2>The layer model: OGR beside OSI</h2>
+<p><strong>This is the protocol's foundational concept.</strong> OGR is to agent traffic what
+the layered network model is to packets — and it is built the way a firewall
+is: an integration sees <strong>one event at a time</strong>, the way a firewall sees one
+IP packet, and the runtime reassembles everything above it and reads
+everything below it out of the payload.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>OGR layer</th>
+<th>Network analogue</th>
+<th>One unit is</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>L6</strong></td>
+<td><strong>Session</strong></td>
+<td>— <em>(this domain's own layer)</em></td>
+<td>one conversation</td>
+</tr>
+<tr>
+<td><strong>L5</strong></td>
+<td><strong>Turn</strong></td>
+<td>— <em>(this domain's own layer)</em></td>
+<td>one instruction → quiescence</td>
+</tr>
+<tr>
+<td><strong>L4</strong></td>
+<td><strong>Step</strong></td>
+<td>transport</td>
+<td>one model call: request + response, paired by <code>step_id</code></td>
+</tr>
+<tr>
+<td><strong>L3</strong></td>
+<td><strong>Event</strong></td>
+<td><strong>network — the packet</strong></td>
+<td>one <code>GuardEvent</code>, half a step — <strong>the only layer on the wire</strong></td>
+</tr>
+<tr>
+<td><strong>L2</strong></td>
+<td><strong>Call</strong></td>
+<td>link</td>
+<td>one tool call the model asked for</td>
+</tr>
+<tr>
+<td><strong>L1</strong></td>
+<td><strong>Exec</strong></td>
+<td>physical</td>
+<td>one real execution on a machine — <em>named by the model, not carried by the contract</em></td>
+</tr>
+</tbody></table>
+<p>Like a packet, an event is a <strong>header</strong> — <code>kind</code> (<code>step/request</code> |
+<code>step/response</code>), <code>step_id</code>, and the identity four-tuple <code>agent_id · agent_type · agent_workspace · agent_user</code> (OGR's answer to the firewall's
+5-tuple) — plus a <strong>payload</strong>: the raw provider body. Everything above L3 is
+<strong>derived server-side</strong> (sessions by conversation-prefix chaining, turns by
+instruction boundaries and idle timeout — a firewall does not ask packets
+which connection they belong to); everything below is parsed from the payload
+(calls) or inferred (exec: no sensor observes it, and the gap between what a
+call claims and what an exec does is precisely what agent security is about).</p>
+<p>Two honest notes on the analogy. OGR follows the <em>pragmatic</em> TCP/IP cut — a
+layer earns its place with its own unit, mechanism, and question — not OSI's
+seven: above transport, networking has only "application", but agent traffic
+<em>is</em> a dialogue with stable structure, so Turn and Session are this domain's
+own layers, defined here rather than mapped onto OSI's vestigial
+session/presentation layers. And the <strong>agent is an endpoint, not a layer</strong> —
+it persists with zero traffic, sessions belong to it the way TCP connections
+belong to a host, and it is addressed by the four-tuple every event carries.
+Beside the stack sits the entity axis every firewall has: tenant (the API
+key), <strong>workspace</strong> = security zone (one zone, one policy set), <strong>agent</strong> =
+host, discovered from traffic into an inventory.</p>
+<p>Each event gets a <strong>verdict at the moment the integration can still refuse
+it</strong> — the request before the model sees it, the response before the agent
+acts on it:</p>
+<pre><code>  your own agent · harness plugins        gateway integrations
+  (two POSTs at the loop's seams)         (an LLM proxy: Higress, …)
+        │                                       │
+        │   raw provider bodies + step_id       │
+        ▼                                       ▼
+   ┌───────────────────────────────────────────────┐
+   │  OGR core contract                            │
+   │  GuardEvent · Verdict ·                       │
+   │  composition · taxonomy                       │
+   └───────────────────────────────────────────────┘
+                       ▲
+                       │
+                detector plugins
+               (config rules OR model/classifier)
+</code></pre>
+<h3>The same six layers, in five other vocabularies</h3>
+<p>Agent harnesses already have words for this traffic. They line up:</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>OGR</th>
+<th>Network (OSI / TCP-IP)</th>
+<th>OTel GenAI</th>
+<th>OpenAI Agents SDK</th>
+<th>Claude Agent SDK</th>
+<th>LangGraph</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>L6</strong></td>
+<td><strong>Session</strong> — one conversation</td>
+<td><em>no OSI layer</em> — the firewall's session table, idle aging</td>
+<td><code>gen_ai.conversation.id</code> <em>(no span)</em></td>
+<td><code>Session</code> / <code>SQLiteSession</code> id; a trace's <code>group_id</code></td>
+<td>the session — <code>session_id</code>, <code>resume</code>, <code>fork</code></td>
+<td>the <strong>thread</strong> — <code>thread_id</code> + checkpointer</td>
+</tr>
+<tr>
+<td><strong>L5</strong></td>
+<td><strong>Turn</strong> — one instruction → quiescence</td>
+<td><em>no OSI layer</em> — a flow's FIN / RST / timeout</td>
+<td><code>invoke_agent</code> span</td>
+<td>one <code>Runner.run()</code> — one trace</td>
+<td>one <code>query()</code> prompt, up to its <code>ResultMessage</code></td>
+<td>one <code>invoke()</code> / <code>stream()</code> on the graph</td>
+</tr>
+<tr>
+<td><strong>L4</strong></td>
+<td><strong>Step</strong> — one model call</td>
+<td><strong>transport</strong> (OSI L4)</td>
+<td>the inference span, <code>chat {model}</code></td>
+<td><code>generation_span</code> / <code>response_span</code> — <em>their</em> "turn"</td>
+<td>one loop round trip — <em>their</em> "turn" (<code>max_turns</code>)</td>
+<td>one model-node execution (<code>before_model</code> → <code>after_model</code>)</td>
+</tr>
+<tr>
+<td><strong>L3</strong></td>
+<td><strong>Event</strong> — half a step, <strong>the wire unit</strong></td>
+<td><strong>network</strong> (OSI L3) — the packet</td>
+<td>that span's start / end</td>
+<td>that span's start / end</td>
+<td><code>AssistantMessage</code> out; tool results ride the <strong>next</strong> <code>UserMessage</code></td>
+<td>the two moments around the chat model's <code>invoke()</code></td>
+</tr>
+<tr>
+<td><strong>L2</strong></td>
+<td><strong>Call</strong> — one tool call</td>
+<td><strong>data link</strong> (OSI L2)</td>
+<td><code>execute_tool</code> span</td>
+<td><code>function_span</code></td>
+<td>a <code>tool_use</code> block; <code>PreToolUse</code> is its gate</td>
+<td>a <code>ToolNode</code> call; <code>wrap_tool_call</code> is its gate</td>
+</tr>
+<tr>
+<td><strong>L1</strong></td>
+<td><strong>Exec</strong> — one real execution</td>
+<td><strong>physical</strong> (OSI L1)</td>
+<td>—</td>
+<td>—</td>
+<td>what <code>Bash</code> / <code>Edit</code> actually did on the host</td>
+<td>what the tool function actually did</td>
+</tr>
+<tr>
+<td>—</td>
+<td><strong>Agent</strong> <em>(entity, off the stack)</em></td>
+<td>host / endpoint</td>
+<td><code>gen_ai.agent.id</code> / <code>.name</code></td>
+<td>the <code>Agent</code> object (<code>agent_span</code>); a handoff switches it</td>
+<td>the agent, and each subagent</td>
+<td>the compiled graph</td>
+</tr>
+<tr>
+<td>—</td>
+<td><strong>Workspace</strong> · <strong>Tenant</strong></td>
+<td>security zone · administrative boundary</td>
+<td><em>(<code>deployment.environment.name</code>)</em></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<p><strong>The numbers line up through L4 on purpose.</strong> Exec/call/event/step sit on
+physical/link/network/transport, and the packet is L3 in both columns. Above
+transport the columns part: networking has only "application", because network
+applications share no structure — agent traffic <em>is</em> a dialogue with stable
+structure, so <strong>turn and session are this domain's own L5 and L6</strong>, not OSI's
+session and presentation layers (the two practice discarded).</p>
+<p>⚠️ <strong>"Turn" means this stack's STEP in two of the three SDKs.</strong> In both the
+OpenAI Agents SDK and the Claude Agent SDK a <em>turn</em> is one iteration of the
+agent loop — one model call plus the tool runs it triggers — and that is what
+<code>max_turns</code> counts. An OGR <strong>turn</strong> is the user-instruction episode that
+<em>contains</em> those iterations: one <code>Runner.run()</code>, one <code>query()</code> prompt, one
+graph <code>invoke()</code>. Same word, one layer apart. (The OpenAI Agents SDK
+documentation uses both senses: <code>max_turns</code> counts loop iterations, while "a
+single logical turn in a chat conversation" is one <code>Runner.run()</code> — an OGR
+turn.)</p>
+<p>The full mapping — including what to send as <code>session_hint</code>, why an SDK <em>hook</em>
+(<code>PreToolUse</code>, <code>wrap_tool_call</code>) is an enforcement point where a tracing span
+is not, and how a handoff moves the entity axis rather than the stack — is in
+<a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/overview.md#the-layer-model-in-harness-vocabularies-non-normative" target="_blank" rel="noopener noreferrer">Overview § The layer model in harness vocabularies</a>.</p>
+<p>Normative text: <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/overview.md" target="_blank" rel="noopener noreferrer">Overview § The layer model</a>.</p>
+<h2>Integrate your agent in five minutes</h2>
+<p>The whole protocol is <strong>one endpoint, two calls per model call</strong>. You forward
+the exact bodies you already send to and receive from your LLM; the runtime
+does everything else (sessions, turns, decomposition, detection). Fail-open by
+default: if the runtime is unreachable, your agent keeps running.</p>
+<pre><code class="language-python">import uuid, requests
+
+OGR = "https://ogr.example.com"           # your runtime's base URL
+KEY = "ogr_xxxxxxxx"                      # your organization API key
+
+# The identity four-tuple. All four always present; "" = nothing to assert
+# (the runtime then derives identity from the API key).
+IDENTITY = {
+    "agent_id":        "invoice-bot",     # WHICH agent — unique in your org
+    "agent_type":      "my-harness",      # what KIND — a label, never policy
+    "agent_workspace": "finance-agents",  # agent GROUP — one policy set
+    "agent_user":      "u-8232",          # who is USING it this session
+}
+
+SESSION = uuid.uuid4().hex   # optional session_hint: one id per conversation —
+                             # sessions become declared instead of inferred
+
+def evaluate(kind, step_id, payload):
+    """The whole protocol is this one call. Fail-open: no verdict → proceed."""
+    try:
+        r = requests.post(f"{OGR}/v1/evaluate",
+                          headers={"Authorization": f"Bearer {KEY}"},
+                          json={"kind": kind, "step_id": step_id,
+                                "llm_protocol": "openai.chat",
+                                "session_hint": SESSION,
+                                **IDENTITY, "payload": payload},
+                          timeout=5)
+        return r.json() if r.ok else None
+    except requests.RequestException:
+        return None
+
+def blocked(v):
+    return v is not None and v["decision"] == "block"
+
+# your agent loop, with the two calls added:
+while True:
+    step_id = uuid.uuid4().hex                     # binds this call's 2 events
+    body = {"model": "gpt-5", "messages": messages, "tools": TOOLS}
+    if blocked(evaluate("step/request", step_id, body)):     # ① before the model
+        break
+    resp = call_llm(body)                                    # your code, unchanged
+    if blocked(evaluate("step/response", step_id, resp)):    # ② before acting on it
+        break
+    ...                                            # execute tool calls, loop
+</code></pre>
+<p>Runnable version (with streaming): <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/examples/minimal-agent/" target="_blank" rel="noopener noreferrer"><code>examples/minimal-agent/</code></a>.
+Full contract: <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/runtime-api.md" target="_blank" rel="noopener noreferrer">Runtime API</a> — including
+<a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/runtime-api.md#a-complete-exchange" target="_blank" rel="noopener noreferrer">a complete exchange</a>: both
+halves of one model call written out whole, with the verdict each returns.</p>
+<p><strong>The questions the wire raises first</strong> — which <code>llm_protocol</code> to declare, what
+to send when your protocol is not one we list, why a different model does not
+mean a different integration — are answered in the
+<a href="https://openguardrails.com/api/docs/faq/" target="_blank" rel="noopener noreferrer">protocols FAQ</a>.</p>
+<h2>Why a standard</h2>
+<p>Without OGR, securing an agent is an <code>N × M × L</code> integration problem: every
+agent, every detector vendor, every LLM protocol wired pairwise. OGR collapses
+it to <code>N + M + L</code> — integrate once against the contract.</p>
+<h2>Two layers: API → Plugin</h2>
+<p><strong>There is no SDK layer.</strong> The API is the integration surface — one decision
+endpoint and <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/runtime-api.md#the-recipe" target="_blank" rel="noopener noreferrer">one recipe</a> — and
+agent developers integrate by calling it directly:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>What it is</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>API</strong></td>
+<td>The wire contract a runtime (PDP) exposes: <code>POST /v1/evaluate</code> (decide + record), heartbeat, health — carrying <code>GuardEvent</code>s and returning <code>Verdict</code>s.</td>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/runtime-api.md" target="_blank" rel="noopener noreferrer">Runtime API binding</a> + <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/schema/" target="_blank" rel="noopener noreferrer">JSON Schemas</a></td>
+</tr>
+<tr>
+<td><strong>Plugin</strong></td>
+<td>A hook for one surface — an agent harness or a gateway — that observes steps, builds events, and enforces verdicts, speaking the API directly.</td>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/integrations/" target="_blank" rel="noopener noreferrer"><code>integrations/</code></a></td>
+</tr>
+</tbody></table>
+<h2>The normative components</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>What it defines</th>
+<th>OTel analogue</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/overview.md" target="_blank" rel="noopener noreferrer">Overview</a></td>
+<td>The layer model and the integration surface</td>
+<td>—</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/guard-event.md" target="_blank" rel="noopener noreferrer">GuardEvent</a></td>
+<td>The typed unit observed at an integration point</td>
+<td>span / log record</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/verdict.md" target="_blank" rel="noopener noreferrer">Verdict</a></td>
+<td>The runtime's decision about an event</td>
+<td>—</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/obligations.md" target="_blank" rel="noopener noreferrer">obligations</a></td>
+<td>What the enforcement point must DO before an action proceeds — carried beside an <code>allow</code></td>
+<td>XACML obligations</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/artifact-scan.md" target="_blank" rel="noopener noreferrer">artifact scan</a></td>
+<td>The sibling contract a scanner implements — hash-first, range-negotiated, pluggable</td>
+<td>ICAP</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/composition.md" target="_blank" rel="noopener noreferrer">composition</a></td>
+<td>How multiple detectors' answers combine into one decision</td>
+<td>—</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/degraded-mode.md" target="_blank" rel="noopener noreferrer">degraded mode</a></td>
+<td>What an integration does when the runtime is unreachable (default: fail open)</td>
+<td>—</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/runtime-api.md" target="_blank" rel="noopener noreferrer">Runtime API</a></td>
+<td>The HTTP binding a runtime exposes, the recipe, and the minimal integration</td>
+<td>OTLP/HTTP</td>
+</tr>
+</tbody></table>
+<p>Risk categories live in the <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/taxonomy.md" target="_blank" rel="noopener noreferrer">taxonomy</a> (<code>safety.*</code> and
+<code>security.*</code>), versioned and swappable — the contract references category IDs but
+stays neutral on what is "unsafe."</p>
+<h2>Two domains, one contract</h2>
+<ul>
+<li><strong>Safety</strong> — harmful <em>content/behavior</em> (toxicity, self-harm, CSAM, brand,
+topic). Mostly classifier-judged at the content I/O boundary.</li>
+<li><strong>Security</strong> — <em>system compromise</em> (prompt injection, data exfiltration,
+malicious commands, SSRF, secret leakage, supply chain). Judged on actions
+and data flow — what a tool call is about to do.</li>
+</ul>
+<p>The contract is unified; the pipelines and enforcement points differ. Start with
+the <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/overview.md" target="_blank" rel="noopener noreferrer">overview</a>.</p>
+<h2>Conformance &amp; benchmark</h2>
+<ul>
+<li>A detector is <strong>OGR-conformant</strong> if it accepts a <code>GuardEvent</code> and returns a
+valid <code>Verdict</code> against the <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/schema/" target="_blank" rel="noopener noreferrer">JSON Schemas</a>. See <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/CONFORMANCE.md" target="_blank" rel="noopener noreferrer">CONFORMANCE.md</a>.</li>
+<li>The <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/benchmarks/" target="_blank" rel="noopener noreferrer">benchmark</a> evaluates conformant detectors on shared corpora
+and publishes the leaderboard.</li>
+</ul>
+<hr />
+<h2>Monorepo layout</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>What it contains</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/specification/" target="_blank" rel="noopener noreferrer"><code>specification/</code></a> and <a href="https://github.com/openguardrails/openguardrails/blob/HEAD/schema/" target="_blank" rel="noopener noreferrer"><code>schema/</code></a></td>
+<td>Normative protocol, schemas (JSON Schemas + OpenAPI), taxonomy, conformance, and governance.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/integrations/" target="_blank" rel="noopener noreferrer"><code>integrations/</code></a></td>
+<td>Agent and gateway integrations, each speaking the API directly.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/benchmarks/" target="_blank" rel="noopener noreferrer"><code>benchmarks/</code></a></td>
+<td>Neutral detector benchmark and leaderboard.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/examples/" target="_blank" rel="noopener noreferrer"><code>examples/</code></a></td>
+<td>The runnable minimal integration (<code>minimal-agent/</code>).</td>
+</tr>
+<tr>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/skills/openguardrails/" target="_blank" rel="noopener noreferrer"><code>skills/openguardrails/</code></a></td>
+<td>Agent skill for drafting and enforcing policies.</td>
+</tr>
+<tr>
+<td>—</td>
+<td><a href="https://openguardrails.com" target="_blank" rel="noopener noreferrer">openguardrails.com</a> lives in a separate repository; this repo holds the protocol and plugins it documents.</td>
+</tr>
+</tbody></table>
+<h3>Integration status</h3>
+<p>The v0.6 SDK packages were retired in v0.7 — the API is the integration
+surface. v0.8 merged the two integration recipes into one, and every
+integration below speaks it (v1.0 releases the same wire unchanged):</p>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Target</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Gateway</strong></td>
+<td>Higress (Go/WASM)</td>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/integrations/gateway/higress/" target="_blank" rel="noopener noreferrer"><code>integrations/gateway/higress</code></a> — <strong>the reference gateway integration</strong></td>
+</tr>
+<tr>
+<td></td>
+<td>OpenAI/Anthropic example · mitmproxy</td>
+<td>current</td>
+</tr>
+<tr>
+<td><strong>Agent</strong></td>
+<td>DeepSeek Harness (<code>dsh</code>)</td>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/integrations/agent/dsh/" target="_blank" rel="noopener noreferrer"><code>integrations/agent/dsh</code></a> — <strong>the reference agent-direct integration</strong></td>
+</tr>
+<tr>
+<td></td>
+<td>litellm</td>
+<td><a href="https://github.com/openguardrails/openguardrails/blob/HEAD/integrations/agent/litellm/" target="_blank" rel="noopener noreferrer"><code>integrations/agent/litellm</code></a> — current</td>
+</tr>
+<tr>
+<td></td>
+<td>Claude Code · Codex · opencode · OpenClaw · Hermes · LangGraph</td>
+<td>current</td>
+</tr>
+</tbody></table>
+<h2>Development</h2>
+<pre><code class="language-bash"># benchmark tests
+python -m pip install pytest &amp;&amp; python -m pytest
+
+# higress plugin
+cd integrations/gateway/higress &amp;&amp; go test ./...
+
+# dsh plugin (npm workspace)
+npm install &amp;&amp; npm run build &amp;&amp; npm test
+</code></pre>
+<h2>Principles</h2>
+<ol>
+<li><strong>Neutral.</strong> The protocol is open and foundation-governed; the benchmark is a
+referee, not a contestant.</li>
+<li><strong>Standardize the boundary, not the brains.</strong> Detection stays competitive.</li>
+<li><strong>Name the loop the way harnesses do.</strong> Session, turn, step, call — an
+integration should never have to translate its own vocabulary to speak the
+wire.</li>
+<li><strong>The wire carries what only the producer knows.</strong> Identity and the
+step-pairing id are asserted; everything derivable — sessions, turns,
+numbering, timestamps, protocol versions — is the runtime's job, so the
+integration stays stateless.</li>
+</ol>
+<h2>Status</h2>
+<p>Current protocol version: <strong>v1.0</strong> — the first stable release (see
+<a href="https://github.com/openguardrails/openguardrails/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a> for protocol versions). The wire is stable:
+changes within 1.x are additive-optional (<code>additionalProperties: false</code>
+rejects unknown keys, not absent ones, so both ends roll forward
+independently); anything breaking is a new major version. See
+<a href="https://github.com/openguardrails/openguardrails/blob/HEAD/GOVERNANCE.md" target="_blank" rel="noopener noreferrer">GOVERNANCE.md</a> for how the spec evolves. Contributions welcome —
+<a href="https://github.com/openguardrails/openguardrails/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a>.</p>
+<h2>License</h2>
+<p>Apache-2.0.</p>

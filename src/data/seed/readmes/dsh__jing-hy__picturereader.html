@@ -1,0 +1,636 @@
+<h1>picturereader</h1>
+<blockquote>
+<p><strong>v3.1.0</strong> — 给纯文本模型（DeepSeek / text-only）的全能「看图 / 读文档」能力：<strong>粘贴即用、原生缩略图</strong>。
+融合 <strong>视觉孪生 adapter</strong>（把任意文本模型原位包装成「支持图片」→ DSH 原生缩略图 + 图片块自动分析）、<strong>三模式路由</strong>、<strong>本地像素级工具链</strong>（scan / OCR×3 引擎 / crop / palette / compare / batch）、<strong>文档转图片</strong>（pdf / word / excel / ppt）与<strong>可选外部 VLM 桥</strong>。一个插件全包，无需另装。</p>
+<p><strong>v3.1.0 新增</strong>：<code>read_image</code> 工具拦截 — 当 LLM 调用 DSH 内置的 <code>read_image</code> 工具时，如果返回了 image block，会自动替换为文本引导，避免后续请求因 image block 导致 <code>UNSUPPORTED_CONTENT</code> 错误。内置 <code>image-reading</code> 技能注册。</p>
+</blockquote>
+<p><a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin" target="_blank" rel="noopener noreferrer"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="dsh-plugin" /></a></p>
+<hr />
+<h2>定位</h2>
+<p>DeepSeek 等纯文本模型没有视觉编码器，无法直接看图片；DSH 原生缩略图也需要模型被声明为「支持图片」才会渲染。</p>
+<blockquote>
+<p>⭐ <strong>已支持外部视觉 API（OpenAI 兼容端点 / LM Studio / 云端 VLM），由 LLM 自行按需调用</strong>：配置好端点后，模型会在智能/严谨模式下自主判断"这张图值不值得外呼视觉模型"，需要时用 <code>vision_analyze</code> 调外部 API 做语义理解，简单内容则本地像素/OCR 搞定——<strong>外部 API 是即插即用的增强能力，不是必须依赖</strong>。</p>
+</blockquote>
+<p>picturereader 解决两件事：</p>
+<ol>
+<li><strong>把「看图/读文档」翻译成纯文本模型能理解的结构化证据</strong>（像素级 huel/结构/材质分析 + OCR 实读 + 可选 VLM 语义描述），并沉淀为读图方法论 skill。</li>
+<li><strong>通过「视觉孪生 adapter」让纯文本模型在 DSH 里获得原生缩略图体验</strong>：勾选模型即生成「(视觉)」变体，粘贴图片显示原生缩略图、图片块进会话、并被自动分析成文本路径 + 本地证据再交给模型——模型拿到的永远是纯文本，不会触发 <code>UNSUPPORTED_CONTENT</code>。</li>
+</ol>
+<blockquote>
+<p><strong>版本兼容性</strong>：本版本专门兼容 <strong>dsh 0.1.1-rc.2</strong> 及 <strong>dsheac 5.1.0</strong>，已针对这两个版本进行适配测试与优化，确保稳定运行。同时兼容 DeepSeek Harness EAC 4.2.0 与 <code>@deepseek-ai/dsh-client-ui-workspace</code> rc.7。</p>
+</blockquote>
+<blockquote>
+<p>🚀 <strong>后续将作为 DeepSeek Harness EAC 的内置视觉插件</strong>：本插件计划替换内置的 <code>dsh-tool-vision</code>，随 DSH EAC 桌面版直接捆绑发布，开箱即用（见上游 PR）。作为独立包发布的目的，是让非 EAC / 旧版用户也能通过 <code>dsh plugin add picturereader</code> 或 Git/npm 安装获得同等「看图 / 读文档」能力。</p>
+</blockquote>
+<h2>功能总览</h2>
+<h3>① 视觉孪生 adapter（原生缩略图 + 自动分析）</h3>
+<ul>
+<li><strong>Proxy 原位包装</strong>：对被勾选的模型所属 provider，用 <code>Proxy</code> 把其 adapter 包装成「孪生」并原位替换（<code>registerTwinAdapters</code>，卸载经 <code>ctx.effect</code> 还原），不重复注册。</li>
+<li><strong><code>listModels</code> / <code>resolveModel</code></strong>：对被勾选模型声明 <code>inputModalities: ['text','image']</code>、名称加「(视觉)」后缀 → DSH 认为它支持图片 → <strong>原生缩略图渲染、图片块进会话、粘贴准入</strong>全部解锁。</li>
+<li><strong><code>stream</code> 拦截</strong>：捕获请求里的 <code>image</code> block → 导出到 <code>~/.dsh/picturereader-vision/images/</code> → 替换成文本路径 + 本地工具链引导 → 转发给原始 adapter。<strong>pi-ai 收到的是纯文本，不会报 <code>UNSUPPORTED_CONTENT</code></strong>；<code>opencode-go</code> 等走 <code>@earendil-works/pi-ai</code> 的 provider 同样经此孪生获得原生缩略图能力。</li>
+<li>隐私模式下分析只走本地工具，绝不外发。</li>
+</ul>
+<h3>② 智能路由（隐私 / 智能 / 严谨 三模式）</h3>
+<p><strong>这是 picturereader 的"大脑"</strong>：统一在 <code>routing.js</code> + <code>runtime.js</code> 收敛「什么时候走外部 VLM、什么时候只用本地、要不要交叉验证」，供各工具 / 图片桥 / 视觉孪生 <code>stream</code> / <code>vision_analyze</code> 共享，保证整条图链都遵守同一套路由策略。</p>
+<h4>路由决策原理</h4>
+<p>每次看图，模型面对的问题其实是同一个：「这张图，值得花什么成本、用哪条路线读懂它？」picturereader 把答案预置成三种策略，模型据此自主决策，同时 host 侧做硬约束兜底：</p>
+<pre><code>图片进来 → 孪生 stream 拦截 / 工具被调用
+        → 读入当前「模式」→ 得到该模式的路由策略
+        → 模型 / 工具按策略选路线：
+            本地像素分析（image_scan / image_sample）
+            本地文字识别（image_ocr：windows / paddle / rapid）
+            外部语义理解（vision_analyze include_vlm=true → VLM）
+            交叉验证（多路证据对照）
+</code></pre>
+<p>核心决策函数 <code>visionAnalyzeDefaults(mode)</code> 定义各模式"默认的证据组合"：</p>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>默认 include_scan</th>
+<th>默认 include_ocr</th>
+<th>默认 include_vlm</th>
+<th>allow_low_info</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>隐私（privacy）</strong></td>
+<td>✅</td>
+<td>✅</td>
+<td>❌（硬禁）</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><strong>智能（smart）</strong></td>
+<td>✅</td>
+<td>❌（按需）</td>
+<td>✅（值得才调）</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><strong>严谨（strict）</strong></td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+</tbody></table>
+<h4>三种模式的路线策略</h4>
+<p><strong>🕶 隐私模式（Privacy）——零外呼硬门禁</strong></p>
+<ul>
+<li><strong>绝不调用</strong>任何外部视觉端点，即使你在设置卡配了 API。</li>
+<li>约束是 host 侧强制：<code>runtime.js</code> 使 <code>isVlmConfigured()</code> 恒为 <code>false</code>，<code>vision_analyze</code> 强制 <code>include_vlm=false</code>，视觉孪生 <code>stream</code> 的降级文本也明确"只用本地工具"。</li>
+<li>模型只能用本地工具：<code>image_scan</code> / <code>image_ocr</code> / <code>image_sample</code> / <code>image_crop</code> / <code>image_palette</code> / <code>image_compare</code>。图片字节不出本机。</li>
+<li>适用：敏感图片（身份证、合同、私人截图）、离线、零外部流量审计场景。</li>
+</ul>
+<p><strong>⚡ 智能模式（Smart）——省轮数、省时间（默认）</strong></p>
+<ul>
+<li>目标：<strong>先把成本压到最低，复杂内容才值得外呼</strong>。</li>
+<li>决策流程：先 <code>image_scan</code> 快速看整体 → 自行判断：<ol>
+<li>图片以文字为主 → <code>image_ocr</code> 读文字即可，<strong>不必调 VLM</strong>；</li>
+<li>普通图表 / 界面 / 简单内容 → <code>image_scan</code> + <code>image_sample</code> 自己看就能说清，<strong>不必调 VLM</strong>；</li>
+<li>仅当内容复杂、需语义理解（照片、抽象画面）<strong>且配置了端点</strong>时，才 <code>vision_analyze(include_vlm=true)</code> 走外部 VLM。</li>
+</ol>
+</li>
+<li>视觉孪生死活都会先把图片导出成本地路径，模型可随时本地深挖，不会被困在"必须外呼"的死路。</li>
+</ul>
+<p><strong>🎯 严谨模式（Strict）——交叉验证、细看细节</strong></p>
+<ul>
+<li>目标：<strong>可靠性优先</strong>，不贪省。</li>
+<li>决策：先 <code>image_scan</code> 了解整体 → 必要时 <code>image_ocr</code> 读文字、<code>image_sample</code> 细看细节 → 对关键判断做<strong>交叉验证</strong>（把像素证据、OCR 证据、（可选）VLM 语义描述相互对照，不轻信单一来源）。</li>
+<li>允许使用外部 VLM（需配置），但强度更高、可追溯。</li>
+<li>适用：需要高准确率与可复现结论的场景（审图、校对、数据分析）。</li>
+</ul>
+<blockquote>
+<p><strong>隐私硬门禁贯穿所有入口</strong>：无论走哪个工具/桥，<code>runtime.js</code> 的模式快照都会在调用点做校验，<code>routePolicyText(mode)</code> 还会把当前策略注入给模型的提示里，双保险。</p>
+</blockquote>
+<h4>与视觉孪生 adapter 的协同</h4>
+<p>三模式不仅约束 <code>vision_analyze</code>，也约束视觉孪生 <code>registerTwinAdapters</code> 的 <code>stream</code> 拦截：图片块总是被<strong>无条件</strong>替换成文本（路径 + 本地证据引导，这是模型能读懂的前提），但<strong>是否/何时进一步外呼 VLM</strong> 由当前模式决定——隐私模式恒不透传图片、不发起外部调用；智能/严谨模式在需要且已配置时才走外部语义理解。因此"原生缩略图"与"隐私零外呼"可以同时成立，互不冲突。</p>
+<h3>③ 本地工具链（纯本地、纯 JS 像素级）</h3>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>image_scan</code></td>
+<td>全局/区域扫描：颜色网格 + regions 色块 + shade diversity + texture + structure + hue families；支持 <code>focus</code>/<code>region</code>/<code>px_per_cell</code> 定向放大</td>
+</tr>
+<tr>
+<td><code>image_ocr</code></td>
+<td>文字识别<strong>三引擎</strong>：<code>windows</code>（内置）/ <code>paddle</code>（选装，发光/弯曲/游戏字更强）/ <code>rapid</code>（选装，轻量快速），失败自动降级不崩溃</td>
+</tr>
+<tr>
+<td><code>image_sample</code></td>
+<td>N×N 精确像素取样，判断材质/纹理</td>
+</tr>
+<tr>
+<td><code>image_crop</code></td>
+<td>按 region 裁剪并导出 PNG</td>
+</tr>
+<tr>
+<td><code>image_palette</code></td>
+<td>颜色提取：主色列表（hex + 命名单 + 占比）+ 色相家族</td>
+</tr>
+<tr>
+<td><code>image_compare</code></td>
+<td>两图/两区域像素对比：mean_diff / diff_ratio / diff_box / verdict，可选差异可视化预览</td>
+</tr>
+<tr>
+<td><code>image_batch</code></td>
+<td>批量规模/上下文验证：批量扫描 + 类型判定 + 自动全量 OCR + 是否值得深入建议</td>
+</tr>
+<tr>
+<td><code>vision_analyze</code></td>
+<td>统一入口：低信息拦截 + 可选像素扫描 / OCR / VLM，按模式路由，返回多路证据</td>
+</tr>
+</tbody></table>
+<h3>④ 文档转图片 <code>document_to_image</code></h3>
+<p>把 <strong>pdf / docx / doc / xlsx / xls / pptx / ppt</strong> 逐页转成 PNG（LiberOffice headless → PDF → PyMuPDF），供模型逐页 OCR / 扫描分析。纯本地、零网络；支持 <code>dpi</code> / <code>max_pages</code> / <code>out_dir</code> / 批量 <code>file_paths</code>。</p>
+<h3>⑤ 外部 VLM 桥（已支持，由 LLM 自行调用）</h3>
+<p><strong>已支持外部视觉 API，且调用时机完全交给 LLM 自主判断</strong>：配置好 OpenAI 兼容端点后（LM Studio / llama-server / 云端网关 / GLM-4V-Flash 免费模型），模型在<strong>智能 / 严谨模式</strong>下会自行判断"这张图是否值得外呼视觉模型"——简单内容用本地像素/OCR 就够，复杂内容（照片、抽象画面、需语义理解）才通过 <code>vision_analyze(include_vlm=true)</code> 调 <code>sendVisionRequest</code> 以 data URI 送图给外部 VLM，取回语义描述。<strong>baseURL 自动补 <code>/v1/chat/completions</code></strong>（无需手写完整路径）。</p>
+<ul>
+<li>LLM 自行调用 = 你不用手动切模型/手动发图，模型按模式策略在该外呼时自己调外部 API。</li>
+<li>隐私模式仍为硬门禁：即使配置了外部 API 也绝不调用、绝不外发图片字节。</li>
+</ul>
+<h3>⑥ 设置卡片「图片阅读」</h3>
+<p>Web 设置页注册「图片阅读」卡片：使用模式、外部视觉 API、视觉桥模型多选、高级设置（详见「设置卡字段」）。改动写 <code>~/.dsh/settings.yaml</code> 即时生效。</p>
+<h3>⑦ 粘贴即用 + 缩略图</h3>
+<p>开启视觉孪生并选择「(视觉)」模型变体后：粘贴/拖入图片 → 原生缩略图 → 图片块进会话 → 被孪生 <code>stream</code> 拦截 → 导出文本路径 + 本地证据 → 纯文本模型拿到结果，可继续用 <code>image_scan</code> / <code>image_ocr</code> 深挖。</p>
+<h2>与主流多模态插件的差异 / 优势</h2>
+<p>对比常见方案（<code>dsh-tool-vision</code>、<code>dsh-image-paste</code>、<code>dsh-vision-bridge</code> 等）：</p>
+<ol>
+<li><strong>不绑定单一厂商</strong>：视觉孪生对任意 provider 生效（含 <code>opencode-go</code> / xiaomi / qiu 等 pi-ai 系），不是只适配某一家 API。</li>
+<li><strong>全链路可离线</strong>：隐私模式零外呼；本地纯 JS 像素工具 + 3 引擎 OCR，不依赖云端。</li>
+<li><strong>工具链完整</strong>：裁剪 / 取色 / 对比 / 批量 / 文档转图，一个插件全覆盖。</li>
+<li><strong>原生缩略图</strong>：真正 DSH 原生图片块（<code>inputModalities</code> 声明），非文本路径模拟。</li>
+<li><strong>快</strong>：本地工具毫秒级；可控 VLM 调用（低信息拦截 + 智能模式"值得才调"）省轮数与耗时。</li>
+<li><strong>只写不读 key、隐私硬门禁</strong>：API Key 以 <code>role:'secret'</code> 保存、只写不读不回显；隐私模式经 <code>runtime.js</code> 强制 <code>isVlmConfigured()=false</code>。</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th><strong>picturereader</strong></th>
+<th>dsh-tool-vision</th>
+<th>dsh-image-paste</th>
+<th>dsh-vision-bridge</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>原生缩略图（文本模型）</td>
+<td>✅ 视觉孪生 adapter</td>
+<td>❌</td>
+<td>⚠️ 部分</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>任意 provider（含 pi-ai 系）</td>
+<td>✅</td>
+<td>绑定厂商</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>隐私模式硬门禁</td>
+<td>✅</td>
+<td>—</td>
+<td>—</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>本地像素工具链（scan/ocr/crop/palette/compare）</td>
+<td>✅ 全内置</td>
+<td>⚠️ 基础</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>文档转图片（pdf/word/excel/ppt）</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>批量/上下文验证</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>外部 VLM 桥（可选，OpenAI 兼容）</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>全离线可用</td>
+<td>✅</td>
+<td>⚠️</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+</tbody></table>
+<h2>快速上手</h2>
+<pre><code class="language-sh"># 1. 安装插件
+dsh plugin --profile web add picturereader        # npm 包；或从源码: dsh plugin --profile web add .
+dsh plugin --profile headless add picturereader
+
+# 2.（推荐）安装读图方法论 skill
+copy skills\image-reading.md %USERPROFILE%\.dsh\skills\          # Windows
+# cp skills/image-reading.md ~/.dsh/skills/                      # macOS / Linux
+
+# 3.（可选）增强 OCR 引擎
+node scripts/setup-ocr.mjs       # PaddleOCR（发光/弯曲/游戏字更强）
+node scripts/setup-rapid.mjs     # RapidOCR（轻量快速）
+
+# 4.（可选）文档转图片依赖（需已装 LibreOffice）
+node scripts/setup-doc-venv.mjs  # 建 doc_venv 装 PyMuPDF
+</code></pre>
+<p>重启 DSH Desktop 后：模型工具列表出现全部工具，设置页出现「图片阅读」卡片。</p>
+<h3>启用视觉孪生（原生缩略图）</h3>
+<ol>
+<li>在设置页「图片阅读」勾选要作为视觉孪生的文本模型，保存后<strong>重启 DSH</strong>。</li>
+<li>模型选择器中选择对应模型的「(视觉)」变体（如 <code>deepseek-v4-flash (视觉)</code>）。</li>
+<li>粘贴 / 拖入图片 → 原生缩略图 → 图片块自动分析为文本证据。</li>
+</ol>
+<h3>使用示例</h3>
+<pre><code class="language-text">用 image_scan 看一下 &lt;路径&gt; 这张图，细看感兴趣的部分
+（复杂场景可接着用 vision_analyze；如有文字先 image_ocr；一批图用 image_batch；
+  文档用 document_to_image 逐页转成图片再看）
+</code></pre>
+<h2>Code Mode（工具折叠）兼容说明</h2>
+<p>DSH 的 <code>tools</code> 呈现有三种 <code>mode</code>：<code>native</code>（默认，模型可直呼所有工具）、<code>code</code>（只允许模型直呼 <code>run_code</code>，其它工具折叠进 <code>run_code</code> 的生成 SDK 内调用）、<code>both</code>（两种都能用）。</p>
+<ul>
+<li><strong>picturereader 所有工具与 mode 无关</strong>：<code>native</code> / <code>both</code> 下全部可直呼；<code>code</code> 下也<strong>完全可用</strong>，只是要经 <code>run_code</code> 程序内调用（<code>await tools.image_scan(...)</code> / <code>await tools.vision_analyze(...)</code>）。工具会被自动投影进 <code>run_code</code> 生成的 SDK，一个都不少。</li>
+<li><strong>若报错</strong> <code>Error: unknown tool "vision_analyze" ... only run_code is callable directly ...</code>——这不是插件坏了，而是当前会话处于 <code>code</code> 模式、仍以直呼方式发起了调用。两种情况任选其一：<ol>
+<li>把该部署的 <code>tools.mode</code> 设为 <code>both</code>（最省心：直呼 + run_code 都能用，不会降速）；</li>
+<li>保持 <code>code</code> 模式，改用 <code>run_code</code> 程序调用（见下方示例）。</li>
+</ol>
+</li>
+<li><strong>推荐</strong>：日常使用直接保持 <code>native</code> 或 <code>both</code>；<code>code</code> 是平台级的"只留 run_code"硬化模式，对本地看图工具是净亏（更多轮数、更多 token），非必要不开。</li>
+</ul>
+<p>在 <code>code</code> 模式下用 <code>run_code</code> 调用示例（Python）：</p>
+<pre><code class="language-python">async def main():
+    r = await tools.image_scan({"file_path": r"C:\path\to\img.png"})
+    return r
+
+await main()
+</code></pre>
+<h2>三模式（使用模式）</h2>
+<p>在 Web 设置 →「图片阅读」卡片顶部选择，修改即时生效。</p>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>是否调用外部视觉 API</th>
+<th>模型行为引导</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>隐私模式</strong></td>
+<td><strong>绝不调用</strong>（即使配置了 API）</td>
+<td>只走本地工具：image_scan / image_ocr / image_sample / image_crop / image_palette / image_compare</td>
+<td>敏感图片、离线、零外部流量</td>
+</tr>
+<tr>
+<td><strong>智能模式</strong>（默认）</td>
+<td>允许，但先本地看图再决定</td>
+<td>先 <code>image_scan</code> 快速看，文字→OCR、简单图→本地、复杂图才 <code>vision_analyze</code> 外呼</td>
+<td>日常，省轮数与耗时</td>
+</tr>
+<tr>
+<td><strong>严谨模式</strong></td>
+<td>允许</td>
+<td>自行选择路线 + 多证据交叉验证 + 细看细节</td>
+<td>需要高准确率与可追溯的场景</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>隐私模式约束是 host 侧硬门禁（<code>runtime.js</code>）：<code>isVlmConfigured()</code> 在此模式下恒返回 <code>false</code>，<code>vision_analyze</code> 强制 <code>include_vlm=false</code>，图片桥引导也明确「只用本地工具」。</p>
+</blockquote>
+<h2>设置卡字段（图片阅读）</h2>
+<ul>
+<li><strong>使用模式</strong>：隐私 / 智能 / 严谨（<code>mode</code>）。</li>
+<li><strong>启用外部视觉 API（选配）</strong>：勾选后才显示并允许调用外部视觉端点；不勾选一律走本地，图片绝不外发（<code>vlm_enabled</code>）。</li>
+<li>勾选后显示：<ul>
+<li><strong>视觉 API Base URL</strong>（<code>vlm_base</code>，如 <code>https://api.openai.com/v1</code> 或 <code>http://127.0.0.1:1234</code>；留空=禁用外部 VLM）</li>
+<li><strong>视觉模型</strong>（<code>vlm_model</code>）</li>
+<li><strong>视觉 API Key</strong>（<code>vlm_key</code>，<code>password</code>+<code>secret</code>：只写不读，留空保持当前，填写保存即覆盖、不回显）</li>
+<li><strong>Key 环境变量</strong>（<code>vlm_key_env</code>，apiKey 为空时回退读取）</li>
+<li><strong>默认 OCR 引擎</strong>（<code>ocr_engine</code>：windows / paddle / rapid）</li>
+</ul>
+</li>
+<li><strong>视觉桥模型多选</strong>（<code>vision_models</code>）：勾选即生成该模型的「(视觉)」变体；改动需<strong>重启 DSH</strong> 生效；已勾选模型会被兜底并入列表保持打钩，与孪生注入一致。</li>
+<li><strong>高级设置</strong>（折叠）：</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>vlm_timeout_ms</code></td>
+<td><code>300000</code></td>
+<td>外部视觉请求超时（毫秒）</td>
+</tr>
+<tr>
+<td><code>vlm_max_tokens</code></td>
+<td><code>8192</code></td>
+<td>外部视觉最大输出 Tokens</td>
+</tr>
+<tr>
+<td><code>bridge_export_dir</code></td>
+<td>空（系统临时目录）</td>
+<td>图片桥导出目录</td>
+</tr>
+<tr>
+<td><code>max_image_bytes</code></td>
+<td><code>52428800</code> (50MB)</td>
+<td>单张图片读取大小上限（字节）</td>
+</tr>
+<tr>
+<td><code>scan_default_size</code></td>
+<td><code>32</code></td>
+<td>image_scan 默认格子大小</td>
+</tr>
+<tr>
+<td><code>scan_palette</code></td>
+<td><code>auto</code></td>
+<td>image_scan 默认色板（auto/full/basic/gray）</td>
+</tr>
+<tr>
+<td><code>scan_mode</code></td>
+<td><code>auto</code></td>
+<td>image_scan 默认模式（auto/ascii/color）</td>
+</tr>
+<tr>
+<td><code>ocr_language</code></td>
+<td>空</td>
+<td>OCR 默认语言（BCP-47，如 zh-Hans / en-US）</td>
+</tr>
+<tr>
+<td><code>multimodal_models</code></td>
+<td>空</td>
+<td>多模态白名单（逗号分隔，这些模型直收图片不降级）</td>
+</tr>
+<tr>
+<td><code>request_guard</code></td>
+<td><code>true</code></td>
+<td>请求保护（llm/stream 最后防线降级 image block）</td>
+</tr>
+<tr>
+<td><code>batch_probe_first</code></td>
+<td><code>3</code></td>
+<td>image_batch 探测前几张（判断是否文字密集）</td>
+</tr>
+<tr>
+<td><code>batch_ocr_limit_chars</code></td>
+<td><code>800</code></td>
+<td>image_batch 每张 OCR 截断字符数</td>
+</tr>
+<tr>
+<td><code>doc_dpi</code></td>
+<td><code>150</code></td>
+<td>document_to_image 渲染 DPI</td>
+</tr>
+<tr>
+<td><code>doc_max_pages</code></td>
+<td><code>50</code></td>
+<td>document_to_image 最大页数</td>
+</tr>
+<tr>
+<td><code>debug</code></td>
+<td><code>false</code></td>
+<td>调试日志</td>
+</tr>
+</tbody></table>
+<h2>环境变量</h2>
+<h3>OCR（选装）</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>默认值</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DSH_PADDLE_PYTHON</code></td>
+<td><code>C:\Users\Administrator\paddle_venv\Scripts\python.exe</code></td>
+<td>PaddleOCR 解释器路径</td>
+</tr>
+<tr>
+<td><code>DSH_PADDLE_CACHE</code></td>
+<td><code>D:/coding/picturereader/.paddlex-cache</code></td>
+<td>PaddleX 模型缓存目录</td>
+</tr>
+<tr>
+<td><code>DSH_RAPID_PYTHON</code></td>
+<td><code>C:\Users\Administrator\rapid_venv\Scripts\python.exe</code></td>
+<td>RapidOCR 解释器路径</td>
+</tr>
+</tbody></table>
+<h3>文档转图片（选装）</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>默认值</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DSH_SOFFICE</code></td>
+<td><code>C:/Program Files/LibreOffice/program/soffice.exe</code></td>
+<td>LibreOffice headless 可执行路径</td>
+</tr>
+<tr>
+<td><code>DSH_DOC_PYTHON</code></td>
+<td><code>C:\Users\Administrator\doc_venv\Scripts\python.exe</code></td>
+<td>文档转换 venv 解释器路径（PyMuPDF）</td>
+</tr>
+</tbody></table>
+<h3>外部视觉 API / VLM（可选，也可在设置卡填）</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>默认值</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SEE_API_KEY</code> / <code>GLM_API_KEY</code></td>
+<td>空</td>
+<td>视觉 API Key（设置卡 <code>vlm_key</code> 优先级更高）</td>
+</tr>
+<tr>
+<td><code>SEE_BASE</code></td>
+<td>智谱或设置卡 <code>vlm_base</code></td>
+<td>OpenAI 兼容视觉端点</td>
+</tr>
+<tr>
+<td><code>SEE_MODEL</code></td>
+<td><code>glm-4v-flash</code> 或设置卡 <code>vlm_model</code></td>
+<td>视觉模型名</td>
+</tr>
+<tr>
+<td><code>SEE_SERVER_EXE / MODEL / MMPROJ</code></td>
+<td>空</td>
+<td>本地 llama-server 自启路径（可选）</td>
+</tr>
+<tr>
+<td><code>SEE_SERVER_PORT / NGL / CTX</code></td>
+<td><code>8080 / 20 / 16384</code></td>
+<td>本地服务器参数</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>设置卡 <code>vlm_base / vlm_model / vlm_key</code> 优先于环境变量；隐私模式下即使配置也<strong>不调用</strong>。端点未写 <code>/v1</code> 时自动补 <code>/v1/chat/completions</code>。</p>
+</blockquote>
+<h2>已知限制</h2>
+<ul>
+<li><strong>DSH attachment 单图默认约 5MB</strong>：超大图片可能被宿主上传限制拦截；工具端的 <code>max_image_bytes</code>（默认 50MB）是读取上限。</li>
+<li><strong>原生缩略图需启用视觉孪生</strong>：文本模型默认不被 DSH 视为「支持图片」，需在设置卡勾选生成「(视觉)」变体并重启。</li>
+<li><strong>WebP 暂不支持</strong>：<code>image_scan</code> / <code>vision_analyze</code> 等对 WebP 报错，请先转成 PNG / JPEG。</li>
+<li><strong>视觉桥模型勾选需重启 DSH</strong> 生效（<code>vision_models</code> 的改动不会热加载）。</li>
+<li><strong><code>dsh-file-drop</code> 需停用</strong>：其「拖入图片即注入文本」与视觉孪生/图片桥的自动分析可能冲突（重复/竞争注入），建议在对应 profile 停用；原生缩略图 + 图片桥自动分析已覆盖该需求。<strong>v3.1.0 修复</strong>：增强了与 <code>dsh-file-drop</code> 的兼容性，当检测到冲突时会自动降级处理。</li>
+<li><strong>外部 VLM 依赖网络/端点</strong>：未配置端点或离线时自动跳过并给出提示；隐私模式恒不调用。</li>
+</ul>
+<h2>拖拽上传问题排查</h2>
+<p>如果遇到图片拖拽上传不工作的问题，请按以下步骤排查：</p>
+<ol>
+<li><p><strong>检查 <code>dsh-file-drop</code> 插件状态</strong>：在 DSH 设置中检查 <code>dsh-file-drop</code> 插件是否启用。如果启用，请尝试禁用它，因为该插件可能与 picturereader 的图片桥冲突。</p>
+</li>
+<li><p><strong>检查视觉孪生配置</strong>：确保在设置页「图片阅读」中已勾选需要视觉桥的模型，并重启 DSH。</p>
+</li>
+<li><p><strong>检查浏览器控制台</strong>：打开浏览器开发者工具，查看控制台是否有 <code>[picturereader]</code> 相关的日志输出。如果有错误信息，请记录并反馈。</p>
+</li>
+<li><p><strong>检查网络请求</strong>：在开发者工具的 Network 标签中，查看是否有 <code>/picturereader/models</code> 等请求。如果没有，可能是插件未正确加载。</p>
+</li>
+<li><p><strong>重启 DSH</strong>：某些配置更改需要重启 DSH 才能生效。</p>
+</li>
+</ol>
+<h2>测试情况</h2>
+<h3>v3.0.3 集成测试（2026-08-20）</h3>
+<p>132/132 单元测试通过 + 13/13 文档转换测试通过 + 全功能集成测试：</p>
+<table>
+<thead>
+<tr>
+<th>功能</th>
+<th>状态</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>image_scan</td>
+<td>✅</td>
+<td>4 种格式、region/focus/px_per_cell/palette/mode 全部正确</td>
+</tr>
+<tr>
+<td>image_ocr (windows)</td>
+<td>✅</td>
+<td>中英文识别正常</td>
+</tr>
+<tr>
+<td>image_ocr (rapid)</td>
+<td>✅</td>
+<td>带 confidence score</td>
+</tr>
+<tr>
+<td>image_ocr (paddle)</td>
+<td>✅</td>
+<td>v3.0.3 修复字段名后正常</td>
+</tr>
+<tr>
+<td>image_sample</td>
+<td>✅</td>
+<td>8×8 精确像素取样</td>
+</tr>
+<tr>
+<td>image_crop</td>
+<td>✅</td>
+<td>裁剪导出 PNG</td>
+</tr>
+<tr>
+<td>image_palette</td>
+<td>✅</td>
+<td>主色提取 + hue families</td>
+</tr>
+<tr>
+<td>image_compare</td>
+<td>✅</td>
+<td>相同/不同图片判定正确</td>
+</tr>
+<tr>
+<td>image_batch</td>
+<td>✅</td>
+<td>v3.0.3 修复 cordis inject 后正常</td>
+</tr>
+<tr>
+<td>document_to_image</td>
+<td>✅</td>
+<td>PDF/DOCX/PPTX/XLSX 全部正常</td>
+</tr>
+<tr>
+<td>vision_analyze (本地)</td>
+<td>✅</td>
+<td>scan + OCR 证据返回正常</td>
+</tr>
+<tr>
+<td>三模式路由</td>
+<td>✅</td>
+<td>privacy/smart/strict 逻辑全部正确</td>
+</tr>
+<tr>
+<td>视觉孪生 adapter</td>
+<td>✅</td>
+<td>3 个 provider 激活</td>
+</tr>
+<tr>
+<td>设置持久化</td>
+<td>✅</td>
+<td>vision_models / ocr_engine / mode 全部保留</td>
+</tr>
+</tbody></table>
+<h3>v3.0.6 修复</h3>
+<ul>
+<li><strong>依赖安装完整性修复</strong>：修复了 picturereader 安装后图像分析功能（scan / ocr / vision）静默失败的问题。根因是 npm install 未完整执行，<code>jpeg-js</code>、<code>omggif</code>、<code>pngjs</code> 三个运行时依赖没有正确安装到 <code>node_modules/</code> 目录下，导致 <code>core.js</code> 顶层 import 失败。修复方案：在内置插件打包时预装依赖，确保 <code>node_modules/</code> 随插件一起分发。</li>
+</ul>
+<h3>v3.0.5 修复</h3>
+<ul>
+<li><strong>scope.load() 兼容性修复</strong>：修复了在某些 DSH 版本中设置页「图片阅读」卡片打开空白的问题。根因是 <code>client.js</code> 直接调用 <code>scope.load()</code> 但该宿主版本的 <code>settingsScope</code> API 没有 <code>load</code> 方法（只有 getSnapshot/subscribe/set/unset），导致组件渲染时抛出 <code>TypeError: scope.load is not a function</code>。修复方案：在调用前检查 <code>typeof scope.load === "function"</code>，不存在时直接从 <code>scope.getSnapshot()</code> 读取。</li>
+</ul>
+<h3>v3.0.3 修复</h3>
+<ul>
+<li><strong>视觉桥模型列表持久化修复</strong>：修复了设置页「视觉桥模型」勾选后重新打开设置丢失勾选状态的问题。根因是 <code>settings/document-updated</code> 事件触发 <code>scope.load()</code> 覆盖本地修改，改为通过 <code>lastSavedRef</code> 跟踪保存值，跳过同步覆盖。</li>
+<li><strong>OCR 引擎/模式设置持久化修复</strong>：修复了 <code>ocr_engine</code> 和 <code>mode</code> 等 select 字段修改后重新打开设置恢复默认的问题。根因是 <code>onSave</code> 函数未正确处理 select 类型字段的默认值回退。</li>
+<li><strong>cordis 4 兼容性修复</strong>：修复了 <code>image-batch.js</code> 和 <code>doc-tools.js</code> 中访问未声明 <code>ctx</code> 属性导致的报错。</li>
+<li><strong>PaddleOCR 字段名修复</strong>：<code>w/h</code> 字段改为 <code>width/height</code> 以匹配 schema。</li>
+<li><strong>本地 VLM 端点检测修复</strong>：<code>isManagedEndpoint</code> 扩展为识别所有 <code>127.0.0.1</code>/<code>localhost</code> 地址，不再要求 API key。</li>
+</ul>
+<h2>开发 / 仓库布局</h2>
+<pre><code class="language-sh"># DSH 版（本仓库 main，代码在 dsh/）
+npm install
+npm test                       # node:test
+node scripts/setup-ocr.mjs     # 可选
+node scripts/setup-rapid.mjs   # 可选
+node scripts/setup-doc-venv.mjs# 可选（文档转换）
+node scripts/preview.mjs       # 生成 fixtures 并预览渲染
+</code></pre>
+<ul>
+<li><strong>热插拔</strong>：业务逻辑集中在 <code>src/core.js</code> 单文件，工具每次执行按 mtime 动态加载；工具定义（schema/描述）与设置卡改动需重启桌面端。</li>
+<li><strong>ZCode 版</strong>：位于本仓库 <a href="https://github.com/jing-hy/picturereader/tree/zcode" target="_blank" rel="noopener noreferrer">zcode 分支</a>（源码在 <code>zcode/</code>），经 MCP server 暴露工具，安装 <code>npm install picturereader-zcode</code>。两版共用 <code>src/core.js</code> 与读图方法论 skill。</li>
+</ul>
+<h2>License</h2>
+<p>MIT</p>

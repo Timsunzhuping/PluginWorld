@@ -1,0 +1,151 @@
+<h1>DeepSeek Harness SDR Plugin</h1>
+<p><a href="https://www.npmjs.com/package/@xuxchloris/dsh-sdr" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/@xuxchloris/dsh-sdr?logo=npm" alt="npm version" /></a>
+<a href="https://www.npmjs.com/package/@xuxchloris/dsh-sdr" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/dm/@xuxchloris/dsh-sdr?logo=npm" alt="npm downloads" /></a>
+<a href="https://github.com/Xuxchloris/deepseek-harness-sdr-plugin/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license" /></a></p>
+<p>DeepSeek Harness 的外贸获客 SDR 插件。安装后在 DSH Web 的模式菜单中选择「SDR 数字员工」，Agent 按九阶段销售流程工作：解析任务、开发客户、公司背调、评分、写开发信、人工审批、跟进计划、报价素材、结案。</p>
+<p>阶段顺序由服务端状态机决定，模型不能跳阶段。开发信必须经人工批准才能进入后续流程。Email、WhatsApp、CRM 默认 dry-run，不会发出真实消息。</p>
+<h2>安装</h2>
+<p>要求 DeepSeek Harness <code>0.1.0-rc.6</code>、Node.js <code>20+</code>。</p>
+<pre><code class="language-powershell">dsh plugin --profile web add @xuxchloris/dsh-sdr
+dsh web
+</code></pre>
+<p>重启 Web 后新建会话，在模式菜单选择「SDR 数字员工」。旧会话仍使用旧 preset，需要新建。</p>
+<p>从源码安装：</p>
+<pre><code class="language-powershell">git clone https://github.com/Xuxchloris/deepseek-harness-sdr-plugin.git
+cd deepseek-harness-sdr-plugin
+dsh plugin --profile web add ".\packages\dsh-sdr"
+dsh web
+</code></pre>
+<p>preset 写入 <code>$DSH_HOME/.agent-presets/sdr</code>；Windows 未设置 <code>DSH_HOME</code> 时是 <code>%USERPROFILE%\.dsh\.agent-presets\sdr</code>。安装器不会覆盖没有 <code>dsh-sdr</code> 管理标记的同名 preset。</p>
+<h2>使用</h2>
+<p>在 SDR 模式中输入任务，例如：</p>
+<pre><code class="language-text">开发 3 个美国户外用品客户
+</code></pre>
+<p>Agent 调用 <code>sdr_create_task</code> 创建任务，然后反复调用 <code>sdr_next_step</code> 推进，每次只完成一个阶段。</p>
+<p>第 6 阶段时，<code>sdr_review_drafts</code> 列出开发信草稿，等人工选择。只要还有草稿没批，<code>sdr_continue_after_approval</code> 就拒绝放行。批准凭证绑定草稿内容哈希：草稿改过后，原来的批准自动失效，需要重新审批。</p>
+<p>用离线演示跑一遍，实际顺序是这样的：</p>
+<pre><code class="language-text">&gt; 开发 3 个美国户外用品客户
+
+sdr_create_task              创建任务，进入 task_parse
+sdr_next_step × 4            客户发现 → 公司背调 → 评分 → 生成 3 封开发信草稿
+sdr_next_step                进入 human_approval，流程停在这里
+sdr_continue_after_approval  拒绝：仍有 3 封草稿未获批准
+sdr_review_drafts            列出 3 封草稿，等人工逐封选择
+（人工批准全部草稿）
+sdr_continue_after_approval  校验草稿哈希，放行
+sdr_next_step × 3            跟进计划 → 报价素材 → 结案报告，附 11 条审计事件
+</code></pre>
+<p>没有 DSH Web 时可以跑离线演示，合成数据，不需要凭证：</p>
+<pre><code class="language-powershell">npm.cmd test --prefix ".\packages\dsh-sdr"
+node ".\scripts\demo_dsh_sdr.mjs"
+</code></pre>
+<h2>架构</h2>
+<pre><code class="language-mermaid">flowchart LR
+    U[DSH Web / SDR 模式] --&gt; T[Cordis 原生工具]
+    T --&gt; S[dsh-sdr Node runtime]
+    S --&gt; SOP[九阶段 SOP 状态机]
+    S --&gt; G[审批哈希门控]
+    S --&gt; L[Lead Registry 去重]
+    S --&gt; K[Hybrid RAG 知识库]
+    S --&gt; A[审计事件与结案报告]
+    S --&gt; C[Connector Registry]
+    C --&gt; E[Email dry-run]
+    C --&gt; W[WhatsApp 预留]
+    C --&gt; R[CRM 预留]
+    K --&gt; J[本地 JSON]
+    K --&gt; P[PostgreSQL / pgvector]
+</code></pre>
+<p>DSH 负责 Agent loop、工具调用和人机交互；插件负责任务状态、审批、去重、知识库和发送边界。模型没有 <code>send_email</code> 之类的通用发送工具可用。</p>
+<h2>工具</h2>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sdr_create_task</code></td>
+<td>创建任务；相同请求幂等返回原任务</td>
+</tr>
+<tr>
+<td><code>sdr_next_step</code></td>
+<td>执行服务端决定的下一阶段</td>
+</tr>
+<tr>
+<td><code>sdr_review_drafts</code></td>
+<td>列出草稿，发起人工审批</td>
+</tr>
+<tr>
+<td><code>sdr_continue_after_approval</code></td>
+<td>校验批准后放行后续阶段</td>
+</tr>
+<tr>
+<td><code>sdr_get_task</code> / <code>sdr_get_report</code></td>
+<td>读取任务状态、结案报告</td>
+</tr>
+<tr>
+<td><code>sdr_audit_log</code></td>
+<td>回放工具调用、阶段和审批事件</td>
+</tr>
+<tr>
+<td><code>sdr_knowledge_search</code></td>
+<td>检索企业知识</td>
+</tr>
+<tr>
+<td><code>sdr_knowledge_upsert</code></td>
+<td>写入知识（需显式开启）</td>
+</tr>
+<tr>
+<td><code>sdr_knowledge_list</code></td>
+<td>列出知识条目摘要</td>
+</tr>
+<tr>
+<td><code>sdr_knowledge_evaluate</code></td>
+<td>评测召回质量（Recall@K、MRR）</td>
+</tr>
+<tr>
+<td><code>sdr_connector_status</code></td>
+<td>查看 connector 状态</td>
+</tr>
+<tr>
+<td><code>sdr_configure_connector</code></td>
+<td>写入非敏感 connector 配置（需显式开启）</td>
+</tr>
+</tbody></table>
+<h2>知识库</h2>
+<p>知识库存放产品、品牌、认证、报价政策、市场规则等资料，供开发信草稿和结案报告引用，引用记录来源和版本。默认实现是本地原子 JSON 文件，支持全文检索，可注入 embedding 和 reranker；生产环境可换成 PostgreSQL + pgvector，见 <code>lib/postgres-rag.js</code>。</p>
+<p>默认只读。允许 Agent 写入用户确认过的知识时开启：</p>
+<pre><code class="language-powershell">$env:DSH_SDR_AGENT_KNOWLEDGE = '1'
+</code></pre>
+<p>密码、API key、token 不会进入知识库、工具参数或审计日志。</p>
+<h2>外部连接</h2>
+<p>Email、WhatsApp、CRM 都走 connector 接口，默认实现是 dry-run，<code>send()</code> 返回 <code>blocked-dry-run</code>。接真实渠道需要部署方注册自己的 connector 实现，审批流程不变。</p>
+<p>允许 Agent 补充部署配置时开启 <code>DSH_SDR_AGENT_CONFIG=1</code>。Agent 只能写 host、port、provider、发件人和凭证引用名，写不了密码和 token 的值。<code>DSH_SDR_AGENT_LIVE_CONFIG=1</code> 只保存 live 配置，不会自动启用真实发送。</p>
+<p>任务状态默认保存在 <code>%USERPROFILE%\.dsh\.dsh-sdr\state.json</code>，可用 <code>DSH_SDR_DATA_FILE</code> 改路径。JSON 写入先落临时文件再 rename，进程中断不会写坏状态。</p>
+<h2>项目结构</h2>
+<pre><code class="language-text">packages/dsh-sdr/       DSH 插件 bundle（交付物）
+  lib/domain.js         SOP 状态机、审批、去重和知识服务
+  lib/rag.js            本地混合 RAG、reranker 和评测
+  lib/postgres-rag.js   PostgreSQL/pgvector adapter
+  lib/index.js          DSH 工具注册入口
+  presets/sdr/          「SDR 数字员工」persona 和 preset
+app/                    原 ai-sdr Python 业务代码，完整保留
+scripts/                离线演示脚本
+docs/                   迁移方案和验收记录
+</code></pre>
+<h2>与原 ai-sdr 的关系</h2>
+<p>这个仓库的前身是 Python 项目 ai-sdr（<code>app/</code>：FastAPI、飞书机器人、Pydantic AI、旧 MCP 入口），代码完整保留，可独立运行。当前交付物是 <code>packages/dsh-sdr/</code>，用 Node.js 重新实现，运行时不依赖 Python 环境。取舍过程见 <a href="https://github.com/Xuxchloris/deepseek-harness-sdr-plugin/blob/HEAD/docs/%E8%BF%81%E7%A7%BB%E6%96%B9%E6%A1%88.md" target="_blank" rel="noopener noreferrer">docs/迁移方案.md</a>。</p>
+<h2>限制</h2>
+<ul>
+<li>只验证过 DSH <code>0.1.0-rc.6</code>，其他版本未测。</li>
+<li>默认 JSON 存储适合本地和单实例；多实例部署用 PostgreSQL adapter。</li>
+<li>真实邮件、WhatsApp、CRM connector 不随包提供，只有接口和 dry-run 实现。</li>
+<li>当前会话不支持 agent 交互提问时，审批请求会失败，任务冻结在原地，不会跳过审批继续跑。</li>
+</ul>
+<h2>开发与发布</h2>
+<pre><code class="language-powershell">npm.cmd test --prefix ".\packages\dsh-sdr"
+</code></pre>
+<p>发布由 <code>.github/workflows/npm-publish.yml</code> 完成：推 <code>dsh-sdr-v*</code> 标签触发，先跑测试，再用 npm Trusted Publishing 发布，不需要长期 npm token。</p>
+<h2>许可证</h2>
+<p>MIT。仓库不含 <code>.env</code>、真实客户数据和 API key，示例数据均为合成。</p>

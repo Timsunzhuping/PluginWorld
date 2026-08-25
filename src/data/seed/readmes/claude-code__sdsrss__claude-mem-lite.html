@@ -1,0 +1,1379 @@
+<p><a href="https://github.com/sdsrss/claude-mem-lite/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer">English</a> | <a href="https://github.com/sdsrss/claude-mem-lite/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">中文</a></p>
+<h1>claude-mem-lite</h1>
+<p><code>claude-mem-lite</code> is a <strong>persistent memory</strong> (also called <em>long-term memory</em> or <em>cross-session context</em>) system for <strong><a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a></strong> — Anthropic's CLI coding agent. It runs as an <strong><a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener noreferrer">MCP</a> server</strong> plus a set of Claude Code hooks, automatically capturing coding observations, decisions, and bug fixes during sessions, then providing hybrid full-text + semantic search to recall them later.</p>
+<p>Compared to general-purpose LLM memory frameworks like <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener noreferrer"><code>mem0</code></a> or the MCP reference <a href="https://github.com/modelcontextprotocol/servers/tree/main/src/memory" target="_blank" rel="noopener noreferrer"><code>memory</code></a> server, claude-mem-lite is purpose-built for Claude Code's hook lifecycle: episode batching cuts LLM calls 7–10× vs the original <a href="https://github.com/thedotmack/claude-mem" target="_blank" rel="noopener noreferrer">claude-mem</a> (an estimated ~600× lower total cost — see the cost model below; this is an architecture estimate, not a measured benchmark), while the hybrid FTS5 + TF-IDF retriever benchmarks at 0.90 Recall@10 / 0.85 Precision@10
+(see <a href="#search-quality" target="_blank" rel="noopener noreferrer">Search Quality</a> for the reproduction command).</p>
+<blockquote>
+<p>中文简介：claude-mem-lite 是 Claude Code 的轻量级<strong>持久化记忆 / 长期记忆 / 跨会话上下文</strong>插件，基于 MCP 协议 + 钩子机制，自动捕获编码会话中的决策、修复和上下文，并通过 FTS5 + TF-IDF 混合检索召回。详见 <a href="https://github.com/sdsrss/claude-mem-lite/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">中文 README</a>。</p>
+</blockquote>
+<p>Zero external services. Single SQLite database. Minimal overhead.</p>
+<h2>Why claude-mem-lite?</h2>
+<p>A ground-up redesign of <a href="https://github.com/thedotmack/claude-mem" target="_blank" rel="noopener noreferrer">claude-mem</a>, replacing its heavyweight architecture with a smarter, leaner approach.</p>
+<h3>Architecture comparison</h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>claude-mem (original)</th>
+<th>claude-mem-lite</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>LLM calls</strong></td>
+<td>Every tool use triggers a Sonnet call</td>
+<td>Only on episode flush (5-10 ops batched)</td>
+</tr>
+<tr>
+<td><strong>LLM input</strong></td>
+<td>Raw <code>tool_input</code> + <code>tool_output</code> JSON</td>
+<td>Pre-processed action summaries</td>
+</tr>
+<tr>
+<td><strong>Conversation</strong></td>
+<td>Multi-turn, accumulates full history</td>
+<td>Stateless single-turn extraction</td>
+</tr>
+<tr>
+<td><strong>Noise filtering</strong></td>
+<td>LLM decides via "WHEN TO SKIP" prompt</td>
+<td>Deterministic code-level Tier 1 filter</td>
+</tr>
+<tr>
+<td><strong>Runtime</strong></td>
+<td>Long-running worker process (1.8MB .cjs)</td>
+<td>On-demand spawn, exits immediately</td>
+</tr>
+<tr>
+<td><strong>Dependencies</strong></td>
+<td>Bun + Python/uv + Chroma vector DB</td>
+<td>Node.js only (3 npm packages)</td>
+</tr>
+<tr>
+<td><strong>Source size</strong></td>
+<td>~2.3MB compiled bundles</td>
+<td>~50KB readable source</td>
+</tr>
+<tr>
+<td><strong>Data directory</strong></td>
+<td><code>~/.claude-mem/</code></td>
+<td><code>~/.claude-mem-lite/</code> (hidden, auto-migrates)</td>
+</tr>
+</tbody></table>
+<h3>Token &amp; cost efficiency</h3>
+<p>For a typical 50-tool-call session (illustrative cost model — the ratios below are
+architecture estimates derived from batch size, token counts, and model pricing, <strong>not</strong>
+a measured end-to-end benchmark):</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>claude-mem</th>
+<th>claude-mem-lite</th>
+<th>Ratio (estimated)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>LLM calls</td>
+<td>~50 (every tool use)</td>
+<td>~5-8 (per episode)</td>
+<td><strong>~7-10x fewer</strong></td>
+</tr>
+<tr>
+<td>Tokens per call</td>
+<td>1,000-5,000 (raw JSON + history)</td>
+<td>200-500 (summaries only)</td>
+<td><strong>~5-10x smaller</strong></td>
+</tr>
+<tr>
+<td>Total tokens</td>
+<td>~100K-250K</td>
+<td>~1K-4K</td>
+<td><strong>~50-100x less</strong></td>
+</tr>
+<tr>
+<td>Model cost</td>
+<td>Sonnet ($3/$15 per M)</td>
+<td>Haiku ($0.25/$1.25 per M)</td>
+<td><strong>~12x cheaper</strong></td>
+</tr>
+<tr>
+<td>Combined savings</td>
+<td></td>
+<td></td>
+<td><strong>~600x lower cost (estimated)</strong></td>
+</tr>
+</tbody></table>
+<h3>Quality comparison</h3>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Winner</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Classification accuracy</strong></td>
+<td>Tie</td>
+<td>Both produce correct type/title/narrative</td>
+</tr>
+<tr>
+<td><strong>Noise filtering</strong></td>
+<td><strong>lite</strong></td>
+<td>Code-level filtering is deterministic; LLM "WHEN TO SKIP" is unreliable</td>
+</tr>
+<tr>
+<td><strong>Observation coherence</strong></td>
+<td><strong>lite</strong></td>
+<td>Episode batching groups related edits into one coherent observation</td>
+</tr>
+<tr>
+<td><strong>Code-level detail</strong></td>
+<td>original</td>
+<td>Sees full diffs, but rarely useful for memory search</td>
+</tr>
+<tr>
+<td><strong>Search recall</strong></td>
+<td>Tie</td>
+<td>Users search semantic concepts ("auth bug"), not code lines</td>
+</tr>
+<tr>
+<td><strong>Hook latency</strong></td>
+<td><strong>lite</strong></td>
+<td>Async background workers; original blocks 2-5s per hook</td>
+</tr>
+</tbody></table>
+<h3>Design philosophy</h3>
+<p>The original sends <strong>everything to the LLM and hopes it filters well</strong>. claude-mem-lite <strong>filters first with code, then sends only what matters</strong> to a smaller model. This is not a downgrade; it's a smarter architecture that produces equivalent search quality at a fraction of the cost.</p>
+<h3>Comparison: memory systems for AI coding agents</h3>
+<p>How claude-mem-lite differs from the major neighbors in the LLM-memory space (verified May 2026):</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><strong>claude-mem-lite</strong></th>
+<th><a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener noreferrer"><code>mem0</code></a></th>
+<th>MCP reference <a href="https://github.com/modelcontextprotocol/servers/tree/main/src/memory" target="_blank" rel="noopener noreferrer"><code>memory</code></a></th>
+<th><a href="https://github.com/thedotmack/claude-mem" target="_blank" rel="noopener noreferrer">claude-mem</a> (original)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Target client</strong></td>
+<td>Claude Code only</td>
+<td>Any LLM app via SDK</td>
+<td>Any MCP client</td>
+<td>Claude Code only</td>
+</tr>
+<tr>
+<td><strong>Capture model</strong></td>
+<td>Auto via hooks</td>
+<td>Manual <code>memory.add()</code></td>
+<td>Manual tool calls (<code>create_entities</code>, <code>add_observations</code>)</td>
+<td>Auto via hooks</td>
+</tr>
+<tr>
+<td><strong>Code-aware retrieval</strong></td>
+<td>FTS5 + 100+ synonym pairs (incl. CJK↔EN)</td>
+<td>General-purpose</td>
+<td>Generic graph nodes</td>
+<td>Code-aware</td>
+</tr>
+<tr>
+<td><strong>Search</strong></td>
+<td>Hybrid: FTS5 BM25 + TF-IDF cosine via RRF</td>
+<td>Hybrid: semantic + BM25 + entity linking</td>
+<td>Knowledge-graph traversal</td>
+<td>FTS5 + Chroma vector</td>
+</tr>
+<tr>
+<td><strong>Storage</strong></td>
+<td>Single local SQLite</td>
+<td>Pluggable; Qdrant or configurable vector store</td>
+<td>Single JSONL file (knowledge graph)</td>
+<td>SQLite + Chroma</td>
+</tr>
+<tr>
+<td><strong>LLM dependency</strong></td>
+<td>Haiku per episode (5–10 ops batched)</td>
+<td>LLM per add/search op</td>
+<td>None (graph CRUD only)</td>
+<td>Sonnet per tool call</td>
+</tr>
+<tr>
+<td><strong>Setup</strong></td>
+<td>One command (<code>/plugin install</code> or <code>npx</code>)</td>
+<td>SDK integration + vector store config</td>
+<td>MCP install (per-client)</td>
+<td>Bun + Python + Chroma</td>
+</tr>
+</tbody></table>
+<p><strong>When to pick which</strong>: pick <code>mem0</code> if you need a memory layer for a non-Claude-Code app (your own agent, multiple LLM providers). Pick the MCP reference <code>memory</code> server if you specifically want a knowledge-graph data model and don't mind invoking memory tools by hand. Pick claude-mem-lite if you want zero-touch automatic capture purpose-built for Claude Code's hook lifecycle, with code-domain retrieval and no external services.</p>
+<h2>Features</h2>
+<ul>
+<li><strong>Automatic capture</strong> -- Hooks into Claude Code lifecycle (PostToolUse, SessionStart, Stop, UserPromptSubmit) to record observations without manual effort</li>
+<li><strong>Hybrid search</strong> -- FTS5 BM25 + TF-IDF vector cosine similarity, merged via Reciprocal Rank Fusion (RRF). FTS5 handles keyword matching; 512-dim TF-IDF vectors capture semantic similarity for recall beyond exact terms</li>
+<li><strong>Timeline browsing</strong> -- Navigate observations chronologically with anchor-based context windows</li>
+<li><strong>Episode batching</strong> -- Groups related file operations into coherent episodes before LLM encoding</li>
+<li><strong>Error-triggered recall</strong> -- Automatically searches memory when Bash errors occur, surfacing relevant past fixes</li>
+<li><strong>Proactive file history</strong> -- When editing a file, automatically shows relevant past observations for that file</li>
+<li><strong>Session summaries</strong> -- LLM-generated summaries at session end (via background workers using <code>claude -p</code>)</li>
+<li><strong>Project-scoped context</strong> -- Injects recent memory into <code>CLAUDE.md</code> and session startup for immediate context</li>
+<li><strong>Observation types</strong> -- Categorized as <code>decision</code>, <code>bugfix</code>, <code>feature</code>, <code>refactor</code>, <code>discovery</code>, or <code>change</code></li>
+<li><strong>Importance grading</strong> -- LLM assigns 1-3 importance levels (routine / notable / critical) to each observation</li>
+<li><strong>Observation relations</strong> -- Bidirectional links between related observations based on file overlap</li>
+<li><strong>User prompt capture</strong> -- Records user prompts via UserPromptSubmit hook for intent tracking</li>
+<li><strong>Read file tracking</strong> -- Tracks files read during sessions for richer episode context</li>
+<li><strong>Zero data loss</strong> -- If LLM fails, observations are saved with degraded (inferred) metadata instead of being discarded</li>
+<li><strong>Two-tier dedup</strong> -- Jaccard similarity (5-minute window) + MinHash signatures (7-day cross-session window) prevent duplicates</li>
+<li><strong>Synonym expansion</strong> -- Abbreviations like <code>K8s</code>, <code>DB</code>, <code>auth</code> automatically expand to full forms in FTS5 search (100+ pairs including CJK↔EN cross-language mappings)</li>
+<li><strong>CJK synonym extraction</strong> -- Unsegmented Chinese text is scanned for known vocabulary words (数据库→database, 搜索→search, etc.) enabling cross-language memory recall</li>
+<li><strong>Stop-word filtering</strong> -- English stop words filtered from both TF-IDF vocabulary (reclaiming ~18% of vector dimensions) and FTS queries (preventing false negatives from noise terms like "how", "the", "does")</li>
+<li><strong>Persisted vocabulary</strong> -- TF-IDF vocabulary persisted to <code>vocab_state</code> table, preventing vector staleness when document frequencies shift. Vectors stay valid until explicit rebuild</li>
+<li><strong>Pseudo-relevance feedback (PRF)</strong> -- Top results seed expansion queries for broader recall</li>
+<li><strong>Concept co-occurrence</strong> -- Shared concepts across observations expand search to related topics</li>
+<li><strong>Context-aware re-ranking</strong> -- Active file overlap boosts relevance (exact match + directory-level half-weight)</li>
+<li><strong>Superseded detection</strong> -- Marks older observations as outdated when newer ones cover the same files with higher importance</li>
+<li><strong>Adaptive time windows</strong> -- Session startup recall uses velocity-based time windows (high/medium/low activity tiers)</li>
+<li><strong>Token-budgeted context</strong> -- Greedy knapsack algorithm selects session-start context within a 2,000-token budget, prioritizing by recency and importance</li>
+<li><strong>Observation compression</strong> -- Old low-value observations can be compressed into weekly summaries to reduce noise</li>
+<li><strong>Secret scrubbing</strong> -- Automatic redaction of API keys, tokens, PEM blocks, connection strings, and 15+ credential patterns</li>
+<li><strong>Atomic writes</strong> -- All file writes (episodes, CLAUDE.md) use write-to-tmp + rename to prevent corruption on crash</li>
+<li><strong>Robust locking</strong> -- PID-aware lock files with automatic stale/orphan cleanup (&gt;30s timeout or dead PID)</li>
+<li><strong>Stale session cleanup</strong> -- Sessions active for &gt;24h are automatically marked as abandoned on next start</li>
+<li><strong>Resource registry</strong> -- Indexes installed skills and agents with FTS5 search, composite scoring, and invocation tracking; searchable via <code>mem_registry</code> MCP tool</li>
+<li><strong>Unified resource discovery</strong> -- Shared filesystem traversal layer (<code>resource-discovery.mjs</code>) used by both runtime scanner and offline indexer, supporting flat directories, plugin nesting, and loose <code>.md</code> files</li>
+<li><strong>Domain synonym expansion</strong> -- Registry search queries expand to domain synonyms (e.g., "fix" → debug, bugfix, troubleshoot, diagnose, repair)</li>
+<li><strong>Multi-provider LLM mode</strong> -- Provider priority <code>ANTHROPIC_API_KEY</code> (direct Anthropic API) → <code>OPENROUTER_API_KEY</code> (OpenRouter, OpenAI-compatible — point it at any model via <code>OPENROUTER_MODEL</code>) → <code>claude -p</code> CLI fallback when no key is set</li>
+<li><strong>Lesson-learned indexing</strong> -- <code>lesson_learned</code> field indexed in FTS5 with weight 8, making past debugging insights directly searchable</li>
+<li><strong>Cross-source normalization</strong> -- <code>mem_search</code> normalizes scores across observations, sessions, and prompts before merging, preventing any source from dominating results</li>
+<li><strong>Exponential recency decay</strong> -- Type-differentiated half-lives (decisions: 90d, discoveries: 60d, bugfixes: 14d, changes: 7d) consistently applied in all ranking paths</li>
+<li><strong>Prompt-time memory injection</strong> -- UserPromptSubmit hook automatically searches and injects relevant past observations with recency and importance weighting</li>
+<li><strong>Smart skill invocation</strong> -- Auto-loaded and searched managed skills/agents include portable <code>~</code> paths with <code>Read()</code> guidance; native plugin skills recommend <code>Skill("full:name")</code>; prevents <code>Skill()</code> misuse for managed resources that aren't registered with Claude Code's native handler</li>
+<li><strong>Dual injection dedup</strong> -- <code>user-prompt-search.js</code> and <code>handleUserPrompt</code> coordinate via temp file to prevent duplicate memory injection</li>
+<li><strong>Plugin cache hook self-heal</strong> -- Claude Code runtime reads plugin hooks from <code>~/.claude/plugins/cache/&lt;mp&gt;/&lt;plugin&gt;/&lt;ver&gt;/hooks/hooks.json</code>, not from the marketplace source. When <code>install.mjs</code>-managed <code>settings.json</code> hooks coexist with a stale cache <code>hooks.json</code> (e.g. from a previous marketplace install or a plugin auto-update), the runtime registers hooks twice → every session start / user prompt fires twice. <code>install.mjs</code> and <code>hook-update.mjs</code> now clear cache <code>hooks.json</code> in every version dir, and <code>hook.mjs session-start</code> self-heals on every session (gated by <code>hasInstallManagedHooks</code> so plugin-only users are not affected). <code>install.mjs status</code> reports cache pollution state (since v2.31.1/2.31.2).</li>
+<li><strong>Result-dedup cooldown</strong> -- User-prompt memory injection uses result-overlap detection (&gt;80% ID overlap → skip) instead of time-based cooldown, allowing topic switches within seconds while preventing redundant injections</li>
+<li><strong>OR query fallback</strong> -- When AND-joined FTS5 queries return zero results, automatically relaxes to OR-joined queries for broader recall (applied in both user-prompt-search and hook-memory paths)</li>
+<li><strong>Configurable LLM model</strong> -- Switch between Haiku (fast/cheap) and Sonnet (deeper analysis) via <code>CLAUDE_MEM_MODEL</code> env var</li>
+<li><strong>DB auto-recovery</strong> -- Detects and cleans corrupted WAL/SHM files on startup; periodic WAL checkpoints prevent unbounded growth</li>
+<li><strong>Schema auto-migration</strong> -- Idempotent <code>ALTER TABLE</code> migrations run on every startup, safely adding new columns and indexes without data loss</li>
+<li><strong>Exploration bonus</strong> -- New resources in the registry get a fair chance in composite ranking; zombie resources (high recommend, zero adopt) are penalized in scoring</li>
+<li><strong>LLM concurrency control</strong> -- File-based semaphore limits background workers to 2 concurrent LLM calls, preventing resource contention</li>
+<li><strong>stdin overflow protection</strong> -- Hook input truncated at 256KB with regex-based action salvage for oversized tool outputs</li>
+<li><strong>Cross-session handoff</strong> -- Captures session state (request, completed work, next steps, key files) on <code>/clear</code> or <code>/exit</code>, then injects context when the next session detects continuation intent via explicit keywords or FTS5 term overlap</li>
+<li><strong>Git-SHA continuation anchor</strong> (v2.31.0) -- Handoff rows include <code>git_sha_at_handoff</code>; any handoff matching the current <code>HEAD</code> counts as continuation regardless of TTL. Code state is a stronger continuation signal than wall-clock time</li>
+<li><strong>Startup dashboard</strong> (v2.31.0) -- SessionStart hook aggregates <code>git status</code> + <code>~/.claude/tasks/*.json</code> + <code>~/.claude/plans/*.md</code> + most-recent exit handoff + recent event count into a single structured block injected via <code>hookSpecificOutput.additionalContext</code></li>
+<li><strong>Activity namespace</strong> (v2.31.0) -- Dedicated <code>events</code> table + FTS5 for non-memdir types (<code>bugfix</code>, <code>lesson</code>, <code>bug</code>, <code>discovery</code>, <code>refactor</code>, <code>feature</code>, <code>observation</code>, <code>decision</code>) that don't compete with <code>WHAT_NOT_TO_SAVE</code> semantics on the observations table. CLI: <code>claude-mem-lite activity save|search|recent|show</code>. <code>hook-llm</code> routes non-memdir summary types through <code>persistHaikuSummary</code> so upgrades from observations→events are atomic. (v3.39: the <code>/lesson</code> and <code>/bug</code> slash commands were redirected from this events table to searchable <strong>observations</strong> — <code>mem_search</code> never read the events table, so explicit saves were unfindable; the events table remains the auto-capture activity log.)</li>
+<li><strong>In-place observation updates</strong> -- <code>mem_update</code> tool modifies existing observations atomically (field update + FTS text rebuild + vector re-computation in one transaction), preserving original IDs and references</li>
+<li><strong>Bulk export</strong> -- <code>mem_export</code> tool exports observations as JSON or JSONL, with project/type/date filtering and 1000-row pagination cap with batch guidance</li>
+<li><strong>FTS integrity management</strong> -- <code>mem_fts_check</code> tool verifies FTS5 index health or rebuilds indexes on demand, useful after database recovery or when search results seem wrong</li>
+<li><strong>Atomic multi-table writes</strong> -- <code>saveObservation</code> wraps observations + observation_files + observation_vectors INSERTs in a single <code>db.transaction()</code>, preventing orphaned rows on crash</li>
+<li><strong>Modular NLP pipeline</strong> -- Synonym maps, stop words, scoring constants, and query building extracted into focused modules (<code>synonyms.mjs</code>, <code>stop-words.mjs</code>, <code>scoring-sql.mjs</code>, <code>nlp.mjs</code>) for independent testing and maintenance</li>
+<li><strong>Porter-aligned PRF</strong> -- Pseudo-relevance feedback terms are now stemmed with the same Porter algorithm used by FTS5, ensuring PRF expansion terms match the search index</li>
+</ul>
+<h2>Platform Support</h2>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Status</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Linux</strong></td>
+<td>Supported</td>
+<td>Primary development and testing platform</td>
+</tr>
+<tr>
+<td><strong>macOS</strong></td>
+<td>Supported</td>
+<td>Fully compatible (Intel and Apple Silicon)</td>
+</tr>
+<tr>
+<td><strong>Windows</strong></td>
+<td>Not supported</td>
+<td>Uses POSIX shell scripts (<code>post-tool-use.sh</code>, <code>setup.sh</code>) and Unix file locking; WSL2 may work but is untested</td>
+</tr>
+</tbody></table>
+<h2>Requirements</h2>
+<ul>
+<li><strong>Node.js</strong> &gt;= 20</li>
+<li><strong>Claude Code</strong> CLI installed and configured (<code>claude</code> command available)</li>
+<li><strong>SQLite3</strong> support (provided by <code>better-sqlite3</code>, compiled on install)</li>
+<li><strong>Platform</strong>: Linux or macOS (see <a href="#platform-support" target="_blank" rel="noopener noreferrer">Platform Support</a>)</li>
+</ul>
+<h2>Installation</h2>
+<h3>Method 1: Plugin Marketplace (recommended)</h3>
+<pre><code class="language-bash">/plugin marketplace add sdsrss/claude-mem-lite
+/plugin install claude-mem-lite
+</code></pre>
+<p>Plugin mode manages its own hooks/runtime. On session start it only <strong>checks and reports</strong> new claude-mem-lite versions; it does <strong>not</strong> self-overwrite plugin files in place. Update plugin-mode installs through Claude's plugin workflow.</p>
+<blockquote>
+<p><strong>The plugin install is complete on its own</strong> — hooks, MCP tools, and the bundled slash commands (<code>/mem</code>, <code>/lesson</code>, <code>/bug</code>, <code>/adopt</code>) all run from the plugin with no second step. The slash commands invoke the bundled CLI by an absolute path resolved from the plugin directory (<code>${CLAUDE_PLUGIN_ROOT}/cli.mjs &lt;cmd&gt;</code>), so they work without anything on your <code>PATH</code>. A global <code>claude-mem-lite</code> <strong>shell</strong> command (for running queries yourself in a terminal) is <strong>optional</strong> — <code>npm i -g claude-mem-lite</code> — and is a <em>separate</em> npm install: the plugin's auto-update does <strong>not</strong> refresh it, so re-run <code>npm i -g claude-mem-lite@latest</code> if you want that shell command kept in sync. You do <strong>not</strong> need it for the plugin to be fully functional.</p>
+</blockquote>
+<blockquote>
+<p><strong>Auto-adopt fires on the first SessionStart per project (v2.82.1+).</strong> The plugin automatically writes the <strong>invited-memory sentinel</strong> (a system-authority pointer that boosts Claude's proactive use of <code>mem_recall</code> / <code>mem_save</code>) into the project's memdir — <strong>no manual <code>/adopt</code> needed</strong>, regardless of install path (npm, npx, <code>/plugin</code>, manual). Per-project opt-out: <code>claude-mem-lite adopt --disable</code> (<code>--enable</code> to re-arm). Global opt-out: <code>export MEM_NO_AUTO_ADOPT=1</code>. Manual <code>/adopt</code> remains available for re-applying after edits and for the <code>--all</code> batch path.</p>
+</blockquote>
+<h3>Method 2: npx (one-liner)</h3>
+<pre><code class="language-bash">npx github:sdsrss/claude-mem-lite
+</code></pre>
+<p>Source files are automatically copied to <code>~/.claude-mem-lite/</code> for persistence.</p>
+<blockquote>
+<p><strong>Note:</strong> <code>npx github:…</code> installs from the repo's <strong>default branch (HEAD)</strong>, which can be ahead of the latest published release. For the stable released version use the npm package (<code>npx claude-mem-lite</code>), or pin a release tag: <code>npx github:sdsrss/claude-mem-lite#vX.Y.Z</code>.</p>
+</blockquote>
+<h3>Method 3: git clone</h3>
+<pre><code class="language-bash">git clone https://github.com/sdsrss/claude-mem-lite.git
+cd claude-mem-lite
+node install.mjs install
+</code></pre>
+<p>Source files stay in the cloned repo. Update via <code>git pull &amp;&amp; node install.mjs install</code>.</p>
+<h3>What happens during installation</h3>
+<ol>
+<li><strong>Install dependencies</strong> -- <code>npm install --omit=dev</code> (compiles native <code>better-sqlite3</code>)</li>
+<li><strong>Register MCP server</strong> -- <code>mem-lite</code> server with 20 tools (9 core exposed via <code>tools/list</code> + 11 hidden-but-callable; see the Usage section for the full table). The pre-v2.78 generic server name <code>mem</code> is renamed to <code>mem-lite</code> for namespace hygiene; the tool names themselves (<code>mem_search</code>, <code>mem_recall</code>, ...) are unchanged.</li>
+<li><strong>Configure hooks</strong> -- <code>PostToolUse</code>, <code>SessionStart</code>, <code>Stop</code>, <code>UserPromptSubmit</code> lifecycle hooks</li>
+<li><strong>Create data directory</strong> -- <code>~/.claude-mem-lite/</code> (hidden) for database, runtime, and managed resource files</li>
+<li><strong>Auto-migrate</strong> -- If <code>~/.claude-mem/</code> (original claude-mem) or <code>~/claude-mem-lite/</code> (pre-v0.5 unhidden) exists, migrates database and runtime files to <code>~/.claude-mem-lite/</code>, preserving the original untouched</li>
+<li><strong>Initialize database</strong> -- SQLite with WAL mode, FTS5 indexes created on first server start</li>
+</ol>
+<p>Restart Claude Code after installation to activate.</p>
+<h3>Migration</h3>
+<p>All installation methods auto-detect and migrate from previous versions:</p>
+<p><strong>From claude-mem (original <code>~/.claude-mem/</code>):</strong></p>
+<ul>
+<li>Copy <code>claude-mem.db</code> → <code>~/.claude-mem-lite/claude-mem-lite.db</code> (renamed)</li>
+<li>Copy the <code>runtime/</code> directory</li>
+<li><strong>Original <code>~/.claude-mem/</code> is preserved</strong> (no deletion, no overwrite)</li>
+</ul>
+<p><strong>From pre-v0.5 unhidden directory (<code>~/claude-mem-lite/</code>):</strong></p>
+<ul>
+<li>Entire directory is moved to <code>~/.claude-mem-lite/</code> (hidden)</li>
+</ul>
+<p><strong>In-place rename:</strong></p>
+<ul>
+<li>Existing <code>claude-mem.db</code> in <code>~/.claude-mem-lite/</code> is automatically renamed to <code>claude-mem-lite.db</code></li>
+</ul>
+<p>Remove old directories manually after confirming:</p>
+<pre><code class="language-bash">rm -rf ~/.claude-mem/       # original claude-mem
+rm -rf ~/claude-mem-lite/   # pre-v0.5 unhidden (if not auto-moved)
+</code></pre>
+<h3>Directory Structure</h3>
+<pre><code>~/.claude-mem-lite/
+  claude-mem-lite.db       # SQLite database — memory (WAL mode)
+  resource-registry.db     # SQLite database — skill/agent registry
+  runtime/
+    session-&lt;project&gt;    # Active session state
+    ep-&lt;project&gt;.json    # Episode buffer
+    ep-flush-*.json      # Flushed episodes awaiting processing
+    reads-&lt;project&gt;.txt  # Read file paths (collected on flush)
+  managed/
+    skills/              # Standalone skills: {name}/SKILL.md
+    agents/              # Agent plugins: {group}/agents/{name}.md + skills/*/SKILL.md
+    repos/               # Shallow-cloned source repos
+</code></pre>
+<h2>Usage</h2>
+<h3>MCP Tools (used automatically by Claude)</h3>
+<p>As of v2.70.0, the server registers 20 tools in total but only the 9 <strong>core</strong>
+tools appear in <code>tools/list</code>. The 11 <strong>hidden</strong> tools remain callable at the
+protocol layer (<code>tools/call</code> by exact name still routes normally); they're
+omitted from the list response so Claude Code sessions don't load 11 extra
+tool schemas at startup. Hidden tools are the maintenance / admin / browser
+surface — reach them through the CLI column in the second table.</p>
+<p><strong>Core (9, exposed to Claude Code)</strong></p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>mem_search</code></td>
+<td>FTS5 full-text search with BM25 ranking. Filters by type, project, date range, importance level.</td>
+</tr>
+<tr>
+<td><code>mem_recent</code></td>
+<td>Show most recent observations, ordered by time. Quick snapshot of latest activity.</td>
+</tr>
+<tr>
+<td><code>mem_recall</code></td>
+<td>Recall observations related to a file. Use before editing to surface past bugfixes and context.</td>
+</tr>
+<tr>
+<td><code>mem_timeline</code></td>
+<td>Browse observations chronologically around an anchor point.</td>
+</tr>
+<tr>
+<td><code>mem_get</code></td>
+<td>Retrieve full details for specific observation IDs (includes importance and related_ids).</td>
+</tr>
+<tr>
+<td><code>mem_save</code></td>
+<td>Manually save a memory/observation. Accepts <code>closes_deferred</code> array for transactional closure of deferred work.</td>
+</tr>
+<tr>
+<td><code>mem_defer</code></td>
+<td>Mark work for a future session (v2.70+). First-class carry-forward signal, surfaced in SessionStart <code>### Deferred Work</code> block.</td>
+</tr>
+<tr>
+<td><code>mem_defer_list</code></td>
+<td>List open deferred items for the current project.</td>
+</tr>
+<tr>
+<td><code>mem_defer_drop</code></td>
+<td>Drop a deferred item without fixing it; requires a <code>reason</code> for the audit trail.</td>
+</tr>
+</tbody></table>
+<p><strong>Hidden-but-callable (11, CLI-routed)</strong></p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>CLI equivalent</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>mem_update</code></td>
+<td><code>claude-mem-lite update &lt;id&gt;</code></td>
+<td>Edit an observation in place.</td>
+</tr>
+<tr>
+<td><code>mem_stats</code></td>
+<td><code>claude-mem-lite stats</code></td>
+<td>Counts, type distribution, daily activity.</td>
+</tr>
+<tr>
+<td><code>mem_delete</code></td>
+<td><code>claude-mem-lite delete &lt;id&gt;</code></td>
+<td>Preview / confirm workflow, FTS5 cleanup.</td>
+</tr>
+<tr>
+<td><code>mem_compress</code></td>
+<td><code>claude-mem-lite compress</code></td>
+<td>Roll up old low-value observations (preview default; <code>--execute</code> to apply).</td>
+</tr>
+<tr>
+<td><code>mem_maintain</code></td>
+<td><code>claude-mem-lite maintain scan --ops dedup,decay</code></td>
+<td>dedup / decay / cleanup / rebuild_vectors (<code>scan</code> previews, <code>execute</code> applies).</td>
+</tr>
+<tr>
+<td><code>mem_optimize</code></td>
+<td><code>claude-mem-lite optimize</code></td>
+<td>LLM-powered re-enrich / normalize / cluster-merge (preview default; <code>--run</code> to apply).</td>
+</tr>
+<tr>
+<td><code>mem_export</code></td>
+<td><code>claude-mem-lite export</code></td>
+<td>JSON / JSONL dump, filters by project, type, date.</td>
+</tr>
+<tr>
+<td><code>mem_fts_check</code></td>
+<td><code>claude-mem-lite fts-check &lt;check|rebuild&gt;</code></td>
+<td>FTS5 integrity + rebuild.</td>
+</tr>
+<tr>
+<td><code>mem_browse</code></td>
+<td><code>claude-mem-lite browse</code></td>
+<td>Tier-grouped dashboard (working / active / archive).</td>
+</tr>
+<tr>
+<td><code>mem_registry</code></td>
+<td><code>claude-mem-lite registry &lt;action&gt;</code></td>
+<td>List / search / import / remove skills + agents.</td>
+</tr>
+<tr>
+<td><code>mem_use</code></td>
+<td><em>MCP only</em></td>
+<td>Load a skill / agent from the registry by name.</td>
+</tr>
+</tbody></table>
+<h3>Skill Commands (in Claude Code chat)</h3>
+<pre><code>/mem search &lt;query&gt;        # Full-text search across all memories
+/mem recent [n]            # Show recent N observations (default 10)
+/mem recall &lt;file&gt;         # Show past observations for a file
+/mem save &lt;text&gt;           # Save a manual memory/note
+/mem stats                 # Show memory statistics
+/mem timeline &lt;query&gt;      # Browse timeline around a match
+/mem browse                # Tier-grouped memory dashboard
+/mem &lt;query&gt;               # Shorthand for search
+/lesson &lt;text&gt;             # Save a non-obvious lesson to the events table (v2.31.0)
+/bug &lt;text&gt;                # Log a known bug + repro steps to the events table (v2.31.0)
+</code></pre>
+<h3>Efficient Search Workflow</h3>
+<pre><code>1. mem_search(query="auth bug")     -&gt; compact ID index
+2. mem_timeline(anchor=12345)       -&gt; surrounding context
+3. mem_get(ids=[12345, 12346])      -&gt; full details
+</code></pre>
+<h3>Invited Memory (v2.32+)</h3>
+<p>Opt-in mechanism that installs a slug-scoped managed block into the project's
+own <code>CLAUDE.md</code> (plus an on-demand detail doc under <code>.claude/</code>) so Claude Code
+loads the plugin's MCP-tool triggers as <strong>project instructions</strong> — a higher
+instruction-following authority than MCP server instructions (which are framed
+as tool metadata). Claude Code loads <code>CLAUDE.md</code> and the memdir <code>MEMORY.md</code> at
+equal weight, so steering lives in <code>CLAUDE.md</code> (the canonical home for project
+instructions) rather than polluting <code>MEMORY.md</code>, which is reserved for the user's
+own memories. The pre-v3.13 scheme wrote into <code>MEMORY.md</code>; it is migrated away
+automatically on the next SessionStart.</p>
+<pre><code class="language-bash">claude-mem-lite adopt              # install for current project
+claude-mem-lite adopt --all        # install for every project under ~/.claude/projects/
+claude-mem-lite adopt --status     # list adopted/disabled projects + current gating snapshot
+claude-mem-lite adopt --dry-run    # preview without writing
+claude-mem-lite adopt --disable    # opt out of auto-adopt for current project (writes .mem-no-auto-adopt sentinel)
+claude-mem-lite adopt --enable     # re-arm auto-adopt for current project (deletes the sentinel)
+claude-mem-lite unadopt            # remove sentinel + doc (runtime marker stays to honor the explicit removal)
+</code></pre>
+<p>Slash commands <code>/adopt</code> and <code>/unadopt</code> wrap the same CLI.</p>
+<p><strong>What adoption changes:</strong></p>
+<ul>
+<li>A <code>&lt;!-- claude-mem-lite:begin v1 --&gt;…&lt;!-- claude-mem-lite:end --&gt;</code> managed
+block is added to <code>&lt;cwd&gt;/CLAUDE.md</code> under its own
+<code>## claude-mem-lite — persistent memory</code> header, containing a compact trigger
+table pointing at <code>mem_recall</code> / <code>mem_save</code> / <code>mem_defer</code> with their key
+arguments. The block is slug-scoped: only this region is managed; the rest of
+your <code>CLAUDE.md</code> is preserved verbatim, and it coexists with other plugins'
+blocks (e.g. <code>code-graph-mcp</code>) in the same file.</li>
+<li>A <code>&lt;cwd&gt;/.claude/plugin_claude_mem_lite.md</code> detail file is written (not
+auto-loaded; read on demand when the <code>CLAUDE.md</code> block points to it). The
+block auto-refreshes when the shipped content drifts (version bump or template
+change), unless <code>CLAUDE_MEM_NO_TEMPLATE_REFRESH=1</code>.</li>
+<li>Post-adopt the conservative hook layer auto-trims: MCP server instructions
+drop the <code>WHEN TO USE</code> section, SessionStart injection drops the <code>File Lessons</code>
+/ <code>Key Context</code> sections. <code>#ID</code> references and the <code>Recent</code> table still fire
+so <code>mem_get</code> remains reachable.</li>
+</ul>
+<p><strong>When does it take effect?</strong></p>
+<ul>
+<li>The <code>CLAUDE.md</code> managed block and the hook-layer trim (<code>File Lessons</code> /
+<code>Key Context</code> / lesson suffix) apply on the <strong>next SessionStart</strong> (any new
+Claude Code session in the adopted project).</li>
+<li>The MCP server instructions are built once at server boot and MCP has no
+"push" protocol — the <code>WHEN TO USE</code> / <code>Decision rules</code> trim only applies
+after Claude Code restarts and re-spawns the mem-lite MCP server. A single
+<code>/exit</code> + fresh session is enough. Same caveat applies to <code>unadopt</code>.</li>
+</ul>
+<p><strong>Safety:</strong></p>
+<ul>
+<li>Hash-guarded: editing the managed-block body yourself blocks automatic
+rewrites unless you pass <code>--force</code>.</li>
+<li>Slug-scoped &amp; dedup-guarded: only the <code>claude-mem-lite:begin…end</code> region is
+ever rewritten, and duplicate / CRLF-orphaned copies are collapsed to one.
+Unlike the legacy <code>MEMORY.md</code> scheme there is no line-budget gate — <code>CLAUDE.md</code>
+has no truncation cap.</li>
+<li><strong>Auto-adopt fires on the first SessionStart per project for any install
+path (v2.82.1+).</strong> Per-project opt-out: <code>claude-mem-lite adopt --disable</code>
+(writes a durable <code>&lt;memdir&gt;/.mem-no-auto-adopt</code> sentinel that survives marker
+deletion / plugin reinstalls). Global opt-out: <code>MEM_NO_AUTO_ADOPT=1</code>.
+Pre-v2.82.1 the <code>CLAUDE_PLUGIN_ROOT</code> gate left auto-adopt unreachable for
+every <code>install.mjs</code>-written hook (the common path) — see CHANGELOG v2.82.1.</li>
+<li>The fallback hook layer is never removed from source — conditional trim is
+runtime-gated on sentinel presence, so projects without adoption get the
+full verbose output.</li>
+</ul>
+<p>See <code>docs/plans/2026-04-16-invited-memory-pattern.md</code> for the full design
+(including the reusable template other plugins can follow).</p>
+<h2>Database Schema</h2>
+<p>Five core tables with FTS5 virtual tables for search:</p>
+<p><strong>observations</strong> -- Individual coding observations (decisions, bugfixes, features, etc.)</p>
+<pre><code>id, memory_session_id, project, type, title, subtitle,
+text, narrative, concepts, facts, files_read, files_modified,
+importance, related_ids, created_at, created_at_epoch,
+lesson_learned, minhash_sig, access_count, compressed_into, search_aliases,
+branch, superseded_at, superseded_by, last_accessed_at
+</code></pre>
+<p><strong>session_summaries</strong> -- LLM-generated session summaries</p>
+<pre><code>id, memory_session_id, project, request, investigated,
+learned, completed, next_steps, files_read, files_edited, notes,
+remaining_items, lessons, key_decisions
+</code></pre>
+<p><strong>sdk_sessions</strong> -- Session tracking</p>
+<pre><code>id, content_session_id, memory_session_id, project,
+started_at, completed_at, status, prompt_counter
+</code></pre>
+<p><strong>user_prompts</strong> -- User prompts captured via UserPromptSubmit hook</p>
+<pre><code>id, content_session_id, prompt_text, prompt_number
+</code></pre>
+<p><strong>session_handoffs</strong> -- Cross-session handoff snapshots (UPSERT, max 2 per project)</p>
+<pre><code>project, type, session_id, working_on, completed, unfinished,
+key_files, key_decisions, match_keywords, created_at_epoch
+</code></pre>
+<p><strong>observation_files</strong> -- Normalized file membership for efficient file-based recall</p>
+<pre><code>obs_id, filename
+</code></pre>
+<p><strong>observation_vectors</strong> -- TF-IDF vector embeddings for hybrid search</p>
+<pre><code>observation_id, vector (BLOB Float32Array), vocab_version, created_at_epoch
+</code></pre>
+<p><strong>vocab_state</strong> -- Persisted TF-IDF vocabulary for stable vector indexing</p>
+<pre><code>term, term_index, idf, version, created_at_epoch
+</code></pre>
+<p>FTS5 indexes: <code>observations_fts</code> (title, subtitle, narrative, text, facts, concepts, lesson_learned), <code>session_summaries_fts</code>, <code>user_prompts_fts</code></p>
+<h2>How It Works</h2>
+<h3>Hook Pipeline</h3>
+<pre><code>SessionStart
+  -&gt; Generate session ID (or save handoff snapshot on /clear)
+  -&gt; Mark stale sessions (&gt;24h active) as abandoned
+  -&gt; Clean orphaned/stale lock files
+  -&gt; Query recent observations (24h)
+  -&gt; Inject context into CLAUDE.md + stdout
+
+PostToolUse (every tool execution)
+  -&gt; Bash pre-filter skips noise in ~5ms (Read paths tracked to reads file)
+  -&gt; Detect Bash significance (errors, tests, builds, git, deploys)
+  -&gt; Accumulate into episode buffer
+  -&gt; Proactive file history: show past observations for edited files
+  -&gt; Flush when: buffer full (10 entries) | 5min gap | context change
+  -&gt; Collect Read file paths into episode on flush
+  -&gt; Spawn LLM episode worker for significant episodes
+  -&gt; Error-triggered recall: search memory for related past fixes
+
+UserPromptSubmit (two parallel paths)
+  -&gt; [user-prompt-search.js] Auto-search memory via FTS5 + active file context
+  -&gt; [user-prompt-search.js] Inject relevant past observations with recency/importance weighting
+  -&gt; [user-prompt-search.js] Write injected IDs to temp file for dedup
+  -&gt; [user-prompt-search.js] L1 skill auto-load: match managed skill names in prompt
+     -&gt; Load content with portable ~ path + Read() guidance
+     -&gt; source="managed-skill|managed-agent", path="~/.claude-mem-lite/managed/..."
+  -&gt; [hook.mjs handleUserPrompt] Capture user prompt text to user_prompts table
+  -&gt; [hook.mjs handleUserPrompt] Increment session prompt counter
+  -&gt; [hook.mjs handleUserPrompt] Handoff: detect continuation intent → inject previous session context
+  -&gt; [hook.mjs handleUserPrompt] Semantic memory injection (hook-memory.mjs), deduped via temp file
+
+Stop
+  -&gt; Flush final episode buffer
+  -&gt; Save handoff snapshot (on /exit)
+  -&gt; Mark session completed
+  -&gt; Spawn LLM summary worker (poll-based wait)
+</code></pre>
+<h3>Resource Registry</h3>
+<p>The resource registry (<code>registry.mjs</code>, <code>registry-retriever.mjs</code>) indexes installed skills and agents into a searchable FTS5 database. Unlike the previous proactive dispatch system, the registry is now on-demand — it's reachable via the <code>claude-mem-lite registry</code> CLI (primary path for Claude Code since v2.34.0 hides the <code>mem_registry</code> MCP tool from <code>tools/list</code>) or by direct <code>tools/call mem_registry</code> for MCP clients that know the name.</p>
+<pre><code>Registry pipeline:
+  -&gt; registry-scanner.mjs discovers skills/agents on filesystem
+  -&gt; resource-discovery.mjs handles flat dirs, plugin nesting, loose .md files
+  -&gt; registry-indexer.mjs indexes content into FTS5 with metadata
+  -&gt; registry-retriever.mjs provides BM25-ranked search with synonym expansion
+  -&gt; mem_registry MCP tool exposes search/list/stats/import/remove/reindex actions
+
+Smart invocation (three layers):
+  L1 auto-load: UserPromptSubmit matches managed skill name in prompt
+     -&gt; Loads content with path="~/.claude-mem-lite/managed/.../SKILL.md"
+     -&gt; Guides: Read("path") or mem_use(name="..."), never Skill()
+  L2 bridge: PreToolUse hook intercepts Skill("name") for managed resources
+     -&gt; Outputs content, prevents native handler failure
+  L3 explicit: mem_use(name="...") loads full content with reload path
+  Search: managed resources → Read(path), native plugins → Skill("full:name")
+</code></pre>
+<p>Composite scoring for search results: BM25 relevance (40%) + repo stars (15%) + success rate (15%) + adoption rate (10%) + freshness (10%) + exploration bonus (10%). Domain filtering ensures platform-specific resources (iOS, Go, Rust) only surface for matching projects.</p>
+<h3>Episode Encoding</h3>
+<p>Episodes are batched related operations (edits to the same file group) that get processed by a background LLM worker:</p>
+<pre><code>Episode buffer -&gt; Flush to JSON -&gt; claude -p --model haiku -&gt; Structured observation -&gt; SQLite
+</code></pre>
+<p>Each observation includes type, title, narrative, concepts, facts, importance (1-3), and is automatically deduplicated via two tiers: Jaccard similarity (&gt;70% within 5 minutes) and MinHash signatures (&gt;80% within 7 days across sessions). If the LLM call fails, a degraded observation is saved with inferred metadata (zero data loss). Related observations are linked via <code>related_ids</code> based on FTS5 title similarity and file overlap.</p>
+<h2>Management Commands</h2>
+<pre><code class="language-bash"># Plugin install:
+/plugin install claude-mem-lite       # Install / update
+/plugin uninstall claude-mem-lite     # Uninstall
+
+# git clone install:
+node install.mjs install              # Install and configure
+node install.mjs uninstall            # Remove (keep data)
+node install.mjs uninstall --purge    # Remove and delete all data
+node install.mjs status               # Show current status
+node install.mjs doctor               # Diagnose issues
+node install.mjs cleanup-hooks        # Remove only stale claude-mem-lite hooks from settings.json
+node install.mjs update               # Force-check for updates and install them (direct install / npx mode)
+
+# npx install:
+npx claude-mem-lite                   # Install / reinstall
+npx claude-mem-lite uninstall         # Remove (keep data)
+npx claude-mem-lite doctor            # Diagnose issues
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li>Plugin mode only reports available updates; it does not self-update plugin files.
+To upgrade an installed plugin to the latest published version, run <strong>inside Claude Code</strong>:<pre><code>/plugin marketplace update sdsrss
+/plugin install claude-mem-lite@sdsrss
+</code></pre>
+(The first command refreshes the local marketplace clone; the second reinstalls from it. Without the first command, <code>/plugin install</code> reuses the stale local clone and you stay on whichever version you originally pulled.)</li>
+<li>Direct install / npx mode keeps auto-update enabled and uses staged replacement with rollback on install failure.</li>
+<li>If you disabled the plugin but still have old mem hooks in <code>~/.claude/settings.json</code>, run <code>node install.mjs cleanup-hooks</code>.</li>
+</ul>
+<h4>Trust model per install path</h4>
+<p>The three install paths do <strong>not</strong> carry the same supply-chain guarantees — pick the one that matches your threat model:</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Update mechanism</th>
+<th>Ed25519 release-signature verification</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>npm / npx / git-clone direct install</td>
+<td>auto-update from GitHub Releases</td>
+<td><strong>Yes</strong> — every runtime file (140 entries incl. hook scripts, MCP launcher, plugin declaration files) is hash-pinned in a signed manifest; verification is fail-closed</td>
+</tr>
+<tr>
+<td><code>/plugin install</code> (marketplace)</td>
+<td>manual <code>/plugin marketplace update</code> + reinstall</td>
+<td><strong>No</strong> — Claude Code installs from a git clone of the marketplace repo; the plugin's own signature chain is not consulted on this path. You are trusting GitHub + the repo's branch protection, not the release signing key</td>
+</tr>
+</tbody></table>
+<p><strong>Rollback recipe (plugin path).</strong> If an update misbehaves, pin the marketplace clone to the previous release tag and reinstall from it:</p>
+<pre><code class="language-bash"># 1. Find the local marketplace clone
+ls ~/.claude/plugins/marketplaces/          # e.g. sdsrss
+
+# 2. Pin it to the previous good tag (tags mirror npm versions, e.g. v3.62.0)
+cd ~/.claude/plugins/marketplaces/sdsrss
+git fetch --tags &amp;&amp; git checkout v3.62.0
+
+# 3. Reinstall from the pinned clone — inside Claude Code:
+#    /plugin install claude-mem-lite@sdsrss
+# 4. To leave the pin later: git checkout main, then the normal update flow.
+</code></pre>
+<p>Your data directory (<code>~/.claude-mem-lite/</code>) is untouched by install/rollback; schema migrations are forward-only, so after rolling back more than one minor version check <code>node install.mjs doctor</code> before trusting search results.</p>
+<h3>doctor</h3>
+<p>Checks Node.js version, dependencies, server/hook files, database integrity, FTS5 indexes, and stale processes.</p>
+<h3>status</h3>
+<p>Shows MCP registration, hook configuration, plugin disabled state, and database stats (observation/session counts).</p>
+<h3>Recovery (stuck install / hook errors)</h3>
+<p>If you see <code>ERR_MODULE_NOT_FOUND</code> on PreToolUse:Read/Edit/Skill hooks, or <code>claude-mem-lite</code> commands crash with import errors, you're likely hit by a partial auto-update — the updater copied new scripts but missed a sibling <code>lib/*</code> file, breaking the hook chain (and the next auto-update that would have healed it).</p>
+<p><strong>v2.84.0+</strong> ships a <code>repair</code> subcommand that re-syncs from the latest GitHub release:</p>
+<pre><code class="language-bash">claude-mem-lite repair
+</code></pre>
+<p><strong>If <code>repair</code> itself fails</strong> (the bin is older than v2.84.0, or the bin is also broken), run this one-liner — it pulls a fresh tarball into a temp dir and runs <em>that</em> tarball's <code>install.mjs</code>, bypassing every file on your disk:</p>
+<pre><code class="language-bash">T=$(mktemp -d) &amp;&amp; curl -sL https://api.github.com/repos/sdsrss/claude-mem-lite/tarball | tar xz -C "$T" --strip-components=1 &amp;&amp; node "$T/install.mjs" install
+</code></pre>
+<p>After it finishes, <code>~/.claude-mem-lite/</code> is back in sync with the latest release and <code>claude-mem-lite repair</code> is available for next time.</p>
+<h2>Uninstall</h2>
+<pre><code class="language-bash"># Plugin:
+/plugin uninstall claude-mem-lite
+
+# git clone:
+cd claude-mem-lite
+node install.mjs uninstall            # Keeps ~/.claude-mem-lite/ data
+node install.mjs uninstall --purge    # Deletes ~/.claude-mem-lite/ and all data
+
+# npx:
+npx claude-mem-lite uninstall
+npx claude-mem-lite uninstall --purge
+</code></pre>
+<p>Data in <code>~/.claude-mem-lite/</code> is preserved by default. Delete manually if needed:</p>
+<pre><code class="language-bash">rm -rf ~/.claude-mem-lite/
+</code></pre>
+<h3>Mixed-install residue (read this if you've used multiple install methods)</h3>
+<p><code>/plugin uninstall</code> only removes the plugin manifest — it <strong>does not touch <code>~/.claude/settings.json</code></strong>. If you've ever run <code>claude-mem-lite install</code> (npx or git-clone path), hook entries pointing at <code>~/.claude-mem-lite/hook.mjs</code> were written into your user-global settings, and they keep firing after <code>/plugin uninstall</code>. If <code>~/.claude-mem-lite/hook.mjs</code> still exists they double-fire alongside the plugin; if you also ran <code>rm -rf ~/.claude-mem-lite/</code> they error every session.</p>
+<p><strong>The safe sequence is</strong>: run <code>claude-mem-lite uninstall</code> first (which cleans the settings.json hooks plus the global MCP registration), then <code>/plugin uninstall claude-mem-lite</code>, then optionally <code>rm -rf ~/.claude-mem-lite/</code>.</p>
+<p>If you already uninstalled in the wrong order, <code>claude-mem-lite doctor</code> flags orphan hooks under <code>Orphan hooks:</code> with the exact cleanup command.</p>
+<h2>Project Structure</h2>
+<pre><code>claude-mem-lite/
+  .claude-plugin/
+    plugin.json      # Plugin manifest
+    marketplace.json # Marketplace catalog
+  .mcp.json          # MCP server definition (plugin root)
+  hooks/
+    hooks.json       # Hook definitions (plugin mode)
+  commands/
+    mem.md           # /mem command definition
+  server.mjs           # MCP server: tool definitions, FTS5 search, database init
+  search-scoring.mjs # Extracted search helpers: re-ranking, PRF, concept expansion
+  hook.mjs             # Claude Code hooks: episode capture, error recall, session management
+  hook-llm.mjs         # Background LLM workers: episode extraction, session summaries
+  hook-shared.mjs      # Shared hook infrastructure: session management, DB access, LLM calls
+  hook-handoff.mjs     # Cross-session handoff: state extraction, intent detection, injection
+  hook-context.mjs     # CLAUDE.md context injection and token budgeting
+  hook-episode.mjs     # Episode buffer management: atomic writes, pending entry merging
+  hook-memory.mjs      # Semantic memory injection on user prompt
+  hook-semaphore.mjs   # LLM concurrency control: file-based semaphore for background workers
+  schema.mjs           # Database schema: single source of truth for tables, migrations, FTS5
+  tool-schemas.mjs     # Shared Zod schemas for MCP tool validation
+  tfidf.mjs            # TF-IDF vector engine: tokenization, vocabulary building, vector computation, cosine similarity, RRF merge
+  tier.mjs             # Temporal tier system: activity-based time window classification
+  utils.mjs            # Re-export hub: backward-compatible surface for all utility modules
+  nlp.mjs              # FTS5 query building: synonym expansion, CJK bigrams, sanitization
+  scoring-sql.mjs      # BM25 weight constants and type-differentiated decay half-lives
+  stop-words.mjs       # Shared base stop-word set for all NLP/search modules
+  synonyms.mjs         # Unified synonym source: SYNONYM_MAP (bidirectional) + DISPATCH_SYNONYMS
+  project-utils.mjs    # Shared project name resolution with in-process cache
+  secret-scrub.mjs     # API key, token, PEM, and credential pattern redaction
+  format-utils.mjs     # String formatting: truncate, typeIcon, date/time/week formatting
+  hash-utils.mjs       # MinHash signatures, Jaccard similarity for dedup
+  bash-utils.mjs       # Bash output significance detection: errors, tests, builds, deploys
+  # Resource registry
+  registry.mjs         # Resource registry DB: schema, CRUD, FTS5, invocation tracking
+  registry-retriever.mjs # FTS5 retrieval with synonym expansion and composite scoring
+  registry-indexer.mjs # Resource indexing pipeline
+  registry-scanner.mjs # Filesystem scanner: reads content + hashes, delegates discovery
+  resource-discovery.mjs # Shared discovery layer: flat dirs, plugin nesting, loose .md files
+  haiku-client.mjs     # Unified Haiku LLM wrapper: direct API or CLI fallback
+  # Install &amp; config
+  install.mjs          # CLI installer: setup, uninstall, status, doctor (npx/git clone mode)
+  skill.md             # MCP skill definition (npx/git clone mode)
+  package.json         # Dependencies and metadata
+  scripts/
+    setup.sh           # Setup hook: npm install + migration (hidden dir + old dir)
+    post-tool-use.sh   # Bash pre-filter: skips noise in ~5ms, tracks Read paths
+    user-prompt-search.js # UserPromptSubmit hook: auto-search memory + L1 skill auto-load
+    pre-skill-bridge.js  # PreToolUse hook: L2 skill bridge for managed resources
+    pre-tool-recall.js   # PreToolUse hook: file lesson recall before Edit/Write
+    prompt-search-utils.mjs # Shared logic: skip patterns, intent detection, name matching
+    convert-commands.mjs # Converts command .md → SKILL.md in managed plugins
+    index-managed.mjs  # Offline indexer for managed resources
+  # Test &amp; benchmark (dev only)
+  tests/               # Unit, property, integration, contract, E2E, pipeline tests
+  benchmark/           # BM25 search quality benchmarks + CI gate
+</code></pre>
+<h2>Search Quality</h2>
+<p>Benchmarked on 200 observations across 30 queries (standard + hard-negative categories),
+measuring the <strong>production-hybrid</strong> retriever (FTS5 BM25 + TF-IDF vector + RRF) — the path
+<code>mem_search</code> / <code>recall</code> actually use. The CI gate (<code>npm run benchmark:gate</code>) runs this same
+path and fails on regression.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Score (production-hybrid)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Recall@10</td>
+<td>0.90</td>
+</tr>
+<tr>
+<td>Precision@10</td>
+<td>0.85</td>
+</tr>
+<tr>
+<td>nDCG@10</td>
+<td>0.97</td>
+</tr>
+<tr>
+<td>MRR@10</td>
+<td>0.96</td>
+</tr>
+<tr>
+<td>P95 search latency</td>
+<td>~1.8ms</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p><strong>Where these numbers come from.</strong> Reproduce with
+<code>node benchmark/benchmark.mjs --production-hybrid</code> (deterministic — same fixture corpus,
+same query set, no sampling). The CI reference capture is <code>benchmark/baseline.json</code>, and
+<code>npm run benchmark:gate</code> fails the build when a run drifts more than 5% from it. This is
+the single source for every retrieval figure quoted in this README.</p>
+</blockquote>
+<blockquote>
+<p><strong>Note on the path measured.</strong> Earlier versions of this table reported the <em>lexical</em>
+FTS-only path (Precision@10 0.96, P95 0.15ms). The hybrid vector arm trades raw
+precision@10 for higher recall / nDCG / MRR by surfacing semantically-related candidates
+beyond exact lexical matches; the gate now measures the hybrid path so these numbers
+reflect real <code>mem_search</code> behavior. For field-comparable recall, see the LongMemEval
+section below.</p>
+</blockquote>
+<h3>Recall on LongMemEval (standard benchmark)</h3>
+<p>Beyond the in-repo micro-benchmark above, claude-mem-lite is measured on
+<a href="https://github.com/xiaowu0162/LongMemEval" target="_blank" rel="noopener noreferrer">LongMemEval</a> (Wu et al.) — a
+500-question long-term-memory benchmark — so its recall is comparable to the
+field, not just to itself. Metric is <strong>recall_any@k</strong>: does <em>any</em> gold evidence session appear in the
+top <em>k</em> retrieved? This is the same session-level definition the systems we
+compare against report on this split — <a href="https://github.com/rohitg00/agentmemory" target="_blank" rel="noopener noreferrer">agentmemory</a>
+(BM25 + vector + graph) and dense-embedding systems like MemPalace — so the rows
+below sit on one axis, not metric-shopped. (Note: 65% of the 500 questions have
+multiple gold sessions, so <code>recall_any@k</code> is looser than fractional recall there;
+all systems in this comparison report the any-hit form.) Corpus is user-turns-only
+(the standard raw-baseline rule). Runners: <code>benchmark/longmemeval.mjs</code> (lexical)
+and <code>benchmark/longmemeval-rerank.mjs</code> (rerank).</p>
+<table>
+<thead>
+<tr>
+<th>Retriever (zero embeddings)</th>
+<th>@1</th>
+<th>@5</th>
+<th>@10</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Lexical hybrid — FTS5 + TF-IDF + RRF</td>
+<td><strong>83.4%</strong></td>
+<td><strong>95.2%</strong></td>
+<td><strong>96.0%</strong></td>
+</tr>
+<tr>
+<td>+ one top-20 LLM rerank pass †</td>
+<td>92.8%</td>
+<td>96.8%</td>
+<td>97.4%</td>
+</tr>
+</tbody></table>
+<p><em>n = 500 questions.</em> The lexical row was re-measured 2026-07-18: the v3.39–v3.45
+alias/synonym-pipeline work lifted it from the previously published 76.8/90.6/95.2
+on the <strong>same harness and dataset</strong> (both unchanged since that run — the gain is
+engine-side, not metric drift). † The rerank row is the 2026-06 measurement taken
+against the <em>older</em> lexical baseline; with lexical now at 95.2 @5 its remaining
+headroom is ~1.6pt and a re-measurement is pending. The rerank pass hands the top
+20 lexical candidates to a single Haiku call (~1.4 s/query) that reorders them; it
+is <strong>never worse than the lexical baseline by construction</strong> — any LLM or parse
+failure falls back to the original candidate order.</p>
+<p><strong>Stricter metric, for the record.</strong> The rows above are <code>recall_any@k</code> — does <em>any</em>
+gold session reach the top <em>k</em> — the metric agentmemory and MemPalace publish, so the
+comparison is like-for-like. Under the stricter <strong>standard recall@k</strong> (<code>|gold ∩ top-k| / |gold|</code>, the <em>fraction</em> of all gold sessions retrieved), the lexical stack scores
+@1 = 52.9% / @5 = 87.8% / @10 = 91.0%. The whole gap is the 65% of questions with
+multiple gold sessions — any-hit needs one, fractional needs them all, and @1 is capped
+at 1/|gold| there; single-gold question types score identically under both.
+<code>benchmark/longmemeval.mjs</code> reports both columns (the rerank row's fractional is not yet
+measured).</p>
+<p><strong>On embeddings, honestly.</strong> With no LLM in the loop, our zero-embedding lexical
+stack now <strong>ties</strong> the BM25 + vector + graph hybrid (agentmemory, 95.2% @5) at the
+same retrieval stage; a dense-embedding baseline (MemPalace, ~96.6% @5) still leads
+by ~1.4pt. The remaining gap concentrates in paraphrase (single-session-preference
+is our lowest category at 80.0% @5). The rerank row's point stands: a <em>single cheap
+LLM call</em> reorders the top-20 lexical candidates because the candidate set is
+already rich enough that ranking, not recall, is the bottleneck. An
+embedding-plus-rerank stack still leads when both sides spend an LLM call; the
+takeaway is that claude-mem-lite reaches embedding-competitive recall with <strong>no
+vector model, no knowledge graph, no Python, and no external service</strong>.</p>
+<p>Per-category any@5, lexical (2026-07-18 run): knowledge-update 100.0 ·
+single-session-user 100.0 · multi-session 94.7 · single-session-assistant 94.6 ·
+temporal-reasoning 94.0 · single-session-preference 80.0.</p>
+<h2>Development</h2>
+<pre><code class="language-bash">npm run lint              # ESLint static analysis
+npm test                  # Run full test suite (vitest)
+npm run test:smoke        # Run 5 core smoke tests
+npm run test:coverage     # Run tests with V8 coverage (≥75% lines/functions, ≥65% branches)
+npm run benchmark         # Run full search quality benchmark
+npm run benchmark:gate    # CI gate: fails if metrics regress beyond 5% tolerance
+</code></pre>
+<h2>Environment Variables</h2>
+<p>Every environment variable the shipped code reads is listed below, grouped by what it
+controls. Booleans accept <code>1</code> unless noted. Anything not listed here is not read by
+claude-mem-lite.</p>
+<h3>Core</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CLAUDE_MEM_DIR</code></td>
+<td>Custom data directory. All databases, runtime files, and managed resources are stored here.</td>
+<td><code>~/.claude-mem-lite/</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_MODEL</code></td>
+<td>LLM model for background calls (episode extraction, session summaries). Accepts <code>haiku</code> or <code>sonnet</code>.</td>
+<td><code>haiku</code></td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>Anthropic API key. When set, all background LLM calls go directly to the Anthropic Messages API (with prompt caching). Highest priority.</td>
+<td><em>(unset → CLI)</em></td>
+</tr>
+<tr>
+<td><code>OPENROUTER_API_KEY</code></td>
+<td>OpenRouter API key (OpenAI-compatible). Used for background LLM calls when <code>ANTHROPIC_API_KEY</code> is <strong>not</strong> set. If neither key is set, calls fall back to the <code>claude -p</code> CLI.</td>
+<td><em>(unset)</em></td>
+</tr>
+<tr>
+<td><code>OPENROUTER_MODEL</code></td>
+<td>Overrides the OpenRouter model slug for <strong>all</strong> background calls (e.g. <code>openai/gpt-4o-mini</code>, <code>qwen/qwen-2.5-72b-instruct</code>). When unset, the <code>CLAUDE_MEM_MODEL</code> tier maps to <code>anthropic/claude-haiku-4.5</code> (haiku) or <code>anthropic/claude-sonnet-4.5</code> (sonnet).</td>
+<td><em>(tier default)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_DEBUG</code></td>
+<td>Enable debug logging (<code>1</code> to enable).</td>
+<td><em>(disabled)</em></td>
+</tr>
+<tr>
+<td><code>MEM_QUIET_HOOKS</code></td>
+<td>Low-noise hooks. <code>1</code> drops the <code>File Lessons</code> / <code>Key Context</code> sections from SessionStart injection, the lesson suffix from <code>[mem] Related memories</code>, and the <code>WHEN TO USE</code> / <code>Decision rules</code> blocks from MCP server instructions. IDs and the <code>Recent</code> table still surface so <code>mem_get(ids=[…])</code> remains reachable. Intended for users running the invited-memory adopt path or who otherwise want minimal auto-injection. <strong>Since v2.82.0 this env no longer gates auto-adopt — use <code>MEM_NO_AUTO_ADOPT=1</code> for that.</strong></td>
+<td><em>(disabled)</em></td>
+</tr>
+<tr>
+<td><code>MEM_NO_AUTO_ADOPT</code></td>
+<td>Global opt-out for auto-adopt (v2.82.0+). <code>1</code> prevents the first-SessionStart auto-write of the invited-memory sentinel across <strong>all</strong> projects. For per-project opt-out use <code>claude-mem-lite adopt --disable</code> instead (writes a durable <code>&lt;memdir&gt;/.mem-no-auto-adopt</code> sentinel that survives marker deletion).</td>
+<td><em>(disabled)</em></td>
+</tr>
+<tr>
+<td><code>MEM_NO_ADOPT_HINT</code></td>
+<td>Silences the one-line "Invited-memory 未启用：<code>claude-mem-lite adopt</code>…" hint that SessionStart appends when the current project hasn't been adopted. Since v2.82.1 auto-adopt fires on first SessionStart for any install path, so this hint typically surfaces only when you've explicitly opted out (<code>MEM_NO_AUTO_ADOPT=1</code> or <code>claude-mem-lite adopt --disable</code>).</td>
+<td><em>(disabled)</em></td>
+</tr>
+</tbody></table>
+<h3>What gets injected into your context</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CLAUDE_MEM_ALL_TOOLS</code></td>
+<td><code>1</code> exposes all 20 MCP tools in <code>tools/list</code> instead of the 9 core ones (pre-v2.34.0 behavior). The 11 hidden tools stay callable by exact name either way.</td>
+<td><em>(9 core)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_FILE_INTEL</code></td>
+<td><code>0</code> disables the file-intel block injected before <code>Read</code> (past observations about the file you are about to open).</td>
+<td><em>(on)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_FILE_INTEL_MIN_TOKENS</code></td>
+<td>Files smaller than this stay silent — file-intel only pays for itself on large files.</td>
+<td><code>800</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_REREAD_GUARD</code></td>
+<td><code>0</code> disables the warning when the same file is read twice in a session. Never fires on <code>offset</code>/<code>limit</code> paging.</td>
+<td><em>(on)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_REREAD_MIN_TOKENS</code></td>
+<td>Token floor below which the re-read guard stays silent.</td>
+<td><code>600</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_PRETOOL_NUDGE</code></td>
+<td><code>1</code> extends the pre-tool recall nudge from <code>Read</code> to other tools.</td>
+<td><em>(Read only)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_KEEP_LOW_SIGNAL</code></td>
+<td><code>1</code> keeps low-signal observations that the deterministic filter would otherwise drop before dedup/vector work.</td>
+<td><em>(filtered)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_NO_TEMPLATE_REFRESH</code></td>
+<td><code>1</code> stops SessionStart from refreshing the adopted <code>CLAUDE.md</code> managed block when the shipped template changes.</td>
+<td><em>(refreshes)</em></td>
+</tr>
+<tr>
+<td><code>MEM_QUIET_HOOKS</code></td>
+<td>See Core above — the broadest injection-volume switch.</td>
+<td><em>(disabled)</em></td>
+</tr>
+</tbody></table>
+<h3>Retrieval tuning</h3>
+<p>Prompt-time search (<code>UPS_*</code> = the UserPromptSubmit surface). Defaults are the values the
+benchmark and A/B harness are calibrated against — changing them invalidates the numbers in
+<a href="#search-quality" target="_blank" rel="noopener noreferrer">Search Quality</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CLAUDE_MEM_UPS_MAX_RESULTS</code></td>
+<td>Max memories injected per prompt.</td>
+<td><code>3</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_UPS_REQUIRE_SIGNAL</code></td>
+<td><code>0</code> restores always-search; by default the prompt must carry an explicit retrieval signal.</td>
+<td><em>(signal required)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_UPS_BM25_MIN</code></td>
+<td>BM25 relevance floor for a result to be injected.</td>
+<td><code>1e-5</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_UPS_BM25_MIN_FOLLOWUP</code></td>
+<td>Looser floor for follow-up prompts inside an already-injected session.</td>
+<td><code>5e-6</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_UPS_OR_BM25_MIN</code></td>
+<td>Floor applied to the OR-fallback arm (looser query, needs a stricter floor).</td>
+<td><code>30</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_UPS_TOP_MIN</code></td>
+<td>Minimum score for the top hit; <code>0</code> disables (useful on tiny test corpora).</td>
+<td><code>50</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_UPS_FLOOR_REF_CORPUS</code></td>
+<td>Reference corpus size the score floors are normalized against, so a fresh install with few rows is not silently gated to zero injections. Shared by every floor-bearing surface, including error-recall below.</td>
+<td><code>584</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_ERROR_RECALL_BM25_MIN</code></td>
+<td>Relevance floor for the error-recall surface (memories injected after a failed Bash command). <strong>Off by default.</strong> Setting it to <code>10.5</code> (the calibrated value) makes the surface stay silent when its best-matching memory is not actually about the failure — the whole set is dropped, never trimmed row-by-row. <strong>It is a real trade, not a free win:</strong> measured on a live database at that threshold, injections fall ~37% and ~39% of firings go silent, concentrated in projects with few memories. Off by default because nothing shows the dropped rows were noise. Explore with <code>node benchmark/error-recall-suite.mjs --sweep</code>.</td>
+<td><code>0</code> (off)</td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_ERROR_RECALL_RERANK</code></td>
+<td><code>off</code> restores the flat keyword ordering of the error-recall surface. <strong>On by default</strong>, and unlike the floor above it removes nothing: memories that share only the failed command's vocabulary are demoted below memories that mention the failure itself, and when a project has none of the latter the result is unchanged. Measured on a live database over 52 real failing commands × 15 projects: the lead memory matched no error term in 42.3% of firings before, 21.5% after, with the injected row count identical.</td>
+<td><em>(on)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_ERROR_RECALL_ON_FAILURE</code></td>
+<td><code>off</code> stops the plugin from recalling memories when a Bash command <strong>fails at the host level</strong>. On by default. Claude Code delivers failed tool calls to a separate <code>PostToolUseFailure</code> hook event, so before this the surface only ever saw commands that exited <code>0</code> while printing error-ish text — a genuinely failing build recalled nothing. Denials from your own guardrails (sandbox, policy hooks, declined permission prompts) and commands you interrupted are never recalled for.</td>
+<td><em>(on)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_UPS_IDENTIFIER_BYPASS</code></td>
+<td><code>0</code> disables the bypass that lets an exact identifier match skip the score floors.</td>
+<td><em>(on)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_UPS_PROMPT_FALLBACK_LIMIT</code></td>
+<td>How many past-prompt rows the fallback arm may return.</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>MEM_COVERAGE_THRESHOLD</code></td>
+<td>Fraction of query terms a memory must cover to qualify (∈ [0,1]).</td>
+<td><code>0.4</code></td>
+</tr>
+<tr>
+<td><code>MEM_CROSS_PROJECT_BOOST</code></td>
+<td>Multiplier for matches from other projects (∈ [0,1]); raise it for installs that want more cross-project sharing.</td>
+<td><code>0.4</code></td>
+</tr>
+<tr>
+<td><code>MEM_OR_FALLBACK_MAX_TOKENS</code></td>
+<td>Max query tokens allowed into the OR fallback (∈ [0,50]).</td>
+<td><code>8</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_CJK_PREC_MIN</code></td>
+<td>Precision floor for CJK segmentation candidates.</td>
+<td><code>0.2</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_AUTO_DEEP</code></td>
+<td><code>0</code> disables automatic deep-search escalation (one Haiku call rewriting a weak query into keyword/concept/HyDE variants). Explicit <code>deep: true</code> still works.</td>
+<td><em>(auto)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_AUTO_DEEP_CLI</code></td>
+<td><code>0</code> disables the same auto-escalation on the CLI path only.</td>
+<td><em>(auto)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_VECTORS</code></td>
+<td><code>1</code> re-enables the persisted TF-IDF vector arm (off by default; also needs a vector rebuild via <code>maintain</code>).</td>
+<td><em>(off)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SCOPE_FILTER</code></td>
+<td><code>1</code> stops environment-scoped observations from firing on file-triggered recall. They stay reachable via search.</td>
+<td><em>(off)</em></td>
+</tr>
+</tbody></table>
+<h3>Citation tracking and feedback</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CLAUDE_MEM_NO_CITATION_TRACK</code></td>
+<td><code>1</code> disables both the access-count bump and the decay loop — no citation bookkeeping at all.</td>
+<td><em>(enabled)</em></td>
+</tr>
+<tr>
+<td><code>MEM_DISABLE_CITATION_DECAY</code></td>
+<td><code>1</code> disables only the decay writes, keeping access-count bumps.</td>
+<td><em>(enabled)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_CITATION_ADOPTION_THRESHOLD</code></td>
+<td>Session cite-rate below which demotion is suppressed (promotion always proceeds).</td>
+<td><code>0.02</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_NO_CITE_NUDGE</code></td>
+<td><code>1</code> fully silences the cite-back nudge.</td>
+<td><em>(enabled)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_CITE_NUDGE_THRESHOLD</code></td>
+<td>Cite-rate below which the nudge fires.</td>
+<td><code>0.6</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_CITE_NUDGE_MIN_INJECTED</code></td>
+<td>Minimum injection volume before the ratio gate is judged at all.</td>
+<td><code>5</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_CITE_NUDGE_SILENCE_AFTER</code></td>
+<td>Consecutive low-cite sessions before the nudge goes quiet; <code>0</code> = never silence.</td>
+<td><code>3</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_METRICS</code></td>
+<td><code>1</code> records feature-injection counters surfaced by <code>claude-mem-lite stats</code>.</td>
+<td><em>(off)</em></td>
+</tr>
+</tbody></table>
+<h3>Background work</h3>
+<p>All of these turn <em>off</em> work that normally happens in the background. Nothing here changes
+what is already stored — only whether new work runs.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CLAUDE_MEM_SKIP_SUMMARY</code></td>
+<td>Skip the LLM session summary at Stop.</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_EPISODE_LLM</code></td>
+<td>Skip LLM extraction on episode flush — observations are still batched, just not summarized.</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_SAVE_ENRICH</code></td>
+<td>Skip the background Haiku call that backfills <code>lesson_learned</code> / search aliases after a save.</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_COMPRESS</code></td>
+<td>Skip auto-compression of old observations.</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_MAINTAIN</code></td>
+<td>Skip the 24h auto-maintain pass (decay, purge, backup).</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_OPTIMIZE</code></td>
+<td>Skip the LLM optimization pass (re-enrich, normalize, cluster-merge).</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_AUTO_DEDUP_FUZZY</code></td>
+<td>Skip the MinHash near-duplicate pass, keeping exact dedup.</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_MARKER_GC</code></td>
+<td>Skip the runtime-marker sweep.</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_UPDATE</code></td>
+<td>Skip the 24h auto-update check against GitHub Releases.</td>
+<td><em>(runs)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_SIG_VERIFY</code></td>
+<td>Skip Ed25519 signature verification of a downloaded update. <strong>Escape hatch — leaves updates unauthenticated.</strong></td>
+<td><em>(verifies)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SKIP_REPOS</code></td>
+<td>Skip skill/agent registry seeding during install.</td>
+<td><em>(seeds)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_NO_LESSON_RETRY</code></td>
+<td><code>1</code> disables the one-shot retry that re-asks for a missing <code>lesson_learned</code>.</td>
+<td><em>(retries)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_FLUSH_TIMEOUT</code></td>
+<td>Seconds the Stop hook waits for pending episode flushes.</td>
+<td><code>15</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_BACKUP_BUDGET_MB</code></td>
+<td>Disk budget for backup snapshots; the next maintain/save evicts oldest snapshots past the 7-day undo grace.</td>
+<td><code>256</code></td>
+</tr>
+</tbody></table>
+<h3>Experimental</h3>
+<p>Off or shadow-mode by default. These are measurement arms, not finished features — behavior
+and names can change between releases.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CLAUDE_MEM_RECOMMEND_MODE</code></td>
+<td>Skill-recommendation engine: <code>shadow</code> (log would-be recommendations, inject nothing) or <code>off</code>. <strong><code>live</code> is parsed but not implemented</strong> — live injection is Phase 2. Setting it runs shadow and prints one warning to stderr per process; <code>claude-mem-lite doctor</code> also reports it as an inert flag.</td>
+<td><code>shadow</code></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_TASK_IMPERATIVE</code></td>
+<td><code>on</code>/<code>1</code> injects the single most relevant lesson at prompt position under an imperative template.</td>
+<td><em>(off)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SUBAGENT_INJECT</code></td>
+<td>Dispatch-time memory injection for subagents.</td>
+<td><em>(off)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_SALIENCE</code></td>
+<td>Selects a comprehension-bridge arm (<code>bridge</code>, <code>bind</code>); unset = current default behavior.</td>
+<td><em>(unset)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_EDGE_DECAY</code></td>
+<td>Enables decay of file↔observation edges.</td>
+<td><em>(off)</em></td>
+</tr>
+<tr>
+<td><code>CLAUDE_MEM_EDGE_DECAY_K</code></td>
+<td>Edge-decay threshold when the flag above is on (clamped to ≥1).</td>
+<td><code>3</code></td>
+</tr>
+</tbody></table>
+<h3>Internal and test-only</h3>
+<p>Set by the tool or by the test harness. Setting these by hand is not supported:
+<code>CLAUDE_MEM_HOOK_RUNNING</code>, <code>CLAUDE_MEM_BINDING_HEALED</code>, <code>CLAUDE_MEM_BRIDGE_FAKE</code>,
+<code>CLAUDE_MEM_NO_DELAY</code>, <code>CLAUDE_MEM_CATCH_SAMPLE</code>, <code>CLAUDE_MEM_QUIET_TRACE</code>,
+<code>CLAUDE_MEM_DB_PATH</code>, <code>CLAUDE_MEM_RUNTIME_DIR</code>, <code>MEM_DISABLE_SPAWN_LOG</code>.
+<code>CLAUDE_PLUGIN_ROOT</code> is set by Claude Code itself.</p>
+<p>Three more are set by <code>vitest.config.mjs</code> / <code>tests/global-setup.mjs</code> and exist only to
+keep a test run off the live database: <code>CLAUDE_MEM_TEST_GUARD</code> (<code>1</code> arms the guard, <code>off</code>
+opts a test out), <code>CLAUDE_MEM_TEST_REALDIR</code> (the live data dir, captured before the suite
+relocates anything) and <code>CLAUDE_MEM_TEST_SANDBOX</code> (this run's throwaway dir). With the
+guard armed, any resolution that lands on the live data dir is redirected to the sandbox
+instead — including from a subprocess that inherited the ambient environment. Unset in
+normal use, and inert when unset.</p>
+<h2>FAQ</h2>
+<h3>What is a memory system for Claude Code?</h3>
+<p>A memory system lets Claude Code remember context — coding decisions, bug fixes, file history — across sessions. By default Claude Code's context resets each session; claude-mem-lite persists observations to a local SQLite database and re-injects them at session start and on relevant prompts.</p>
+<h3>Does Claude Code have built-in long-term memory?</h3>
+<p>No. Claude Code's <code>CLAUDE.md</code> and <code>MEMORY.md</code> files act as static instruction memory, but there is no native dynamic recall of past sessions, bug fixes, or decisions. claude-mem-lite adds that layer via MCP and hooks, with no manual note-taking required.</p>
+<h3>How is claude-mem-lite different from mem0 or MCP's reference memory server?</h3>
+<p><code>mem0</code> and the MCP <code>memory</code> server are general-purpose LLM memory frameworks designed for any client. claude-mem-lite is purpose-built for Claude Code's hook lifecycle: it captures <em>episodes</em> (batched tool calls), uses domain-specific synonym expansion for code terms (<code>K8s</code>, <code>DB</code>, <code>数据库</code>, ...), and surfaces past observations proactively before file edits via the <code>PreToolUse:Edit</code> hook.</p>
+<h3>Why "lite"? What did the original claude-mem do differently?</h3>
+<p>The original called an LLM on every tool use with raw JSON inputs. claude-mem-lite batches 5–10 operations per LLM call, uses a smaller model (Haiku), and runs a deterministic code-level filter before sending anything to the model. Net result: an estimated ~600× lower cost (an architecture estimate from the cost model above, not a measured benchmark) with equivalent search quality. See the <a href="#architecture-comparison" target="_blank" rel="noopener noreferrer">Architecture comparison</a> above.</p>
+<h3>Does this work cross-project? Cross-machine?</h3>
+<p>Project-scoped by default — each project has its own memory namespace. Single-machine only (SQLite, not networked). Use <code>mem_export</code> (JSON / JSONL) to back up or migrate between machines.</p>
+<h3>What about privacy? Does it call external APIs?</h3>
+<p>Only the Haiku summarization step calls Anthropic's API (or the local <code>claude -p</code> CLI if no API key is set). All search, storage, and retrieval is local SQLite — no telemetry, no third-party services.</p>
+<h3>中文常见问题</h3>
+<p><strong>Claude Code 怎么跨会话记住内容？</strong> 默认不能。claude-mem-lite 通过 MCP 协议和钩子自动把决策、bug 修复、文件历史持久化到本地 SQLite，下次会话开始时再注入。</p>
+<p><strong>和 mem0、官方 MCP memory server 有什么区别？</strong> 那两个是通用 LLM 记忆框架；claude-mem-lite 是为 Claude Code 钩子生命周期定制的：批量 episode 处理、代码领域同义词扩展（K8s/DB/数据库等）、文件编辑前主动召回相关历史。</p>
+<p><strong>支持中文吗？</strong> 完整支持。FTS5 + 中英文同义词扩展（100+ 对，含 CJK ↔ EN 跨语言映射），中文记忆也可用英文关键词召回，反之亦然。</p>
+<h2>License</h2>
+<p>MIT</p>

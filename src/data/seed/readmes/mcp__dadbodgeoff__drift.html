@@ -1,0 +1,360 @@
+<h1>Drift</h1>
+<p><strong>Drift stops an AI agent from writing code that violates conventions your repo already
+follows.</strong> It runs entirely on your machine.</p>
+<blockquote>
+<p><strong>Beta install: build from source.</strong> Nothing is published to npm yet — <code>npm install -g @drift/cli</code>
+does not work, and the <code>driftdetect</code> package on npm is the unrelated v1 from January. Building
+needs a Rust toolchain (<a href="https://rustup.rs" target="_blank" rel="noopener noreferrer">rustup</a>) because the scan engine is Rust.</p>
+</blockquote>
+<pre><code class="language-bash">git clone https://github.com/dadbodgeoff/drift.git &amp;&amp; cd drift
+pnpm install --frozen-lockfile
+pnpm build &amp;&amp; pnpm build:engine
+
+# There is no `drift` binary yet; the entry point is the built CLI.
+alias drift="node $PWD/packages/cli/dist/main.js"
+drift doctor --repo-root .          # fails loudly if the toolchain is missing
+</code></pre>
+<p>Then, in the repository you want to protect:</p>
+<pre><code class="language-bash">cd your-repo
+drift start --repo-root . --accept-defaults
+</code></pre>
+<p><code>start</code> prints whether the convention it accepted will actually block, and the command to make it a
+gate if it will not. Now have an agent add a route that queries the database directly, the way a
+hundred other routes in your repo do not, and check the change:</p>
+<pre><code class="language-bash">drift check --diff HEAD~1...HEAD --scope changed-hunks
+</code></pre>
+<p>It names the file, the line, and the convention that was broken. In <code>block</code> mode it exits <code>2</code>.</p>
+<blockquote>
+<p><code>--diff main...HEAD</code> only works once your branch has commits that <code>main</code> does not. On a freshly
+cloned repo you are <em>on</em> <code>main</code>, so that range is empty and Drift refuses rather than reporting a
+pass it cannot support — exit <code>3</code>. That refusal is correct; give it a range with changes in it.</p>
+</blockquote>
+<h2>Scope — read this before adopting</h2>
+<p>Drift enforces <strong>one</strong> convention family well, and says so rather than implying more:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Languages</strong></td>
+<td>TypeScript, JavaScript</td>
+</tr>
+<tr>
+<td><strong>Frameworks</strong></td>
+<td>Next.js API routes (App Router and Pages)</td>
+</tr>
+<tr>
+<td><strong>Convention</strong></td>
+<td>API routes must not import data-access clients directly</td>
+</tr>
+<tr>
+<td><strong>Status</strong></td>
+<td>Beta — local CLI and a read-only MCP server</td>
+</tr>
+</tbody></table>
+<p><strong>It does not</strong> review code generally, support other languages, modify your source, or sync
+anything to a server.</p>
+<p>The data layer is recognised when its import specifier contains <code>prisma</code>, <code>database</code>, <code>db</code> or
+<code>data-access</code>. A repo naming its data layer <code>store</code> or <code>supabase</code> must declare it with
+<code>--data-modules</code>. Drift bootstraps and enforces a <em>declared</em> layering contract — it does not
+learn conventions in general, and the claims manifest blocks that claim explicitly.</p>
+<p>Security heuristics exist behind <code>--experimental-security</code> and are <strong>not</strong> proofs. Their own audit
+is in <a href="https://github.com/dadbodgeoff/drift/blob/HEAD/docs/internal/architecture/security-heuristic-audit.md" target="_blank" rel="noopener noreferrer">docs/internal/architecture/security-heuristic-audit.md</a>.</p>
+<h2>What it does on real repositories</h2>
+<p>Evaluated on seven open-source Next.js repos on every change
+(<a href="https://github.com/dadbodgeoff/drift/blob/HEAD/scripts/external-eval.mjs" target="_blank" rel="noopener noreferrer"><code>pnpm eval:external</code></a>):</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Onboards, learns the real data layer, catches an injected violation</td>
+<td><strong>7 / 7</strong></td>
+</tr>
+<tr>
+<td>Correct <code>file:line</code> evidence</td>
+<td><strong>7 / 7</strong></td>
+</tr>
+<tr>
+<td>A properly layered route falsely flagged</td>
+<td><strong>0 / 7</strong></td>
+</tr>
+<tr>
+<td>False-positive rate (dub, 494 routes)</td>
+<td><strong>3.1%</strong></td>
+</tr>
+<tr>
+<td>Evasion shapes caught, at the contract's mode (<a href="https://github.com/dadbodgeoff/drift/blob/HEAD/scripts/evasion-matrix.mjs" target="_blank" rel="noopener noreferrer"><code>pnpm eval:evasion</code></a>)</td>
+<td><strong>66 / 66</strong> testable cells</td>
+</tr>
+</tbody></table>
+<p>And, because the number that decides whether a first session is tolerable is not recall but how often
+Drift declines to answer — eight ordinary edits per repo, none of them a violation
+(<a href="https://github.com/dadbodgeoff/drift/blob/HEAD/scripts/beta-bench.mjs" target="_blank" rel="noopener noreferrer"><code>pnpm eval:bench</code></a>):</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Ordinary edits refused rather than answered</td>
+<td><strong>0 / 56</strong></td>
+</tr>
+<tr>
+<td>Local imports the resolver places</td>
+<td><strong>96.1% – 99.9%</strong></td>
+</tr>
+</tbody></table>
+<p>Every check reports its own coverage, so a clean result is never mistaken for full coverage. Where
+Drift cannot resolve something it says so, with the offending specifiers — see
+<a href="https://github.com/dadbodgeoff/drift/blob/HEAD/docs/reference/enforcement.md" target="_blank" rel="noopener noreferrer"><code>drift doctor</code></a> and <code>summary.import_coverage</code>.</p>
+<h2>Why your repo might only warn</h2>
+<p>If findings appear but the check exits <code>0</code>, the convention is in <strong>warn</strong> mode, deliberately.</p>
+<p>Drift infers the convention from the violations themselves, so a repo where every route touches
+the database produces the same statement as one where a single route does. Enforcing both
+identically would reject new code written exactly like its neighbours. Instead the mode follows
+the evidence: a <strong>minority</strong> violating means new violations block; a <strong>majority</strong> violating means
+it is a refactor goal, and Drift warns until a human decides.</p>
+<p>formbricks (1 route of 83) blocks. dub (~323 of 494) warns.</p>
+<h2>Documentation</h2>
+<ul>
+<li><a href="https://github.com/dadbodgeoff/drift/blob/HEAD/docs/quickstart.md" target="_blank" rel="noopener noreferrer">Quickstart</a> — install to first blocked change</li>
+<li><a href="https://github.com/dadbodgeoff/drift/blob/HEAD/docs/concepts.md" target="_blank" rel="noopener noreferrer">Concepts</a> — facts → contract → baseline → check</li>
+<li><a href="https://github.com/dadbodgeoff/drift/blob/HEAD/docs/agent-integration.md" target="_blank" rel="noopener noreferrer">Agent integration</a> — MCP, hooks, CI</li>
+<li><a href="https://github.com/dadbodgeoff/drift/blob/HEAD/docs/reference/enforcement.md" target="_blank" rel="noopener noreferrer">Enforcement reference</a> — exit codes and JSON contract</li>
+<li><a href="https://github.com/dadbodgeoff/drift/blob/HEAD/docs/internal/architecture/beta-claims.json" target="_blank" rel="noopener noreferrer">Claims</a> — every claim, and what is deliberately blocked</li>
+<li><a href="https://github.com/dadbodgeoff/drift/blob/HEAD/docs/HISTORY.md" target="_blank" rel="noopener noreferrer">History</a> — why Drift has been rebuilt three times, and what changed each time</li>
+</ul>
+<h2>First Five Minutes</h2>
+<p>From the repo you want Drift to inspect:</p>
+<pre><code class="language-bash">drift doctor --repo-root .
+drift start --repo-root . --accept-defaults
+drift doctor --repo-root .
+</code></pre>
+<p>The first <code>doctor</code> run is a zero-write readiness check. After <code>start</code>, run it again as the ongoing local health gate: it validates SQLite migration compatibility, repo registration, contract compatibility, scan freshness, audit-chain integrity, and tracked backup artifacts, then prints the next upkeep commands.</p>
+<p><code>start --accept-defaults</code> is explicit onboarding confirmation. It accepts the deterministic default convention, materializes the repo contract, and baselines existing findings so legacy drift does not block the first check. Omit <code>--accept-defaults</code> when you want to review every candidate manually first.</p>
+<p><code>drift start</code> prints the local SQLite path:</p>
+<pre><code class="language-bash">export DRIFT_DB=/path/to/drift.sqlite
+</code></pre>
+<p>Then use the printed repo id with the review loop:</p>
+<pre><code class="language-bash">drift baseline status --repo &lt;repo_id&gt;
+drift version --json
+drift capabilities --json
+drift conventions list --repo &lt;repo_id&gt; --status candidate --kind api_route_no_direct_data_access --capability deterministic_check --limit 20 --offset 0 --json
+drift conventions accepted --repo &lt;repo_id&gt; --kind api_route_no_direct_data_access --capability deterministic_check --limit 20 --offset 0 --json
+drift conventions show &lt;candidate_id&gt; --repo &lt;repo_id&gt; --json
+drift ask "what should I know before changing this route?" --repo &lt;repo_id&gt; --path apps/web/app/api/users/route.ts --json
+drift prepare "add user search endpoint" --repo &lt;repo_id&gt; --path apps/web/app/api/users/route.ts --json
+drift repo map --repo &lt;repo_id&gt; --role api_route --json
+drift repo map --repo &lt;repo_id&gt; --limit 50 --offset 0 --json
+drift prepare "add user search endpoint" --repo &lt;repo_id&gt; --require-fresh --json
+drift checks list --repo &lt;repo_id&gt; --limit 20 --offset 0 --json
+drift checks run --repo &lt;repo_id&gt; --command "pnpm test" --timeout-ms 120000 --json
+drift policy check-context --repo &lt;repo_id&gt; --path apps/web/app/api/users/route.ts --surface cli-preflight --require-fresh --json
+drift check --diff main...HEAD --repo &lt;repo_id&gt; --scope changed-hunks
+drift findings list --repo &lt;repo_id&gt;
+drift findings list --repo &lt;repo_id&gt; --convention &lt;convention_id&gt; --json
+drift findings list --repo &lt;repo_id&gt; --path apps/web/app/api/users/route.ts --require-fresh --json
+drift findings list --repo &lt;repo_id&gt; --limit 25 --offset 0 --json
+drift findings show &lt;finding_id&gt; --repo &lt;repo_id&gt; --require-fresh --json
+drift backup create --repo &lt;repo_id&gt; --confirm
+drift backup list --repo &lt;repo_id&gt; --json
+drift backup list --repo &lt;repo_id&gt; --limit 20 --offset 0 --json
+drift backup list --repo &lt;repo_id&gt; --artifact-status missing --json
+drift audit list --repo &lt;repo_id&gt;
+drift audit verify --repo &lt;repo_id&gt; --json
+drift audit list --repo &lt;repo_id&gt; --target-id &lt;repo_id&gt; --limit 20 --offset 0 --json
+drift audit list --repo &lt;repo_id&gt; --since 2026-05-10T00:00:00.000Z --until 2026-05-11T00:00:00.000Z
+</code></pre>
+<p>Backup output prints the verify and restore dry-run commands. Backup list, verify, and restore JSON also include compact summaries so setup scripts can see artifact health, checksum status, restore intent, and rescan requirements without parsing prose:</p>
+<pre><code class="language-bash">drift backup verify &lt;backup.sqlite&gt; --repo &lt;repo_id&gt; --checksum &lt;sha256&gt;
+drift backup verify &lt;backup.sqlite&gt; --repo &lt;repo_id&gt; --checksum &lt;sha256&gt; --require-checksum
+drift --db &lt;target.sqlite&gt; restore &lt;backup.sqlite&gt; --repo &lt;repo_id&gt; --checksum &lt;sha256&gt; --dry-run
+drift --db &lt;target.sqlite&gt; restore &lt;backup.sqlite&gt; --repo &lt;repo_id&gt; --checksum &lt;sha256&gt; --require-checksum --dry-run
+</code></pre>
+<p>For stricter restore identity checks, pass the expected repo fingerprint:</p>
+<pre><code class="language-bash">drift backup verify &lt;backup.sqlite&gt; --repo &lt;repo_id&gt; --expect-repo-fingerprint &lt;fingerprint&gt;
+drift --db &lt;target.sqlite&gt; restore &lt;backup.sqlite&gt; --repo &lt;repo_id&gt; --expect-repo-fingerprint &lt;fingerprint&gt; --dry-run
+</code></pre>
+<p>Contract exports can stay on stdout or be written to one approved artifact:</p>
+<pre><code class="language-bash">drift contract export --repo &lt;repo_id&gt; --format json --output ./repo-contract.json --confirm
+drift contract import ./repo-contract.json --dry-run
+drift contract import ./repo-contract.json --checksum &lt;sha256&gt; --dry-run
+drift contract import ./repo-contract.json --checksum &lt;sha256&gt; --require-checksum --dry-run
+</code></pre>
+<p><code>contract show</code>, <code>contract validate</code>, <code>contract export</code>, <code>contract import --dry-run</code>, and MCP <code>get_repo_contract</code> expose a stable <code>contract_fingerprint</code> for compatibility checks. The fingerprint is computed from canonical contract content, so unordered governance lists do not create false drift.</p>
+<p><code>scan status</code>, <code>prepare</code>, MCP <code>get_scan_status</code>, and MCP <code>get_task_preflight</code> expose a stable <code>scan_fingerprint</code> for the indexed graph plus no-approval governance metadata, summary counts, <code>indexed_file_count</code>, <code>source_change_count</code>, audit integrity, and next commands. Agents can compare the fingerprint before acting and after rescans without reading source code.</p>
+<p><code>ask</code>, <code>prepare</code>, and MCP <code>get_task_preflight</code> can target a specific repo-relative <code>--path</code>, which pins that file into the preflight packet with a <code>requested path</code> reason. Agent-facing context commands also support <code>--require-fresh</code> / <code>require_fresh</code>; when set, Drift refuses stale scan context and tells the agent which <code>drift scan</code> command to run. <code>repo map</code> and MCP <code>get_repo_map</code> include per-file impact annotations for matching conventions, risky areas, and open findings, plus an <code>impact_summary</code>.</p>
+<p><code>policy check-context</code> and MCP <code>get_allowed_context</code> are the path-level gate for agent context access. They return the policy decision, no-approval governance metadata, summary counts, next commands, freshness requirement, scan status, redaction caps, and indexed file impact metadata without reading or emitting source snippets.</p>
+<p><code>findings list --path</code>, <code>findings list --convention</code>, <code>findings list --limit --offset</code>, <code>findings show</code>, and MCP <code>get_findings({ path, convention_id, limit, offset })</code> give agents and humans bounded review queues plus a drill-down view for one finding. Add <code>--require-fresh</code> / <code>require_fresh</code> when stale findings should be refused before an agent acts.</p>
+<p><code>conventions list --kind --capability --limit --offset</code> keeps the human approval queue bounded and machine-checkable. Use it to separate deterministic blocking candidates from heuristic briefing candidates before accepting anything into the repo contract.</p>
+<p><code>ask</code>, <code>repo map</code>, and MCP <code>get_repo_map</code> are deterministic local context surfaces. They answer from approved contracts, findings, file roles, imports, exports, calls, scan metadata, and policy state; they do not call an LLM, do not mutate Drift state, and do not include source snippets. <code>repo map</code> and MCP <code>get_repo_map</code> support limit/offset pagination so large repo maps stay scriptable.</p>
+<p><code>audit verify --json</code> and MCP <code>get_audit_status</code> check the local audit hash chain and report summary counts, next commands, and the current head hash. Backup verification and restore dry-runs also validate the audit chain and expose summary fields for schema support, checksum checks, artifact size, write intent, and stale-graph rescan guidance.</p>
+<p><code>audit list --target-id --limit --offset</code> keeps governance timelines scriptable as local state grows. Audit events are returned in deterministic created-time order, with total, filtered, returned, and next-offset metadata.</p>
+<p><code>doctor --json</code> includes the same production-state signals in one automation-friendly payload: applied migrations, unsupported/missing migrations, contract schema/fingerprint, scan staleness, audit integrity, backup count, backup artifact problems, and <code>next_commands</code> for initialized repos.</p>
+<h2>State Model</h2>
+<p>Drift stores product state in SQLite, not a folder full of JSON files.</p>
+<p>The database owns:</p>
+<ul>
+<li>repo identity</li>
+<li>scan manifests</li>
+<li>file snapshots and hashes</li>
+<li>extracted facts</li>
+<li>convention candidates and accepted conventions</li>
+<li>repo contracts</li>
+<li>findings</li>
+<li>baselines</li>
+<li>policies</li>
+<li>audit events</li>
+<li>backup manifests</li>
+</ul>
+<p>JSON is only an interface format for CLI automation, MCP responses, contract import/export, and tests.</p>
+<h2>What Requires Approval</h2>
+<p>Commands that do not require governance approval:</p>
+<pre><code class="language-bash">drift doctor
+drift scan
+drift scan status
+drift prepare
+drift check
+drift findings list
+drift audit list
+</code></pre>
+<p>Some of these commands write local Drift state, such as <code>scan</code>, <code>start</code>, and <code>check</code>. The important boundary is that they do not mutate source code or approve governance decisions.</p>
+<p>Governance changes require explicit human intent:</p>
+<pre><code class="language-bash">drift conventions accept &lt;candidate_id&gt; --confirm
+drift conventions reject &lt;candidate_id&gt; --reason "..." --confirm
+drift conventions edit &lt;candidate_id&gt; --statement "..." --confirm
+drift conventions exception add &lt;convention_id&gt; --path &lt;glob&gt; --reason "..." --confirm
+drift findings mark-fixed &lt;finding_id&gt; --evidence &lt;file:line&gt; --confirm
+drift findings mark-needs-review &lt;finding_id&gt; --reason "..." --confirm
+drift findings suppress &lt;finding_id&gt; --reason "..." --confirm
+drift findings accept-drift &lt;finding_id&gt; --reason "..." --confirm
+drift findings mark-false-positive &lt;finding_id&gt; --reason "..." --confirm
+drift baseline create --from main --confirm
+drift baseline clear --convention &lt;convention_id&gt; --confirm
+drift policy set-egress ... --confirm
+drift policy agent grant ... --confirm
+drift policy agent revoke ... --confirm
+drift contract export ... --confirm
+drift contract import &lt;path&gt; --confirm
+drift contract waiver add ... --confirm
+drift contract waiver remove ... --confirm
+drift backup create --confirm
+drift restore &lt;backup.sqlite&gt; --confirm
+</code></pre>
+<h2>Architecture</h2>
+<p>Rust owns the bounded-memory scanning and rule-critical engine pieces.</p>
+<p>TypeScript owns the CLI, MCP server, SQLite storage boundary, policy enforcement, onboarding, and packaging.</p>
+<p>The product boundary is intentionally CLI-first. The desktop UI comes after the CLI review loop is stable.</p>
+<h2>Core Wedge Support Matrix</h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>TypeScript/JavaScript API route layering</td>
+<td>Supported</td>
+</tr>
+<tr>
+<td>Local SQLite state</td>
+<td>Supported</td>
+</tr>
+<tr>
+<td>CLI review loop</td>
+<td>Supported</td>
+</tr>
+<tr>
+<td>Read-only MCP context</td>
+<td>Supported</td>
+</tr>
+<tr>
+<td>Backup/restore of Drift state</td>
+<td>Supported</td>
+</tr>
+<tr>
+<td>Python adapter</td>
+<td>Deferred</td>
+</tr>
+<tr>
+<td>Desktop UI</td>
+<td>Deferred</td>
+</tr>
+<tr>
+<td>Cloud sync</td>
+<td>Deferred</td>
+</tr>
+<tr>
+<td>Duplicate helper detection</td>
+<td>Deferred</td>
+</tr>
+</tbody></table>
+<p>Drift does not mutate source code. It stores repo intelligence locally, guides humans and agents with evidence, and requires explicit human confirmation for governance changes.</p>
+<p>Use <code>drift capabilities --json</code> or MCP <code>get_capabilities</code> to discover the supported command surface, no-approval agent tools, human-confirmed governance mutations, and deferred surfaces.</p>
+<h2>Package Smoke</h2>
+<p>The e2e suite packs and installs the workspace packages into a clean consumer project, then runs:</p>
+<ul>
+<li>installed <code>drift doctor</code></li>
+<li>installed <code>drift scan</code></li>
+<li>installed <code>drift conventions list --kind --capability --limit --offset</code></li>
+<li>installed <code>drift conventions accepted --kind --capability --limit --offset</code></li>
+<li>installed <code>drift start --accept-defaults</code></li>
+<li>installed <code>drift scan status</code></li>
+<li>installed <code>drift ask</code></li>
+<li>installed <code>drift prepare</code></li>
+<li>installed <code>drift repo map</code></li>
+<li>installed <code>drift repo map --limit --offset</code></li>
+<li>installed <code>drift checks list --limit --offset</code></li>
+<li>installed <code>drift checks run</code></li>
+<li>installed <code>drift baseline status</code></li>
+<li>installed <code>drift contract show</code></li>
+<li>installed <code>drift check</code></li>
+<li>installed <code>drift findings list</code></li>
+<li>installed <code>drift findings list --convention</code></li>
+<li>installed <code>drift findings list --limit --offset</code></li>
+<li>installed <code>drift findings list --path --require-fresh</code></li>
+<li>installed <code>drift findings show</code></li>
+<li>installed <code>drift findings mark-needs-review --confirm</code></li>
+<li>installed <code>drift findings mark-fixed --confirm</code></li>
+<li>installed <code>drift audit list</code></li>
+<li>installed <code>drift audit list --target-id --limit --offset</code></li>
+<li>installed <code>drift audit verify</code></li>
+<li>installed <code>drift backup create --confirm</code></li>
+<li>installed <code>drift backup list</code></li>
+<li>installed <code>drift backup list --artifact-status --limit --offset</code></li>
+<li>installed <code>drift backup verify</code></li>
+<li>installed <code>drift restore --dry-run</code></li>
+<li>installed <code>drift restore --confirm</code></li>
+<li>installed <code>drift version --json</code></li>
+<li>installed <code>drift capabilities --json</code></li>
+<li>installed MCP <code>get_runtime_info</code></li>
+<li>installed MCP <code>get_capabilities</code></li>
+<li>installed MCP <code>get_audit_status</code></li>
+<li>installed MCP <code>get_scan_status</code></li>
+<li>installed MCP <code>get_repo_contract</code></li>
+<li>installed MCP <code>get_repo_map</code></li>
+<li>installed MCP <code>get_task_preflight</code></li>
+<li>installed MCP <code>get_conventions</code></li>
+<li>installed MCP <code>get_findings</code></li>
+<li>installed MCP <code>get_required_check_executions</code></li>
+<li>installed MCP <code>get_allowed_context</code></li>
+<li>installed <code>drift-mcp</code></li>
+<li><code>pnpm beta:proof</code></li>
+</ul>
+<p>Run the full gate:</p>
+<pre><code class="language-bash">pnpm verify:full
+</code></pre>
+<p><code>verify:full</code> is two gates. <code>pnpm verify:ci</code> is the half a hosted runner can execute and is what
+GitHub Actions runs on every PR. <code>pnpm verify:evals</code> is the external-repo battery — it requires the
+seven pinned evaluation repos cloned locally and is not run by CI.</p>
+<p><code>pnpm verify:ci</code> includes <code>pnpm beta:proof</code>, which proves a fresh Rust scan, an accepted contract, a service-delegated route passing, a new direct data-access route blocking, evidence-complete findings, full schema-stable CLI/MCP parity, and audit hash-chain verification.</p>

@@ -1,0 +1,396 @@
+<h1>Agent Guard</h1>
+<p><a href="https://github.com/JeongJaeSoon/agent-guard/releases" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/v/release/JeongJaeSoon/agent-guard" alt="Release" /></a> <a href="https://github.com/marketplace/actions/agent-guard-secret-guardrails" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Marketplace-Agent%20Guard-2EA44F?logo=github" alt="GitHub Marketplace" /></a> <a href="https://github.com/JeongJaeSoon/agent-guard/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/JeongJaeSoon/agent-guard/actions/workflows/ci.yml/badge.svg" alt="CI" /></a> <a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a></p>
+<p><strong>Stop your AI coding agent from leaking secrets — in real time, before the tool call runs.</strong></p>
+<p><img src="https://raw.githubusercontent.com/JeongJaeSoon/agent-guard/HEAD/docs/demo.gif" alt="Agent Guard blocking an agent's read of a .env that holds a private key, then a scan flagging the leak" /></p>
+<p>Agent Guard is a deterministic guardrail for AI coding agents (Claude Code, Codex) and the Git hooks, CI, and CLI around them. It blocks common ways an agent accidentally exposes secrets: reading <code>.env</code>, writing secret-like values, running shell commands that dump credentials, or leaving secrets in the working tree after a tool call. It uses <a href="https://github.com/gitleaks/gitleaks" target="_blank" rel="noopener noreferrer">gitleaks</a> for detection and plain shell scripts for integration.</p>
+<p>Unlike commit- or CI-time scanners that catch a leak <em>after</em> it lands, Agent Guard also runs at the agent's tool boundary — the <code>.env</code> read or secret write is blocked before it happens. Pair it with commit/CI scanning for defense in depth.</p>
+<p>It is not a vault, credential rotator, or replacement for GitHub Secret Scanning / Push Protection.</p>
+<h2>Quick start</h2>
+<h3>Claude Code</h3>
+<p>Install from the marketplace:</p>
+<pre><code class="language-text">/plugin marketplace add JeongJaeSoon/agent-guard
+/plugin install agent-guard@agent-guard
+/reload-plugins
+/agent-guard:setup-shell
+</code></pre>
+<p>The last command installs the default-on Claude command wrapping into your shell rc. Restart the shell and Claude Code after it succeeds. Plugin hooks are active after reload; shell wrapping for user-typed <code>!</code> commands requires this explicit rc update because plugins cannot edit it during installation.</p>
+<p>Verify it's live — ask the agent to read your <code>.env</code>:</p>
+<pre><code class="language-text">Please read .env
+</code></pre>
+<p>It should refuse:</p>
+<pre><code class="language-text">agent-guard: blocked sensitive file access: .env
+</code></pre>
+<h3>Codex</h3>
+<p>Add the marketplace:</p>
+<pre><code class="language-sh">codex plugin marketplace add JeongJaeSoon/agent-guard
+</code></pre>
+<p>Open <code>/plugins</code> in Codex and install <strong>Agent Guard</strong>. Then open <strong>Settings &gt; Hooks</strong>, trust the <strong>SessionStart</strong>, <strong>PreToolUse</strong>, <strong>PostToolUse</strong>, and <strong>Stop</strong> hooks, and restart Codex.</p>
+<p>Run the guided setup skill:</p>
+<pre><code class="language-text">$setup-agent-guard
+</code></pre>
+<p>Treat setup as complete only when the plugin-local dependency check, smoke test, and both live host probes pass. The probes confirm that the current Codex tool route actually dispatches to Agent Guard's hooks.</p>
+<p>To install or refresh the optional Agent Guard shell integration, choose
+<strong>Set Up Agent Guard Shell</strong> from the <code>/</code> menu or invoke:</p>
+<pre><code class="language-text">$setup-shell
+</code></pre>
+<p>The skill resolves the current plugin-local binary and requests approval before
+updating the shell rc, so the versioned plugin-cache path does not need to be
+copied into the prompt. After the rc update, start a new shell and restart any
+agent sessions launched from that shell before relying on the integration.</p>
+<p>Both plugins need <code>jq</code> and <code>gitleaks</code> on your machine (<code>brew install jq gitleaks</code>; see <a href="#requirements" target="_blank" rel="noopener noreferrer">Requirements</a>). Using the CLI, Git hooks, or CI instead? Pick your path below.</p>
+<h2>Pick an install path</h2>
+<table>
+<thead>
+<tr>
+<th>Use case</th>
+<th>Install path</th>
+<th>Best first check</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Claude Code agent guardrails</td>
+<td><a href="#claude-code" target="_blank" rel="noopener noreferrer">Claude Code quick start</a></td>
+<td>Ask the agent to read <code>.env</code>; it should be blocked.</td>
+</tr>
+<tr>
+<td>Codex plugin guardrails</td>
+<td><a href="#codex" target="_blank" rel="noopener noreferrer">Codex quick start</a></td>
+<td>Run <code>$setup-agent-guard</code> and require both live hook probes to pass.</td>
+</tr>
+<tr>
+<td>Codex CLI + Git backstop</td>
+<td><a href="#direct-cli" target="_blank" rel="noopener noreferrer">Direct CLI</a> + <a href="#native-git-hook" target="_blank" rel="noopener noreferrer">Native Git hook</a></td>
+<td>Run <code>agent-guard smoke-test</code>; commit a staged fixture secret, and it should fail.</td>
+</tr>
+<tr>
+<td>Centrally managed machines</td>
+<td><a href="#managed-deployment" target="_blank" rel="noopener noreferrer">Managed deployment</a></td>
+<td>Merge the managed settings example, have each developer run the setup commands, then ask the agent to read <code>.env</code>.</td>
+</tr>
+<tr>
+<td>Local commits</td>
+<td><a href="#native-git-hook" target="_blank" rel="noopener noreferrer">Native Git hook</a></td>
+<td>Commit a staged fixture secret; commit should fail.</td>
+</tr>
+<tr>
+<td>CI / PRs</td>
+<td><a href="#github-actions" target="_blank" rel="noopener noreferrer">GitHub Actions</a></td>
+<td>Push a test PR with a gitleaks-detectable fixture; workflow should fail.</td>
+</tr>
+<tr>
+<td>Manual scans</td>
+<td><a href="#direct-cli" target="_blank" rel="noopener noreferrer">Direct CLI</a></td>
+<td>Run <code>agent-guard smoke-test</code>.</td>
+</tr>
+</tbody></table>
+<h2>Requirements</h2>
+<p>Agent Guard runs on macOS and Linux and expects:</p>
+<ul>
+<li><code>sh</code></li>
+<li><code>awk</code></li>
+<li><code>git</code></li>
+<li><code>jq</code></li>
+<li><code>gitleaks</code> 8.30 or newer recommended</li>
+</ul>
+<p>Install paths that download release archives also use <code>curl</code>, <code>tar</code>, <code>shasum</code>, and <code>ln</code>.
+PII endpoint providers also use <code>curl</code>.</p>
+<p>With a direct CLI install:</p>
+<pre><code class="language-sh">agent-guard setup   # prints dependency status and install hints
+agent-guard check   # strict pass/fail dependency check
+agent-guard smoke-test
+</code></pre>
+<p>From a clone of this repo:</p>
+<pre><code class="language-sh">plugins/agent-guard/bin/agent-guard setup
+make check
+make smoke-test
+</code></pre>
+<p>The Claude Code and Codex plugin installs do not put <code>agent-guard</code> on your shell <code>PATH</code>. In Codex, invoke <code>$setup-agent-guard</code>: it uses the plugin-local binary even when a different standalone version is on <code>PATH</code>, presents the exact host-appropriate install plan, requests approval, runs <code>check</code> plus <code>smoke-test</code>, verifies hook trust, and runs live host probes. It never installs software merely because a session started. The same skill is available in Claude Code as <code>/agent-guard:setup-agent-guard</code>; Claude Code users can also run the equivalent manual commands below.</p>
+<p>Manual macOS equivalent:</p>
+<pre><code class="language-sh">brew install jq gitleaks
+</code></pre>
+<p>On Debian / Ubuntu or Fedora, install <code>jq</code> with the system package manager and download <code>gitleaks</code> from its release page.</p>
+<h2>Trust, privacy, and support</h2>
+<p>When the plugin is enabled, its <code>PreToolUse</code> and <code>PostToolUse</code> hooks run for every
+matched tool call in the session. They inspect supported tool inputs and outputs
+in memory, and mutation/stop backstops scan changed files in the current Git work
+tree. Default hook processing is local: Agent Guard has no telemetry, developer
+service, account, or analytics endpoint, and it does not retain inspected data.</p>
+<p>PII hook handling is off by default. The built-in <code>regex</code> provider stays local.
+If you explicitly select the experimental <code>http</code> adapter, text passed to
+<code>pii-filter</code>—and supported tool-input text in PII <code>block</code> mode—is sent to the
+exact endpoint in <code>AGENT_GUARD_PII_REDACT_URL</code>. Review that endpoint's privacy
+and retention terms before enabling it. Agent Guard does not guarantee
+compatibility with any specific service.</p>
+<p>Dependency downloads never happen from a lifecycle hook. The guided setup asks
+before installing anything and requires a published SHA-256 for the gitleaks
+archive. See <a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/PRIVACY.md" target="_blank" rel="noopener noreferrer">Privacy and data handling</a>, <a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a>,
+<a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/SUPPORT.md" target="_blank" rel="noopener noreferrer">Support</a>, and <a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener noreferrer">Third-party notices</a>.</p>
+<h2>Claude Code Plugin</h2>
+<p>Install and verify in the <a href="#claude-code" target="_blank" rel="noopener noreferrer">Claude Code quick start</a>. Useful slash commands once installed:</p>
+<pre><code class="language-text">/agent-guard:verify
+/agent-guard:checksum [VERSION]
+/agent-guard:setup-shell
+</code></pre>
+<p>For guided dependency diagnosis and installation, use the
+<code>/agent-guard:setup-agent-guard</code> skill — the same skill Codex invokes as
+<code>$setup-agent-guard</code>. SessionStart recommends it when it reports degraded
+protection, but never invokes it: it only emits the warning. The skill selects
+the active host's plugin-verification path and runs live probes through that
+host's normal command surface. <code>/agent-guard:verify</code> remains a separate
+working-tree scan and does not prove live hook dispatch.</p>
+<h2>Codex Plugin</h2>
+<p>Start with the <a href="#codex" target="_blank" rel="noopener noreferrer">Codex quick start</a>. Re-check <strong>Settings &gt; Hooks</strong> after plugin updates: a changed hook is marked <strong>Modified</strong> and remains inactive until you review and trust it again. SessionStart reports degraded protection when a dependency is unavailable and points Codex to <code>$setup-agent-guard</code>; installation remains approval-gated. An untrusted SessionStart hook cannot display that guidance.</p>
+<p>The setup skill requires all three layers to pass: plugin-local <code>check</code>, plugin-local <code>smoke-test</code>, and the live host probes. For the pre-tool probe, ask Codex to run this harmless sentinel command:</p>
+<pre><code class="language-sh">printf '%s\n' 'AGENT_GUARD_LIVE_PRE_TOOL_PROBE'
+</code></pre>
+<p>Expected result: Agent Guard blocks the command before the sentinel is printed. For the post-tool probe, run the paired harmless sentinel and confirm that the raw marker is masked or replaced before it reaches the model:</p>
+<pre><code class="language-sh">printf '%s\n' 'AGENT_GUARD_LIVE_POST_TOOL_PROBE'
+</code></pre>
+<p>These sentinels test only whether the host dispatched PreToolUse and PostToolUse. The plugin-local <code>smoke-test</code> separately exercises the real deny-list and secret-redaction rules without placing sensitive-looking instructions in the setup skill.</p>
+<p>Codex may expose shell execution through a wrapping or orchestration tool such as <code>functions.exec</code>. Agent Guard cannot replace or wrap Codex's host executor; it protects only nested operations that the current Codex release dispatches to plugin hooks. Test the exact route used in the current task. If the pre-tool marker or raw fake token appears, protection is not active on that route even when the binary smoke test passes. Use a native Git hook or CI as the backstop and do not treat the plugin setup as complete for that host route.</p>
+<p>Codex loads the plugin's <code>skills/</code> directory but does not use the Claude
+<code>commands/</code> directory. Use <code>$setup-agent-guard</code> for dependency and hook setup,
+and <code>$setup-shell</code> to install or refresh the optional shell integration. Ask
+Codex to run the binary directly for other workflows:</p>
+<pre><code class="language-sh">${PLUGIN_ROOT}/bin/agent-guard scan-working-tree
+${PLUGIN_ROOT}/bin/agent-guard checksum
+</code></pre>
+<h2>Direct CLI</h2>
+<p>Install the latest release without cloning:</p>
+<pre><code class="language-sh">curl -fsSL https://github.com/JeongJaeSoon/agent-guard/releases/latest/download/bootstrap.sh | sh
+</code></pre>
+<p>The installer verifies the release archive checksum, extracts to <code>~/.agent-guard</code>, links <code>agent-guard</code> into <code>~/.local/bin</code>, runs <code>agent-guard setup</code>, and installs the default-on shell integration. Set <code>AGENT_GUARD_COMMAND_WRAPPING=off</code> on the bootstrap command for a persistent command-wrapping opt-out.</p>
+<p>Common commands:</p>
+<pre><code class="language-sh">agent-guard scan-path .
+agent-guard scan-working-tree
+agent-guard scan-staged
+agent-guard pii-filter
+agent-guard setup
+agent-guard smoke-test
+agent-guard checksum
+</code></pre>
+<p>Scan commands exit <code>0</code> when nothing was found, <code>1</code> when a secret was detected, and <code>3</code> when the scan could not run at all — for example <code>scan-staged</code> outside a git work tree. <code>3</code> exists so that "I looked and it was clean" is never confused with "I never got to look"; both non-zero results mean the change is not cleared. Any other non-zero status is a scanner error.</p>
+<p>At a host hook boundary, scanner-infrastructure failures (missing dependencies,
+an inaccessible/non-repository workdir, or a scanner crash) follow
+<code>AGENT_GUARD_INFRA_FAILURE_MODE</code>: <code>open</code> is the default and continues after one
+clear warning per session; <code>closed</code> blocks instead. A real secret detection is
+not an infrastructure failure and always blocks. Direct scan commands and the
+native Git hook keep their non-zero exit status so CI and Git never mistake an
+unperformed scan for a clean result.</p>
+<p>Override install defaults with <code>AGENT_GUARD_VERSION</code>, <code>AGENT_GUARD_HOME</code>, <code>AGENT_GUARD_BIN_DIR</code>, or <code>AGENT_GUARD_COMMAND_WRAPPING</code>.</p>
+<h2>Managed deployment</h2>
+<p>Rolling Agent Guard out to an organization takes two steps:</p>
+<ol>
+<li><strong>Administrator, once</strong>: merge
+<a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/deployment/claude-managed-settings.example.json" target="_blank" rel="noopener noreferrer"><code>deployment/claude-managed-settings.example.json</code></a>
+into the organization's Claude Code managed settings. It registers the
+Agent Guard marketplace pinned to a release tag and force-enables the
+plugin for every developer.</li>
+<li><strong>Each developer, once per machine</strong>: run the setup commands —
+<code>agent-guard setup --install ...</code> for the <code>jq</code>/<code>gitleaks</code> dependencies
+(<code>/agent-guard:checksum</code> prints the paste-ready command),
+<code>/agent-guard:setup-shell</code> for the shell integration, then
+<code>agent-guard smoke-test</code> to verify.</li>
+</ol>
+<p>Developers who have not finished setup are reminded automatically: the
+plugin's <code>SessionStart</code> hook detects missing dependencies or a missing shell
+integration and suggests the exact setup command at session start.</p>
+<p>See <a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/docs/managed-deployment.md" target="_blank" rel="noopener noreferrer">Managed deployment for Claude Code</a> for the
+managed settings locations, per-command details, and the automatic reminder
+behavior.</p>
+<h2>PII Filtering</h2>
+<p><code>agent-guard pii-filter</code> reads text from stdin, masks detected PII, and writes the masked text to stdout. The default provider is <code>regex</code>, a built-in shell/awk adapter with no Python runtime dependency:</p>
+<pre><code class="language-sh">printf '%s\n' 'Email jane@example.com from 203.0.113.42' | agent-guard pii-filter
+# Email [PII:EMAIL] from [PII:IP_ADDRESS]
+</code></pre>
+<p>The built-in regex provider masks common deterministic formats: email addresses, phone numbers, credit cards, US SSNs, and IP addresses. Clean text is passed through unchanged.</p>
+<p>Choose a provider with <code>AGENT_GUARD_PII_PROVIDER</code>. Accepted values are:</p>
+<ul>
+<li><code>regex</code> — the supported built-in local adapter, and the default. No network access.</li>
+<li><code>http</code> — an experimental bring-your-own-endpoint adapter. No compatibility with a specific service is guaranteed.</li>
+</ul>
+<p>Any other value fails closed with the accepted-value list; PII redaction never degrades to pass-through on an unrecognised provider.</p>
+<pre><code class="language-sh">AGENT_GUARD_PII_PROVIDER=regex agent-guard pii-filter --check
+</code></pre>
+<p>The experimental endpoint adapter can be used with a compatible service you operate or select:</p>
+<pre><code class="language-sh">AGENT_GUARD_PII_PROVIDER=http \
+AGENT_GUARD_PII_REDACT_URL=http://127.0.0.1:8080/api/redact \
+agent-guard pii-filter --check
+
+printf '%s\n' 'Customer jane@example.com' \
+  | AGENT_GUARD_PII_PROVIDER=http \
+    AGENT_GUARD_PII_REDACT_URL=http://127.0.0.1:8080/api/redact \
+    agent-guard pii-filter
+</code></pre>
+<p><code>http</code> POSTs JSON as <code>{"text":"..."}</code> and reads a redacted string from <code>redacted_text</code>, <code>anonymized_text</code>, <code>text</code>, or <code>data.redacted_text</code>. It requires <code>curl</code>, <code>jq</code>, and <code>AGENT_GUARD_PII_REDACT_URL</code>; missing tools, missing URL, HTTP errors, invalid JSON, or unexpected response shapes fail closed. This generic contract is exercised with local mock fixtures, but compatibility with a real external service is not yet part of Agent Guard's supported surface.</p>
+<p>PII handling in hooks is off by default. Two opt-in modes:</p>
+<pre><code class="language-sh">AGENT_GUARD_PII_HOOK_MODE=block   # block tool INPUTS that contain any PII
+# or
+AGENT_GUARD_PII_HOOK_MODE=mask    # mask PII in tool OUTPUTS; hard-block Tier-2 inputs
+</code></pre>
+<p>In <strong>block</strong> mode, proposed <code>Write</code>, <code>Edit</code>, <code>MultiEdit</code>, <code>NotebookEdit</code>, <code>apply_patch</code>, <code>Bash</code>, <code>WebFetch</code>, <code>WebSearch</code>, and MCP inputs are blocked when any PII is detected, with guidance to run <code>agent-guard pii-filter</code> first.</p>
+<p>In <strong>mask</strong> mode, PII is masked in a tool's <em>output</em> (<code>PostToolUse</code>, the same path as secret redaction) so the model never sees it. On the <em>input</em> side, mask mode hard-blocks only <strong>Tier-2</strong> PII — credit card, US SSN, and Korean resident registration number, which must never reach a tool — and lets <strong>Tier-1</strong> PII (email, phone, IPv4) through to be masked on the way out. Hooks cannot rewrite a <em>pending</em> input payload, so Tier-1 input is allowed rather than masked in place; use <code>agent-guard pii-filter</code> for input-side masking.</p>
+<p>The regex provider recognizes email, phone (including Korean mobile), IPv4, credit card, US SSN, and Korean resident registration number.</p>
+<h2>Native Git Hook</h2>
+<p>Install from a clone or direct CLI install:</p>
+<pre><code class="language-sh">cd &lt;your-project&gt;
+~/.agent-guard/install.sh git-hooks
+</code></pre>
+<p>From a clone of this repo:</p>
+<pre><code class="language-sh">./install.sh git-hooks
+</code></pre>
+<p>This sets <code>core.hooksPath=githooks</code> only when it will not overwrite an existing hook setup.</p>
+<h2>GitHub Actions</h2>
+<p>Add a workflow step:</p>
+<pre><code class="language-yaml">- uses: JeongJaeSoon/agent-guard@v3
+  with:
+    paths: "."
+    gitleaks-checksum: "&lt;sha256 of the gitleaks release archive&gt;"
+</code></pre>
+<p><code>paths</code> is whitespace-separated, so an individual path cannot contain spaces; the default <code>.</code> scans the whole repository.</p>
+<p>Use <code>@v3</code> for compatible 3.x updates. The <code>@v2</code> and <code>@v1</code> moving tags remain on the 2.x and 1.x lines; pin one of them, a full tag, or a commit SHA when you intentionally stay on an older line.</p>
+<p>Get the checksum with:</p>
+<pre><code class="language-sh">agent-guard checksum
+</code></pre>
+<p>CI runners are usually <code>linux/x64</code>, so use the <code>linux/x64</code> value printed by the checksum command. <code>require-checksum</code> defaults to <code>true</code>; set it to <code>false</code> only for local experimentation.</p>
+<h3>Codex Code Review</h3>
+<p>This repository also includes <code>.github/workflows/codex-review.yml</code>, which runs <a href="https://github.com/openai/codex-action" target="_blank" rel="noopener noreferrer">openai/codex-action</a> on non-draft pull requests and posts Codex feedback as a PR comment.</p>
+<p>To enable it, add an Actions secret named <code>OPENAI_API_KEY</code> in the GitHub repository settings. The workflow intentionally runs on <code>pull_request</code>, checks out the PR merge commit without persisted Git credentials, and runs Codex in a read-only sandbox with <code>drop-sudo</code>.</p>
+<h2>What Gets Blocked</h2>
+<ul>
+<li>On Claude Code: <code>Read</code>, <code>NotebookRead</code>, <code>Grep</code>, and <code>Glob</code> access to deny-listed paths; <code>Write</code>, <code>Edit</code>, <code>MultiEdit</code>, and <code>NotebookEdit</code> secret-like content; and sensitive web/MCP inputs</li>
+<li>On Codex: supported hook surfaces (<code>Bash</code>, <code>apply_patch</code>, and MCP tools). Current Codex hooks do not intercept arbitrary Read/Grep/WebSearch calls, so Agent Guard does not claim coverage for them.</li>
+<li>risky shell commands such as <code>printenv</code>, <code>op read</code>, <code>vault kv get</code>, <code>aws secretsmanager get-secret-value</code>, <code>cat .env</code>, and <code>git commit --no-verify</code></li>
+<li>PII in proposed write, shell, web, or MCP inputs — all PII when <code>AGENT_GUARD_PII_HOOK_MODE=block</code>, or only Tier-2 PII (credit card, US SSN, Korean resident registration number) when <code>AGENT_GUARD_PII_HOOK_MODE=mask</code></li>
+<li>staged added lines in the native pre-commit hook</li>
+<li>working-tree added lines and untracked files after agent mutations</li>
+</ul>
+<p>Patch and diff scans inspect added lines only. Removing an existing leaked value is allowed.</p>
+<p>Environment templates remain readable when their basename has an explicit,
+final <code>.example</code>, <code>.sample</code>, <code>.template</code>, or <code>.dist</code> marker, or when
+<code>example</code>, <code>sample</code>, or <code>template</code> directly prefixes an <code>.env</code>/<code>.envrc</code>
+extension (for example <code>.env.local.example</code>, <code>sample.env</code>, and
+<code>example.envrc</code>). Runtime-shaped names such as <code>.env.local</code>, <code>local.env</code>,
+<code>env.local</code>, <code>env.preview</code>, <code>example.env.local</code>, <code>.flaskenv</code>, and
+<code>.dev.vars.production</code> stay blocked. Source-module forms such as <code>env.ts</code> and
+<code>config.env.ts</code> remain readable, while data/config suffixes such as
+<code>schema.env.json</code> stay protected. Template exceptions never override a
+non-environment deny rule, a deny-listed ancestor, or an operator-supplied
+<code>AGENT_GUARD_DENY_READ_PATHS</code> policy. Template-named symlinks are resolved and
+do not bypass the runtime-file rule; proposed template contents are still
+scanned normally for real secrets.</p>
+<p>Dependency checksums are exempt only for recognized hash-field shapes in
+<code>go.sum</code>, <code>package-lock.json</code>, <code>yarn.lock</code>, <code>Cargo.lock</code>, and <code>uv.lock</code>. The
+allowlist requires both the lockfile path and the checksum pattern; arbitrary
+content in those files, including a credential added beside normal hashes, is
+still scanned.</p>
+<h2>What Gets Masked</h2>
+<p>Beyond blocking, Agent Guard <strong>masks</strong> secret-like values in a matched tool's output before the model sees them. Claude uses the native <code>updatedToolOutput</code> rewrite and preserves the result shape. Codex does not expose that Claude field, so Agent Guard blocks the original sensitive result and supplies a sanitized replacement through <code>additionalContext</code>. Detection combines gitleaks with an assignment-value heuristic. The heuristic masks only the quoted value or next unquoted value token of a complete secret-bearing key; it does not mask metadata keys merely beginning with a secret word, prose after a known standalone status label (<code>error:</code>, <code>warning:</code>, <code>info:</code>, <code>note:</code>, <code>debug:</code>, <code>fatal:</code>, <code>hint:</code>), or adjacent status text. Any other colon-terminated label is treated as structured output, so <code>response: api_key: &lt;value&gt;</code>, <code>response.error: api_key: &lt;value&gt;</code>, and <code>response/error: api_key: &lt;value&gt;</code> are masked. It is on by default; disable with <code>AGENT_GUARD_OUTPUT_REDACT=off</code>.</p>
+<p>With <code>AGENT_GUARD_PII_HOOK_MODE=mask</code>, the same <code>PostToolUse</code> redactor also masks <strong>PII</strong> in tool output — email, phone (including Korean mobile), IPv4, credit card, US SSN, and Korean resident registration number become <code>[PII:TYPE]</code> placeholders in place. Secret redaction and PII masking compose into a single rewrite, so a result containing both is fully sanitized at once.</p>
+<h2>Shell integration (masking <code>!</code> shell-escape output)</h2>
+<p>The <code>PostToolUse</code> redactor only ever sees the results of the agent's <em>tool calls</em>. When you type a <code>!</code>-prefixed command at the Claude Code prompt, it runs in the session shell and its <strong>output is captured into the transcript and sent to the model</strong> — but it is not a tool call, so <strong>no</strong> Agent Guard hook fires (a documented blind spot). If that output carries a credential, the model sees it unmasked.</p>
+<p><code>agent-guard exec</code> closes that gap. Before running anything, it verifies that the configured masking dependencies are usable; if they are not, the explicit wrapper fails closed and does not run the command. Once ready, it runs the command to completion, propagates its exit code, captures combined stdout+stderr, and prints only masked text. Capture is buffered, so this is for non-interactive info commands, not TUIs or streaming programs. <code>AGENT_GUARD_OUTPUT_REDACT=off</code> explicitly disables secret masking.</p>
+<pre><code class="language-sh">agent-guard exec -- printenv          # runs it, but the transcript gets [REDACTED] in place of secrets
+</code></pre>
+<p>To make this ergonomic, add the shell integration to your <code>~/.bashrc</code> / <code>~/.zshrc</code>:</p>
+<pre><code class="language-sh">eval "$(agent-guard shell-init)"
+</code></pre>
+<p>Or let <code>setup-shell</code> write (and later update) that line for you — idempotently, and by absolute path when <code>agent-guard</code> isn't on your <code>$PATH</code> yet:</p>
+<pre><code class="language-sh">agent-guard setup-shell
+</code></pre>
+<p>This defines <code>agx</code> (a thin wrapper for <code>agent-guard exec --</code>) so you can run <code>agx &lt;cmd&gt;</code> — in Claude Code, <code>!agx &lt;cmd&gt;</code> — and have the output masked before the model sees it. It also installs a <strong>warn-only, non-blocking</strong> nudge (a zsh <code>preexec</code> / bash <code>DEBUG</code> trap) that reminds you to use <code>agx</code> when you run a known secret-loading idiom without it. The nudge never blocks or modifies your command; pass <code>--bash</code> or <code>--zsh</code> to force a target shell.</p>
+<h3>Claude command wrapping (stable, default on)</h3>
+<p>The nudge above relies on a <code>preexec</code> / <code>DEBUG</code> hook — but Claude Code runs <code>!</code> commands from a <strong>shell snapshot</strong> that strips those hooks (and <code>unalias -a</code>s), so the nudge never fires for <code>!</code>. The snapshot <em>does</em> keep shell <strong>functions</strong>, so Agent Guard installs function overrides for the common dump commands by default.</p>
+<p>The default <code>shell-init</code> output overrides <code>cat</code>, <code>head</code>, and <code>printenv</code> so that — <strong>only inside Claude Code</strong> (gated on <code>$CLAUDECODE</code>) — they route through <code>agent-guard exec</code>, masking their output before the transcript captures it. So <code>!cat config.txt</code> gets its secrets redacted automatically, without you remembering to type <code>agx</code>. In a normal terminal (<code>$CLAUDECODE</code> unset) the overrides stay inert and fall back to plain <code>cat</code> / <code>head</code> / <code>printenv</code> behavior.</p>
+<p>Turn automatic wrapping off for one process or shell by exporting <code>AGENT_GUARD_COMMAND_WRAPPING=off</code>. For a persistent opt-out, rewrite the managed block without the automatic overrides:</p>
+<pre><code class="language-sh">export AGENT_GUARD_COMMAND_WRAPPING=off  # runtime opt-out
+agent-guard setup-shell --no-command-wrapping  # persistent opt-out
+</code></pre>
+<p>For plugin installs, every execution refreshes a sibling
+<code>current/bin/agent-guard</code> symlink and <code>setup-shell</code> records only that stable
+path. Hooks and shell snippets use <code>current</code> first, then select the newest
+installed semantic-version directory if symlinks are unavailable. This keeps an
+already-running session valid when the host removes an older cache directory.
+Standalone CLI installs continue to use their stable <code>~/.agent-guard</code> /
+<code>~/.local/bin</code> paths.</p>
+<p>The shell resolver order is an explicit <code>$AGENT_GUARD_BIN</code>, the stable baked
+path, the newest plugin-cache version fallback, then <code>agent-guard</code> on <code>$PATH</code>.
+Both transparent wrapping and <code>agx</code> preflight dependencies and use the same
+infrastructure policy: default <code>open</code> runs the original command with one clear
+<code>output is NOT masked</code> warning per shell session; set
+<code>AGENT_GUARD_INFRA_FAILURE_MODE=closed</code> to refuse execution instead.</p>
+<p>Because the plugin (auto-updated by <code>claude plugin update</code>) and the binary the integration actually resolves update independently, updating only one side can silently leave <code>agx</code> / <code>!</code>-command masking on older rules. To catch that, the <code>shell-init</code> snippet exports <code>AGENT_GUARD_SHELL_INIT_VERSION</code> — the version of the binary it resolved at rc-eval time (whichever of the three paths above won) — and a Claude Code <code>SessionStart</code> hook compares that marker against the plugin's own version, showing a <strong>non-blocking warning</strong> on mismatch. Because the marker records what the integration resolved at shell start (not a re-derivation the hook would have to guess), it stays silent unless the integration is genuinely loaded <em>and</em> drifting: a user who has <code>agent-guard</code> on <code>$PATH</code> but never ran <code>setup-shell</code> gets no warning, and a plugin-only install pinned to a stale baked binary is still covered. It is a start-up snapshot, so if you upgrade the resolved binary <em>in place</em> inside a long-lived shell and then launch Claude Code from it without opening a new shell, the warning reflects the version from when that shell started until you re-source your rc.</p>
+<blockquote>
+<p><strong>Works without the CLI on <code>$PATH</code> — but a plugin can't edit your rc.</strong> Direct CLI bootstrap installs the default-on shell integration automatically. For a plugin-only install, run the plugin-local <code>agent-guard setup-shell</code> once — invoke it by absolute path if <code>agent-guard</code> isn't on your <code>$PATH</code>; it writes the stable <code>current</code> path — then restart your shell and any Claude Code session. See <a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/docs/migration-v4.md" target="_blank" rel="noopener noreferrer">Migrating from 3.x to 4.x</a> for old managed blocks — 4.x rejects the 1.x flags, so stale blocks must be rewritten with one <code>setup-shell</code> run — and <a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/docs/migration-v2.md" target="_blank" rel="noopener noreferrer">Migrating from 1.x to 2.x</a> for the historical opt-out behavior.</p>
+</blockquote>
+<p><code>/agent-guard:setup-shell</code> invokes that binary through Claude's Bash tool so a
+sandboxed session can request approval before writing the shell rc. If the host
+cannot grant that approval, run the displayed plugin-local command directly in
+your terminal; <code>!</code> command interpolation cannot request the required write
+permission.</p>
+<p><strong>This is best-effort, not a security control.</strong> It covers only those command names and is trivially bypassed by an absolute path (<code>/bin/cat</code>), <code>source</code> / <code>.</code>, <code>python -c 'open(...)'</code>, or a redirection (<code>&lt; file</code>). Because <code>agent-guard exec</code> buffers the whole output before masking it, <strong>streaming / follow commands would hang</strong> — so <code>tail</code> is deliberately <em>not</em> wrapped, and you should not <code>agx</code> a <code>tail -f</code>, a pager, or any long-running program (wrap only terminating dump commands). Output is captured via shell substitution, so wrapping is <strong>text-only</strong> — a binary or NUL-containing read loses embedded NULs and its trailing newline, so use <code>command cat</code> / <code>\cat</code> for faithful binary output. Invalid UTF-8 is handled byte-for-byte when possible; to keep that fallback bounded and fail closed, a secret-bearing assignment dump over 64 KiB or invalid-byte output from a secret-named <code>printenv</code> request is replaced as one <code>[REDACTED]</code> result. Oversized invalid-byte output with no secret-like assignment is preserved. Each wrapped call also pays a gitleaks scan. Treat it as a convenience nudge for the common cases, not a boundary — the only channel-agnostic fix remains an egress redaction proxy or an upstream <code>!</code>-command hook.</p>
+<h2>Known Limitations</h2>
+<p>Agent Guard is a deterministic, thin guardrail — not a DLP system, EDR, or vault. It scans tracked diffs, staged changes, and untracked files with gitleaks, and blocks a fixed list of sensitive paths and shell idioms. It deliberately does <strong>not</strong> inspect arbitrary file contents that a command reads, and it has these blind spots by design:</p>
+<ul>
+<li><strong>Gitignored files are not scanned.</strong> The working-tree and post-tool/stop backstops use <code>git ls-files --others --exclude-standard</code> and <code>git diff</code>, both of which skip <code>.gitignore</code>d paths. A secret written to a gitignored file (e.g. <code>secrets/</code> or <code>*.local</code>) is not caught by the backstop. Keep real secrets out of the repo entirely.</li>
+<li><strong>Only files inside the git work tree are covered.</strong> The post-tool and stop hooks no-op outside a git repository, and scans are scoped to the current repo. Files outside the repo root, or written when no repo is present, get no backstop. Use <code>agent-guard scan-path &lt;dir&gt;</code> to scan an arbitrary tree on demand.</li>
+<li><strong>Path and command blocking use fixed lists.</strong> Read/Grep/Glob blocking matches the paths in <code>deny-read-paths.txt</code>; shell blocking matches the idioms in <code>deny-bash-patterns.txt</code>. A secret in an unlisted path, or read by an unlisted tool or flag, is not blocked. Extend the lists with <code>AGENT_GUARD_DENY_READ_PATHS</code> / <code>AGENT_GUARD_DENY_BASH_PATTERNS</code>.</li>
+<li><strong>Output masking is best-effort.</strong> Secret-like values in a tool's output (<code>Bash</code> stdout/stderr, file reads) are masked in place by the <code>PostToolUse</code> redactor (<code>AGENT_GUARD_OUTPUT_REDACT</code>, on by default), but detection is heuristic — gitleaks plus a <code>KEY=value</code> env-assignment rule. Detection is also <strong>entropy-gated</strong>: a realistic high-entropy credential is masked regardless of context, but a low-entropy value is only caught when its key name looks secret-bearing (<code>*_TOKEN=</code>, <code>PASSWORD:</code>, …) or its shape carries a distinctive vendor prefix (GitHub <code>ghp_</code>/<code>github_pat_</code>, AWS <code>AKIA…</code>, Anthropic/OpenAI <code>sk-ant-</code>/<code>sk-proj-</code>, npm <code>npm_</code>, GCP <code>AIza…</code>, Slack <code>xox?-</code>, GitLab <code>glpat-</code>, DigitalOcean <code>dop_v1_</code> — matched by shape alone, with no entropy filter). A low-entropy secret under a generic variable name with no recognizable prefix passes through unmasked, non-secret-but-sensitive data (internal hostnames, base URLs, private config) is never a match at all, and other unusual or custom secret formats can still slip through. The redactor also only sees results of the agent's <em>tool calls</em>. PII masking (<code>AGENT_GUARD_PII_HOOK_MODE=mask</code>) is likewise regex-based: it can over-match (a version string read as an IPv4) or miss locale formats it has no rule for. Both the secret redactor and the PII masker walk JSON string <em>values</em> only — a secret or PII string that appears as an object <em>key</em> is left unmasked, because rewriting keys could collapse two distinct keys onto one placeholder and drop an entry. Treat output masking as defense in depth and keep real secrets and personal data out of agent sessions entirely.</li>
+<li><strong>Bash detection is pattern-based.</strong> The denylist targets common-accident and obvious-malicious idioms; an actively-evading agent can craft a command that matches none of them. Treat shell blocking as defense in depth, not a complete adversarial boundary.</li>
+<li><strong>User-typed shell-escape commands bypass every hook.</strong> Agent Guard works entirely through tool-use hooks (<code>PreToolUse</code> / <code>PostToolUse</code>) and git hooks. A command the user runs directly through the host's interactive shell escape — for example a <code>!</code>-prefixed command typed at the agent prompt — never becomes a tool call, so <strong>no</strong> Agent Guard hook fires: neither the input block nor the output redactor. A secret that such a command prints (e.g. an env- or vault-reading CLI whose output is not redirected to <code>/dev/null</code>) lands in the session transcript unmasked. The recommended mitigation is to run such commands via <code>agx &lt;cmd&gt;</code> / <code>agent-guard exec -- &lt;cmd&gt;</code> (see <a href="#shell-integration-masking--shell-escape-output" target="_blank" rel="noopener noreferrer">Shell integration</a>) so their output is masked <em>before</em> it reaches the model, or use the default-on <a href="#claude-command-wrapping-stable-default-on" target="_blank" rel="noopener noreferrer">Claude command wrapping</a> for the common dump commands. Alternatively, run secret-loading commands <em>through</em> the agent's tools so the hooks apply, or redirect their output away from the transcript — both streams, since many CLIs print credentials or secret-bearing diagnostics to stderr (<code>&gt;/dev/null 2&gt;&amp;1</code>).</li>
+</ul>
+<p>For defense in depth, pair Agent Guard with GitHub Secret Scanning / Push Protection and a secrets manager so credentials never reach the working tree.</p>
+<h2>Coverage benchmark</h2>
+<p><code>make bench</code> runs a deterministic, per-channel leak-prevention benchmark against the <strong>real</strong> gitleaks engine, classifying each case as <code>blocked</code> / <code>masked</code> / <code>leaked</code> (plus <code>false-positive</code> for benign controls) across the read-tool, bash-read, bash-cmd, bash-output, read-output, mcp-output, and <code>!</code> bang channels. It honestly records the raw <code>!</code> channel as structurally uncovered by hooks; default command wrapping and explicit <code>agx</code> are reported as best-effort shell mitigations, not counted as hook coverage. See <a href="https://github.com/JeongJaeSoon/agent-guard/blob/HEAD/docs/benchmark.md" target="_blank" rel="noopener noreferrer"><code>docs/benchmark.md</code></a> for the channel model, latest results, and findings.</p>
+<h2>Configuration</h2>
+<p>Override bundled policies with environment variables:</p>
+<pre><code class="language-sh">AGENT_GUARD_GITLEAKS_CONFIG=/path/to/gitleaks.toml
+AGENT_GUARD_GITLEAKS_BIN=/absolute/path/to/gitleaks
+AGENT_GUARD_GITLEAKS_BIN_DIR=$HOME/.agent-guard/bin
+AGENT_GUARD_DENY_READ_PATHS=/path/to/deny-read-paths.txt
+AGENT_GUARD_DENY_BASH_PATTERNS=/path/to/deny-bash-patterns.txt
+AGENT_GUARD_PII_PROVIDER=regex
+AGENT_GUARD_PII_REDACT_URL=http://127.0.0.1:8080/api/redact
+AGENT_GUARD_PII_HOOK_MODE=off
+AGENT_GUARD_OUTPUT_REDACT=mask
+AGENT_GUARD_INFRA_FAILURE_MODE=open
+</code></pre>
+<p>An <code>AGENT_GUARD_DENY_READ_PATHS</code> override is authoritative. Unlike the bundled
+environment-family defaults, its entries are not relaxed for template-shaped
+filenames; explicitly listing <code>sample.env</code> or <code>secrets/*</code> therefore blocks those
+paths.</p>
+<p>Set <code>AGENT_GUARD_OUTPUT_REDACT=off</code> to disable masking secret-like values in tool output (default <code>mask</code>). Set <code>AGENT_GUARD_PII_HOOK_MODE</code> to <code>block</code> (block PII in tool inputs), <code>mask</code> (mask PII in tool outputs + hard-block Tier-2 PII inputs), or <code>off</code> (default).</p>
+<p>Set <code>AGENT_GUARD_INFRA_FAILURE_MODE=closed</code> when a host hook or shell wrapper
+must refuse execution if the scanner cannot run. The default is <code>open</code>, with a
+deduplicated warning; detections always block in either mode.</p>
+<p>Project-local <code>.gitleaks.toml</code> files are not automatically trusted.
+Gitleaks resolution is deterministic: <code>AGENT_GUARD_GITLEAKS_BIN</code>, then <code>PATH</code>, then <code>AGENT_GUARD_GITLEAKS_BIN_DIR/gitleaks</code> (default <code>~/.agent-guard/bin/gitleaks</code>). This makes the private <code>setup --install</code> destination immediately usable without editing <code>PATH</code>.</p>
+<h2>Checksums and Approval-Gated Install</h2>
+<p><code>agent-guard setup --install</code> can install <code>gitleaks</code>, but only with an explicit checksum:</p>
+<pre><code class="language-sh">agent-guard checksum
+agent-guard setup --install \
+  --gitleaks-version 8.30.1 \
+  --gitleaks-checksum &lt;sha256-for-this-os-and-arch&gt;
+</code></pre>
+<p>The checksum helper prints all supported OS / arch values and paste-ready snippets for CLI setup and GitHub Actions. The guided setup skill —
+<code>/agent-guard:setup-agent-guard</code> in Claude Code, <code>$setup-agent-guard</code> in Codex —
+automates the diagnosis and checksum-selection workflow, but still asks before the download or a package-manager change.</p>
+<h2>Host Integrations</h2>
+<p>Agent Guard shares its scanner implementation across Claude Code and Codex, but keeps host wiring explicit:</p>
+<ul>
+<li><code>plugins/agent-guard/bin/agent-guard</code>, <code>config/</code>, and <code>scripts/</code> are shared.</li>
+<li>Claude Code uses <code>.claude-plugin/plugin.json</code>, <code>commands/</code>, and <code>hooks/hooks.json</code>.</li>
+<li>Codex uses <code>.codex-plugin/plugin.json</code>, which explicitly declares <code>hooks.json</code> and <code>skills/</code>; hook commands set <code>AGENT_GUARD_HOOK_HOST=codex</code> so output follows the Codex contract.</li>
+<li>Codex uses <code>$setup-agent-guard</code> for guided dependency setup and <code>$setup-shell</code>
+for the optional shell integration. Claude <code>commands/</code> remain Claude-specific;
+other Codex workflows use the binary directly.</li>
+</ul>
+<h2>Development</h2>
+<pre><code class="language-sh">make help
+make test
+make smoke-test
+make scan
+make scan-staged
+make checksum
+</code></pre>
+<p><code>make smoke-test</code> uses real <code>git</code>, <code>jq</code>, and <code>gitleaks</code> in temporary projects. <code>make test</code> is the faster deterministic routing suite and uses a mock scanner for some cases.</p>
