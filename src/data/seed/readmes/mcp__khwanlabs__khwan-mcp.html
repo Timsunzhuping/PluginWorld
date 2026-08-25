@@ -1,0 +1,242 @@
+<h1>khwan-mcp</h1>
+<p><strong>Durable memory that survives the session.</strong> An <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">MCP</a>
+server that plugs <a href="https://khwan.ai" target="_blank" rel="noopener noreferrer">Khwan</a> — a pure AI-memory layer — into
+Claude Code, Claude Desktop, or any MCP client.</p>
+<p>Khwan never runs a model. <strong>The client is the model.</strong> Its job is to persist and
+distil what matters into a brain you can <strong>recall in a later session or seed a
+subagent with</strong> — a compact, bounded set of facts instead of a replayed
+transcript. One account can hold many isolated <strong>cores</strong> (brains), and — on paid
+plans — an isolated sub-brain per end-user.</p>
+<h2>How it saves tokens (and where it doesn't)</h2>
+<p>Be honest about the mechanism — an MCP <strong>adds</strong> to a host's context, it cannot
+<strong>replace</strong> the transcript the host already sends. So:</p>
+<ul>
+<li><strong>Within one hot session, it does not save tokens.</strong> Claude Code caches its
+growing history (cache reads ≈ 0.1×), so re-injecting memory every turn only
+adds. Don't do that here.</li>
+<li><strong>Across sessions and subagents, it does.</strong> A cache dies in minutes; a session
+ends. Khwan persists distilled facts so the <em>next</em> run recalls them cheaply —
+no cold-replay of an old transcript, and facts that already scrolled out of
+context are retrievable again.</li>
+</ul>
+<p>The token-smart pattern: <strong>seed once, remember durable facts</strong> (below), rather
+than running the full loop on every turn of a caching host. The full
+<code>prepare → record</code> loop still shines in a <strong>custom agent on a non-caching host</strong>,
+where replacing history with distilled memory bounds per-turn cost directly.</p>
+<h2>Install</h2>
+<pre><code class="language-bash">pip install khwan-mcp          # or: uvx khwan-mcp
+</code></pre>
+<h2>Connect to Claude Code</h2>
+<pre><code class="language-bash">claude mcp add khwan --scope project \
+  -e KHWAN_CORE=default \
+  -- khwan-mcp
+</code></pre>
+<p><code>--scope project</code> writes <code>.mcp.json</code> into the repo, so the setting travels with
+the project. Note what is <strong>not</strong> in that command: the key.</p>
+<h3>Keeping the key out of the repo</h3>
+<p><code>claude mcp add -e KHWAN_API_KEY=…</code> writes the literal value into <code>.mcp.json</code> —
+a file whose whole point is being committed. Two ways to avoid that, and the
+second is the one that works everywhere:</p>
+<p><strong>Shell environment.</strong> Leave <code>KHWAN_API_KEY</code> out of the config entirely and
+export it in the shell that launches <code>claude</code>. The server inherits it.</p>
+<pre><code class="language-bash">export KHWAN_API_KEY=kwk_live_xxx
+</code></pre>
+<p><strong>A launcher (works in the desktop app too).</strong> A desktop app is started from a
+dock or menu, not a login shell, so it inherits none of your shell exports and
+the approach above silently yields no key. Read it from a file instead:</p>
+<pre><code class="language-bash">mkdir -p ~/.khwan &amp;&amp; chmod 700 ~/.khwan
+printf 'KHWAN_API_KEY=kwk_live_xxx\n' &gt; ~/.khwan/env &amp;&amp; chmod 600 ~/.khwan/env
+
+cat &gt; ~/.khwan/khwan-mcp &lt;&lt;'SH'
+#!/bin/sh
+set -a
+[ -f "$HOME/.khwan/env" ] &amp;&amp; . "$HOME/.khwan/env"
+set +a
+exec khwan-mcp "$@"
+SH
+chmod 700 ~/.khwan/khwan-mcp
+</code></pre>
+<p>Then point the config at the launcher and keep only non-secret settings inline:</p>
+<pre><code class="language-bash">claude mcp add khwan --scope project \
+  -e KHWAN_CORE=acme -e KHWAN_USER=Web \
+  -- ~/.khwan/khwan-mcp
+</code></pre>
+<p><code>.mcp.json</code> is now safe to commit, and every new repo costs two lines instead of
+a pasted key. Anyone else on the team writes their own <code>~/.khwan/env</code>.</p>
+<h2>One brain per project</h2>
+<p>Memory is only useful if the right project's memory comes back. Two axes, and
+both give <strong>complete</strong> isolation:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>selected by</th>
+<th>costs</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>core</strong></td>
+<td><code>KHWAN_CORE</code></td>
+<td>one of your plan's cores</td>
+</tr>
+<tr>
+<td><strong>sub-brain</strong></td>
+<td><code>KHWAN_USER</code> (with a core)</td>
+<td>nothing — unlimited on paid plans</td>
+</tr>
+</tbody></table>
+<p>A sub-brain is a full separate brain, not a filter: <code>account::acme::@Web</code> shares
+nothing with <code>account::acme::@Api</code>. So a client with several repositories can be
+one core with a sub-brain each, rather than a core each:</p>
+<pre><code class="language-bash"># in ~/code/acme-web
+claude mcp add khwan --scope project -e KHWAN_CORE=acme -e KHWAN_USER=Web -- ~/.khwan/khwan-mcp
+# in ~/code/acme-api
+claude mcp add khwan --scope project -e KHWAN_CORE=acme -e KHWAN_USER=Api -- ~/.khwan/khwan-mcp
+</code></pre>
+<p>Cores must exist before you point at one — an unknown core answers 404. Create
+them in the dashboard. Sub-brains are created on first write.</p>
+<h3>Recommended pattern (token-smart)</h3>
+<p>On a caching host like Claude Code, prefer <strong>seed + remember</strong> over the per-turn
+loop:</p>
+<ol>
+<li><strong>Seed</strong> at the start of a session or subagent:<blockquote>
+<p>"Call <code>khwan_recall(query="&lt;the task&gt;")</code> and use the returned <code>seed_text</code> as
+context."</p>
+</blockquote>
+</li>
+<li><strong>Remember</strong> durable facts as they emerge:<blockquote>
+<p>"That's a standing decision — call <code>khwan_remember(fact="…")</code>."</p>
+</blockquote>
+</li>
+</ol>
+<p>Reinforce it in your project's <code>CLAUDE.md</code>, e.g.:</p>
+<pre><code class="language-md">- At the start of a task, call `khwan_recall` to seed relevant memory.
+- When a durable decision/preference/fact emerges, call `khwan_remember`.
+- Don't call prepare/record every turn — it adds tokens without saving them here.
+</code></pre>
+<p><strong>Seeding a subagent</strong> is where the win is clearest — hand it a bounded brief
+instead of the whole transcript:</p>
+<blockquote>
+<p>"Recall deploy memory with <code>khwan_recall(query="deploy runbook")</code>, then spawn a
+subagent whose brief is that <code>seed_text</code> plus the task."</p>
+</blockquote>
+<h2>Connect to Claude Desktop</h2>
+<p>Claude Desktop and Claude Code keep <strong>separate</strong> MCP configuration — a server
+added to one is invisible to the other, and <code>claude mcp add</code> does not touch this
+file. Add to <code>claude_desktop_config.json</code>:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "khwan": {
+      "command": "/Users/you/.khwan/khwan-mcp",
+      "env": {
+        "KHWAN_CORE": "acme",
+        "KHWAN_USER": "Web"
+      }
+    }
+  }
+}
+</code></pre>
+<p>Use an absolute path: a desktop app does not get your shell's <code>PATH</code> either, so
+a bare <code>khwan-mcp</code> may not resolve. One core is selected for the whole app —
+there is no per-project switch here, so choose a broad one.</p>
+<h2>Configuration (environment)</h2>
+<table>
+<thead>
+<tr>
+<th>Var</th>
+<th>Required</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>KHWAN_API_KEY</code></td>
+<td>yes</td>
+<td>Your key from the Khwan dashboard (<code>kwk_live_…</code>).</td>
+</tr>
+<tr>
+<td><code>KHWAN_CORE</code></td>
+<td>no</td>
+<td>Select an isolated core/brain (default: the account's default core).</td>
+</tr>
+<tr>
+<td><code>KHWAN_USER</code></td>
+<td>no</td>
+<td>Isolated sub-brain per end-user (paid); sets <code>X-Khwan-User</code>.</td>
+</tr>
+<tr>
+<td><code>KHWAN_BASE_URL</code></td>
+<td>no</td>
+<td>Override the API base — e.g. <code>http://127.0.0.1:8010</code> for a local engine.</td>
+</tr>
+</tbody></table>
+<h2>Tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>khwan_recall(query, limit=3)</code></td>
+<td><strong>seed</strong> a session/subagent — synthesised <code>lessons</code> + up to 3 relevant facts, as <code>seed_text</code>.</td>
+</tr>
+<tr>
+<td><code>khwan_remember(fact)</code></td>
+<td><strong>persist</strong> a durable fact/preference for future sessions.</td>
+</tr>
+<tr>
+<td><code>khwan_prepare(input)</code></td>
+<td>full loop, <strong>before</strong> answering — memory context + a <code>turn_token</code>.</td>
+</tr>
+<tr>
+<td><code>khwan_record(turn_token, answer)</code></td>
+<td>full loop, <strong>after</strong> answering — persists the turn so Khwan learns.</td>
+</tr>
+<tr>
+<td><code>khwan_memory(limit=20)</code></td>
+<td>inspect what the brain currently remembers.</td>
+</tr>
+<tr>
+<td><code>khwan_cores()</code></td>
+<td>list the isolated cores on the account.</td>
+</tr>
+</tbody></table>
+<p><code>khwan_recall</code> / <code>khwan_remember</code> are the token-smart pair for a caching host;
+<code>khwan_prepare</code> / <code>khwan_record</code> are the full loop for custom agents (pass the
+exact <code>turn_token</code> from prepare back into record).</p>
+<h3>What comes back, and what an empty answer means</h3>
+<p><code>khwan_recall</code> returns at most <strong>three</strong> facts — that ceiling is the server's,
+so <code>limit</code> can lower it but not raise it — plus any <code>lessons</code> synthesis has
+distilled from many past turns. Lessons lead the <code>seed_text</code>: a rule earned over
+months outranks a single turn that happens to sit nearby in the index.</p>
+<p>Retrieval applies a relevance floor, so <strong>an empty <code>facts</code> is an answer</strong>: the
+brain has nothing close to this question. Read it as "not known here" rather than
+as a failure, and do not fill the gap by leaning on whichever fact was nearest.</p>
+<p>The floor is deliberately loose, because a memory wrongly dropped is invisible
+while a memory wrongly kept is not. Expect a returned fact to be <em>plausibly</em>
+related, not certainly relevant — read it before relying on it.</p>
+<h2>Seeding a brain from work you have already done</h2>
+<p>A new brain knows nothing, so its first weeks of recall are thin — while the
+answers are often already sitting in the host's own transcripts, unread.
+<a href="https://github.com/khwanlabs/khwan-mcp/blob/HEAD/examples/backfill/" target="_blank" rel="noopener noreferrer"><code>examples/backfill/</code></a> replays Claude Code transcripts into a
+brain: deterministic, no model calls, dry-run by default.</p>
+<pre><code class="language-bash">python3 examples/backfill/backfill_claude_code.py --map cores.json
+</code></pre>
+<h2>Always-on memory (Claude Code hooks)</h2>
+<p>The tools above are called <em>when Claude decides to</em>. For <strong>deterministic</strong> memory
+— no reliance on the model — use the hook preset in
+<a href="https://github.com/khwanlabs/khwan-mcp/blob/HEAD/examples/claude-code-hooks/" target="_blank" rel="noopener noreferrer"><code>examples/claude-code-hooks/</code></a>: a <code>UserPromptSubmit</code>
+hook injects memory on every prompt and a <code>Stop</code> hook records every answer.</p>
+<blockquote>
+<p>⚠️ On a caching host this is the <em>thorough</em> option, not the <em>cheap</em> one — it
+adds per-turn tokens. Prefer it when recall reliability matters more than token
+cost (or on a non-caching client); otherwise use <code>khwan_recall</code> at session
+start.</p>
+</blockquote>
+<h2>Source</h2>
+<p><a href="https://github.com/khwanlabs/khwan-mcp" target="_blank" rel="noopener noreferrer">github.com/khwanlabs/khwan-mcp</a> — this
+server runs on your machine, with your key, reading what you type. Read it before
+you install it.</p>
+<h2>License</h2>
+<p>MIT — © Khwan Labs. See <a href="https://github.com/khwanlabs/khwan-mcp/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>.</p>

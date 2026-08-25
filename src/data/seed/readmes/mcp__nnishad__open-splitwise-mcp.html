@@ -1,0 +1,304 @@
+<h1>open-splitwise</h1>
+<p><strong>Turn <a href="https://www.splitwise.com" target="_blank" rel="noopener noreferrer">Splitwise</a> into an agent-native expense tracker.</strong></p>
+<p>An open <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">Model Context Protocol</a> (MCP) server that lets
+any AI agent — Hermes, Claude Desktop, Claude Code, Cursor, or anything that speaks MCP —
+read balances, split expenses from messy natural language, diagnose its own auth problems,
+and never think about rate limits.</p>
+<p><code>Python 3.11+</code> · <code>MCP spec 2026-07-28</code> · <code>stdio transport</code> · <code>33 tools · lazy-loaded</code></p>
+<hr />
+<h2>Why</h2>
+<p>Existing Splitwise integrations hand the model a raw API mirror and hope for the best.
+That fails in predictable ways: the model invents category IDs, mis-splits ₹300 three ways,
+believes Splitwise's <code>200 OK</code> when the request actually failed, or treats a rate-limit
+response as a bug to retry aggressively.</p>
+<p><strong>open-splitwise</strong> fixes this at the server layer:</p>
+<table>
+<thead>
+<tr>
+<th>Problem for agents</th>
+<th>What open-splitwise does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>"Split dinner with Alice" requires 3–4 API calls + arithmetic</td>
+<td><code>quick_add_expense</code> resolves names → IDs, computes cent-exact shares, picks the category, posts once</td>
+</tr>
+<tr>
+<td>Two Alices in your friends list</td>
+<td><code>resolve_users</code> returns candidate lists so the agent asks <em>you</em> which one</td>
+</tr>
+<tr>
+<td>"What do I owe?" needs multi-endpoint aggregation</td>
+<td><code>money_summary</code> returns per-currency totals in one call</td>
+</tr>
+<tr>
+<td>Splitwise returns <code>200 OK</code> with an <code>errors</code> object</td>
+<td>Server checks it; failures surface as tool errors with actionable text — never false success</td>
+</tr>
+<tr>
+<td>HTTP 429 rate limits</td>
+<td>Retried invisibly (<code>Retry-After</code> honored, exponential backoff fallback)</td>
+</tr>
+<tr>
+<td>Key revoked / logged out mid-session</td>
+<td>Errors tell the agent the cause and to run <code>setup_auth</code>; new keys apply instantly, no restart</td>
+</tr>
+<tr>
+<td>33 tool schemas burn ~4k tokens in every prompt</td>
+<td><strong>Lazy tool discovery</strong>: only 7 essential tools are exposed by default; <code>search_tools("expenses")</code> loads the rest on demand with full schemas</td>
+</tr>
+</tbody></table>
+<h2>Features</h2>
+<ul>
+<li><strong>Complete API coverage</strong> — all 27 endpoints of the official Splitwise OpenAPI 3.0 spec,
+one tool each, faithful names.</li>
+<li><strong>Workflow layer</strong> — high-level tools so a single utterance maps to a single call.</li>
+<li><strong>Self-service auth lifecycle</strong> — <code>setup_auth</code> validates a key live against Splitwise
+before storing it (wrong keys are never persisted), <code>get_auth_status</code> explains what's
+configured, <code>logout</code> clears credentials. Re-auth works mid-session.</li>
+<li><strong>Honest errors</strong> — every failure mode (unresolved person, share-sum mismatch, unknown
+category, revoked key, exhausted retries) returns text telling the agent exactly what
+happened and what to do next.</li>
+<li><strong>Safe-by-default annotations</strong> — reads carry <code>readOnlyHint</code>, destructive deletes carry
+<code>destructiveHint</code>, per MCP 2026-07-28 semantics. Tools register in deterministic order
+for cache-friendly discovery.</li>
+<li><strong>Local-first secrets</strong> — API key stored at <code>~/.config/splitwise-mcp/credentials.json</code>,
+mode <code>0600</code>, atomic writes, never echoed back (masked previews only).</li>
+</ul>
+<h2>Quick start</h2>
+<pre><code class="language-bash">git clone https://github.com/&lt;you&gt;/open-splitwise.git
+cd open-splitwise
+uv sync
+</code></pre>
+<p>Run it standalone (stdio):</p>
+<pre><code class="language-bash">uv run open-splitwise          # starts with no key configured — see auth below
+</code></pre>
+<p>Get an API key at <a href="https://secure.splitwise.com/apps" target="_blank" rel="noopener noreferrer">https://secure.splitwise.com/apps</a> <em>(Account Settings → API keys)</em>.</p>
+<h3>Connect any MCP client</h3>
+<p>Generic stdio block (Claude Desktop <code>claude_desktop_config.json</code>, Claude Code <code>.mcp.json</code>,
+Cursor, …):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "splitwise": {
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/open-splitwise", "run", "open-splitwise"],
+      "env": { "SPLITWISE_API_KEY": "&lt;optional: preconfigure&gt;" }
+    }
+  }
+}
+</code></pre>
+<h3>Connect Hermes Agent</h3>
+<p>Add to <code>~/.hermes/config.yaml</code>:</p>
+<pre><code class="language-yaml">mcp_servers:
+  splitwise:
+    command: "uv"
+    args: ["--directory", "/absolute/path/to/open-splitwise", "run", "open-splitwise"]
+    env:
+      SPLITWISE_API_KEY: "&lt;optional&gt;"
+    tools:
+      include: [quick_add_expense, resolve_users, money_summary, get_auth_status]
+    prompts: false
+    resources: false
+</code></pre>
+<p>Then <code>/reload-mcp</code>. Start with the four workflow/auth tools above; add raw API tools only
+when needed — Hermes' per-server filtering keeps the tool surface small.</p>
+<h2>Authentication lifecycle</h2>
+<p>The server is designed so <strong>agents diagnose and fix auth themselves</strong>, asking you only for
+the secret:</p>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th>Agent-visible behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>No key anywhere</td>
+<td>Every tool fails with: <em>"No Splitwise API key is configured. Ask the user to generate one at secure.splitwise.com/apps, then call setup_auth."</em></td>
+</tr>
+<tr>
+<td>User provides a key</td>
+<td><code>setup_auth(api_key)</code> probes <code>/get_current_user</code> first — invalid keys are <strong>rejected, not stored</strong>; valid keys are saved and who they belong to is reported</td>
+</tr>
+<tr>
+<td>Key revoked / account logged out (HTTP 401/403)</td>
+<td>Tools fail with <em>"key may have been revoked, expired, or the account was logged out… ask the user for a fresh key and call setup_auth"</em></td>
+</tr>
+<tr>
+<td>Diagnosis</td>
+<td><code>get_auth_status()</code> → <code>{configured, source: stored|environment, masked_key}</code></td>
+</tr>
+<tr>
+<td>Switching accounts</td>
+<td><code>logout()</code> deletes the stored credential</td>
+</tr>
+</tbody></table>
+<p>Key resolution happens <strong>per request</strong>: stored credential → <code>SPLITWISE_API_KEY</code> env var →
+none. A freshly saved key takes effect immediately in the running process — zero restarts.</p>
+<p>Credentials live at <code>~/.config/splitwise-mcp/credentials.json</code> (mode <code>0600</code>). Override the
+directory with <code>SPLITWISE_MCP_CONFIG_DIR</code> (handy for tests or multi-profile setups).</p>
+<h2>Agent ergonomics</h2>
+<pre><code class="language-text">You:      "add dinner 900 split with alice and bob@x.com, groceries"
+Agent:    quick_add_expense(description="Dinner", cost="900.00",
+                            participants=["alice", "bob@x.com"],
+                            category_name="groceries")
+Server:   resolves alice→12? two matches! → error listing Alice A (id 10), Alice Wood (id 12)
+Agent:    "Which Alice?"  → you answer → re-call succeeds
+Server:   { status: created, expense_id: 99123,
+            splits: [ "Nikhil paid 900.00 INR",
+                      "Alice A owes 300.00 INR",
+                      "Bob B owes 300.00 INR" ] }
+</code></pre>
+<ul>
+<li><strong><code>quick_add_expense</code></strong> — names/partial-names/emails/IDs accepted; equal shares computed
+with remainder cents distributed deterministically; custom <code>owed_shares</code> validated to sum
+exactly; payer included by default (<code>include_payer_in_split=false</code> when they didn't
+consume); currency defaults from your profile.</li>
+<li><strong><code>resolve_users</code></strong> — email exact-match, full-name match, unique first-name, substring
+fallback; ambiguity returns candidates instead of guessing.</li>
+<li><strong><code>money_summary</code></strong> — per-currency <code>owed_to_you</code> / <code>you_owe</code> / <code>net</code>, friend-level
+balances, and group simplified debts involving you.</li>
+</ul>
+<h2>Tool reference (33)</h2>
+<table>
+<thead>
+<tr>
+<th>Group</th>
+<th>Tools</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Workflows</strong></td>
+<td><code>quick_add_expense</code> · <code>resolve_users</code> · <code>money_summary</code></td>
+</tr>
+<tr>
+<td>Users</td>
+<td><code>get_current_user</code> · <code>get_user</code> · <code>update_user</code></td>
+</tr>
+<tr>
+<td>Groups</td>
+<td><code>get_groups</code> · <code>get_group</code> · <code>create_group</code> · <code>delete_group</code>* · <code>undelete_group</code> · <code>add_user_to_group</code> · <code>remove_user_from_group</code></td>
+</tr>
+<tr>
+<td>Friends</td>
+<td><code>get_friends</code> · <code>get_friend</code> · <code>create_friend</code> · <code>create_friends</code> · <code>delete_friend</code>*</td>
+</tr>
+<tr>
+<td>Expenses</td>
+<td><code>get_expenses</code> · <code>get_expense</code> · <code>create_expense</code> · <code>update_expense</code> · <code>delete_expense</code>* · <code>undelete_expense</code></td>
+</tr>
+<tr>
+<td>Comments</td>
+<td><code>get_comments</code> · <code>create_comment</code> · <code>delete_comment</code>*</td>
+</tr>
+<tr>
+<td>Notifications</td>
+<td><code>get_notifications</code></td>
+</tr>
+<tr>
+<td>Other</td>
+<td><code>get_currencies</code> · <code>get_categories</code></td>
+</tr>
+<tr>
+<td>Auth</td>
+<td><code>setup_auth</code> · <code>get_auth_status</code> · <code>logout</code>*</td>
+</tr>
+</tbody></table>
+<p>* annotated <code>destructiveHint=true</code>; all <code>get_*</code> tools annotated <code>readOnlyHint=true</code>.
+Prefer workflow tools over their raw counterparts whenever both exist.</p>
+<h2>Rate limiting</h2>
+<p>Splitwise answers <code>HTTP 429</code> when throttled. open-splitwise retries automatically:
+<code>Retry-After</code> header honored verbatim; otherwise exponential backoff (0.5 s doubling,
+capped at 30 s), up to 3 attempts by default. Agents see an error only if every attempt is
+exhausted — and that error says to slow down, not retry blindly.</p>
+<h2>Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Env var</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SPLITWISE_API_KEY</code></td>
+<td>–</td>
+<td>Bootstrap key (stored credentials take precedence)</td>
+</tr>
+<tr>
+<td><code>SPLITWISE_MCP_CONFIG_DIR</code></td>
+<td><code>~/.config/splitwise-mcp</code></td>
+<td>Where <code>credentials.json</code> lives</td>
+</tr>
+<tr>
+<td><code>SPLITWISE_MCP_MAX_RETRIES</code></td>
+<td><code>3</code></td>
+<td>429 retry attempts before surfacing</td>
+</tr>
+<tr>
+<td><code>SPLITWISE_MCP_LAZY</code></td>
+<td><code>on</code></td>
+<td><code>off</code> registers all 33 tools upfront</td>
+</tr>
+</tbody></table>
+<h2>Splitwise quirks handled for you</h2>
+<ul>
+<li>Array params flattened to Splitwise's odd <code>users__{index}__{property}</code> encoding</li>
+<li><code>200 OK ≠ success</code>: <code>errors{}</code> / <code>success:false</code> checked on every mutation</li>
+<li>Money as decimal <strong>strings</strong> with 2 dp; remainder cents distributed, sums always exact</li>
+<li><code>category_id</code> must be a <strong>subcategory</strong> — enforced via fuzzy name resolution</li>
+<li>Balances/debts read from pre-computed <code>balance[]</code> / <code>simplified_debts</code> (never recomputed)</li>
+<li>"Settle up" is just an expense with <code>payment:true</code> (no dedicated endpoint exists)</li>
+<li>OAuth2 exists but is deliberately out of scope: personal API keys fit the
+agent-asks-user flow; OAuth needs a redirect URI + browser (hosted deployments only)</li>
+</ul>
+<h2>Architecture</h2>
+<pre><code class="language-text">┌─────────────── any MCP client ───────────────┐
+│  Hermes / Claude Desktop / Cursor / …        │
+└──────────────────┬───────────────────────────┘
+                   │ JSON-RPC over stdio
+┌──────────────────▼───────────────────────────┐
+│ server.py — FastMCP app, 33 tools            │
+│   workflows · raw endpoints · auth lifecycle │
+├──────────────────────────────────────────────┤
+│ client.py — async REST client                │
+│   bearer auth (per-request key resolution)   │
+│   param flattening · success verification    │
+│   transparent 429 retry/backoff              │
+├──────────────────────────────────────────────┤
+│ auth.py — credentials.json (0600, atomic)    │
+└──────────────────┬───────────────────────────┘
+                   │ HTTPS
+          secure.splitwise.com/api/v3.0
+</code></pre>
+<h2>Development</h2>
+<pre><code class="language-bash">uv run pytest                        # 54 tests: client, rate limits, auth, workflows, lazy loading, MCP semantics
+uv run python scripts/smoke_stdio.py # real subprocess: handshake, discovery, live auth-failure paths
+</code></pre>
+<p>Built test-first (strict TDD): every behavior above has a failing-test-first provenance.
+Layout:</p>
+<pre><code class="language-text">src/open_splitwise/
+  client.py    # REST client: auth provider, flattening, retry, error mapping
+  auth.py      # credential storage
+  server.py    # FastMCP definitions: workflows + raw + auth tools
+tests/
+scripts/smoke_stdio.py
+</code></pre>
+<h2>Terms of use</h2>
+<p>Splitwise's self-serve API is <strong>non-commercial</strong> per their <a href="https://dev.splitwise.com/#section/Terms-of-Use" target="_blank" rel="noopener noreferrer">API terms</a>.
+Your API key grants full access to your account — treat it like a password. This project
+is an independent integration and is not affiliated with or endorsed by Splitwise Inc.</p>
+<h2>Roadmap</h2>
+<ul>
+<li> Receipt upload on expense creation</li>
+<li> Multi-currency expense helper with conversion awareness</li>
+<li> Recurring-expense summaries as an MCP prompt</li>
+<li> Optional Streamable HTTP transport for hosted/multi-user deployments (+OAuth2)</li>
+<li> Publish to PyPI (<code>uvx open-splitwise</code>)</li>
+</ul>
+<h2>Contributing</h2>
+<p>PRs welcome — please keep the TDD discipline (tests fail first, then pass), keep tool
+descriptions written <em>for models</em>, and never log secrets.</p>
+<h2>License</h2>
+<p><a href="https://github.com/nnishad/open-splitwise-mcp/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a> — open for everyone: use it, modify it, ship it, sell with it. Just keep
+the copyright notice.</p>

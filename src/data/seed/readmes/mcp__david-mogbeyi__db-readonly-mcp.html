@@ -1,0 +1,191 @@
+<h1>db-readonly-mcp</h1>
+<p>An <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">MCP</a> server that gives an AI assistant (Claude
+Code, Claude Desktop, or any other MCP client) guarded, <strong>read-only</strong> access to a
+Postgres database. Ask something like "get me all merchants created yesterday" and
+the assistant writes the SQL and runs it through this server, which enforces that the
+query can only ever read data.</p>
+<p>Postgres only — no other databases are supported.</p>
+<h2>Why this exists</h2>
+<p>Letting an assistant query your database directly is genuinely useful for debugging,
+data exploration, and answering "how many X" questions without writing a script every
+time. The risk is obvious: an LLM can hallucinate or be prompted into writing a
+destructive query. This server exists to make that risk close to zero, with several
+independent layers of protection rather than relying on any single one.</p>
+<h2>Safety model</h2>
+<p>Layered, in order of how much they're actually trusted:</p>
+<ol>
+<li><strong>DB role</strong> — the connection uses a dedicated Postgres role with <code>SELECT</code>-only
+grants. This is the real boundary: even if every other layer were bypassed, the
+role can't write.</li>
+<li><strong>Query validation</strong> — rejects anything that isn't a single <code>SELECT</code>/<code>WITH ... SELECT</code> statement (no semicolon-stacked statements, no DDL/DML keywords).</li>
+<li><strong>Enforced <code>LIMIT</code></strong> — every query is wrapped in <code>SELECT * FROM (...) LIMIT N</code>,
+capped at <code>MAX_LIMIT</code> regardless of what's requested.</li>
+<li><strong><code>statement_timeout</code></strong> — queries are killed after <code>STATEMENT_TIMEOUT_MS</code>.</li>
+<li><strong>Startup log</strong> — logs the connected database/user to stderr on boot, so it's
+obvious which DB you're pointed at before any query runs.</li>
+</ol>
+<p><strong>Only ever point this server at a dev/test/staging database — never at
+production.</strong> Layers 2-5 are defense in depth; layer 1 (the DB role) is the only
+layer you should actually trust, and even that shouldn't be trusted with prod data.</p>
+<h2>Requirements</h2>
+<ul>
+<li>Node.js &gt;= 20</li>
+<li>A Postgres database you can create a role on</li>
+<li>An MCP client (e.g. <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a>,
+Claude Desktop, or any other client that supports MCP servers over stdio)</li>
+</ul>
+<h2>Setup</h2>
+<h3>1. Clone and install</h3>
+<pre><code class="language-bash">git clone https://github.com/david-mogbeyi/db-readonly-mcp.git
+cd db-readonly-mcp
+npm install
+</code></pre>
+<h3>2. Create the read-only role</h3>
+<p>Run this against your target Postgres database — replace the role name, password,
+database name, and schema/owner if your app uses something other than <code>public</code>:</p>
+<pre><code class="language-sql">CREATE ROLE myapp_readonly WITH LOGIN PASSWORD '&lt;choose-a-password&gt;';
+GRANT CONNECT ON DATABASE myapp TO myapp_readonly;
+GRANT USAGE ON SCHEMA public TO myapp_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO myapp_readonly;
+
+-- Keeps future tables (new migrations) readable automatically, without
+-- re-running this grant every time the schema changes.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO myapp_readonly;
+</code></pre>
+<p>If your schema isn't <code>public</code>, or you have multiple schemas, repeat the <code>GRANT USAGE</code>/<code>GRANT SELECT</code>/<code>ALTER DEFAULT PRIVILEGES</code> lines for each one. This server
+currently only queries the <code>public</code> schema for <code>list_tables</code>/<code>describe_table</code>, but
+<code>query_readonly</code> can reference any schema the role has been granted access to.</p>
+<h3>3. Configure</h3>
+<pre><code class="language-bash">cp .env.example .env
+</code></pre>
+<p>Edit <code>.env</code> and set <code>DATABASE_URL</code> to the readonly role's connection string:</p>
+<pre><code class="language-bash">DATABASE_URL=postgresql://myapp_readonly:&lt;password&gt;@localhost:5432/myapp
+</code></pre>
+<p>See <a href="#configuration" target="_blank" rel="noopener noreferrer">Configuration</a> below for the other variables.</p>
+<h3>4. Build</h3>
+<pre><code class="language-bash">npm run build
+</code></pre>
+<p>This compiles <code>src/</code> to <code>dist/</code> via <code>tsc</code>. Re-run it after pulling changes or editing
+source.</p>
+<h2>Register with an MCP client</h2>
+<h3>Claude Code</h3>
+<p>In the project you want to query from, add an <code>.mcp.json</code> (or edit your existing
+one):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "db-readonly": {
+      "command": "node",
+      "args": ["/absolute/path/to/db-readonly-mcp/dist/index.js"],
+      "env": {
+        "DATABASE_URL": "postgresql://myapp_readonly:&lt;password&gt;@localhost:5432/myapp"
+      }
+    }
+  }
+}
+</code></pre>
+<p>Replace <code>/absolute/path/to/db-readonly-mcp</code> with wherever you cloned this repo.
+Restart Claude Code (or reconnect MCP servers) to pick it up.</p>
+<p>You can also register it globally rather than per-project — see the <a href="https://docs.claude.com/en/docs/claude-code/mcp" target="_blank" rel="noopener noreferrer">Claude Code MCP
+docs</a> for <code>claude mcp add</code> and scope
+options.</p>
+<h3>Claude Desktop / other MCP clients</h3>
+<p>Any client that supports MCP servers over stdio can use this the same way: point it
+at <code>node /absolute/path/to/db-readonly-mcp/dist/index.js</code> with <code>DATABASE_URL</code> (and
+optionally the other env vars below) set in its environment. See your client's docs
+for where its MCP server config lives — for Claude Desktop this is
+<code>claude_desktop_config.json</code>, using the same <code>command</code>/<code>args</code>/<code>env</code> shape as above.</p>
+<h2>Configuration</h2>
+<p>All configuration is via environment variables (set in <code>.env</code> for local runs, or in
+the <code>env</code> block of your MCP client config).</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th align="center">Required</th>
+<th align="center">Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DATABASE_URL</code></td>
+<td align="center">Yes</td>
+<td align="center">—</td>
+<td>Postgres connection string for the read-only role.</td>
+</tr>
+<tr>
+<td><code>DEFAULT_LIMIT</code></td>
+<td align="center">No</td>
+<td align="center">100</td>
+<td>Row limit applied when a query doesn't specify one.</td>
+</tr>
+<tr>
+<td><code>MAX_LIMIT</code></td>
+<td align="center">No</td>
+<td align="center">1000</td>
+<td>Hard ceiling on rows returned, regardless of what's requested.</td>
+</tr>
+<tr>
+<td><code>STATEMENT_TIMEOUT_MS</code></td>
+<td align="center">No</td>
+<td align="center">5000</td>
+<td>Postgres <code>statement_timeout</code> for every query, in milliseconds.</td>
+</tr>
+</tbody></table>
+<h2>Tools</h2>
+<p>The server exposes three tools to the assistant:</p>
+<h3><code>list_tables</code></h3>
+<p>Lists tables in the <code>public</code> schema. No arguments.</p>
+<pre><code class="language-json">→ [
+    { "table_name": "merchants" },
+    { "table_name": "orders" },
+    ...
+  ]
+</code></pre>
+<h3><code>describe_table(table)</code></h3>
+<p>Columns, types, nullability, and defaults for a table in the <code>public</code> schema.</p>
+<pre><code class="language-json">{ "table": "merchants" }
+→ [
+    { "column_name": "id", "data_type": "uuid", "is_nullable": "NO", "column_default": "gen_random_uuid()" },
+    { "column_name": "created_at", "data_type": "timestamp with time zone", "is_nullable": "NO", "column_default": "now()" },
+    ...
+  ]
+</code></pre>
+<h3><code>query_readonly(sql, limit?)</code></h3>
+<p>Runs a single guarded <code>SELECT</code> (or <code>WITH ... SELECT</code>) statement. <code>limit</code> is optional
+and capped at <code>MAX_LIMIT</code> even if a larger value is passed.</p>
+<pre><code class="language-json">{ "sql": "SELECT id, name, created_at FROM merchants WHERE created_at &gt; now() - interval '1 day'" }
+→ { "rowCount": 3, "rows": [ { "id": "...", "name": "...", "created_at": "..." }, ... ] }
+</code></pre>
+<p>Anything that isn't a single <code>SELECT</code>/<code>WITH</code> statement — multiple statements, DDL,
+DML, <code>SET</code>, etc. — is rejected before it reaches the database, with an explanation of
+why.</p>
+<h2>Local development</h2>
+<pre><code class="language-bash">npm run dev   # runs src/index.ts directly via tsx, loads .env via Node's --env-file
+</code></pre>
+<h3>Project structure</h3>
+<pre><code>src/
+  index.ts    # MCP server setup and tool definitions
+  sqlGuard.ts # query validation (layer 2 of the safety model)
+  db.ts       # Postgres pool setup (statement_timeout, pool size)
+  config.ts   # env var loading/validation
+</code></pre>
+<h2>Troubleshooting</h2>
+<ul>
+<li><strong>"DATABASE_URL environment variable is required"</strong> — <code>.env</code> is missing or not
+being loaded; confirm it exists (from <code>cp .env.example .env</code>) and that your MCP
+client's <code>env</code> block or <code>npm run dev</code>/<code>npm start</code> is picking it up.</li>
+<li><strong>Server logs the wrong database/user on startup</strong> — check <code>DATABASE_URL</code>; the
+startup log (<code>connected as "..." to database "..."</code>) is printed specifically so
+this is easy to catch before any query runs.</li>
+<li><strong>"Query rejected: ..."</strong> — the query either wasn't a single <code>SELECT</code>/<code>WITH</code>
+statement or contained a disallowed keyword. This is layer 2 of the safety model
+working as intended, not a bug.</li>
+<li><strong>Query hangs then errors</strong> — likely hitting <code>STATEMENT_TIMEOUT_MS</code>; raise it in
+<code>.env</code> if your workload legitimately needs longer, or optimize the query.</li>
+</ul>
+<h2>Contributing</h2>
+<p>Issues and PRs welcome. This is intentionally a small, auditable tool — the goal is
+to keep the safety model simple enough to read in full, not to grow it into a general
+query builder.</p>
+<h2>License</h2>
+<p><a href="https://github.com/david-mogbeyi/db-readonly-mcp/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>

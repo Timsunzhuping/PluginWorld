@@ -67,6 +67,7 @@ export async function GET(req: Request) {
         spec_valid: p.specValid,
         quality_score: p.qualityScore,
         score_breakdown: p.scoreBreakdown,
+        security_grade: p.securityGrade,
         trust_flags: p.trustFlags,
         npm_package: p.npmPackage,
         url: `https://www.pluginworld.ai/plugins/${p.slug}`,

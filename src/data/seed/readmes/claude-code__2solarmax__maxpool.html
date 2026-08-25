@@ -1,0 +1,439 @@
+<h1>Maxpool</h1>
+<p>Multi-account proxy for <a href="https://claude.ai/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a> that spreads your work across several Claude accounts with adaptive, rate-aware load balancing.</p>
+<p>Sits transparently between Claude Code and the Anthropic API, managing multiple Claude Max (or API key) accounts. Instead of waiting until one account hits a wall, it continuously balances requests by how much quota each account has <em>and</em> how soon that quota resets — so an account about to refresh gets used, and one burning through its budget early gets spared.</p>
+<p><img src="https://raw.githubusercontent.com/2solarmax/maxpool/HEAD/screenshots/maxpool.png" alt="Maxpool TUI" /></p>
+<h2>⚠️ Read this first: account risk and Anthropic's terms</h2>
+<p>This tool sits in a <strong>contested gray area</strong> of Anthropic's terms. Using it could put your Claude accounts at risk. Please read before installing.</p>
+<ul>
+<li><strong>Not blessed by Anthropic.</strong> This is an independent project. Anthropic has not approved multi-account proxying, and nothing here is covered by an official "this is allowed" statement.</li>
+<li><strong>The terms can be read to prohibit it.</strong> Anthropic's Consumer Terms (Section 3, automated access) and its February 2026 rule that subscription OAuth tokens are "only authorized for use with Claude Code" can reasonably be read to cover a proxy that selects and injects tokens across accounts. It is genuinely ambiguous, and the ambiguity is not in your favor.</li>
+<li><strong>Multiplexing is a detectable pattern.</strong> Many accounts fronted by one machine, with parallel sessions and fast token rotation, looks like the anomaly Anthropic's automated systems flag, regardless of intent. People have lost accounts to pattern detection, and a clawback can hit all your pooled accounts at once.</li>
+<li><strong>Owned accounts only. No spoofing.</strong> Only use accounts you personally own and pay for. Never share accounts across people (that is the clear violation), and never add IP/residential proxies, fingerprint spoofing, or MITM. Those are the documented ban triggers, and this fork deliberately leaves them out. PRs adding them will be rejected.</li>
+<li><strong>You are accepting the risk.</strong> If you use this, you may lose accounts you pay for. This notice protects honesty, not your account.</li>
+<li><strong>Do your own research. This is not legal advice.</strong> The terms have moved several times in 2026. Check the current terms yourself before relying on it.</li>
+</ul>
+<p>If you want certainty, ask Anthropic support directly, or use <strong>API-key accounts</strong> (the sanctioned path for tooling) instead of subscription OAuth.</p>
+<h2>Features</h2>
+<ul>
+<li><strong>Rate-aware load balancing</strong> — ranks accounts by remaining quota ÷ time-to-reset, not raw usage %, so a near-reset account with quota left is drained (use-it-or-lose-it) and one burning fast early in its window is spared; sequential traffic rotates across accounts instead of funnelling onto one</li>
+<li><strong>Interactive account &amp; routing management</strong> — add/import/enable-disable accounts and switch between automatic load balancing and a preferred (manual) account, all from the TUI</li>
+<li><strong>Quota-aware routing</strong> — avoids accounts when session (5h) or weekly (7d) quota reaches the configured threshold (default 90%)</li>
+<li><strong>Session affinity</strong> — optional session headers keep one Claude Code session on the same account until that account becomes unavailable</li>
+<li><strong>Fast failover on 429/overload</strong> — parks the affected account and retries another account before response bytes are sent</li>
+<li><strong>Provider fallback profile</strong> — optional <code>all</code> profile can use Claude accounts first, then GLM, then Kimi via local custom headers</li>
+<li><strong>Provider telemetry</strong> — GLM/Kimi rows show active requests, completed/failed counts, last status/latency, and standard rate-limit headers when providers return them</li>
+<li><strong>Rolling load view</strong> — each row shows current in-flight load plus request counts/average latency over the last 15 minutes and 1 hour</li>
+<li><strong>Interactive TUI</strong> — real-time dashboard with color-coded quota bars, reset countdowns, activity log, and keyboard controls</li>
+<li><strong>Graceful drain on restart</strong> — restart/quit/Ctrl-C stops new requests and waits for active streams to finish before exiting or relaunching</li>
+<li><strong>OAuth token management</strong> — automatically refreshes tokens nearing expiry and persists them to config; client token refreshes pass through untouched</li>
+<li><strong>Hot-sync accounts</strong> — add accounts via <code>import</code> or <code>login</code> while the server is running; the server auto-syncs config and <strong>s</strong> can sync immediately</li>
+<li><strong>Account deduplication</strong> — detects duplicate accounts by UUID and keeps the most recent</li>
+<li><strong>Request logging</strong> — optional full request/response logging for debugging</li>
+<li><strong>Zero dependencies</strong> — uses only Node.js built-in modules</li>
+</ul>
+<h2>Quick Start</h2>
+<p>Requires Node.js 18+.</p>
+<pre><code class="language-bash"># Install
+npm install -g maxpool
+
+# Add your first account (opens browser for OAuth)
+maxpool login
+
+# Add a second account
+maxpool login
+
+# Start the proxy
+maxpool server
+
+# In another terminal, run Claude Code through the proxy
+maxpool run
+</code></pre>
+<h2>Recommended setup</h2>
+<p>The cleanest way to use maxpool day-to-day: <strong>keep your normal <code>claude</code> login untouched, and add a separate alias that routes through the pool.</strong> Then plain <code>claude</code> still uses your default single account, and <code>ccmax</code> (call it whatever you like) spreads work across all your accounts.</p>
+<ol>
+<li><strong>Install and add your accounts</strong> (see <a href="#adding-accounts" target="_blank" rel="noopener noreferrer">Adding Accounts</a>):<pre><code class="language-bash">npm install -g maxpool
+maxpool login        # repeat for each account (browser) — or `maxpool import`
+</code></pre>
+</li>
+<li><strong>Start the proxy</strong> and leave it running (it shows a live dashboard):<pre><code class="language-bash">maxpool
+</code></pre>
+</li>
+<li><strong>Add an alias</strong> to your <code>~/.zshrc</code> (or <code>~/.bashrc</code>):<pre><code class="language-bash"># Run Claude Code through the maxpool proxy.
+# Your plain `claude` stays on its own separate login.
+ccmax() {
+  local url
+  url="$(maxpool env | sed -n 's/^export ANTHROPIC_BASE_URL=//p')"
+  ( unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+    ANTHROPIC_BASE_URL="$url" \
+    ANTHROPIC_CUSTOM_HEADERS="x-maxpool-session: $(uuidgen)" \
+    claude "$@" )
+}
+</code></pre>
+Reload with <code>source ~/.zshrc</code> (or just open a new terminal).</li>
+<li><strong>Use it:</strong><pre><code class="language-bash">ccmax            # Claude Code, load-balanced across all your accounts
+claude           # unchanged — still your normal single-account login
+</code></pre>
+</li>
+</ol>
+<p>Why this approach:</p>
+<ul>
+<li><strong>Your normal <code>claude</code> stays separate.</strong> maxpool keeps its own account tokens in its config; your everyday Claude Code login (in the OS keychain) is never touched. Use <code>ccmax</code> when you want the pool, <code>claude</code> when you don't.</li>
+<li><strong>Session affinity.</strong> The <code>x-maxpool-session</code> header pins each terminal to one account (with automatic failover), so a single task doesn't bounce between accounts mid-stream.</li>
+<li><strong>No key needed locally.</strong> The proxy listens on <code>127.0.0.1</code> and accepts local clients without an API key, so the alias stays short.</li>
+<li><strong>Composes with your other aliases.</strong> If you already use aliases for other providers (GLM, Kimi, …), <code>ccmax</code> slots right in alongside them.</li>
+</ul>
+<blockquote>
+<p>Prefer zero config? <code>maxpool run</code> launches Claude Code through the proxy for you — the alias above is the same idea, just composable with your own setup. Most people end up making an alias.</p>
+</blockquote>
+<h2>Adding Accounts</h2>
+<h3>OAuth Login (recommended)</h3>
+<p>The easiest way to add accounts — opens your browser for authentication:</p>
+<pre><code class="language-bash">maxpool login
+</code></pre>
+<p>Uses the same OAuth flow as Claude Code. Auto-detects the account email and subscription tier. Logging in with the same account again updates its credentials.</p>
+<p>You can add accounts while the server is running — press <strong>s</strong> in the TUI to sync immediately, or wait for automatic sync.</p>
+<blockquote>
+<p><strong>Note on adding accounts:</strong> OAuth login adds whatever account you're currently signed into at claude.ai — there's no account picker. To add a <em>different</em> account, sign into that account at claude.ai first (or use a logged-out / incognito browser window), then run <code>maxpool login</code>. (Importing the Claude Code CLI's own local login was removed — it shares a single-use credential the CLI keeps rotating, which broke the pooled copy. Use browser login so maxpool holds its own independent grant.)</p>
+</blockquote>
+<h3>API Key</h3>
+<p>For Anthropic API key accounts (billed via Console):</p>
+<pre><code class="language-bash">maxpool login --api
+</code></pre>
+<h2>Usage</h2>
+<h3>Start the proxy server</h3>
+<pre><code class="language-bash">maxpool server
+</code></pre>
+<p>When running from a TTY, shows an interactive TUI with:</p>
+<ul>
+<li>Account table with session/weekly quota progress bars and reset countdowns</li>
+<li>Real-time activity log with request tracking</li>
+<li>Keyboard shortcuts (see below)</li>
+</ul>
+<p>Falls back to plain log output when not a TTY (e.g. running as a service).</p>
+<h4>TUI Keyboard Shortcuts</h4>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>a</code></td>
+<td>Open account management</td>
+</tr>
+<tr>
+<td><code>m</code></td>
+<td>Choose automatic routing or a preferred account</td>
+</tr>
+<tr>
+<td><code>s</code></td>
+<td>Sync accounts and credentials from config now</td>
+</tr>
+<tr>
+<td><code>r</code></td>
+<td>Restart server after draining active requests</td>
+</tr>
+<tr>
+<td><code>q</code></td>
+<td>Stop server after draining active requests</td>
+</tr>
+</tbody></table>
+<p>State-changing actions show what will happen and require <code>y</code> or <code>n</code>. In selection mode, use <code>j</code>/<code>k</code> or arrow keys to navigate, <code>Enter</code> to choose, and <code>Esc</code> to go back.</p>
+<p>The Accounts menu (<code>a</code>) lets you add and manage accounts without leaving the TUI:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>l</code></td>
+<td>Log in via browser — add an account, then name it</td>
+</tr>
+<tr>
+<td><code>k</code></td>
+<td>Add an Anthropic API key account</td>
+</tr>
+<tr>
+<td><code>n</code></td>
+<td>Rename the selected account</td>
+</tr>
+<tr>
+<td><code>t</code></td>
+<td>Enable or disable the selected account</td>
+</tr>
+<tr>
+<td><code>d</code></td>
+<td>Permanently delete an idle account</td>
+</tr>
+</tbody></table>
+<p>Disabling keeps credentials in config but prevents new requests from using the account. Deletion is blocked while that account has active requests. The currently-active account is marked with a green <code>►</code>.</p>
+<p>Routing modes:</p>
+<ul>
+<li><strong>Automatic</strong> spreads requests across healthy accounts using live load, quota pressure, and recent errors.</li>
+<li><strong>Manual preference</strong> sends subsequent requests, including the next request from existing idle sessions, to the selected Claude account whenever it is healthy. Maxpool still fails over automatically when necessary and returns to the preferred account after recovery.</li>
+</ul>
+<p>Routing changes do not move requests already in flight.</p>
+<h3>Run Claude Code through the proxy</h3>
+<pre><code class="language-bash">maxpool run
+</code></pre>
+<p>Or manually set the environment:</p>
+<pre><code class="language-bash">eval "$(maxpool env)"
+claude
+</code></pre>
+<p><code>maxpool env</code> exports only <code>ANTHROPIC_BASE_URL</code> by default so Claude Code can keep using your claude.ai subscription login without showing an <code>ANTHROPIC_API_KEY</code> auth conflict warning. Use <code>maxpool env --with-key</code> only for non-local clients that need to authenticate to the proxy.</p>
+<p>The proxy also understands an optional internal header profile:</p>
+<ul>
+<li>default/absent <code>x-maxpool-profile</code>: Claude accounts only</li>
+<li><code>x-maxpool-profile: all</code>: Claude accounts first, then lower-priority provider fallbacks</li>
+</ul>
+<p>Provider fallback credentials can be supplied per Claude Code process with <code>ANTHROPIC_CUSTOM_HEADERS</code>. Maxpool strips all <code>x-maxpool-*</code> headers before forwarding upstream.</p>
+<p><code>x-maxpool-session: &lt;id&gt;</code> enables session affinity. With this header, the first request for a Claude Code process is routed by the adaptive load balancer, then later requests from the same process keep using that home account while it remains available. If the home account is rate-limited, exhausted, in cooldown, or removed, the session temporarily uses another eligible route. When the home account becomes available again, the session returns to it. For the <code>all</code> profile, a Claude session that had to spill onto GLM/Kimi moves back to Claude once a Claude account frees up — <strong>as long as it produced no provider-format tool calls while there</strong>.</p>
+<p><strong>Cross-provider fallback + compatibility (<code>all</code> profile).</strong> Claude, GLM (z.ai), and Kimi (Moonshot) interoperate for ordinary sessions — a regular tool-use id (<code>call_</code>/<code>tool_</code>) passes Anthropic's loose validation, so a Kimi or GLM session that used no server tools runs on Claude (its <em>thinking</em> blocks are rejected, but Maxpool strips them automatically — see self-heal below) and a Claude session spills onto GLM/Kimi when Claude is unavailable. <code>scheduler.crossProviderFallbackPolicy</code> controls it, cyclable live in the TUI Routing menu (<code>m</code> → <code>f</code>): <code>never</code> (default) = <strong>Claude sessions never spill onto a provider</strong> (note: this governs the Claude→provider direction only — it is NOT a same-family pin), <code>when-exhausted</code> = cross only once the home family is exhausted, <code>always</code> = providers peer with Claude.</p>
+<p>The one hard incompatibility Maxpool guards is a <strong><code>server_tool_use</code> id</strong> that isn't <code>srvtoolu_</code> — Anthropic 400s that on replay (e.g. a <code>cc glm</code> session that used a server tool, resumed under <code>cc all</code>). Maxpool predicts that case ahead (pins the session to GLM/Kimi) and, for anything it can't predict (a rejected thinking signature), <strong>self-heals</strong>: the 400 is pre-stream, so Maxpool latches the session provider-only and transparently retries on GLM/Kimi — the client never sees the error. (Note: Claude Code may warn a resumed <code>glm-*</code> model "could not be restored" and fall back to <code>claude-opus-4-8</code>; that's a client-side message — routing is unaffected.)</p>
+<p>Provider rows do not use Claude Max session/week bars unless the provider returns compatible quota headers. For GLM/Kimi, Maxpool always tracks operational telemetry (<code>Act</code>, <code>OK</code>, <code>Fail</code>, <code>Last</code>) and also parses common <code>x-ratelimit-*</code> / <code>ratelimit-*</code> headers if present.</p>
+<p>When GLM/Kimi return 429 without standard retry headers, Maxpool also parses provider-specific JSON error bodies. Z.AI <code>next_flush_time</code> / weekly-monthly exhausted messages and Kimi “try again after N seconds” rate-limit messages are converted into provider cooldowns and queue wake-up timing.</p>
+<p>Every account/provider row also includes load telemetry: <code>Load current/weight</code>, <code>15m &lt;requests&gt; &lt;avg latency&gt;</code>, and <code>1h &lt;requests&gt;</code>. This is based on completed requests retained in memory for the last hour, plus current in-flight requests.</p>
+<h3>Restart behavior</h3>
+<p>When you confirm Restart, confirm Stop, press Ctrl-C, or send SIGTERM, Maxpool enters draining shutdown:</p>
+<ol>
+<li>The proxy stops accepting new requests.</li>
+<li>Existing in-flight streams keep running.</li>
+<li>The process exits when active requests finish.</li>
+<li>If you selected Restart, Maxpool starts a fresh <code>maxpool server</code> process in the same terminal.</li>
+<li>Press Ctrl-C again to force exit.</li>
+</ol>
+<p>Idle Claude Code sessions are not tied to the server process. If the server is restarted while a Claude Code session is idle, its next request reconnects to the new server. If the server is forced closed while a stream is actively running, that stream can still fail because the TCP connection disappears.</p>
+<h3>Other commands</h3>
+<pre><code class="language-bash">maxpool accounts          # List accounts with subscription tier and token status
+maxpool accounts -v       # Also show token expiry times
+maxpool status            # Show live proxy status (requires running server)
+maxpool remove &lt;name&gt;     # Remove an account
+maxpool rename &lt;name|#&gt; &lt;new&gt;  # Rename an account (by name or list number)
+maxpool api &lt;path&gt;        # Call an API endpoint with account credentials
+maxpool help              # Show all commands
+</code></pre>
+<h3>Request logging</h3>
+<p>Log full request/response details to a directory (one file per request):</p>
+<pre><code class="language-bash">maxpool server --log-to /tmp/requests
+</code></pre>
+<p>Request logging includes prompt and response bodies. Use it only for short debugging windows and delete logs afterwards.</p>
+<h2>Configuration</h2>
+<p>Config is stored at <code>~/.config/maxpool.json</code> (or <code>$XDG_CONFIG_HOME/maxpool.json</code>). A random proxy API key is generated on first use.</p>
+<p>Override the config path with <code>TEAMCLAUDE_CONFIG</code>:</p>
+<pre><code class="language-bash">TEAMCLAUDE_CONFIG=./my-config.json maxpool server
+</code></pre>
+<h3>Config format</h3>
+<pre><code class="language-json">{
+  "proxy": {
+    "host": "127.0.0.1",
+    "port": 3456,
+    "apiKey": "tc-auto-generated-key"
+  },
+  "upstream": "https://api.anthropic.com",
+  "updateCheck": true,
+  "autoUpdate": false,
+  "switchThreshold": 0.90,
+  "scheduler": {
+    "mode": "adaptive-least-loaded",
+    "safetyMaxActivePerAccount": 50,
+    "safetyMaxGlobalActive": 150,
+    "cooldownMs": 30000,
+    "maxCooldownMs": 900000,
+    "weeklySoftThreshold": 0.65,
+    "weeklyReserveThreshold": 0.85,
+    "weeklyCriticalThreshold": 0.95,
+    "weeklyExhaustedThreshold": 0.999,
+    "weeklyBurnDebtWeight": 0.6
+  },
+  "retry": {
+    "maxAttemptsPerRequest": 0,
+    "maxRetryBufferBytes": 10485760
+  },
+  "queue": {
+    "enabled": true,
+    "maxWaitMs": 86400000,
+    "autoMaxWaitMs": null,
+    "capacityMaxWaitMs": 900000,
+    "weeklyMaxWaitMs": 86400000,
+    "nonStreamMaxWaitMs": 300000,
+    "maxConcurrentQueued": 64,
+    "maxQueuedBytes": 1073741824,
+    "maxQueuedBodyBytes": 268435456,
+    "pollMs": 1000
+  },
+  "shutdown": {
+    "drainTimeoutMs": 15000
+  },
+  "accounts": [
+    {
+      "name": "user@example.com",
+      "type": "oauth",
+      "accountUuid": "...",
+      "accessToken": "sk-ant-oat01-...",
+      "refreshToken": "sk-ant-ort01-...",
+      "expiresAt": 1774384968427
+    }
+  ]
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>proxy.host</code></td>
+<td>Local interface the proxy listens on; defaults to <code>127.0.0.1</code></td>
+</tr>
+<tr>
+<td><code>proxy.port</code></td>
+<td>Local port the proxy listens on</td>
+</tr>
+<tr>
+<td><code>proxy.apiKey</code></td>
+<td>API key clients use for status/admin requests</td>
+</tr>
+<tr>
+<td><code>upstream</code></td>
+<td>Upstream API base URL</td>
+</tr>
+<tr>
+<td><code>updateCheck</code></td>
+<td>Check npm for a newer maxpool on startup and notify; defaults to <code>true</code></td>
+</tr>
+<tr>
+<td><code>autoUpdate</code></td>
+<td>Install new versions automatically (applied on next restart, never interrupting sessions); defaults to <code>false</code></td>
+</tr>
+<tr>
+<td><code>switchThreshold</code></td>
+<td>Quota utilization (0–1) at which an account is avoided (5h <em>and</em> weekly); default <code>0.90</code>. Raise toward <code>0.97</code> to use more before rotating</td>
+</tr>
+<tr>
+<td><code>scheduler.weeklySoftThreshold</code> / <code>weeklyReserveThreshold</code> / <code>weeklyCriticalThreshold</code> / <code>weeklyExhaustedThreshold</code></td>
+<td>Weekly (7d) quota tiers (0–1) controlling how aggressively an account is de-prioritised as its weekly usage climbs</td>
+</tr>
+<tr>
+<td><code>scheduler.safetyMaxActivePerAccount</code></td>
+<td>Emergency circuit breaker, not a normal capacity cap</td>
+</tr>
+<tr>
+<td><code>scheduler.safetyMaxGlobalActive</code></td>
+<td>Emergency global circuit breaker</td>
+</tr>
+<tr>
+<td><code>retry.maxAttemptsPerRequest</code></td>
+<td>Retry attempts before returning an error; <code>0</code> means one pass over accounts</td>
+</tr>
+<tr>
+<td><code>retry.maxRetryBufferBytes</code></td>
+<td>Maximum buffered request body eligible for cross-account retry</td>
+</tr>
+<tr>
+<td><code>queue.enabled</code></td>
+<td>Hold requests instead of returning 429 when every eligible route is temporarily unavailable</td>
+</tr>
+<tr>
+<td><code>queue.maxWaitMs</code></td>
+<td>Hard maximum time a request can wait in the proxy queue before returning an error; defaults to 24h for long-running agent loops</td>
+</tr>
+<tr>
+<td><code>queue.autoMaxWaitMs</code></td>
+<td>Optional shorter auto-queue cap. Set to <code>null</code> or omit it to use <code>queue.maxWaitMs</code>; set a number for interactive sessions where you prefer fast errors</td>
+</tr>
+<tr>
+<td><code>queue.capacityMaxWaitMs</code></td>
+<td>Separate cap for repeated upstream 5xx/overload failures; defaults to 15m so broken providers do not park requests for 24h</td>
+</tr>
+<tr>
+<td><code>queue.maxQueuedBodyBytes</code></td>
+<td>Maximum request body Maxpool will hold in memory while waiting for capacity before the request has been sent upstream; defaults to 256 MiB</td>
+</tr>
+<tr>
+<td><code>queue.weeklyMaxWaitMs</code></td>
+<td>How long to hold a request when every account is at its weekly (7d) cap. Defaults to 24h — but the early-exit gates on each account's REAL reset time, so it only waits when a reset genuinely lands inside the window and errors honestly otherwise. (Was <code>0</code> = fail-fast, which killed sessions the instant all accounts hit their weekly cap.)</td>
+</tr>
+<tr>
+<td><code>queue.nonStreamMaxWaitMs</code></td>
+<td>Max hold for non-streaming requests; defaults to 5m. They have no SSE keepalive, so a longer hold would die on the client timeout anyway</td>
+</tr>
+<tr>
+<td><code>queue.maxConcurrentQueued</code></td>
+<td>Backpressure: max requests held waiting at once; defaults to 64. Beyond it, new waiters get a clear "queue full" error instead of growing the heap</td>
+</tr>
+<tr>
+<td><code>queue.maxQueuedBytes</code></td>
+<td>Backpressure: max aggregate buffered request-body bytes across all held requests; defaults to 1 GiB</td>
+</tr>
+<tr>
+<td><code>queue.pollMs</code></td>
+<td>How often queued requests check for a recovered account/provider</td>
+</tr>
+<tr>
+<td><code>queue.heartbeatMs</code></td>
+<td>SSE heartbeat interval for queued streaming requests; defaults to 10s so Claude Code keeps the queued connection alive</td>
+</tr>
+<tr>
+<td><code>shutdown.drainTimeoutMs</code></td>
+<td>Maximum time quit/Ctrl-C waits for active requests before exiting</td>
+</tr>
+</tbody></table>
+<p>Weekly Claude quota is treated as long-horizon budget, not the same as the 5-hour session cap:</p>
+<ul>
+<li><code>normal</code>: accepts new and sticky sessions.</li>
+<li><code>soft</code>: remains available, but new sessions prefer cooler accounts.</li>
+<li><code>reserve</code>: existing sticky sessions can continue; new sessions use other Claude accounts when possible.</li>
+<li><code>critical</code>: avoided unless no healthier eligible route exists. This can be raw weekly usage or reset-aware pace pressure.</li>
+<li><code>exhausted</code>: unavailable until weekly reset or upstream recovery.</li>
+</ul>
+<p>The weekly usage bar shows raw upstream utilization and reset timing. Reset-aware burn rate is a separate pace signal used for routing pressure; it can mark an account as <code>Pace critical</code>, but only raw near-exhaustion or upstream rejection can show/block as <code>Wk exhausted</code>.</p>
+<h2>How It Works</h2>
+<ol>
+<li>Claude Code connects to the local proxy instead of <code>api.anthropic.com</code></li>
+<li>The proxy selects the least-loaded healthy account and forwards requests with that account's credentials</li>
+<li>If the client sends <code>x-maxpool-session</code>, the session is pinned to that account while it stays available</li>
+<li>OAuth tokens expiring within 5 minutes are automatically refreshed and persisted to config</li>
+<li>Rate limit headers from the API (<code>anthropic-ratelimit-unified-*</code>) track session (5h) and weekly (7d) quota utilization</li>
+<li>5-hour quota controls immediate availability; weekly quota controls new-session admission and preservation; weekly <code>critical</code> is last-resort, while weekly <code>exhausted</code> is blocked</li>
+<li>Account quota 429s cool down only that account and fail over before response bytes are sent</li>
+<li>Anthropic's server-side 429 and 529 responses first fail over across every eligible Claude account; only a request-wide set of matching failures with no concurrent Claude success promotes to the shared circuit breaker. One real request probes recovery after <code>retry-after</code>, then queued work resumes automatically</li>
+<li>Queued streaming requests receive SSE heartbeats, preventing Claude Code's client timeout from abandoning temporary waits</li>
+<li>Transient network errors (connection reset, timeout) fail over before the stream starts; if every eligible route has a network failure, the proxy returns <code>503 connection_unavailable</code> instead of a quota error</li>
+<li>In the <code>all</code> profile only, if all Claude accounts are unavailable, provider fallbacks are tried by priority: GLM before Kimi</li>
+<li>If all eligible accounts/providers are temporarily unavailable for a temporary reason (5h/session limit, provider cooldown, short 429), the proxy queues the request and retries when one recovers</li>
+<li>Repeated upstream 5xx/overload failures use the shorter <code>capacityMaxWaitMs</code> cap, not the long quota wait</li>
+<li>Weekly (7d) exhaustion is held and retried like a 5h cap, up to <code>weeklyMaxWaitMs</code>, but only when an account's real reset lands inside the window; if the soonest reset is beyond it (or unknown), it returns 429 promptly with an honest message naming the soonest reset rather than spinning. Non-retryable 4xx errors still fail fast</li>
+<li>Temporary OAuth refresh failures cool the account down and queue/fail over; invalid refresh credentials disable only that account and require login</li>
+<li>In an interactive terminal, the server runs under a foreground supervisor so confirmed Restart (<code>r</code>) can drain and restart without detaching the replacement TUI</li>
+<li>When Restart is confirmed, new upstream admission pauses immediately. Existing upstream requests finish, queued requests cannot deadlock restart, and their sockets close during relaunch so Claude Code reconnects automatically</li>
+<li>Client token refresh requests (<code>/v1/oauth/token</code>) are relayed to upstream untouched — the proxy and client manage their own token lifecycles independently</li>
+</ol>
+<h2>FAQ</h2>
+<p><strong>Does this touch my normal Claude Code login?</strong>
+No. maxpool stores its own account tokens in its config file. Your everyday <code>claude</code> login lives in the OS keychain and is never modified. Run <code>ccmax</code> for the pool, <code>claude</code> for your normal login.</p>
+<p><strong>How do I add another account?</strong>
+<code>maxpool login</code> (browser — adds any account), or in the TUI press <code>a</code> then <code>l</code>. To add the account you're currently logged into Claude Code with, use <code>maxpool import</code> (or <code>a</code> then <code>i</code>).</p>
+<p><strong>Can I rename an account?</strong>
+Yes — <code>maxpool rename &lt;name|number&gt; &lt;new-name&gt;</code>, or in the TUI press <code>a</code> then <code>n</code>.</p>
+<p><strong>An account stopped being used before it hit 100% — why?</strong>
+maxpool stops routing to an account at <code>switchThreshold</code> (default 90%) of its 5-hour or weekly window, leaving a safety margin so it's never hard rate-limited. Raise it in your config (toward 0.97) to use more before rotating.</p>
+<p><strong>One account shows empty quota bars but it's serving requests — is it broken?</strong>
+No. The bars show how <em>full</em> an account is toward its limit, so an empty bar means lots of headroom (good). Actual activity is in the <code>15m</code>/<code>1h</code> request-count columns.</p>
+<p><strong>Will updates apply automatically?</strong>
+Set <code>"autoUpdate": true</code> in your config and maxpool installs new versions itself (applied on the next restart; running sessions are never interrupted). Otherwise <code>npm i -g maxpool</code> updates it.</p>
+<p><strong>Where do my tokens go?</strong>
+They're stored locally in your config (file mode <code>0600</code>) and sent only to Anthropic — or, in the optional <code>all</code> profile, to GLM/Kimi if you supply those. Nothing else leaves your machine. Zero third-party dependencies.</p>
+<p><strong>How do I stop it?</strong>
+Press <code>q</code> in the TUI (or Ctrl-C). It drains briefly, then exits.</p>
+<h2>Credits</h2>
+<p>maxpool is a fork of <a href="https://github.com/KarpelesLab/teamclaude" target="_blank" rel="noopener noreferrer">KarpelesLab/teamclaude</a>
+by Mark Karpelès, substantially extended with rate-aware (use-it-or-lose-it)
+load balancing, interactive account &amp; routing management, atomic credential
+storage, and resilient upstream-error handling. Thanks to the original authors.</p>
+<h2>License</h2>
+<p>MIT — see <a href="https://github.com/2solarmax/maxpool/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>. Copyright © 2026 KarpelesLab and Max Krasnykh.</p>

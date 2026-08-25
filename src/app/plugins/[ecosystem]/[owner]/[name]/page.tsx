@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { EcosystemBadge } from "@/components/ecosystem-badge";
 import { ScoreBadge, ScoreBars } from "@/components/score-badge";
+import { SecurityGradeBadge, SecurityPanel } from "@/components/security-grade";
 import { InstallCommand } from "@/components/install-command";
 import { PluginCard } from "@/components/plugin-card";
 import { ClaimButton } from "./claim-button";
@@ -151,6 +152,13 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
         </div>
         <div className="flex shrink-0 items-center gap-4">
           <div className="text-right">
+            <p className="label text-muted">SECURITY</p>
+            <SecurityGradeBadge
+              grade={plugin.securityGrade}
+              className="mt-1 h-10 min-w-12 justify-center text-[18px]"
+            />
+          </div>
+          <div className="text-right">
             <p className="label text-muted">SCORE</p>
             <ScoreBadge
               score={plugin.qualityScore}
@@ -210,6 +218,8 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
 
         {/* Sidebar */}
         <aside className="space-y-8">
+          <SecurityPanel plugin={plugin} />
+
           <div className="rounded-[12px] border border-line bg-white p-5">
             <h2 className="label text-muted">QUALITY BREAKDOWN</h2>
             <div className="mt-4">

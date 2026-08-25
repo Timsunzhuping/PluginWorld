@@ -1,0 +1,1820 @@
+<h1>remem: Local-first Coding Agent Memory for Claude Code and OpenAI Codex</h1>
+<p><a href="https://mcptoplist.com/server/io.github.majiayu000%2Fremem" target="_blank" rel="noopener noreferrer"><img src="https://mcptoplist.com/badge/io.github.majiayu000%2Fremem.svg" alt="MCP Toplist" /></a></p>
+<blockquote>
+<p>Stop re-explaining your project every new coding-agent session.</p>
+</blockquote>
+<p>Language: <strong>English</strong> | <a href="https://github.com/majiayu000/remem/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+<p><code>remem</code> is a single Rust binary that automatically captures, distills, searches,
+and injects project memory across Claude Code, OpenAI Codex, and Codex CLI
+sessions. It keeps decisions, bug-fix rationale, project patterns, and
+preferences available through hooks, MCP, CLI, and REST without requiring an
+external database.</p>
+<p><a href="https://github.com/majiayu000/remem/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/majiayu000/remem/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://github.com/majiayu000/remem/releases/latest" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/v/release/majiayu000/remem?sort=semver" alt="Release" /></a>
+<a href="https://crates.io/crates/remem-ai" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/crates/v/remem-ai" alt="crates.io" /></a>
+<a href="https://www.npmjs.com/package/@remem-ai/remem" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/%40remem-ai%2Fremem" alt="npm" /></a>
+<a href="https://github.com/majiayu000/remem/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a></p>
+<p><img src="https://raw.githubusercontent.com/majiayu000/remem/HEAD/assets/remem-recall-demo.gif" alt="Remem recall demo — a new Claude Code session picks up last week's bug fix" /></p>
+<p><em>Real Claude Code session on a demo repo: a brand-new session recalls last week's root cause, commit, and open TODO — with memory citations, zero re-explaining.</em></p>
+<h2>What You Get</h2>
+<ul>
+<li>Claude Code, OpenAI Codex, and Codex CLI remember project decisions across sessions.</li>
+<li>Cursor has a v1 integration: <code>remem install --target cursor</code> registers the
+remem MCP server (macOS/Linux), and the runtime commands for tool-event
+capture (<code>remem observe --host cursor</code>, GH-823) and Stop transcript
+summarization (<code>remem summarize --host cursor</code>, GH-825) are merged. The v1
+install surface does not register Cursor hook entries yet, so automatic
+Cursor memory capture is not enabled, and session-init injection is not
+supported on Cursor. See the <a href="#cursor-capability-matrix" target="_blank" rel="noopener noreferrer">Cursor capability matrix</a>.</li>
+<li>Bug-fix rationale, preferences, and project patterns are searchable.</li>
+<li>Memory stays local by default with SQLite and SQLCipher.</li>
+<li>Hooks, MCP tools, CLI commands, and a localhost REST API use the same store.</li>
+<li>The experimental MCP <code>context_bundle</code> tool compiles a versioned, budgeted,
+source-attributed SessionStart context bundle with a complete selection/drop
+audit, including redacted poisoning-gate drops and canonical memory, session,
+and preference preselection reasons. Poisoned session/workstream text is
+rejected before it can steer implicit retrieval. High-risk requests return
+only user-authored trusted memories and abstain when none survive. It requires
+<code>schema_version: 1</code>; its foreground query embeddings are local-only, ambient
+reranking is disabled, retrieval weights are fixed to the bundle v1 policy
+instead of ambient overrides, and the effective local embedding
+provider/model/dimensions are fingerprinted into <code>plan_hash</code>. The shape is
+intentionally not yet a stable API commitment.</li>
+<li>Bundle-backed SessionStart emissions persist a payload-free, hash-verified
+audit linked to the existing per-item injection rows. The durable record
+contains plan/policy/schema versions, selection and token-budget aggregates,
+degraded/truncation state, and canonical audit reason metadata. Delta-mode
+previews rewind to the last complete item boundary, then records are resealed
+to the identities and token estimate actually emitted, including when gate
+state persistence fails after preview construction; no record stores memory
+titles, memory bodies, or rendered hook output.</li>
+<li>Current-memory contracts expose staleness, temporal/as-of truth, citation
+usage, and injection audit state instead of treating recall as a black box.</li>
+<li>Active memories without sufficient provenance, confidence, validity, or
+mutable-state identity are classified as legacy_unverified. They remain
+recoverable through labeled search/detail, but are excluded from
+CurrentTruth and default SessionStart context with stable audit reasons.</li>
+<li>User-context controls keep personal claims, profile summaries, suppression
+feedback, and Markdown export explicit and reviewable.</li>
+<li>One Rust binary; no hosted database or separate memory service.</li>
+</ul>
+<h2>Install</h2>
+<p>Install the <code>remem</code> binary:</p>
+<pre><code class="language-bash">brew install majiayu000/tap/remem
+</code></pre>
+<p>Then configure hooks and MCP for your installed coding agents:</p>
+<pre><code class="language-bash">REMEM_INSTALL_BINARY="$(brew --prefix remem)/bin/remem" remem install --target codex
+# or: REMEM_INSTALL_BINARY="$(brew --prefix remem)/bin/remem" remem install --target claude
+# or: REMEM_INSTALL_BINARY="$(brew --prefix remem)/bin/remem" remem install --target all
+</code></pre>
+<p>If you do not use Homebrew:</p>
+<pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/majiayu000/remem/main/install.sh | env REMEM_NO_CONFIG=1 sh
+~/.local/bin/remem install --target codex
+# or: ~/.local/bin/remem install --target claude
+# or: ~/.local/bin/remem install --target all
+</code></pre>
+<p><code>remem install</code> can auto-detect existing Claude Code, Codex CLI, and Cursor
+config directories. On first-time setups, use <code>--target codex</code>,
+<code>--target claude</code>, or <code>--target all</code> so remem can create the selected config
+files.</p>
+<p><code>--target cursor</code> (macOS/Linux) manages only the user-level
+<code>~/.cursor/hooks.json</code> and <code>~/.cursor/mcp.json</code>: it registers the remem MCP
+server, strictly validates both files, and preserves foreign entries
+semantically for the validated snapshot (coordinated updates use staged
+apply with compensating rollback, not a cross-file atomic transaction, and
+edits landing between the final comparison and the rename can still be
+lost). Install contract v1 registers no Cursor hook entries — automatic
+Cursor memory is not enabled — and <code>session-init</code> is not supported on Cursor.
+<code>--target auto</code> includes Cursor only when a Cursor config is detected on
+macOS/Linux; Windows is skipped with a diagnostic because no hook command
+renderer is approved there, and <code>--repair</code> does not cover Cursor. Before
+downgrading remem, run <code>remem uninstall --target cursor</code> with the current
+version first.</p>
+<h3>Cursor capability matrix</h3>
+<p>Capabilities below reflect the merged runtime, not planned work:</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Claude Code / Codex CLI</th>
+<th>Cursor (v1)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>MCP memory tools (search, <code>save_memory</code>, ...)</td>
+<td>Registered by <code>remem install</code></td>
+<td>Registered by <code>remem install --target cursor</code> (macOS/Linux only)</td>
+</tr>
+<tr>
+<td>Session-start memory injection</td>
+<td>Installed hook</td>
+<td>Not supported; doctor and install always print <code>session-init: not supported on cursor</code></td>
+</tr>
+<tr>
+<td>Automatic tool-event capture</td>
+<td>Installed hook</td>
+<td>Runtime command exists (<code>remem observe --host cursor</code>, strict fail-closed parsing of the verified generic tool events); install v1 registers no hook entry, so it is not automatic</td>
+</tr>
+<tr>
+<td>Stop transcript summarization</td>
+<td>Installed hook</td>
+<td>Runtime command exists (<code>remem summarize --host cursor</code>, Stop-keyed transcript snapshot with explicit <code>degraded/&lt;reason&gt;</code> fallback); install v1 registers no hook entry, so it is not automatic</td>
+</tr>
+<tr>
+<td><code>remem doctor</code></td>
+<td>Hooks/MCP rows</td>
+<td>Dedicated Cursor row reporting detected/configured/drift/collision plus fixed capability lines</td>
+</tr>
+<tr>
+<td><code>remem install --repair</code></td>
+<td>Claude hooks only</td>
+<td>Not supported</td>
+</tr>
+<tr>
+<td>Windows</td>
+<td>Supported</td>
+<td>Not supported (no approved hook command renderer)</td>
+</tr>
+</tbody></table>
+<p>Run <code>remem doctor</code> when you want to verify or troubleshoot the integration.
+If Claude Code reports a Hook Integrity Warning or doctor shows incomplete
+Claude hooks, run:</p>
+<pre><code class="language-bash">remem install --target claude --repair
+</code></pre>
+<p>Repair mode restores only user-level Claude hooks in <code>~/.claude/settings.json</code>.
+It preserves third-party hooks, does not write <code>.claude.json</code> MCP settings, and
+does not initialize the runtime store or API token.</p>
+<h2>Success Check</h2>
+<p><img src="https://raw.githubusercontent.com/majiayu000/remem/HEAD/assets/remem-demo.gif" alt="remem install and SessionStart context injection" /></p>
+<p><em>What <code>remem install</code> configures, and what a new Codex session receives at SessionStart. The demo uses a temp HOME and temp database; no private memories are shown.</em></p>
+<p>Start a new Claude Code or Codex CLI session after installation. remem should
+inject relevant project memory at session start and summarize durable memory
+after the session stops. Then run:</p>
+<pre><code class="language-bash">remem status
+remem search "last decision"
+</code></pre>
+<p>For a focused, read-only view of the CurrentTruth projection, run:</p>
+<pre><code class="language-bash">remem doctor truth --cwd .
+remem doctor truth --cwd . --branch main --as-of-epoch 1735689600 --json
+</code></pre>
+<p>The diagnostic summarizes current results, surfaced conflicts and abstentions,
+supersedes links, non-current or dangling claim references, and the explicit
+stored-status to lifecycle mapping. It does not print claim text and never
+migrates or writes the database. <code>--project</code> accepts an exact stored project key;
+otherwise <code>--cwd</code> (or the current directory) is normalized to the project key.
+<code>--subject</code> accepts an exact memory topic key, a bare user-claim key, or its
+explicit <code>type:key</code> form. Warnings exit with status 1, including in quiet mode.
+The selector also scopes lifecycle counts; object kinds without a matching
+subject identity are omitted from a subject-focused report.
+When <code>--as-of-epoch</code> is omitted, the report samples one effective epoch,
+returns it as <code>as_of_epoch</code>, and uses it for every projection and diagnostic
+query in the same read snapshot. Every explicit historical cutoff is reported
+as unreconstructable and exits with a warning until versioned lifecycle
+history can prove in-place status changes.</p>
+<p>For Codex CLI, <code>remem install</code> creates or updates:</p>
+<ul>
+<li><code>~/.remem/.key</code> and the encrypted <code>~/.remem/remem.db</code></li>
+<li><code>~/.remem/config.toml</code> memory-AI profiles</li>
+<li>Codex MCP registration in <code>~/.codex/config.toml</code></li>
+<li>Codex SessionStart/Stop hooks in <code>~/.codex/hooks.json</code></li>
+</ul>
+<p>For a Codex-only setup, <code>remem doctor</code> reports Schema, Key format, Database,
+and the Codex Hooks/MCP rows as ok. If Claude Code config directories already
+exist but were not auto-detected during installation, run
+<code>remem install --target claude</code> or <code>remem install --target all</code>. If doctor warns
+about multiple <code>remem</code> binaries, follow the printed install-path fix so hooks
+keep using the intended binary.</p>
+<h2>Install With Your Coding Agent</h2>
+<p>Paste this into Claude Code or Codex CLI:</p>
+<blockquote>
+<p>Install remem for this repository. Use the official README. Configure it for
+this agent, run <code>remem doctor</code>, verify that session memory is working, and
+summarize what was installed.</p>
+</blockquote>
+<h2>Why remem if Claude Code and Codex already have memory?</h2>
+<p>Built-in memory is useful for concise preferences and stable project guidance.</p>
+<p>remem is for engineering memory that needs to be searchable, auditable,
+project-scoped, and recoverable:</p>
+<ul>
+<li>Search past decisions, bug fixes, and rationale with <code>remem search</code></li>
+<li>Inspect why a memory was injected with <code>remem why</code></li>
+<li>Keep memory local with SQLite and SQLCipher</li>
+<li>Use MCP and REST APIs from coding agents and local tools</li>
+<li>Track usage and background memory cost</li>
+<li>Avoid hand-maintaining large <code>MEMORY.md</code> or <code>CLAUDE.md</code> files</li>
+</ul>
+<h3>How remem Compares in the Ecosystem</h3>
+<p>Snapshot from our
+<a href="https://github.com/majiayu000/remem/blob/HEAD/docs/research/claude-memory-mcp-ecosystem-2026-03.md" target="_blank" rel="noopener noreferrer">memory-tool ecosystem survey (2026-03)</a>;
+check upstream projects for their current feature sets.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>remem</th>
+<th>Built-in memory files</th>
+<th>claude-mem</th>
+<th>mem0 / OpenMemory</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Capture</td>
+<td>Automatic hooks + LLM distillation</td>
+<td>Manual editing</td>
+<td>Automatic hooks</td>
+<td>Agent calls save tools</td>
+</tr>
+<tr>
+<td>Agents</td>
+<td>Claude Code + Codex, one shared store</td>
+<td>Per-tool files</td>
+<td>Claude Code</td>
+<td>Any MCP client</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>Local SQLite, optional SQLCipher encryption</td>
+<td>Plain text files</td>
+<td>SQLite + Chroma vector DB</td>
+<td>Vector DB, hosted platform or local server</td>
+</tr>
+<tr>
+<td>Retrieval</td>
+<td>FTS + optional embeddings via CLI, MCP, REST</td>
+<td>Loaded wholesale</td>
+<td>Tiered vector search</td>
+<td>Vector search</td>
+</tr>
+<tr>
+<td>Runtime</td>
+<td>Single Rust binary</td>
+<td>None</td>
+<td>Node worker + background service</td>
+<td>Python service</td>
+</tr>
+<tr>
+<td>Audit trail</td>
+<td><code>remem why</code>, provenance, usage and cost tracking</td>
+<td>Git history</td>
+<td>Not documented in survey</td>
+<td>Not documented in survey</td>
+</tr>
+</tbody></table>
+<h2>How remem Solves Session Amnesia</h2>
+<table>
+<thead>
+<tr>
+<th>Without remem</th>
+<th>With remem</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>"We use FTS5 trigram tokenizer..." (every session)</td>
+<td>Injected automatically from memory</td>
+</tr>
+<tr>
+<td>"Do not use <code>expect()</code> in non-test code" (again)</td>
+<td>Preference surfaced before you ask</td>
+</tr>
+<tr>
+<td>"Last session we decided to..." (reconstruct manually)</td>
+<td>Decision history with rationale</td>
+</tr>
+<tr>
+<td>Bug context lost after session ends</td>
+<td>Root cause + fix preserved</td>
+</tr>
+</tbody></table>
+<h2>Other Install Channels</h2>
+<pre><code class="language-bash"># Quick install options
+curl -fsSL https://raw.githubusercontent.com/majiayu000/remem/main/install.sh | env REMEM_NO_CONFIG=1 REMEM_VERSION=vX.Y.Z sh
+~/.local/bin/remem install --target codex
+
+curl -fsSL https://raw.githubusercontent.com/majiayu000/remem/main/install.sh | env REMEM_NO_CONFIG=1 sh
+~/.local/bin/remem install --target codex
+
+curl -fsSL https://raw.githubusercontent.com/majiayu000/remem/main/install.sh | env REMEM_NO_CONFIG=1 REMEM_INSTALL_DIR=/usr/local/bin sh
+remem install --target codex
+
+# npm wrapper
+npm install -g @remem-ai/remem
+remem install --target codex
+
+# Cargo
+cargo install remem-ai --bin remem
+remem install --target codex
+
+# Manual GitHub Release download
+curl -LO https://github.com/majiayu000/remem/releases/latest/download/remem-darwin-arm64.tar.gz
+tar xzf remem-darwin-arm64.tar.gz
+mv remem ~/.local/bin/
+codesign -s - -f ~/.local/bin/remem  # required on macOS ARM
+~/.local/bin/remem install --target codex
+
+# Build from source
+git clone https://github.com/majiayu000/remem.git
+cd remem
+cargo build --release
+cp target/release/remem ~/.local/bin/
+codesign -s - -f ~/.local/bin/remem  # required on macOS ARM
+~/.local/bin/remem install --target codex
+</code></pre>
+<p>Use one canonical <code>remem</code> command on PATH. Standalone and source installs
+should normally live at <code>~/.local/bin/remem</code>; Windows standalone installs
+should use <code>%USERPROFILE%\.local\bin\remem.exe</code>. If you install through a
+package manager such as Homebrew or Cargo, update through that same channel
+and avoid keeping a second manual copy earlier or later on PATH. <code>remem doctor</code>
+and <code>remem install --dry-run</code> warn when multiple <code>remem</code> executables are
+visible.</p>
+<h3>Updating an Existing Install</h3>
+<p>When you replace the binary manually, rerun <code>remem install</code> so existing Claude Code
+and Codex hook commands pick up the current host-aware settings:</p>
+<pre><code class="language-bash">cargo build --release
+cp target/release/remem ~/.local/bin/
+codesign -s - -f ~/.local/bin/remem  # required on macOS ARM
+remem install --target all
+</code></pre>
+<p>Verify the installed hooks include host-specific context commands:</p>
+<pre><code class="language-bash">jq -r '.hooks.SessionStart[]?.hooks[]?.command' ~/.claude/settings.json
+jq -r '.hooks.SessionStart[]?.hooks[]?.command' ~/.codex/hooks.json
+</code></pre>
+<p>Expected commands are host-only; model, executor, and context policy live in
+<code>~/.remem/config.toml</code>:</p>
+<pre><code class="language-text">/Users/you/.local/bin/remem context --host claude-code
+/Users/you/.local/bin/remem context --host codex-cli
+</code></pre>
+<h2>Use With Codex</h2>
+<p><code>remem install --target codex</code> configures Codex in four ways:</p>
+<ul>
+<li>Enables Codex hooks with <code>[features].hooks = true</code> in <code>~/.codex/config.toml</code></li>
+<li>Registers <code>remem</code> as an MCP server in <code>~/.codex/config.toml</code></li>
+<li>Writes Codex hook commands to <code>~/.codex/hooks.json</code></li>
+<li>Creates or updates <code>~/.remem/config.toml</code> memory-AI profiles</li>
+</ul>
+<p>After restarting Codex, remem automatically injects relevant project memory at
+session start and summarizes the session at stop. Codex can also call the MCP
+tools exposed by <code>remem mcp</code>: current-state, curated/raw search, contextual
+recall, timeline/detail/commit lookup, memory save/governance, reports, and
+workstream tools, plus the experimental <code>context_bundle</code> compiler. All 15 tools
+publish explicit side-effect annotations. The 14 JSON tools return both their
+legacy text content and matching structured
+content with an output schema; <code>timeline_report</code> remains Markdown.</p>
+<p>MCP <code>search</code> also supports an opt-in task-aware retrieval route. Supplying
+<code>task_intent</code> with optional <code>role</code>, <code>risk</code>, <code>token_budget</code>, and
+<code>include_superseded</code> compiles a GH-934 <code>RetrievalPlan</code> for that request, applies
+the plan to the existing search weights / graph-expansion / rerank / fallback
+controls, and returns the plan hash plus reason codes in <code>retrieval_plan</code>.</p>
+<p>SessionStart keeps Core, Preferences, and Workstreams on their existing paths,
+then applies one deterministic relevance budget across Lessons, the non-Core
+MemoryIndex, and Sessions. The default keeps the single strongest matching
+item (<code>REMEM_CONTEXT_RELEVANCE_K=1</code>); set the value to <code>0</code> to restore the legacy
+per-section selection. The context footer and <code>remem status</code> expose the active
+state, threshold, selected count, and closed drop-reason counts.</p>
+<p>On healthy loads, SessionStart compiles those same candidates through the
+versioned Context Bundle contract before rendering. The bundle owns scope,
+trust, attribution, and relevance decisions; the established renderer owns
+exact character limits and seals the bundle to the final identities, keeping
+host-visible output byte-compatible. Operators can temporarily restore the
+legacy relevance path with <code>REMEM_CONTEXT_BUNDLE_RENDER_MODE=legacy</code>; unset or
+<code>bundle</code> uses the bundle-backed path.</p>
+<p>Each emitted bundle is stored atomically with its <code>context_injection_items</code>
+rows under one emission-unique <code>injection_run_id</code>. A lower-level retry that
+explicitly reuses that run ID is idempotent only for the identical audit;
+conflicting hashes and later audit tampering fail verification. A persistence
+failure does not hide hook output, but is recorded at error level with the
+attempted run ID so missing production audit evidence is diagnosable rather
+than silent.</p>
+<p><code>remem doctor</code> reports this production consumer as <code>Context compiler</code> without
+loading or printing memory payloads. Bundle mode is healthy, the explicit
+legacy rollback is a warning, and an invalid render-mode value is a failure;
+the check also names the active bundle/plan schemas and policy versions. Use
+<code>remem context-plan --task &lt;task&gt; --json</code> when a request-specific retrieval
+plan is needed.</p>
+<p>The default Codex integration is intentionally low-noise: it uses
+<code>SessionStart</code> for context injection and <code>Stop</code> for background summarization.
+For Codex hook invocations, remem emits the supported
+<code>hookSpecificOutput.additionalContext</code> JSON shape so the memory block is
+model-visible through the hook contract instead of asking the assistant to
+repeat a separate <code>Remem context:</code> line. Codex may still show its own completed
+hook context block in the UI; remem does not add a second assistant-rendered
+status line.
+Codex uses strict duplicate-injection gating via
+<code>[memory_ai.hosts."codex-cli"].context_gate = "strict"</code>, so a mid-chat
+<code>SessionStart</code> repeat stays silent after the first injection for the same
+session. It does not install high-frequency Bash observation by default.</p>
+<h3>Codex Plugin</h3>
+<p>This repository includes a local Codex plugin wrapper in <code>plugins/remem</code>.
+The plugin exposes <code>remem mcp</code> and a Remem skill while keeping hook activation
+explicit. The complete product direction is documented in
+<a href="https://github.com/majiayu000/remem/blob/HEAD/docs/spec-codex-plugin-complete-design.md" target="_blank" rel="noopener noreferrer"><code>docs/spec-codex-plugin-complete-design.md</code></a>;
+the current plugin is the local development foundation, not the final
+self-contained plugin experience. To try it from a local checkout:</p>
+<pre><code class="language-bash">codex plugin marketplace add .
+codex plugin add remem@remem-local
+</code></pre>
+<p>The plugin runtime gives <code>remem --version</code> up to 15 seconds on cold startup.
+Set <code>REMEM_RUNTIME_VERSION_TIMEOUT_MS</code> to a different positive integer only
+when the local filesystem or code-signature check needs another bound.</p>
+<p>After installing the plugin, start a new Codex thread. To enable automatic
+SessionStart context injection and Stop summarization, run:</p>
+<pre><code class="language-bash">cargo build --release
+node plugins/remem/scripts/activate-codex.js --dry-run
+node plugins/remem/scripts/activate-codex.js
+</code></pre>
+<h2>Distribution Channels</h2>
+<p>Currently published:</p>
+<ul>
+<li>Homebrew: <code>brew install majiayu000/tap/remem</code></li>
+<li>GitHub Releases: prebuilt binaries for macOS and Linux on x64/arm64</li>
+<li>crates.io: <code>cargo install remem-ai --bin remem</code></li>
+<li>npm: <code>npm install -g @remem-ai/remem</code></li>
+<li>Source build: <code>cargo build --release</code></li>
+</ul>
+<p>Good next channels:</p>
+<ul>
+<li>apt/yum packages: useful later, after the binary install path and service
+story are stable across Linux distributions</li>
+</ul>
+<h2>How It Works</h2>
+<p>remem uses host-specific hook strategies:</p>
+<pre><code>Claude Code workflow
+        |
+        |- SessionStart      -&gt; Inject memories + preferences
+        |- UserPromptSubmit  -&gt; Register session, capture prompt + inject context
+        |- PreToolUse(Bash)  -&gt; Evaluate compiled preference rules
+        |- PostToolUse       -&gt; Capture tool operations (queued, &lt;1ms)
+        '- Stop              -&gt; Summarize in background (~6ms return)
+
+Codex workflow
+        |
+        |- SessionStart      -&gt; Inject memories + preferences
+        '- Stop              -&gt; Summarize in background with Codex CLI
+</code></pre>
+<p>Codex does not install a high-frequency <code>PostToolUse(Bash)</code> observe hook by
+default. Shell-heavy sessions must use the coalesced capture pipeline before
+per-command capture is enabled again; otherwise Bash output can create an
+unbounded backlog. Existing legacy hooks are also ignored unless
+<code>REMEM_ENABLE_CODEX_BASH_OBSERVE=1</code> is set explicitly.</p>
+<p>The capture pipeline starts with an append-only ledger:
+<code>captured_events</code> stores raw hook/session evidence, <code>event_blobs</code> keeps large
+payloads out of prompt-sized rows, and <code>extraction_tasks</code> coalesces work by
+host/project/session instead of creating one LLM job per tool call. Curated
+memory remains the promoted output of this pipeline, not the raw event itself.
+Compatibility <code>events</code> projections share the canonical captured-event identity:
+a hook retry reuses the same projection, while a projection failure rolls back
+the capture and extraction task together so replay cannot create duplicates.</p>
+<h3>Compiled preference rules</h3>
+<p>Compiled preference rules are disabled by default. Enable the worker/compiler
+explicitly with <code>remem config set rule_compilation.enabled true</code>; SQLite
+remains canonical, and the background worker rebuilds the derived
+<code>&lt;data-dir&gt;/compiled_rules/&lt;project-hash&gt;.json</code> artifact. CLI overrides enqueue
+that rebuild and take effect after it completes, without restarting the host:</p>
+<pre><code class="language-bash">remem rules list [--project &lt;path&gt;]
+remem rules disable &lt;rule-id&gt;
+remem rules enable &lt;rule-id&gt;
+remem rules set-action &lt;rule-id&gt; warn
+remem rules set-action &lt;rule-id&gt; block --host claude-code
+</code></pre>
+<p>On Claude Code, the installed <code>PreToolUse(Bash)</code> hook evaluates the artifact
+before execution: <code>warn</code> is the default visible action, while <code>block</code> requires
+explicit per-rule opt-in. <code>PostToolUse</code> remains capture-only and is not an
+enforcement path. Codex has no supported pre-execution command hook, so remem
+reports command enforcement as unsupported there and rejects Codex block-mode
+claims. Missing, corrupt, or unsupported artifacts fail open and record an
+error-level diagnostic instead of blocking the agent.</p>
+<p><code>remem doctor</code> reports whether compilation is enabled, artifact
+presence/validity and rule count, compile time/error, the latest evaluation
+error, and Claude/Codex enforcement capability without printing rule payloads.
+GH-671 remains open because #813 still owns the exact global-owner filter and
+exhaustive eligibility matrix.</p>
+<h2>Remem vs Built-in <code>MEMORY.md</code></h2>
+<p>Built-in memory files are enough when the context is small, stable, and worth
+editing by hand: project rules, setup notes, and a short list of durable
+preferences. Keep using them for facts that should be obvious at first glance.</p>
+<p>Remem is meant for the parts that should not depend on manual upkeep:</p>
+<ul>
+<li><strong>Automatic capture and recall</strong>: hooks summarize sessions into a SQLite
+memory store, while <code>remem search</code>, <code>remem show</code>, <code>timeline</code>, and MCP
+<code>get_observations</code> retrieve details on demand.</li>
+<li><strong>A bridge to native memory</strong>: <code>remem sync-memory --cwd .</code> writes a compact
+<code>remem_sessions.md</code> entry for Claude Code native memory when that directory
+exists, with a <code>MEMORY.md</code> pointer and a size guard. Full detail stays in the
+database and is fetched with <code>remem search</code>.</li>
+<li><strong>A human-editable mirror</strong>: <code>remem export --markdown --output ./remem-memory --project "$PWD"</code> writes one <code>.md</code> file per curated memory to
+an empty directory. After editing those files, <code>remem import markdown --source ./remem-memory</code> updates existing rows and rebuilds search, entity, embedding,
+and current-state indexes. Active imports are instruction-scanned and
+transactional, and cannot move an existing memory across project, branch,
+scope, or owner boundaries. Imported files retain <code>repo_file</code> trust rather
+than being promoted to <code>user_prompt</code> merely because a CLI process read them;
+they stay searchable but do not become CurrentTruth without separately bound
+review evidence. Export refuses non-empty directories to avoid overwriting
+manual edits.</li>
+<li><strong>A git-diffable project memory pack</strong>: maintainers can run
+<code>remem export --project "$PWD" --pack .remem-pack</code> and commit the generated
+<code>pack.json</code>, <code>memories.jsonl</code>, and <code>INDEX.md</code> files for active repo-owned
+startup memories. New contributors run <code>remem import --pack .remem-pack</code>
+from the same checkout to merge safe rows into their local store. Export
+re-runs the redaction scan and fails loudly on secret-like content; import
+dedups local rows, skips suppressed or invalidated local decisions, routes
+conflicts/quarantines to review, and marks imported memories with pack
+provenance visible in <code>remem why</code> and <code>remem doctor</code>.</li>
+<li><strong>Codex native memories import</strong>: <code>remem import codex-memories --dry-run</code>
+plans a one-way, read-only import of Codex CLI rollout-summary memories
+(<code>~/.codex/memories/rollout_summaries</code>) and prints a plan digest; apply with
+<code>remem import codex-memories --expect-plan-digest &lt;sha256&gt;</code>. Records are
+treated as untrusted external content: they only land in the candidate
+review queue (<code>pending_review</code>/<code>quarantined</code>, secret-containing batches are
+blocked entirely), never directly in active memories, and the Codex source
+tree is never modified. Re-running the import is idempotent even if Codex
+renames its generated files.</li>
+<li><strong>Failure-loop learning</strong>: raw transcripts that contain both concrete
+build/test failure evidence and an explicit "stop and challenge the
+hypothesis" style lesson feed an idempotent <code>failure</code> lesson before summary
+cooldown, duplicate, or skip exits.</li>
+<li><strong>Guarded Dream consolidation</strong>: every model-generated topic key, type,
+title, content, no-merge reason, and conflict reason is scanned before Dream
+can persist or replace anything. The final title/content render is scanned as
+one surface too, so split-field instructions cannot bypass the boundary. A
+match becomes a project-scoped quarantined review candidate with a
+cryptographically version-bound source-cluster artifact; the original
+memories remain active, and newer semantic output invalidates an older review
+instead of silently rebinding it. Every decision rechecks source payload,
+TTL, current-state pointer, and suppression under its write lock; clean model
+output stays external trust and cannot rewrite a cluster-external dedup target.</li>
+<li><strong>Auditable candidate promotion</strong>: candidate risk uses the closed
+<code>low</code>/<code>medium</code>/<code>high</code> rubric. Observation-derived low-risk facts are checked
+claim by claim against eligible source observations; supported negative facts
+and ordinary engineering uses of “token” are not rejected by a bare-word
+blacklist. Credential token variants, auth/authz state, destructive actions,
+generic imperative controls, outer negation, and ambiguous modal claims are
+deterministically review-gated even if a model labels them low risk. Directly
+supported failure-and-recovery lessons may promote, while preferences,
+procedures, secrets, instruction patterns, unsupported claims, and
+prospective or conditional claims remain review-gated or quarantined with an
+explicit block reason.</li>
+<li><strong>Governance and auditability</strong>: <code>remem why &lt;id&gt;</code>, <code>remem govern --action stale --dry-run --json &lt;id&gt;</code>, <code>remem status --json</code>, and <code>remem usage --days 14 --weeks 8</code> show why a memory is visible, what would change, store health,
+and memory-AI token/cost accounting.</li>
+<li><strong>Commit/session traceability</strong>: successful explicit <code>git commit</code> results
+prove SHAs; trusted hook capture resolves those exact commits and links them
+to the durable session identity. Delayed workers and spill replay reuse that
+typed evidence; ordinary Stop events and missing evidence never guess from a
+later <code>HEAD</code>.</li>
+<li><strong>Current-memory accountability</strong>: staleness labels, temporal facts,
+source-anchor checks, injection item audit rows, and citation/usage events
+show why a memory is current, stale, dropped, abstained, cited, or ignored.</li>
+<li><strong>User-context governance</strong>: <code>remem user ...</code>, <code>remem memory suppress ...</code>,
+profile export, and non-retention policy checks keep personalized recall
+explicit instead of silently blending every user fact into every project.</li>
+<li><strong>Deterministic checks before claims</strong>: local gates include
+<code>cargo test -q context::claude_memory --lib</code>, <code>cargo test -q eval::golden --lib</code>, <code>cargo test -q eval::governance --lib</code>, and <code>remem eval-e2e --json</code>.</li>
+</ul>
+<p>Do not read this as a published claim that remem beats a carefully maintained
+<code>MEMORY.md</code> on coding tasks. The flagship no-memory / remem / curated-file A/B
+is still a separate benchmark requirement; until it is published, the honest
+claim is capability coverage and reproducible local checks.</p>
+<p>For GH-931 operators, <code>remem bench coding --verify-live-approval-only</code> now
+checks the signed default-branch approval, trust root, exact benchmark plan and
+artifact hashes, hard caps, and Linux supervisor attestation with zero
+runner/provider calls. A passing report is explicitly <code>local_gate_only</code> and
+does not authorize smoke or official dispatch; the independent governed
+executor, scorer, ledger, and TUF/Rekor authority are still required. See
+<a href="https://github.com/majiayu000/remem/blob/HEAD/eval/coding-bench/README.md" target="_blank" rel="noopener noreferrer"><code>eval/coding-bench/README.md</code></a>.</p>
+<h2>Embedding Provider Configuration</h2>
+<p>Vector retrieval is controlled by the <code>[embeddings]</code> section in
+<code>~/.remem/config.toml</code>:</p>
+<pre><code class="language-toml">[embeddings]
+provider = "auto"         # auto | api | local | feature-hash | off
+fallback = "feature-hash" # optional; omit for fail-closed
+model = "text-embedding-3-small"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model_dir = ""            # optional; defaults to REMEM_DATA_DIR/models
+</code></pre>
+<p><code>auto</code> resolves in this order: a remem-specific API key, the verified
+<code>multilingual-e5-small</code> local model, then the labeled <code>feature-hash</code> fallback.
+An ambient <code>OPENAI_API_KEY</code> alone does not opt <code>auto</code> into remote calls.
+remem never downloads model weights from a hook or search request; install the
+default local model explicitly:</p>
+<pre><code class="language-bash">remem embedding download --model multilingual-e5-small
+remem embedding status
+remem embedding backfill --limit 1000
+</code></pre>
+<p>Automatic download currently supports only <code>multilingual-e5-small</code>, whose
+evaluated immutable revision is pinned by remem. <code>bge-m3</code> remains recognized so
+an already installed verified cache can still be loaded, but
+<code>remem embedding download --model bge-m3</code> fails closed until remem publishes an
+approved immutable BGE revision.</p>
+<p>After the verified download, an <code>auto</code> configuration with no remem-specific
+API key activates the local model. Run the idempotent backfill after any
+provider/model switch—or after the downloaded artifact changes—so existing
+memories gain vectors in the new model space. The active local model id carries
+the verified artifact SHA-256, so vectors from different weight revisions are
+never mixed even when their preset name and dimensions match.</p>
+<p>Local ONNX initialization is a cold-start cost for short-lived commands. The
+checked-in release-mode reference run measured about 5.43 seconds for provider
+verification plus the first profile probe and 12 ms p95 for subsequent query
+embeddings. Long-lived MCP/API processes reuse one process-wide session; the
+report therefore records cold and warm latency separately instead of treating
+the warm number as end-to-end startup time.</p>
+<p>On Intel macOS (<code>darwin-x64</code>) release binaries, the <code>local</code> ONNX provider is
+not compiled in because ONNX Runtime ships no prebuilt library for that
+platform; embedding falls back to <code>feature-hash</code> (or <code>api</code> if configured), and
+<code>remem status</code> / <code>remem doctor</code> report the provider state explicitly.</p>
+<p>On Windows, local ONNX model operations accept only remem's default per-user
+model root. <code>embeddings.model_dir</code> and non-default <code>REMEM_DATA_DIR</code> roots fail
+closed: a shared/custom ancestor chain cannot provide the same reparse-point
+and file identity guarantees. A worker-exported <code>REMEM_DATA_DIR</code> that resolves
+to the default per-user directory remains supported. <code>auto</code> reports any real
+override as unavailable and uses the labeled feature-hash fallback; explicit
+<code>local</code> returns an actionable error. An older default model cache with
+inherited/wide ACLs is not silently trusted or chmod-like rewritten; remove or
+move that cache, then run <code>remem embedding download</code> again in the default
+location.</p>
+<p>Environment overrides keep the existing <code>REMEM_EMBEDDINGS_*</code> names, including
+<code>REMEM_EMBEDDINGS_PROVIDER</code>, <code>REMEM_EMBEDDINGS_FALLBACK</code>,
+<code>REMEM_EMBEDDINGS_MODEL</code>, <code>REMEM_EMBEDDINGS_MODEL_DIR</code>,
+<code>REMEM_EMBEDDINGS_BASE_URL</code>, <code>REMEM_EMBEDDINGS_API_KEY</code>,
+<code>REMEM_EMBEDDINGS_API_KEY_ENV</code>, <code>REMEM_EMBEDDINGS_DIMENSIONS</code>, and
+<code>REMEM_EMBEDDINGS_TIMEOUT_SECS</code>.</p>
+<p><code>local</code> and <code>feature-hash</code> are separate provider states. <code>local</code> runs the
+verified fastembed/ONNX model; <code>feature-hash</code> explicitly selects
+<code>remem-local-feature-hash-v1</code>, the deterministic non-semantic fallback.
+<code>provider = "off"</code> disables query embeddings, vector fusion, vector writes,
+and embedding backfill. Existing stored vectors remain in SQLite but are
+ignored while the provider is off.</p>
+<p>The confidence gate admits a vector-only semantic fallback when no
+claim-supported grounded result survives. If the query names an explicit
+entity already stored in memory, that fallback must be directly bound to a
+matching visible memory or connected through a specific entity shared by
+already-fused visible candidates; common tags such as <code>API</code>, <code>remem</code>, <code>Claude</code>,
+and <code>Team</code> cannot form that bridge. The candidate must still pass the predicate
+claim check. Vector distance alone never turns an unsupported statement about
+a known entity into an answer, while the constrained bridge preserves valid
+owner-to-pager multi-hop recall.</p>
+<p><code>remem status --json</code> exposes an <code>embedding</code> object with configured provider,
+active provider, active model id, degraded/disabled flags, and active-model
+coverage. <code>remem doctor</code> reports unavailable configured providers, visible
+fallback activation, low active-model coverage, and mixed model/dimension
+profiles that need backfill.</p>
+<h2>Search Architecture</h2>
+<p>remem uses multi-channel Reciprocal Rank Fusion (RRF) inspired by <a href="https://github.com/vectorize-io/hindsight" target="_blank" rel="noopener noreferrer">Hindsight</a>:</p>
+<pre><code>Query: "database encryption"
+        |
+   +----+------------------------------------+
+   |       parallel retrieval channels       |
+   +-----------------------------------------+
+   | 1. FTS5 (BM25)   trigram + OR           |
+   | 2. Entity Index  1600+ entities         |
+   | 3. Temporal      "yesterday"/"last week" |
+   | 4. LIKE fallback short tokens           |
+   | 5. Trusted graph bounded expansion      |
+   +-------------+---------------------------+
+                 |
+        contribution_i = weight_i / (60 + rank_i)
+                         * (1 + normalized_signal_i)
+                 |
+             Top-K merged results
+</code></pre>
+<p>Entity, temporal, fact, LIKE fallback, and graph channels are rank-only, so
+their <code>normalized_signal</code> is absent and the formula reduces to pure weighted
+RRF; <code>rank_i</code> is one-based (<code>1, 2, ...</code>). FTS, vector, and usage channels
+may add a calibrated <code>[0, 1]</code>
+signal; an equal-score FTS result set also falls back to pure RRF. The usage
+channel reranks only candidates the other channels already surfaced, using
+<code>ln1p(access_count)</code> with a 30-day recency half-life. It ships at the
+calibrated default weight <code>0.25</code> (GH-947, evidence in
+<code>eval/weight-grid/report.json</code>); set <code>REMEM_USAGE_WEIGHT=0</code> to restore the
+pre-rollout ranking exactly. Search
+<code>--explain</code> reports each contribution's channel rank and total score. It also
+reports the computed score identity
+<code>final_score = sum(contribution.score) * post_fusion_score_factor</code>; the factor
+captures post-fusion policies such as source-anchor demotion without adding
+required fields to the public Rust explain structs.</p>
+<p>Before claim and confidence gating, remem removes only validated temporal spans
+and a restricted query-opening command scaffold. Entity numbers remain part of
+the query. Malformed or identifier-shaped temporal text fails closed and stays
+semantic instead of silently becoming a temporal filter.</p>
+<p>Enhancements:</p>
+<ul>
+<li>Entity-index and trusted typed-graph expansion (bounded 2-hop retrieval)</li>
+<li>Project-scoped entity search (no cross-project leakage)</li>
+<li>CJK segmentation support</li>
+<li>Chinese-English synonym expansion</li>
+<li>Title-weighted BM25 (<code>bm25(fts, 10.0, 1.0)</code>)</li>
+<li>Content-hash deduplication via <code>topic_key</code></li>
+<li>Multi-step retrieval guidance in MCP tool descriptions</li>
+</ul>
+<p>AI-generated retrieval enrichment is index-only: it never rewrites canonical
+memory content or enters context injection/export payloads. New and canonically
+changed rows are enriched in bounded idle work (four rows per batch, at most one
+batch per one-shot worker or per 60 seconds in a daemon). Schema upgrades defer
+incomplete historical rows instead of automatically backfilling the whole
+database, and a row stops automatic retries after three failures. <code>remem doctor</code> reports pending, exhausted, and deferred counts separately.
+Across all worker queues, a one-shot worker admits at most four potential AI
+work items and stops admitting new items after 180 seconds; an already-running
+provider request is allowed to finish under its own timeout.</p>
+<h2>Benchmark Snapshot</h2>
+<h3>Public Artifact Suite (Directional Only)</h3>
+<p>The checked-in <code>eval/public</code> artifacts now separate memory-system capability
+evidence from coding-agent outcome evidence. Reproduce the public verifier with:</p>
+<pre><code class="language-bash">cargo run -- bench verify --root eval/public --json-out /tmp/remem-bench-verify.json
+cargo run -- bench report --root eval/public --json-out eval/public/reports/baseline.json --markdown-out eval/public/reports/baseline.md
+</code></pre>
+<p>The current directional report verifies 5 manifests, 5 reports, 45 run
+artifacts, and 225 artifact files. It includes:</p>
+<ul>
+<li><code>remem-code-memory</code>: 8 memory QA runs covering temporal/as-of answers, stale
+decision avoidance, conflicts, workstream continuity, prior bug root cause,
+architecture constraints, file/source anchors, and user-context relevance.</li>
+<li><code>adversarial-policy</code>: 20 policy cases covering secrets, credentials, payment
+data, unsupported assistant claims, unapproved external sources, roleplay,
+negation, same-name repos, branch divergence, stale file anchors, unresolved
+conflicts, instruction injection, authority claims, opaque payloads, and a
+benign quoted-instruction control. Its <code>remem_default</code> condition runs real
+capture -&gt; observation extraction -&gt; candidate governance -&gt; promotion and
+reads policy counts from the resulting SQLite state. Each artifact records
+that verification path plus the exact source/generated scanner split;
+direct-memory fixture conditions remain labeled comparative baselines.</li>
+<li><code>issue385-smoke</code>: one committed historical coding-agent smoke run artifact
+classified as <code>remem_preloaded</code>, with memory-contract fields. The full
+<code>issue385-v1</code> fixture pack
+is referenced for dry-run reproduction, but it is not yet part of the
+verified public outcome report.</li>
+</ul>
+<p><code>remem bench report</code> writes paired coding statistics to the JSON
+<code>coding_paired_statistics</code> array and to the Markdown <strong>Paired Coding
+Statistics</strong> table. A comparison has status <code>computed</code> only when the artifact
+verifier passes and one report contains the exact 144-tuple
+<code>issue385-v1/official-v1</code> matrix (16 tasks, three primary conditions, and run
+indices 0, 1, and 2), with a unique <code>attempt_id</code> and
+<code>target_started=true</code> for every tuple. Target-started timeout, crash, or score
+failure remains a binary zero. Missing tuples, integrity-invalid evidence, a
+missing/duplicate attempt identity, or any pre-target failure instead produces
+status <code>insufficient</code>; rates, effects, and confidence bounds stay <code>null</code>/<code>n/a</code>,
+and <code>insufficient_reason</code> (also shown in Markdown) explains the failed gate.
+The currently checked-in smoke-only report is therefore <code>insufficient</code>, not a
+zero-effect official result.</p>
+<p>The source runner now implements directional local adapters for
+<code>curated_file_budgeted</code> and <code>remem_e2e</code>. The E2E adapter consumes only
+closed-schema fixture <code>raw_events</code>, verifies an insert-only production capture
+transaction, drains extraction/candidate/graph work, and binds the exact
+production SessionStart ContextAudit. This is implementation evidence, not an
+official outcome: the governed shared runner, independent scorer, authority,
+ledger/transparency receipts, and 144 sealed runs are still pending.</p>
+<p>The report is intentionally labeled <code>directional_only_no_public_claim</code>. README
+and release wording must stay directional and avoid broad outcome or
+coding-task outcome claims until the public claim gate in
+<a href="https://github.com/majiayu000/remem/blob/HEAD/docs/release-lifecycle.md" target="_blank" rel="noopener noreferrer"><code>docs/release-lifecycle.md</code></a> passes.</p>
+<h3>Isolated Coding-Agent Baseline (Internal, Not A Public Claim)</h3>
+<p><code>eval/coding-bench/reports/baseline.json</code> contains an isolated 5-task,
+3-runs-per-condition baseline generated with <code>codex-cli 0.142.1</code> and
+<code>gpt-5.5</code>: <code>no_memory</code> resolved 2/15, <code>remem</code> resolved 15/15, and
+<code>curated_file</code> resolved 15/15. This is useful engineering evidence, but it
+predates the public 16-task v1 fixture pack. Its <code>remem</code> arm used the historical
+full-body <code>remem_preloaded</code> semantics and is not comparable with current
+retrieval-dependent <code>remem_seeded_sessionstart</code> runs; it must be regenerated
+before it supports stronger product claims.</p>
+<p>New remem-backed coding-bench runs bind their report to the exact production
+SessionStart injection audit. Missing or tampered audit evidence is reported as
+a runtime contract failure. A separate binding hash covers the injection run ID
+and audit hash so standalone artifact verification also rejects a renamed run.
+<code>no_memory</code> and curated-file controls mark that contract as not applicable.</p>
+<h3>LoCoMo (Informational Only)</h3>
+<p>Full <a href="https://github.com/snap-research/locomo" target="_blank" rel="noopener noreferrer">LoCoMo</a> benchmark (10 conversations, 1540 QA pairs after adversarial skip):</p>
+<p>This snapshot is a historical footnote and is not a CI or release gate. Use the
+golden retrieval eval for deterministic gating; LoCoMo remains useful only for
+manual, informational comparison because the methodology is disputed.</p>
+<table>
+<thead>
+<tr>
+<th>Config</th>
+<th align="right">Overall</th>
+<th align="right">Single-hop</th>
+<th align="right">Multi-hop</th>
+<th align="right">Temporal</th>
+<th align="right">Open-domain</th>
+<th>Ingest</th>
+<th>Model</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>v1 (fair)</strong></td>
+<td align="right"><strong>56.8%</strong></td>
+<td align="right">67.1%</td>
+<td align="right">39.0%</td>
+<td align="right">53.9%</td>
+<td align="right">28.1%</td>
+<td>per-turn</td>
+<td>gpt-5.4</td>
+</tr>
+<tr>
+<td><strong>v2 (optimized)</strong></td>
+<td align="right"><strong>62.7%</strong></td>
+<td align="right">72.3%</td>
+<td align="right">61.3%</td>
+<td align="right">40.5%</td>
+<td align="right">56.2%</td>
+<td>session_summary</td>
+<td>gpt-5.4</td>
+</tr>
+</tbody></table>
+<h3>Internal Eval (1777 real memories)</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th align="right">Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>MRR</td>
+<td align="right">0.858</td>
+</tr>
+<tr>
+<td>Hit Rate@5</td>
+<td align="right">1.000</td>
+</tr>
+<tr>
+<td>Dedup rate</td>
+<td align="right">1.0%</td>
+</tr>
+<tr>
+<td>Project leak</td>
+<td align="right">0%</td>
+</tr>
+<tr>
+<td>Self-retrieval</td>
+<td align="right">100%</td>
+</tr>
+</tbody></table>
+<h3>Local QA Eval</h3>
+<pre><code class="language-bash">python3 eval/local/run_local_eval.py --db ~/.remem/remem.db --n 20
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th align="right">Score</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Overall</td>
+<td align="right"><strong>85.0%</strong></td>
+</tr>
+<tr>
+<td>Decision</td>
+<td align="right">77.8%</td>
+</tr>
+<tr>
+<td>Discovery</td>
+<td align="right">87.5%</td>
+</tr>
+<tr>
+<td>Preference</td>
+<td align="right">100%</td>
+</tr>
+<tr>
+<td>Source in top-20</td>
+<td align="right">90.0%</td>
+</tr>
+</tbody></table>
+<p>Requires explicit <code>--db</code> plus <code>.env</code> with <code>OPENAI_API_KEY</code> (optional <code>OPENAI_BASE_URL</code>, <code>OPENAI_MODEL</code>).</p>
+<h3>Sandboxed E2E Eval</h3>
+<pre><code class="language-bash">remem eval-e2e
+remem eval-e2e --json
+</code></pre>
+<p>Runs a deterministic coding-agent memory corpus through the real local REST API
+boundary (<code>POST /api/v1/memories</code>, then <code>GET /api/v1/search</code>) with a temporary
+<code>REMEM_DATA_DIR</code>. The default run removes the sandbox directory afterward, so it
+does not touch <code>~/.remem</code> or other real memory data. Use <code>--keep-data-dir</code> when
+you need to inspect the generated database.</p>
+<h2>Token Usage And Cost Reporting</h2>
+<p>remem records an AI usage ledger for its own background extraction, summary,
+compression, and promotion calls. The CLI can report daily and weekly token
+usage and estimated cost:</p>
+<pre><code class="language-bash">remem usage --days 14 --weeks 8
+remem usage --project /path/to/project --days 30 --weeks 12
+</code></pre>
+<p>The report includes calls, input tokens, cache tokens, output tokens, reasoning
+tokens, total tokens, estimated USD cost, and a precision note. Usage rows are
+tagged by source:</p>
+<ul>
+<li><code>anthropic_usage</code>: provider-reported usage from the Anthropic Messages API</li>
+<li><code>codex_log</code>: exact token counts parsed from the current <code>codex exec --json</code>
+<code>turn.completed.usage</code> event</li>
+<li><code>text_estimate</code>: fallback estimate from prompt/response text length</li>
+</ul>
+<p>Cost is an estimate, not an invoice. Historical rows may be text estimates or
+may have been repriced from older rows that did not store the exact model.
+GPT-5.6 Codex subscription models such as Luna, Sol, and Terra are billed in
+credits, so remem preserves their token counts but reports unknown USD pricing
+unless an operator supplies an explicit USD pricing override in <code>[pricing]</code>
+or <code>REMEM_PRICE_*</code>.</p>
+<h2>Memory AI Configuration</h2>
+<p>Memory AI execution is configured in <code>~/.remem/config.toml</code> (override path with
+<code>REMEM_CONFIG</code>). Hooks pass only <code>--host</code>; the config maps each host to one
+profile used by summarize, flush/extract, compress, and dream.</p>
+<pre><code class="language-bash">remem config path
+remem config show
+remem config set memory_ai.profiles.codex.model gpt-5.2
+</code></pre>
+<p>For normal model switching, prefer the higher-level <code>remem model</code> commands:</p>
+<pre><code class="language-bash">remem model current
+remem model list
+remem model use cheap
+remem model use balanced --dry-run
+remem model use gpt-5.2 --reasoning medium
+remem model use haiku --host claude-code
+remem model test
+remem model test --live
+remem model rollback
+</code></pre>
+<p><code>remem model test</code> only validates the selected config unless <code>--live</code> is set.
+<code>remem model use</code> saves a rollback backup before writing the config. Built-in
+presets are Codex-focused; use explicit model names for Claude Code profiles.</p>
+<p>SessionStart numeric budgets live in the same file:</p>
+<pre><code class="language-toml">[context]
+total_char_limit = 12000
+core_char_limit = 3000
+preference_global_limit = 0
+relevance_k = 1
+</code></pre>
+<p><code>REMEM_CONTEXT_*</code> environment variables remain overrides. Set a budget with
+<code>remem config set context.total_char_limit 8000</code>.</p>
+<p>USD cost estimates use compiled per-family rates unless you set a global
+override in the same file:</p>
+<pre><code class="language-toml">[pricing]
+input_per_mtok = 1.25
+output_per_mtok = 6.5
+</code></pre>
+<p><code>REMEM_PRICE_*</code> environment variables remain overrides. A complete
+<code>[pricing]</code> pair also prices GPT-5.6 credit models; family tables such as
+<code>[pricing.haiku]</code> overlay only that family. Init writes an empty <code>[pricing]</code>
+table and does not pin compiled rates.</p>
+<p>Installed hooks still call the full <code>remem</code> binary unless a <code>remem-hook</code>
+sibling executable sits next to it. Then SessionStart/Stop/observe/session-init use the
+slim entry; <code>rules eval</code> and MCP stay on <code>remem</code>.</p>
+<pre><code class="language-bash">cargo build --release --bin remem
+cargo build --release --no-default-features --bin remem-hook
+</code></pre>
+<p>Default Codex profile:</p>
+<pre><code class="language-toml">[memory_ai.hosts."codex-cli"]
+memory_profile = "codex"
+context_gate = "strict"
+context_color = true
+capture_adapter = "codex-cli"
+
+[memory_ai.profiles.codex]
+executor = "codex-cli"
+model = "gpt-5.2"
+path = "codex"
+</code></pre>
+<h2>Commands</h2>
+<pre><code class="language-bash">remem install
+remem uninstall
+remem doctor
+remem search "query"
+remem search "query" --branch main --type decision --multi-hop --offset 10
+remem search "query" --include-suppressed
+remem search "query" --json
+remem show &lt;id&gt;
+remem show &lt;id&gt; --json
+remem eval
+remem eval-e2e --json
+remem eval-local
+remem backfill-entities
+remem encrypt
+remem api --port 5567
+remem status
+remem status --json
+remem config show
+remem config set memory_ai.profiles.codex.model gpt-5.2
+remem rules list [--project &lt;path&gt;]
+remem rules disable &lt;rule-id&gt;
+remem rules enable &lt;rule-id&gt;
+remem rules set-action &lt;rule-id&gt; warn
+remem rules set-action &lt;rule-id&gt; block --host claude-code
+remem model current
+remem model list
+remem model use balanced --dry-run
+remem model use gpt-5.2 --reasoning medium
+remem model use haiku --host claude-code
+remem model test [--live]
+remem model rollback
+remem usage --days 14 --weeks 8
+remem pending list-failed
+remem pending list-failed --json
+remem pending retry-failed --dry-run
+remem pending list-extraction-ranges --id 308 --json
+remem pending retry-extraction-ranges --id 308 --dry-run
+remem pending retry-extraction-ranges --id 308
+remem pending retry-extraction-ranges --id 308 --acknowledge-quarantine --dry-run
+remem pending retry-extraction-ranges --id 308 --acknowledge-quarantine
+remem pending retry-extraction-ranges --id 308 --acknowledge-quarantine --include-archived --dry-run
+remem worker --once --replay-range-id 308 --acknowledge-quarantine --include-archived --profile claude
+remem pending quarantine-extraction-ranges --id 308 --dry-run
+remem pending migrate-legacy --dry-run
+remem pending migrate-legacy
+remem pending recover-archived --id 42 --dry-run
+remem pending recover-archived --id 42
+remem pending recover-archived --id 42 --host claude-code --dry-run
+remem pending recover-archived --id 42 --host claude-code
+remem pending purge-failed --dry-run --older-than-days 7
+remem govern --action stale --dry-run --json &lt;id&gt;
+remem review list
+remem review approve &lt;id&gt;
+remem review approve &lt;id&gt; --acknowledge-pattern &lt;pattern_id&gt;
+remem review discard &lt;id&gt;
+remem review edit &lt;id&gt; --text "updated memory"
+remem procedures list
+remem procedures list --project /repo/path --json
+remem procedures export &lt;id&gt; --format runbook-md
+remem procedures export &lt;id&gt; --format claude-skill --out remem-drafts
+remem procedures export &lt;id&gt; --format codex-prompt --out remem-drafts --overwrite-generated
+remem preferences list
+remem preferences add "text"
+remem preferences remove 42
+remem memory suppress memory:123 --reason "not relevant anymore"
+remem memory unsuppress memory:123 --reason "needed again"
+remem memory feedback memory:123 --value not-relevant
+remem memory suppressions list
+remem user remember "For this repo, review specs before code"
+remem user remember --scope repo --owner-key /repo/path --type goal "Ship remem user context"
+remem user claims list
+remem user claims why &lt;id&gt;
+remem user claims edit &lt;id&gt; --text "updated claim"
+remem user claims suppress &lt;id&gt;
+remem user claims unsuppress &lt;id&gt;
+remem user claims delete &lt;id&gt;
+remem user summary show
+remem user summary refresh
+remem user summary edit --text "updated profile summary"
+remem user summary sources
+remem user profile export --format markdown --output profile.md
+remem user recall "review the remem user context design"
+remem user backfill --json --limit 100
+remem user backfill --apply --json --limit 100
+remem user review inbox
+remem user review approve &lt;id&gt;
+remem user review edit &lt;id&gt; --text "updated candidate"
+remem user review reject &lt;id&gt;
+remem user review suppress &lt;id&gt;
+remem context --cwd .
+remem cleanup --dry-run --json
+remem cleanup --dry-run --json --archived-failures
+remem cleanup
+remem workstreams merge --project &lt;path&gt; --into &lt;canonical_id&gt; &lt;duplicate_id&gt;... --confirm
+remem workstreams merge --project &lt;path&gt; --into &lt;canonical_id&gt; &lt;duplicate_id&gt;... --confirm --json
+remem dream [--project X] [--profile NAME] [--dry-run]
+remem install --target codex
+remem mcp
+remem sync-memory --cwd .
+</code></pre>
+<p>The worker schedules one database-global lifecycle cleanup at most once per
+24-hour completed-attempt window. It first converges elapsed-TTL memories to
+<code>stale</code>, then applies the same atomic retention policy as <code>remem cleanup</code>.
+Audit events and live provenance are preserved. Automatic cleanup can never
+purge archived failures; that hard-delete boundary still requires an explicit
+positive <code>--archived-failures[=DAYS]</code> operator flag. <code>remem doctor</code> reports the
+latest automatic success and failure independently.</p>
+<h3>Legacy pending recovery</h3>
+<p>Current capture no longer writes or claims the retired
+<code>pending_observations</code> queue. When no current extraction task is ready, an
+ordinary worker can drain residual rows into the current capture/extraction
+pipeline. <code>remem worker --once</code> admits at most one batch per process; a daemon
+admits at most one batch every 60 seconds; each batch contains at most 25
+oldest eligible rows. If current extraction work appears during legacy
+preflight, a zero-progress yield keeps that admission available after current
+work drains; a partial-progress yield consumes it.</p>
+<p>Automatic candidates must have a known Claude Code or Codex host and be
+pending, expired-processing, due transient failures, or controlled historical
+archived transient failures. A success atomically records the current captured
+event and extraction task, marks the legacy row migrated, and clears its old
+failure/archive state. Any replay error rolls back current-pipeline writes,
+records exponential backoff capped at 900 seconds, and stops that batch. The
+bridge does not guess that a shared replay failure is row-local permanent.
+Doctor keeps archived known-host transient rows visible during that backoff,
+shows the earliest <code>next_retry_epoch</code>, and omits immediate <code>worker --once</code>
+guidance until a row is due.
+Rows already classified permanent and unknown-host rows remain available
+through <code>remem pending</code> for inspection and explicit admin recovery; an unknown
+host must be repaired before replay. The bridge does not restore the legacy
+enqueue/claim API and never automatically deletes rows.</p>
+<p>Archived failed legacy rows that are not eligible for the automatic bridge are
+reported by doctor as <code>admin-required</code>. Doctor lists a bounded, oldest-first
+set of those candidates directly, including each real ID, stored host, failure
+class, archive time, and concrete <code>remem pending recover-archived</code> preview and
+apply commands. A row stored with <code>host = unknown</code> is shown with both explicit
+<code>--host claude-code</code> and <code>--host codex-cli</code> variants so the operator can choose
+the correct identity. <code>recover-archived</code> rejects non-failed or non-archived
+rows, replays only the requested ID in one transaction, and clears
+failure/archive state only after the current event and extraction task commit;
+an error leaves the source row unchanged.</p>
+<p>Use the exact-ID extraction-range commands when recovering one known failure:
+preview the retry or quarantine first, apply it only after the preview succeeds,
+then query the same ID with <code>list-extraction-ranges --id &lt;id&gt; --json</code>. Exact
+listing includes terminal <code>replayed</code> ranges and their linked replay task, so the
+final range/task status and bounded error evidence remain auditable. <code>--id</code>
+cannot be combined with batch <code>--project</code> or <code>--limit</code> filters and never falls
+back to a sibling range. A quarantined range remains excluded from ordinary
+exact and batch retry; restoring one requires the exact positive <code>--id</code> plus
+<code>--acknowledge-quarantine</code>, first with <code>--dry-run</code> and then without it.
+If the quarantined range has also archived, the pending command accepts
+<code>--include-archived</code> only for a dual-confirmation dry-run. The write must use
+the exact worker command with the same ID, both acknowledgements, and an
+explicit <code>--profile</code>. That worker refuses to write while another worker holds
+the singleton, atomically requeues and claims only the target task, and returns
+partial, failed, timed-out, or interrupted attempts to archived quarantine
+instead of exposing them to the ordinary daemon queue.</p>
+<p><code>remem procedures export</code> writes reviewable drafts for promoted procedure
+memories. The default output is <code>remem-drafts/</code>; export refuses high-context
+agent instruction paths such as <code>.claude/</code>, <code>.codex/</code>, <code>AGENTS.md</code>,
+<code>CLAUDE.md</code>, repo <code>skills/</code>, <code>.agents/skills/</code>, and plugin <code>skills/</code> roots.
+<code>--overwrite-generated</code> only replaces an unchanged remem-generated draft with a
+matching export registry row.</p>
+<p><code>remem user ...</code> stores explicit user-context claims separately from
+repo-scoped coding memories. Manual claims default to <code>owner_scope=user</code>,
+<code>owner_key=user:default</code>, <code>source_kind=manual</code>, and <code>status=active</code>. Suppress
+and delete commands change status without hard-deleting the audit row; default
+claim lists exclude suppressed, deleted, expired, not-yet-valid, and restricted
+claims.</p>
+<p>Automatic user-context extraction can auto-promote only normal, low-risk
+preference or constraint claims with stable claim keys, explicit user statement
+sources, user-authored source events, and conservative text support. The default
+auto-promote policy lowers only the confidence threshold from <code>0.9</code> to <code>0.7</code>:</p>
+<pre><code class="language-toml">[user_context.auto_promote]
+min_confidence = 0.7
+allowed_source_kinds = ["explicit_user_statement"]
+require_text_support = true
+strict = false
+</code></pre>
+<p>Set <code>strict = true</code> to restore the old <code>0.9</code> threshold while keeping the same
+source and text-support requirements. Sensitivity, high risk, third-party
+framing, non-user-authored source refs, missing keys, claim-key conflicts, and
+non-retention matches remain hard review/no-retention gates in every mode.
+<code>require_text_support = false</code> currently fails closed until queue support and
+full source non-retention scanning are policy-aware.</p>
+<p><code>remem user profile export --format markdown</code> writes a derived, read-only
+snapshot of the user profile remem would use. Without <code>--output</code> it prints to
+stdout; with <code>--output profile.md</code> it creates a new file and refuses to
+overwrite existing content. The snapshot names the SQLite database as the
+source of truth, includes owner/project metadata, active summary provenance,
+source ids, and active default-eligible claims. Default output excludes
+suppressed, deleted, expired, future, personal, sensitive, and restricted
+claims. Use <code>--include-suppressed</code>, <code>--include-sensitive</code>, <code>--include-inactive</code>,
+<code>--include-deleted</code>, and <code>--include-manual-summaries</code> only for explicit audit;
+audit rows are labeled with exclusion reasons and text remains redacted unless
+all applicable audit gates are enabled.</p>
+<p><code>remem memory suppress</code> applies a default-read policy without deleting the
+source row. Targets can be <code>memory:&lt;id&gt;</code>, <code>claim:&lt;id&gt;</code>, <code>topic:&lt;key&gt;</code>,
+<code>entity:&lt;name&gt;</code>, <code>pattern:&lt;text&gt;</code>, or a bare memory id/topic key. Default
+search, SessionStart context, profile-summary sources, preferences, lessons,
+current-state lookup, MCP search, and REST search exclude active suppressions.
+Use <code>--include-suppressed</code> on search when an audit needs to inspect suppressed
+evidence explicitly. <code>remem why &lt;id&gt;</code> reports whether the memory is currently
+suppressed and which policy matched it. <code>remem memory feedback</code> records
+<code>relevant</code>, <code>not-relevant</code>, <code>harmful</code>, <code>stale</code>, or <code>too-noisy</code> events without
+changing ranking by default.</p>
+<p><code>remem user recall &lt;query&gt;</code> retrieves task-aware user context on demand without
+expanding SessionStart. It combines safe profile summaries, active
+non-sensitive claims, repo memory, explicitly requested current-state keys,
+active workstreams, and recent sessions into compact source-attributed context.
+Default recall excludes suppressed, rejected, deleted, expired, future,
+personal, sensitive, and restricted claims. Use <code>--include-sensitive</code> and
+<code>--include-suppressed</code> only for explicit audit. Non-empty recall output includes
+a usage policy telling agents to apply user context only when it materially
+improves the answer, prefer invisible adaptation over memory narration, avoid
+uncited profile inferences, and avoid inventing a profile when no context
+applies.</p>
+<p><code>remem user backfill</code> migrates legacy user-scope preference memories into
+governed user-context claims. Without <code>--apply</code>, it opens an existing database
+read-only, reports candidate and skipped memory ids, and never creates,
+migrates, or writes the store. With <code>--apply</code>, it inserts active preference
+claims with <code>source_kind=preference_backfill</code> and JSON memory source refs while
+leaving the source memory rows unchanged. <code>--limit &lt;n&gt;</code> bounds the source rows
+processed, and <code>--json</code> emits the stable scriptable shape with
+<code>converted[{memory_id, claim_id}]</code> and explicit skip reasons. The candidate set
+matches visible legacy preference rows for <code>owner_scope=user</code>,
+<code>owner_key=user:default</code>, <code>memory_type=preference</code>, and <code>status=active</code>; expired
+or policy-suppressed rows are outside that visible set and do not become
+candidates. Visible rows that fail guards or duplicate checks are reported in
+<code>skipped[]</code> with row-level reasons such as <code>secret_like_content</code>,
+<code>sensitivity_uncertain</code>, <code>instruction_pattern_unacknowledged:*</code>,
+<code>text_too_long</code>, <code>duplicate</code>, or <code>governed_duplicate</code>. After apply, summary,
+profile snapshot, and recall readers avoid showing the same preference as both a
+legacy memory and a claim. Use <code>remem user claims why &lt;claim_id&gt;</code> to audit the
+source <code>memory:&lt;id&gt;</code>, and use <code>remem user claims suppress &lt;claim_id&gt;</code> or
+<code>remem user claims delete &lt;claim_id&gt;</code> to govern or roll back inserted claims;
+the JSON report's <code>converted[].claim_id</code> gives the exact ids. Because the source
+memory row is intentionally left unchanged, use <code>remem memory suppress</code> on
+<code>memory:&lt;id&gt;</code> when the original legacy preference should also be hidden from
+legacy memory readers.</p>
+<p><code>remem user review ...</code> governs review-gated user-context candidates before
+they become active claims. <code>inbox</code> shows pending candidates with risk,
+sensitivity, confidence, source preview, and block reason. <code>approve</code> applies a
+candidate to active claims only when it has a stable claim key and non-empty
+source refs; if an active claim with the same owner/type/key already exists,
+remem either noops on an exact match or supersedes the old row instead of
+appending a contradictory active claim. <code>edit</code> applies corrected text, key, or
+metadata, while <code>reject</code> and <code>suppress</code> close candidates without activating
+them.</p>
+<p><code>remem status</code> and <code>remem status --json</code> include a <code>user_context</code> block with
+claim totals, active/suppressed/deleted claim counts, candidate totals,
+pending-review and auto-promoted candidate counts, and pending block reasons.
+Use <code>remem user claims why &lt;id&gt;</code>, <code>remem user claims suppress &lt;id&gt;</code>, and
+<code>remem user claims delete &lt;id&gt;</code> to audit or roll back active claims created by
+manual save, preference backfill, or auto-promotion.</p>
+<h3>Dream Active-Memory Backfill (GH-990)</h3>
+<p>The v077 migration only adds the binding column and invariants; it never scans
+or rewrites existing memories. To rehearse the pre-v076 Dream stock, run the
+explicit command (dry-run is the default):</p>
+<pre><code class="language-bash">remem dream-backfill --dry-run --json
+</code></pre>
+<p>The report gives before-write stock, hit, no-hit, skipped, per-project, and
+<code>plan_digest</code> counts. A hit is archived and placed in the existing quarantined
+review queue; a no-hit only changes <code>source_trust_class</code> to <code>external_content</code>
+and leaves recency timestamps unchanged. Nothing is written during rehearsal.</p>
+<p>After reviewing the report, apply the exact rehearsal plan with:</p>
+<pre><code class="language-bash">remem dream-backfill --apply --expect-plan-digest &lt;sha256&gt;
+</code></pre>
+<p><code>--apply</code> is the only mode that writes. The apply rechecks the complete stock
+set and every row snapshot inside one immediate transaction; any plan drift
+aborts all writes. Quarantine artifacts are immutable and bound to the retired
+memory. Approving the resulting Dream candidate with its normal pattern and
+provenance acknowledgements restores that same memory id in place; a changed
+or missing target fails closed. Re-running after a successful apply produces an
+empty plan.</p>
+<h3>Raw Session Backfill</h3>
+<p><code>remem ingest-sessions</code> batch-ingests Claude Code and Codex JSONL transcripts
+into the raw archive without promoting them to curated memories:</p>
+<pre><code class="language-bash">remem ingest-sessions --json
+remem ingest-sessions --since 2026-06-01 --root starlight=~/remote-sessions/starlight --json
+</code></pre>
+<p>Default scan roots are <code>~/.claude/projects</code> and <code>~/.codex/sessions</code>.
+Additional <code>--root label=path</code> entries are required roots: a missing explicit
+root is reported as a failed file so backfills do not silently do nothing. Each
+transcript has a path-stable local identity ledger. Metadata IDs take
+precedence over filename fallbacks, Stop and batch ingest use the same
+identity, repeated identical turns retain separate occurrence ordinals, and
+event-time provenance distinguishes transcript timestamps from ingest
+fallbacks and legacy unknowns. Re-running the command is incremental and
+idempotent; <code>--since</code>-skipped files receive an explicitly marked event-range
+index for later bounded reconciliation, failed unindexed files remain stale,
+and ambiguous identity claims fail visibly without rewriting raw rows.</p>
+<p>Use raw time-window queries for recap or audit workflows that need original
+chat turns rather than curated memories:</p>
+<pre><code class="language-bash">remem raw search "deployment decision" --since 2026-06-01 --until 2026-06-30 --json
+remem raw sessions --since 2026-06-01 --until 2026-06-30 --sample 3 --json
+remem raw messages --source-root local --project "/path/to/project" --session-id "&lt;session-id&gt;" --limit 500 --json
+remem raw reconcile --since 2026-06-01 --until 2026-06-30 --json
+</code></pre>
+<p><code>remem raw sessions</code> groups rows by source root, project, and session ID, and
+reports total, user, and assistant message counts; it can include the first N
+user-message samples per session. <code>remem raw messages</code> reads one exact
+<code>(source_root, project, session_id)</code> tuple without truncating stored content.
+It orders rows by <code>(created_at_epoch ASC, id ASC)</code>, defaults to 500 rows per
+page, and returns an opaque <code>next_cursor</code> when <code>has_more</code> is true. The first
+page freezes a maximum row ID; subsequent pages bind the cursor to the same
+selectors and snapshot, so concurrent appends do not create duplicates,
+omissions, or cross-session mixing. Invalid, stale, or selector-mismatched
+cursors fail explicitly; a missing tuple returns a successful empty envelope.
+<code>raw search</code>, <code>raw sessions</code>, <code>raw messages</code>, and <code>raw reconcile</code> open the
+current schema read-only, so a writer lock does not trigger migration
+contention and stale schemas fail with a migration diagnostic.</p>
+<p><code>raw reconcile</code> requires both bounds and compares stable per-occurrence
+identities, not only aggregate counts. It validates the captured file
+mtime/size tuple against the current identity ledger before reading, scans only
+event-range candidates plus files with missing event time, scopes archive rows
+to the requested source-root labels, and emits aggregate counts only—never
+paths, projects, session IDs, hashes, or message text.
+Timestamped records outside the inclusive UTC window are discarded before
+classification. Meta/XML user rows remain in archive parity but are reported
+as conversational exclusions; missing/fallback/legacy event time and malformed
+records make <code>parity</code> false. Window-relevant identity conflicts also return a
+non-zero status after the aggregate report is emitted.</p>
+<p>A date-only <code>since</code> starts at <code>00:00:00</code> UTC, while a date-only <code>until</code>
+includes that entire UTC day through <code>23:59:59</code>. MCP <code>search_raw</code> returns the
+same JSON envelope and pagination fields as <code>remem raw search ... --json</code>.</p>
+<h3>Scriptable JSON output</h3>
+<p>These commands emit one JSON object and no human text on stdout when <code>--json</code>
+is set:</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Stable top-level fields</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>remem status --json</code></td>
+<td><code>version</code>, <code>database</code>, <code>totals</code>, <code>embedding</code>, <code>raw_archive</code>, <code>capture_pipeline</code>, <code>promotion_funnel</code>, <code>legacy_surfaces</code>, <code>usage_feedback</code>, <code>pending_observations</code>, <code>review_queue</code>, <code>candidate_promotion</code>, <code>user_context</code>, <code>jobs</code>, <code>failure_lifecycle</code>, <code>worker_daemon</code>, <code>latest_session_memory_spend</code>, <code>today</code>, <code>top_projects</code></td>
+</tr>
+<tr>
+<td><code>remem cleanup --dry-run --json</code></td>
+<td><code>dry_run</code>, <code>retention_days</code>, <code>plan</code>, <code>applied</code>; archived failure purge counts stay zero unless <code>--archived-failures[=DAYS]</code> is supplied</td>
+</tr>
+<tr>
+<td><code>remem search ... --json</code></td>
+<td><code>query</code>, <code>project</code>, <code>memory_type</code>, <code>limit</code>, <code>offset</code>, <code>branch</code>, <code>include_stale</code>, <code>include_suppressed</code>, <code>multi_hop_requested</code>, <code>explain_requested</code>, <code>count</code>, <code>has_more</code>, <code>next_offset</code>, <code>results</code>, <code>raw_hits</code>, <code>multi_hop</code>, <code>explain_details</code></td>
+</tr>
+<tr>
+<td><code>remem ingest-sessions --json</code></td>
+<td><code>scanned</code>, <code>skipped</code>, <code>ingested_messages</code>, <code>failed_files</code>, <code>partial_files</code></td>
+</tr>
+<tr>
+<td><code>remem raw search ... --json</code></td>
+<td><code>query</code>, <code>project</code>, <code>branch</code>, <code>role</code>, <code>limit</code>, <code>offset</code>, <code>since_epoch</code>, <code>until_epoch</code>, <code>count</code>, <code>has_more</code>, <code>next_offset</code>, <code>source_type</code>, <code>note</code>, <code>results</code></td>
+</tr>
+<tr>
+<td><code>remem raw sessions ... --json</code></td>
+<td><code>since_epoch</code>, <code>until_epoch</code>, <code>project</code>, <code>sample</code>, <code>count</code>, <code>sessions</code>; each session includes <code>message_count</code>, <code>user_message_count</code>, and <code>assistant_message_count</code></td>
+</tr>
+<tr>
+<td><code>remem raw messages ... --json</code></td>
+<td><code>source_type</code>, <code>source_root</code>, <code>project</code>, <code>session_id</code>, <code>order</code>, <code>limit</code>, <code>count</code>, <code>has_more</code>, <code>next_cursor</code>, <code>messages</code>; each message includes full <code>content</code> plus <code>id</code>, <code>role</code>, <code>source</code>, <code>branch</code>, <code>cwd</code>, and <code>created_at_epoch</code></td>
+</tr>
+<tr>
+<td><code>remem raw reconcile ... --json</code></td>
+<td><code>policy_version</code>, <code>since_epoch</code>, <code>until_epoch</code>, <code>transcript</code>, <code>archive</code>, <code>comparison</code>, <code>intentional_exclusions</code>, <code>parity</code></td>
+</tr>
+<tr>
+<td><code>remem show &lt;id&gt; --json</code></td>
+<td><code>found</code>, <code>id</code>, <code>memory</code></td>
+</tr>
+<tr>
+<td><code>remem procedures list --json</code></td>
+<td><code>project</code>, <code>limit</code>, <code>offset</code>, <code>count</code>, <code>procedures</code></td>
+</tr>
+<tr>
+<td><code>remem memory suppress &lt;target&gt; --json</code></td>
+<td><code>status</code>, <code>suppression</code></td>
+</tr>
+<tr>
+<td><code>remem memory unsuppress &lt;id-or-target&gt; --json</code></td>
+<td><code>status</code>, <code>count</code>, <code>suppressions</code></td>
+</tr>
+<tr>
+<td><code>remem memory feedback &lt;target&gt; --json</code></td>
+<td><code>status</code>, <code>feedback</code></td>
+</tr>
+<tr>
+<td><code>remem memory suppressions list --json</code></td>
+<td><code>count</code>, <code>suppressions</code></td>
+</tr>
+<tr>
+<td><code>remem user remember --json</code></td>
+<td><code>status</code>, <code>claim</code></td>
+</tr>
+<tr>
+<td><code>remem user claims list --json</code></td>
+<td><code>count</code>, <code>claims</code></td>
+</tr>
+<tr>
+<td><code>remem user claims show &lt;id&gt; --json</code> / <code>remem user claims why &lt;id&gt; --json</code></td>
+<td><code>found</code>, <code>claim</code></td>
+</tr>
+<tr>
+<td><code>remem user claims edit &lt;id&gt; --json</code></td>
+<td><code>status</code>, <code>previous_id</code>, <code>claim</code></td>
+</tr>
+<tr>
+<td><code>remem user claims suppress &lt;id&gt; --json</code> / <code>unsuppress &lt;id&gt; --json</code> / <code>delete &lt;id&gt; --json</code></td>
+<td><code>status</code>, <code>claim</code></td>
+</tr>
+<tr>
+<td><code>remem user summary show --json</code></td>
+<td><code>found</code>, <code>summary</code></td>
+</tr>
+<tr>
+<td><code>remem user summary refresh --json</code> / <code>edit --json</code></td>
+<td><code>status</code>, <code>summary</code></td>
+</tr>
+<tr>
+<td><code>remem user summary sources --json</code></td>
+<td><code>summary</code>, <code>included_claims</code>, <code>included_memories</code>, <code>included_activity_refs</code>, <code>dropped_claims</code></td>
+</tr>
+<tr>
+<td><code>remem user recall &lt;query&gt; --json</code></td>
+<td><code>query</code>, <code>project</code>, <code>task_intent</code>, <code>host</code>, <code>empty</code>, <code>context</code>, <code>usage_policy</code>, <code>included</code>, <code>dropped</code>, <code>diagnostics</code></td>
+</tr>
+<tr>
+<td><code>remem user backfill --json</code></td>
+<td><code>applied</code>, <code>limit</code>, <code>candidates</code>, <code>converted</code>, <code>skipped</code>, <code>message</code>; dry-run fills <code>candidates</code>, while <code>--apply</code> fills <code>converted[{memory_id, claim_id}]</code> for inserted claims</td>
+</tr>
+<tr>
+<td><code>remem user review inbox --json</code></td>
+<td><code>count</code>, <code>candidates</code></td>
+</tr>
+<tr>
+<td><code>remem user review approve &lt;id&gt; --json</code> / <code>edit &lt;id&gt; --json</code></td>
+<td><code>status</code>, <code>action</code>, <code>candidate</code>, <code>claim</code></td>
+</tr>
+<tr>
+<td><code>remem user review reject &lt;id&gt; --json</code> / <code>suppress &lt;id&gt; --json</code></td>
+<td><code>status</code>, <code>candidate</code></td>
+</tr>
+<tr>
+<td><code>remem workstreams merge --json</code></td>
+<td><code>project</code>, <code>result</code></td>
+</tr>
+<tr>
+<td><code>remem pending list-failed --json</code></td>
+<td><code>project</code>, <code>limit</code>, <code>count</code>, <code>failed</code></td>
+</tr>
+<tr>
+<td><code>remem pending list-extraction-ranges --id &lt;id&gt; --json</code></td>
+<td><code>range</code> (including <code>id</code>, <code>status</code>, <code>attempts</code>, <code>last_error</code>, <code>replay_task_id</code>) and nullable <code>replay_task</code> (<code>id</code>, <code>status</code>, <code>attempts</code>, <code>last_error</code>); terminal <code>replayed</code> ranges remain queryable</td>
+</tr>
+<tr>
+<td><code>remem pending migrate-legacy --json</code></td>
+<td><code>project</code>, <code>limit</code>, <code>count</code>, <code>migrated</code></td>
+</tr>
+<tr>
+<td><code>remem govern ... --json</code></td>
+<td><code>dry_run</code>, <code>action</code>, <code>reason</code>, <code>affected</code></td>
+</tr>
+</tbody></table>
+<h2>REST API</h2>
+<pre><code class="language-bash">remem api --port 5567
+TOKEN=$(cat ~/.remem/.api-token)
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:5567/api/v1/health
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:5567/api/v1/status
+</code></pre>
+<p>Library users who build the router directly should call
+<code>remem::api::ensure_api_token()</code> before <code>remem::api::build_router(...)</code>.</p>
+<p>The complete native web API surface is implemented in source version
+<code>0.5.109</code>. remem-web should require a published <code>remem &gt;= 0.5.109</code> release
+before pointing installed-binary users at the full graph, candidate, or
+rich-detail experience. Fast <code>/api/v1/health</code> and cached <code>/api/v1/status</code>
+metadata are implemented in source version <code>0.5.112</code>. Clients should call
+<code>/api/v1/capabilities</code> before enabling optional views. Suppression audit
+opt-in with <code>include_suppressed=true</code> is implemented in source version
+<code>0.5.113</code>; default search, browse, graph, and detail reads omit
+policy-suppressed memories. On-demand user recall is implemented in source
+version <code>0.5.114</code> through CLI, MCP, and <code>POST /api/v1/user/recall</code>.
+User-context candidate review inbox and apply lifecycle commands are
+implemented in source version <code>0.5.115</code>. Guarded automatic user-context
+candidate extraction from session rollups is implemented in source version
+<code>0.5.116</code>; it creates review candidates from captured user conversations and
+session summaries, and auto-promotes only normal, low-risk explicit user
+preference or constraint statements cited to and supported by user-authored
+source events. Source capture, bounded rollup follow-up ranges, stale review
+guards, edited candidate audit persistence, and claim-key conflict review gates
+are tightened in source version <code>0.5.117</code>. Failed bounded follow-up retries and
+transactional auto-promotion conflict rechecks are tightened in source version
+<code>0.5.118</code>. User-context candidate extraction non-retention rules are tightened
+in source version <code>0.5.122</code>; transient, speculative, unsafe,
+assistant-authored, or unapproved external-source content does not enter the
+candidate queue. Source version <code>0.5.125</code> tightens post-review external-source
+attribution and third-party subject edge cases while preserving valid
+user-stated workflow preferences. Source versions <code>0.5.183</code> through <code>0.5.186</code>
+make user-context auto-promote configuration-driven: the default lowers only the
+confidence threshold to <code>0.7</code>, <code>strict = true</code> restores the old <code>0.9</code> threshold,
+existing hard gates remain review/no-retention gates, and <code>remem status</code> reports
+user-context claim/candidate counts and pending block reasons.
+Source version <code>0.6.6</code> implements the GH-880 safe console API: candidate
+detail/evidence and idempotent safe review, five independently gated safe read
+resources, and recoverable memory archive/restore. Installed clients must wait
+for a published <code>v0.6.6</code> release and require the exact capability/endpoint-map
+bundle; the staged <code>unreleased</code> source manifest is not release evidence.</p>
+<p>Use <code>/api/v1/health</code> as the cheap liveness probe and <code>/api/v1/capabilities</code> for
+feature detection. Use <code>/api/v1/status</code> for dashboard counters no more
+frequently than the returned <code>cache.ttl_secs</code>; use
+<code>/api/v1/status?refresh=true</code> only for explicit refresh actions.</p>
+<h3>Stable core endpoints</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/api/v1/health</code></td>
+<td>GET</td>
+<td>Cheap authenticated liveness and API readiness</td>
+</tr>
+<tr>
+<td><code>/api/v1/status</code></td>
+<td>GET</td>
+<td>Cached queue state and counts with cache metadata</td>
+</tr>
+<tr>
+<td><code>/api/v1/capabilities</code></td>
+<td>GET</td>
+<td>Feature and endpoint detection for native clients</td>
+</tr>
+<tr>
+<td><code>/api/v1/search?query=&amp;project=&amp;type=&amp;limit=&amp;offset=&amp;branch=&amp;multi_hop=&amp;include_suppressed=</code></td>
+<td>GET</td>
+<td>Search memories</td>
+</tr>
+<tr>
+<td><code>/api/v1/memory?id=&amp;include_suppressed=</code></td>
+<td>GET</td>
+<td>Get one memory</td>
+</tr>
+<tr>
+<td><code>/api/v1/memories?project=&amp;type=&amp;scope=&amp;status=&amp;branch=&amp;q=&amp;limit=&amp;offset=&amp;include_suppressed=</code></td>
+<td>GET</td>
+<td>Canonical memory browse endpoint</td>
+</tr>
+<tr>
+<td><code>/api/v1/memories/{id}?include_suppressed=</code></td>
+<td>GET</td>
+<td>Rich memory detail with entities and edges</td>
+</tr>
+<tr>
+<td><code>/api/v1/memories</code></td>
+<td>POST</td>
+<td>Save agent-authored memory; exact idempotent replay preserves the original claim outcome, while instruction-pattern acknowledgement remains on reviewed candidate-governance endpoints</td>
+</tr>
+<tr>
+<td><code>/api/v1/user/recall</code></td>
+<td>POST</td>
+<td>Task-aware user-context recall with source and drop reasons</td>
+</tr>
+</tbody></table>
+<h3>Web read-model endpoints</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/api/v1/stats</code></td>
+<td>GET</td>
+<td>Product stats for local dashboards</td>
+</tr>
+<tr>
+<td><code>/api/v1/session-activity/sessions?project=&amp;cursor=&amp;limit=</code></td>
+<td>GET</td>
+<td>Raw-backed session tuples with projection counts and a filter-bound bounded-scan cursor; continue non-null cursors across sparse pages, and inspect <code>message_counts_truncated</code> for capped counts</td>
+</tr>
+<tr>
+<td><code>/api/v1/session-activity?project=&amp;source_root=&amp;session_id=&amp;before_id=&amp;limit=</code></td>
+<td>GET</td>
+<td>Structured request, understanding, action, and result turns with <code>has_more</code> / <code>next_before_id</code>; each turn reports action truncation</td>
+</tr>
+<tr>
+<td><code>/api/v1/session-activity/{id}</code></td>
+<td>GET</td>
+<td>One structured session turn with captured actions</td>
+</tr>
+<tr>
+<td><code>/api/v1/session-stats?project=&amp;since_epoch=&amp;until_epoch=</code></td>
+<td>GET</td>
+<td>Session, turn, action, outcome, capture-health, project, and tool counts; defaults to 30 days and rejects windows over 366 days</td>
+</tr>
+<tr>
+<td><code>/api/v1/session-activity/project</code></td>
+<td>POST</td>
+<td>Idempotently project one exact raw session tuple without rewriting raw evidence</td>
+</tr>
+<tr>
+<td><code>/api/v1/candidates?project=&amp;status=&amp;limit=&amp;offset=</code></td>
+<td>GET</td>
+<td>List compact memory candidates</td>
+</tr>
+<tr>
+<td><code>/api/v1/candidates/{id}</code></td>
+<td>GET</td>
+<td>Safe candidate detail, evidence/provenance, action-specific review decision, and Dream review token when applicable</td>
+</tr>
+<tr>
+<td><code>/api/v1/candidates/{id}/review/approve</code></td>
+<td>POST</td>
+<td>Versioned, audited, idempotent safe approval; Dream quarantine requires the current pattern and provenance-token acknowledgements</td>
+</tr>
+<tr>
+<td><code>/api/v1/candidates/{id}/review/reject</code></td>
+<td>POST</td>
+<td>Versioned, audited, idempotent safe rejection</td>
+</tr>
+<tr>
+<td><code>/api/v1/candidates/{id}/review/edit</code></td>
+<td>POST</td>
+<td>Versioned, audited, idempotent safe edit-and-approve</td>
+</tr>
+<tr>
+<td><code>/api/v1/candidates/{id}/approve</code></td>
+<td>POST</td>
+<td>Approve a pending memory candidate; quarantined candidates require <code>acknowledge_pattern</code></td>
+</tr>
+<tr>
+<td><code>/api/v1/candidates/{id}/reject</code></td>
+<td>POST</td>
+<td>Reject a pending memory candidate</td>
+</tr>
+<tr>
+<td><code>/api/v1/candidates/{id}/edit</code></td>
+<td>POST</td>
+<td>Edit and approve a pending memory candidate</td>
+</tr>
+<tr>
+<td><code>/api/v1/graph?project=&amp;limit=&amp;include_suppressed=</code></td>
+<td>GET</td>
+<td>DB-backed entity graph read model</td>
+</tr>
+<tr>
+<td><code>/api/v1/observations[/{id}]</code></td>
+<td>GET</td>
+<td>Safe observation list/detail with typed cursor</td>
+</tr>
+<tr>
+<td><code>/api/v1/sessions[/{id}]</code></td>
+<td>GET</td>
+<td>Safe session list/detail with typed cursor</td>
+</tr>
+<tr>
+<td><code>/api/v1/workstreams[/{id}]</code></td>
+<td>GET</td>
+<td>Safe workstream list/detail with typed cursor</td>
+</tr>
+<tr>
+<td><code>/api/v1/events[/{id}]</code></td>
+<td>GET</td>
+<td>Safe event metadata list/detail without raw content</td>
+</tr>
+<tr>
+<td><code>/api/v1/tasks[/{id}]</code></td>
+<td>GET</td>
+<td>Safe task list/detail without raw payload/error text</td>
+</tr>
+<tr>
+<td><code>/api/v1/memories/{id}/archive</code></td>
+<td>POST</td>
+<td>Recoverably archive an active memory</td>
+</tr>
+<tr>
+<td><code>/api/v1/memories/{id}/restore</code></td>
+<td>POST</td>
+<td>Restore only the current exact Web archive</td>
+</tr>
+</tbody></table>
+<p>Permanent Web delete is intentionally unavailable. <code>memory_delete=false</code> and
+the capability endpoint map contains no delete key.</p>
+<h3>Compatibility aliases</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/api/v1/memories/list</code></td>
+<td>GET</td>
+<td>Compatibility alias for <code>/api/v1/memories</code></td>
+</tr>
+<tr>
+<td><code>/api/v1/memory?id=&amp;include_suppressed=</code></td>
+<td>GET</td>
+<td>Legacy compact single-memory endpoint</td>
+</tr>
+</tbody></table>
+<p>Run the local native API smoke test against a built binary with:</p>
+<pre><code class="language-bash">scripts/smoke_native_web_api.sh
+</code></pre>
+<h2>Security</h2>
+<ul>
+<li>SQLCipher encryption at rest (<code>remem encrypt</code>)</li>
+<li>Data directory permissions (<code>0700</code>)</li>
+<li>Key file permissions (<code>0600</code>)</li>
+<li>REST API binds localhost only (<code>127.0.0.1</code>) and requires
+<code>Authorization: Bearer $(cat ~/.remem/.api-token)</code></li>
+<li>API token file permissions (<code>0600</code>)</li>
+</ul>
+<h3>SQLite runtime tuning</h3>
+<p>Runtime connections use WAL mode, foreign keys, a 5-second busy timeout,
+in-memory temporary storage, and a 64 MiB SQLite page-cache target per
+connection. The cache is demand-driven rather than preallocated, but concurrent
+connections can multiply both memory use and the time decrypted pages remain in
+RAM.</p>
+<p>Two environment variables provide strict, fail-closed overrides:</p>
+<ul>
+<li><code>REMEM_SQLITE_CACHE_KIB</code> accepts an integer from <code>1</code> through <code>1048576</code>.
+SQLite interprets it as a KiB cache target for each connection.</li>
+<li><code>REMEM_SQLITE_SYNCHRONOUS</code> accepts only <code>full</code> or <code>normal</code>
+(case-insensitive). The default is <code>full</code>.</li>
+</ul>
+<p><code>normal</code> is an explicit latency/durability tradeoff. With WAL it preserves
+database consistency and committed transactions across an application-process
+crash, but a system crash or power loss can lose recent committed transactions.
+Keep the default <code>full</code> when power-loss durability matters. Temporary storage
+is always forced to memory because SQLCipher does not guarantee encryption for
+file-backed SQLite temporary storage.</p>
+<p>Reproduce the encrypted release-mode A/B latency harness with:</p>
+<pre><code class="language-bash">cargo test --release --test search_latency_benchmark sqlite_tuning_encrypted_release_ab_reports_latency -- --ignored --exact --nocapture --test-threads=1
+</code></pre>
+<h3>Plaintext residue diagnostics</h3>
+<p>The <code>Plaintext residue</code> check in <code>remem doctor</code> recursively inspects regular
+files throughout the managed <code>REMEM_DATA_DIR</code> tree by content, including
+custom backup outputs with arbitrary names or no extension. It never follows
+symlinks and, on Windows, rejects every filesystem reparse point before
+recursive descent. A file shorter than the SQLite header inside the managed
+<code>backups/</code> subtree is reported as an incomplete inspection; unrelated short
+operational files elsewhere are ignored unless their names identify them as
+database artifacts. Configured key and live-database sidecar paths retain their
+existing exclusions. A strictly validated internal Hugging Face cache snapshot pointer
+is omitted because its same-repository blob is a regular file that the tree
+scan inspects independently; any other artifact symlink makes the inspection
+incomplete. The check is read-only and never deletes data. When it finds a
+plaintext copy while the live database is confirmed encrypted, it reports
+<code>Fail</code> and <code>remem doctor</code> exits with code 2. If the live database is plaintext
+or its encryption state cannot be confirmed, the finding is <code>Warn</code>. An entry
+or candidate file that cannot be inspected because of an I/O error is reported
+and prevents the check from reporting <code>Ok</code>.</p>
+<p>Handle a finding according to its status:</p>
+<ul>
+<li><code>Fail</code> means doctor has confirmed that the live database is encrypted and a
+plaintext copy exists. Run <code>remem status</code> to verify that the live database
+opens, run <code>remem admin backup</code> to create a new encrypted backup, and only
+then manually delete the listed plaintext copies or retain them solely in
+encrypted storage.</li>
+<li>For <code>Warn</code> with a plaintext live database, first check whether
+<code>REMEM_DATA_DIR/remem.db.bak</code> or <code>REMEM_DATA_DIR/remem.db.enc</code> is blocking
+encryption. If either exists, verify that <code>REMEM_DATA_DIR/backups/</code> is an
+actual directory and not a symlink, choose unused destination names there,
+and move each blocker without overwriting another file. Then run
+<code>remem encrypt</code> and use <code>remem status</code> to confirm that the live database
+opens. Run <code>remem doctor</code> and verify that the Plaintext residue detail says
+the live database is encrypted and readable; this check is expected to remain
+<code>Fail</code> while the preserved copies are still present. Then run
+<code>remem admin backup</code> to create a new encrypted backup, manually delete the
+older plaintext copies or retain them solely in encrypted storage, and rerun
+<code>remem doctor</code> until Plaintext residue passes.</li>
+<li>For <code>Warn</code> caused by a missing or unverified live database, key problems, or
+I/O errors, do not back up or delete anything. First repair the live database,
+key, or readability problem. Continue with backup and disposal only after
+<code>remem status</code> succeeds and <code>remem doctor</code> confirms encryption.</li>
+</ul>
+<p>Moving a copy outside <code>REMEM_DATA_DIR</code> only removes it from this scan; it does
+not protect the data. Remem does not promise secure erasure of manually deleted
+files.</p>
+<h2>Architecture Docs</h2>
+<p>See <a href="https://github.com/majiayu000/remem/blob/HEAD/docs/ARCHITECTURE.md" target="_blank" rel="noopener noreferrer">docs/ARCHITECTURE.md</a> for full internals and data flow.</p>
+<h2>Uninstall</h2>
+<pre><code class="language-bash">remem uninstall
+rm -rf ~/.remem
+</code></pre>
+<h2>The Agent Infra Stack</h2>
+<p>This project is one layer of an open-source stack for running coding agents (Claude Code, Codex) as serious infrastructure. Every piece works standalone; together they close the loop:</p>
+<p><code>remem</code> is the <strong>Remember</strong> layer — memory that survives the session. It pairs naturally with <code>keepline</code>, which keeps the sessions themselves from getting lost.</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Project</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Extend</td>
+<td><a href="https://github.com/majiayu000/claude-skill-registry" target="_blank" rel="noopener noreferrer">claude-skill-registry</a></td>
+<td>Discover and search community Claude Code skills</td>
+</tr>
+<tr>
+<td>Extend</td>
+<td><a href="https://github.com/majiayu000/spellbook" target="_blank" rel="noopener noreferrer">spellbook</a></td>
+<td>Cross-runtime skills for Claude Code, Codex, and multi-agent workflows</td>
+</tr>
+<tr>
+<td>Trust</td>
+<td><a href="https://github.com/majiayu000/argus" target="_blank" rel="noopener noreferrer">argus</a></td>
+<td>Static install-time scanner for supply-chain attacks (npm / PyPI / crates.io)</td>
+</tr>
+<tr>
+<td>Trust</td>
+<td><a href="https://github.com/majiayu000/vibeguard" target="_blank" rel="noopener noreferrer">vibeguard</a></td>
+<td>Rules, hooks, and guards against hallucinated or unverified agent changes</td>
+</tr>
+<tr>
+<td>Remember</td>
+<td><a href="https://github.com/majiayu000/remem" target="_blank" rel="noopener noreferrer">remem</a> <strong>◀ you are here</strong></td>
+<td>Local-first persistent memory for Claude Code and Codex sessions</td>
+</tr>
+<tr>
+<td>Orchestrate</td>
+<td><a href="https://github.com/majiayu000/harness" target="_blank" rel="noopener noreferrer">harness</a></td>
+<td>Rust agent orchestration platform — rules, skills, GC, observability</td>
+</tr>
+<tr>
+<td>Route</td>
+<td><a href="https://github.com/majiayu000/litellm-rs" target="_blank" rel="noopener noreferrer">litellm-rs</a></td>
+<td>High-performance Rust AI gateway — 100+ LLM APIs via OpenAI format</td>
+</tr>
+<tr>
+<td>Keep</td>
+<td><a href="https://github.com/majiayu000/keepline" target="_blank" rel="noopener noreferrer">keepline</a></td>
+<td>Session command center — monitor, recover, never lose agent work</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>License</h2>
+<p>MIT</p>

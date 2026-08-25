@@ -47,6 +47,8 @@ export async function upsertPlugins(
           scoreSecurity: String(p.scoreBreakdown.security),
           scoreDocs: String(p.scoreBreakdown.docs),
           trustFlags: p.trustFlags,
+          securityGrade: p.securityGrade,
+          securityFindings: p.securityFindings,
           npmPackage: p.npmPackage,
           syncedAt: new Date(p.syncedAt),
         })),
@@ -74,6 +76,8 @@ export async function upsertPlugins(
           scoreDocs: sql`excluded.score_docs`,
           // Preserve existing verifiedOwner claim flags
           trustFlags: sql`coalesce(plugins.trust_flags, '{}'::jsonb) || excluded.trust_flags`,
+          securityGrade: sql`excluded.security_grade`,
+          securityFindings: sql`excluded.security_findings`,
           npmPackage: sql`excluded.npm_package`,
           updatedAt: sql`now()`,
           syncedAt: sql`excluded.synced_at`,

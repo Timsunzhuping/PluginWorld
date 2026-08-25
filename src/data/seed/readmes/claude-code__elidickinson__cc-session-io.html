@@ -1,0 +1,443 @@
+<h1>cc-session-io</h1>
+<p>Read, write, and create Claude Code session files.</p>
+<p>Can create new session history files or read/write existing ones that will work with <code>/resume</code> in Claude Code. Useful for importing conversation history from another coding agent to continue it with <code>claude</code>.</p>
+<p>No runtime dependencies. Not affiliated or supported by Anthropic, the makers of Claude Code.</p>
+<h2>Scope</h2>
+<p><strong>Reads and writes</strong> user and assistant message records, with <code>text</code>, <code>thinking</code>,
+<code>tool_use</code>, <code>tool_result</code> and <code>image</code> content blocks, and <code>attachment</code> records —
+Claude Code's own injected context, such as an <code>@file</code> expansion. <code>importMessages</code>
+repairs tool_use/tool_result pairing on the way in. Sessions written this way
+resume in Claude Code.</p>
+<p><strong>Preserves</strong> every other record type Claude Code writes (<code>queue-operation</code>,
+<code>last-prompt</code>, summaries, and anything added by a future release) through
+<code>UnknownRecord</code>, so a read-modify-write leaves them untouched. Writing one means
+<code>dangerousAppendRecord()</code>, which appends whatever you hand it — the typed helpers
+only cover messages and attachments, because the other record types share almost
+none of their fields and synthesizing those would produce records Claude Code
+never writes.</p>
+<p><strong>Does not handle</strong> subagent transcripts: <code>isSidechain</code> is always written <code>false</code>,
+and Claude Code keeps sub-agent conversations in a separate <code>subagents/</code> directory
+that this library neither creates nor manages. See also the <a href="#known-limitation-bunnode-hash-mismatch-for-long-paths" target="_blank" rel="noopener noreferrer">Bun/Node hash
+mismatch</a> for project paths
+over 200 characters.</p>
+<h2>Install</h2>
+<pre><code>npm install cc-session-io
+</code></pre>
+<p>Requires Node &gt;= 20.</p>
+<h2>Simple CLI Demo</h2>
+<pre><code class="language-bash"># Create new session
+cc-session create -p /my/project
+
+# Add messages to session
+cc-session add user "Hello!" -p /my/project -s &lt;id&gt;
+cc-session add assistant "Hi, how can I help?" -p /my/project -s &lt;id&gt;
+
+# Read conversation
+cc-session read -p /my/project -s &lt;id&gt;
+
+# List sessions
+cc-session list -p /my/project
+</code></pre>
+<p>Options:</p>
+<ul>
+<li><code>-p &lt;path&gt;</code> - Project path (required)</li>
+<li><code>-s &lt;id&gt;</code> - Session ID (required for add/read)</li>
+</ul>
+<h2>Quick Start</h2>
+<h3>Create a new session</h3>
+<pre><code class="language-typescript">import { createSession } from 'cc-session-io';
+
+const session = createSession({ projectPath: '/path/to/project' });
+session.addUserMessage('Refactor the auth module');
+session.addAssistantMessage([{ type: 'text', text: 'I will refactor the auth module.' }]);
+session.save();
+
+// Resume it: claude --resume &lt;session.sessionId&gt;
+</code></pre>
+<h3>Append to an existing session</h3>
+<pre><code class="language-typescript">import { openSession } from 'cc-session-io';
+
+const session = openSession({
+  sessionId: 'existing-uuid-here',
+  projectPath: '/path/to/project',
+});
+
+// Existing messages are available
+console.log(`${session.messages.length} messages loaded`);
+
+// Append new messages — they chain onto the last existing record
+session.addUserMessage('One more thing...');
+session.addAssistantMessage([{ type: 'text', text: 'Sure, what is it?' }]);
+session.save(); // appends to the existing JSONL file
+</code></pre>
+<h2>API</h2>
+<h3><code>createSession(opts): Session</code></h3>
+<p>Creates a new session. Generates a UUID session ID and resolves the JSONL path.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>projectPath</code></td>
+<td><code>string</code></td>
+<td><em>required</em></td>
+<td>Absolute path to the project. Determines where the JSONL file is written.</td>
+</tr>
+<tr>
+<td><code>claudeDir</code></td>
+<td><code>string?</code></td>
+<td><code>~/.claude</code></td>
+<td>Override the Claude config directory.</td>
+</tr>
+<tr>
+<td><code>cwd</code></td>
+<td><code>string?</code></td>
+<td><code>projectPath</code></td>
+<td>Working directory written into records.</td>
+</tr>
+<tr>
+<td><code>gitBranch</code></td>
+<td><code>string?</code></td>
+<td><code>"HEAD"</code></td>
+<td>Git branch name written into records.</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td><code>string?</code></td>
+<td><code>"2.1.83"</code></td>
+<td>Claude Code version to claim.</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td><code>string?</code></td>
+<td><code>"claude-sonnet-4-6"</code></td>
+<td>Default model for assistant messages.</td>
+</tr>
+</tbody></table>
+<h3><code>openSession(opts): Session</code></h3>
+<p>Opens an existing session by ID for reading or appending.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sessionId</code></td>
+<td><code>string</code></td>
+<td>UUID of the session.</td>
+</tr>
+<tr>
+<td><code>projectPath</code></td>
+<td><code>string</code></td>
+<td>Absolute path to the project.</td>
+</tr>
+<tr>
+<td><code>claudeDir</code></td>
+<td><code>string?</code></td>
+<td>Override the Claude config directory.</td>
+</tr>
+</tbody></table>
+<h3><code>readSession(jsonlPath, projectPath?): Session</code></h3>
+<p>Reads a session directly from a JSONL file path.</p>
+<h3><code>Session</code></h3>
+<h4>Properties</h4>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sessionId</code></td>
+<td><code>string</code></td>
+<td>UUID of the session.</td>
+</tr>
+<tr>
+<td><code>projectPath</code></td>
+<td><code>string</code></td>
+<td>Project path.</td>
+</tr>
+<tr>
+<td><code>jsonlPath</code></td>
+<td><code>string</code></td>
+<td>Absolute path to the JSONL file.</td>
+</tr>
+<tr>
+<td><code>records</code></td>
+<td><code>JsonlRecord[]</code></td>
+<td>All JSONL records (including non-message types).</td>
+</tr>
+<tr>
+<td><code>messages</code></td>
+<td><code>(UserRecord | AssistantRecord)[]</code></td>
+<td>Only user and assistant records.</td>
+</tr>
+<tr>
+<td><code>attachments</code></td>
+<td><code>AttachmentRecord[]</code></td>
+<td>Only attachment records.</td>
+</tr>
+</tbody></table>
+<h4><code>session.addUserMessage(content): string</code></h4>
+<p>Adds a user message. <code>content</code> is either a string or an array of user content
+blocks (<code>text</code>, <code>image</code>, <code>tool_result</code>), which are written unchanged. Throws on
+an empty array, which Anthropic rejects. Returns the record's UUID.</p>
+<h4><code>session.dangerousAppendRecord(record, opts?): void</code></h4>
+<p>Appends a record verbatim. The escape hatch for record types this library does not
+model, and for carrying records from one session into another — with one
+exception: use <code>addAttachment</code> for attachments.</p>
+<p>Dangerous because nothing is synthesized or validated beyond <code>sessionId</code> and the
+parent link — the shape is whatever you pass, and Claude Code will read it back.
+<code>sessionId</code> is overwritten with this session's, since a record claiming another
+session is never what a caller wants. The record is appended verbatim and does
+not advance the chain, so the next message parents to whatever came before it.
+That is right for chain-external records like <code>queue-operation</code>, but wrong for
+attachments — Claude Code threads those through the chain, so carry them with
+<code>addAttachment</code> instead.</p>
+<p><code>parentUuid</code> is the one thing checked: a dangling parent makes Claude Code resume
+with <strong>empty context</strong> and answer confidently from nothing, and it does not
+announce itself, so it throws instead.</p>
+<pre><code class="language-typescript">// Append a record type this library does not model
+target.dangerousAppendRecord(queueOperationRecord, { parentUuid: lastMessageUuid });
+</code></pre>
+<h4><code>session.addAttachment(attachment, opts?): string</code></h4>
+<p>Adds an <code>attachment</code> record — Claude Code's injected context, written as its own
+record rather than as part of a message. The payload shape varies by
+<code>attachment.type</code>; only <code>file</code> and <code>edited_text_file</code> carry content a consumer
+cannot regenerate, and Claude Code rewrites the rest (<code>skill_listing</code>,
+<code>task_reminder</code>, <code>agent_listing_delta</code>, …) every turn.</p>
+<p>Attachments are links in the uuid chain, not leaves hanging off it — the record
+that follows one parents to the attachment — so this advances the chain exactly as
+the message methods do. <code>parentUuid</code> defaults to whatever the session would
+currently chain from; pass it explicitly when carrying a record over from another
+session, where the message it belongs to has been given a new UUID.</p>
+<p>Because they sit <em>in</em> the chain, inserting one between existing records would mean
+re-parenting the record that follows, which this method does not do — it appends.
+To place attachments within a conversation, pass them to <code>importMessages</code> instead:</p>
+<pre><code class="language-typescript">session.importMessages(messages, {
+  attachments: [{ afterIndex: 0, attachment: fileAttachment }],
+});
+</code></pre>
+<p><code>afterIndex</code> indexes the array you passed. <code>repairToolPairing</code> runs inside the
+import and can insert or drop messages, so positions are mapped through the
+exported <code>repairWithOrigin()</code>. An attachment whose message the repair dropped is
+not emitted, nor is one with an out-of-range index (which logs a warning), so
+check <code>session.attachments</code> when it matters.</p>
+<pre><code class="language-typescript">const userUuid = session.addUserMessage('review @build.js');
+session.addAttachment(
+  {
+    type: 'file',
+    filename: '/project/build.js',
+    content: { type: 'text', file: { filePath: '/project/build.js', content: source } },
+  },
+  { parentUuid: userUuid },
+);
+</code></pre>
+<h4><code>session.addAssistantMessage(content, opts?): string</code></h4>
+<p>Adds an assistant message with the given content blocks. Returns the record's UUID. Content blocks are written as-is — any <code>tool_use</code> blocks you provide keep their original <code>id</code> values. (This matters when replaying real API responses; <code>addToolCalls()</code> generates IDs for you, but <code>addAssistantMessage()</code> does not.)</p>
+<pre><code class="language-typescript">session.addAssistantMessage([{ type: 'text', text: 'Hello!' }]);
+
+session.addAssistantMessage(
+  [{ type: 'text', text: 'Done.' }],
+  { model: 'claude-opus-4-6' },
+);
+
+// Pass through real tool_use blocks with their original IDs
+session.addAssistantMessage([
+  { type: 'tool_use', id: 'toolu_01ABC...', name: 'Read', input: { file_path: '/foo' } },
+]);
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Type</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>model</code></td>
+<td><code>string?</code></td>
+<td>Session default model</td>
+</tr>
+<tr>
+<td><code>stopReason</code></td>
+<td><code>string?</code></td>
+<td>Auto-detected: <code>"tool_use"</code> if content has tool_use blocks, <code>"end_turn"</code> otherwise</td>
+</tr>
+</tbody></table>
+<h4><code>session.addToolResults(results): string</code></h4>
+<p>Adds a user message containing tool results. Each <code>toolUseId</code> must match the <code>id</code> of a <code>tool_use</code> block from the preceding assistant message — this is how Claude Code pairs requests with responses.</p>
+<pre><code class="language-typescript">// After an assistant message with tool_use blocks:
+session.addToolResults([
+  { toolUseId: 'toolu_abc', content: 'file contents here' },
+  { toolUseId: 'toolu_def', content: 'command output', isError: true },
+]);
+</code></pre>
+<h4><code>session.addToolCalls(calls, opts?): void</code></h4>
+<p>Convenience method that creates the full tool call round-trip: assistant <code>tool_use</code> message, user <code>tool_result</code> message, and optionally a final assistant response.</p>
+<pre><code class="language-typescript">// Single tool call with response
+session.addToolCalls(
+  [{ name: 'Read', input: { file_path: '/foo.ts' }, result: 'file contents' }],
+  { response: [{ type: 'text', text: 'I read the file.' }] },
+);
+
+// Multiple parallel tool calls
+session.addToolCalls([
+  { name: 'Read', input: { file_path: '/foo.ts' }, result: 'contents of foo' },
+  { name: 'Bash', input: { command: 'ls' }, result: 'README.md\nsrc/' },
+], { response: [{ type: 'text', text: 'I read the file and listed the directory.' }] });
+
+// Tool call without a follow-up response (leaves the turn open)
+session.addToolCalls([
+  { name: 'Bash', input: { command: 'npm test' }, result: 'all tests passed' },
+]);
+</code></pre>
+<table>
+<thead>
+<tr>
+<th><code>ToolCallSpec</code> field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>name</code></td>
+<td><code>string</code></td>
+<td>Tool name (e.g. <code>"Read"</code>, <code>"Bash"</code>, <code>"Edit"</code>)</td>
+</tr>
+<tr>
+<td><code>input</code></td>
+<td><code>unknown</code></td>
+<td>Tool input parameters</td>
+</tr>
+<tr>
+<td><code>result</code></td>
+<td><code>string | ContentBlock[]</code></td>
+<td>Tool output</td>
+</tr>
+<tr>
+<td><code>isError</code></td>
+<td><code>boolean?</code></td>
+<td>Whether the tool call errored</td>
+</tr>
+</tbody></table>
+<h4><code>session.importMessages(messages): void</code></h4>
+<p>Bulk import an array of Anthropic API-shaped messages. Dispatches each to the right internal method based on role and content type. Useful when replaying API responses or syncing from another provider.</p>
+<pre><code class="language-typescript">session.importMessages([
+  { role: 'user', content: 'Read the config file' },
+  { role: 'assistant', content: [
+    { type: 'tool_use', id: 'toolu_abc', name: 'Read', input: { file_path: '/config.json' } },
+  ]},
+  { role: 'user', content: [
+    { type: 'tool_result', tool_use_id: 'toolu_abc', content: '{"port": 3000}' },
+  ]},
+  { role: 'assistant', content: [{ type: 'text', text: 'The config sets port to 3000.' }] },
+]);
+</code></pre>
+<p>Dispatch rules:</p>
+<ul>
+<li><code>assistant</code> → <code>addAssistantMessage()</code> (string content wrapped in a text block)</li>
+<li><code>user</code> string → <code>addUserMessage()</code></li>
+<li><code>user</code> array with <code>tool_result</code> blocks → <code>addToolResults()</code>, and any remaining
+blocks follow as a separate <code>addUserMessage()</code> record</li>
+<li><code>user</code> array without <code>tool_result</code> blocks → <code>addUserMessage()</code> (blocks kept as-is)</li>
+</ul>
+<h4><code>session.save(): void</code></h4>
+<p>Writes all pending records to disk. Creates the JSONL file and parent directories if needed. Appends if the file already exists.</p>
+<h3>Session cleanup</h3>
+<h4><code>session.clear(): void</code></h4>
+<p>Resets the session to empty state: wipes in-memory records, deletes the on-disk <code>.jsonl</code> file, and removes the companion directory (Claude Code v2.1.x writes <code>subagents/</code> and <code>tool-results/</code> there). The next <code>save()</code> writes a fresh file.</p>
+<pre><code class="language-typescript">session.clear();
+session.addUserMessage('Start over');
+session.save(); // writes a new file at the original jsonlPath
+</code></pre>
+<h4><code>deleteSession(sessionId, projectPath, claudeDir?): void</code></h4>
+<p>Deletes a session's <code>.jsonl</code> file and companion directory without opening it. No-op if the file doesn't exist.</p>
+<pre><code class="language-typescript">import { deleteSession } from 'cc-session-io';
+
+deleteSession('uuid-here', '/path/to/project');
+</code></pre>
+<h3>Low-level JSONL utilities</h3>
+<pre><code class="language-typescript">import { parseJsonl, parseJsonlFile, serializeRecord, serializeJsonl } from 'cc-session-io';
+
+const records = parseJsonlFile('/path/to/session.jsonl');
+const jsonlString = serializeJsonl(records);
+</code></pre>
+<h3>Path utilities</h3>
+<pre><code class="language-typescript">import { projectPathToHash, getProjectDir, getSessionPath, getClaudeDir, normalizeProjectPath } from 'cc-session-io';
+
+projectPathToHash('/Users/me/project');
+// =&gt; '-Users-me-project'
+
+getSessionPath('uuid-here', '/Users/me/project');
+// =&gt; '/Users/me/.claude/projects/-Users-me-project/uuid-here.jsonl'
+
+getClaudeDir();           // ~/.claude, or CLAUDE_CONFIG_DIR if set
+normalizeProjectPath('/path/to/project');  // realpathSync + NFC normalization
+</code></pre>
+<h2>Content Block Format</h2>
+<p>All content blocks use the <strong>Anthropic API format</strong>. If you're coming from another agent framework, note the naming:</p>
+<table>
+<thead>
+<tr>
+<th>This library (Anthropic API)</th>
+<th>Other conventions</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>tool_use</code></td>
+<td><code>toolCall</code>, <code>function_call</code></td>
+</tr>
+<tr>
+<td><code>tool_result</code></td>
+<td><code>toolResult</code>, <code>function_response</code></td>
+</tr>
+<tr>
+<td><code>tool_use_id</code></td>
+<td><code>toolCallId</code></td>
+</tr>
+<tr>
+<td><code>stop_reason: "tool_use"</code></td>
+<td><code>finish_reason: "function_call"</code></td>
+</tr>
+</tbody></table>
+<h2>How It Works</h2>
+<p>Claude Code stores sessions as JSONL files in <code>~/.claude/projects/-&lt;path-hash&gt;/</code>. Each line is a JSON record. User and assistant messages form a linked list via <code>uuid</code>/<code>parentUuid</code> fields.</p>
+<p>This library writes JSONL files that match the real Claude Code format. On resume, Claude Code replays the stored messages to rebuild context. No SQLite database or session index is required — the JSONL file alone is sufficient.</p>
+<h3>Path resolution</h3>
+<p>To place session files where Claude Code will actually find them, this library:</p>
+<ul>
+<li>Resolves <code>projectPath</code> via <code>realpathSync</code> + NFC normalization before hashing, matching what Claude Code does in its bootstrap. A caller passing <code>process.cwd()</code> from a shell that entered via a symlink (common on macOS: <code>/tmp</code>, <code>/var</code>, user-symlinked dirs) still writes to the correct hash dir. Falls back to NFC of the raw path when realpath fails.</li>
+<li>Honors <code>CLAUDE_CONFIG_DIR</code>, same as Claude Code. <code>getClaudeDir()</code> returns it when set, otherwise <code>~/.claude</code>.</li>
+<li><code>normalizeProjectPath()</code> is exported for callers that want to apply the same normalization.</li>
+</ul>
+<h3>Known limitation: Bun/Node hash mismatch for long paths</h3>
+<p>For <code>projectPath</code> encodings longer than 200 characters, Claude Code appends a hash suffix. The hash algorithm differs by runtime: <strong>Bun</strong> uses <code>Bun.hash</code> (wyhash), <strong>Node</strong> uses djb2. The shipped Claude Code CLI typically runs under Bun, so a session written by a Node consumer of this library (which always uses djb2) lands in a different directory than the Bun-executed CLI looks in, producing "No conversation found with session ID" on resume.</p>
+<p>Affected only when the encoded path exceeds 200 chars — roughly, a project path with deeply nested directories totalling over 200 characters of alphanumerics. Rare in practice but worth knowing.</p>
+<p>Workarounds:</p>
+<ul>
+<li>Keep project paths shorter than ~200 characters (trivially satisfied by most real workspaces).</li>
+<li>Run the consumer under Bun, so <code>Bun.hash</code> is available and matches the CLI.</li>
+<li>Internally, session lookup applies a prefix-match fallback to find dirs produced by the other hash, so listing and resuming existing sessions works either way. Only fresh <em>writes</em> hit the mismatch.</li>
+</ul>
+<h3>Minimum viable record</h3>
+<p>The library writes full-fidelity records with all fields, but Claude Code only requires these for resume:</p>
+<pre><code class="language-jsonl">{"type":"user","uuid":"&lt;uuid&gt;","parentUuid":null,"sessionId":"&lt;uuid&gt;","timestamp":"&lt;ISO 8601&gt;","message":{"role":"user","content":"hello"}}
+{"type":"assistant","uuid":"&lt;uuid&gt;","parentUuid":"&lt;user-uuid&gt;","sessionId":"&lt;uuid&gt;","timestamp":"&lt;ISO 8601&gt;","message":{"id":"msg_...","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}
+</code></pre>
+<p>Everything else (<code>cwd</code>, <code>version</code>, <code>isSidechain</code>, <code>slug</code>, <code>entrypoint</code>, <code>gitBranch</code>, <code>userType</code>) is optional. See <a href="https://github.com/elidickinson/cc-session-io/blob/HEAD/docs/claude-code-sessions.md" target="_blank" rel="noopener noreferrer"><code>docs/claude-code-sessions.md</code></a> for full format documentation and research findings.</p>
+<h2>Testing</h2>
+<pre><code>npm test          # unit + integration tests
+npm run smoke     # end-to-end: creates a session, resumes with claude CLI
+</code></pre>

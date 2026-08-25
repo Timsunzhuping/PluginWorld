@@ -3,6 +3,7 @@ import type { Plugin } from "@/lib/types";
 import { avatarText, formatCount } from "@/lib/utils";
 import { EcosystemBadge } from "./ecosystem-badge";
 import { ScoreBadge } from "./score-badge";
+import { SecurityGradeBadge } from "./security-grade";
 
 /**
  * PLUGIN CARD · core brand component
@@ -42,6 +43,7 @@ export function PluginCard({ plugin }: { plugin: Plugin }) {
       <div className="mt-4 flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
           <EcosystemBadge ecosystem={plugin.ecosystem} />
+          <SecurityGradeBadge grade={plugin.securityGrade} />
           {plugin.trustFlags.specValid && (
             <span className="hidden sm:inline font-mono text-[11px] text-volt-dark">
               verified

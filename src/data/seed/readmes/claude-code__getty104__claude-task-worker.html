@@ -1,0 +1,675 @@
+<h1>claude-task-worker</h1>
+<p>GitHub Issues/PRを定期ポーリングし、Claude Codeに処理を委譲するCLIツール。</p>
+<p>同梱の <code>claude-task-worker</code> Claude Code プラグイン（<code>plugin/</code>）と組み合わせることで、Issue の実装からPRのレビュー対応、Dependabot PR の対応までを自動化する。CLI 本体（npm パッケージ）とプラグイン（Claude Code マーケットプレイス）は同じリポジトリ・同じ名前で提供される。</p>
+<h2>アーキテクチャ</h2>
+<p>CLI が GitHub ラベルを検知してタスクを起動し、プラグインのスキルが実際の処理を担う。</p>
+<pre><code>   GitHub (Issue / PR + ラベル)
+              │ poll
+              ▼
+     claude-task-worker
+              │ invoke
+              ▼
+       Claude Code CLI
+   + claude-task-worker plugin
+</code></pre>
+<h3>Worker とスキルの対応</h3>
+<table>
+<thead>
+<tr>
+<th>Worker</th>
+<th>トリガー</th>
+<th>呼び出すスキル</th>
+<th>間隔</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>exec-issue</code></td>
+<td><code>cc-exec-issue</code> (Issue)</td>
+<td><code>/claude-task-worker:exec-issue</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>create-issue</code></td>
+<td><code>cc-triage-scope</code> (Issue)</td>
+<td><code>/claude-task-worker:create-issue-from-issue-number</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>update-issue</code></td>
+<td><code>cc-update-issue</code></td>
+<td><code>/claude-task-worker:update-issue</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>answer-issue-questions</code></td>
+<td><code>cc-answer-issue-questions</code></td>
+<td><code>/claude-task-worker:answer-issue-questions</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>triage-created-issue</code></td>
+<td><code>cc-issue-created</code> + <code>cc-triage-scope</code> (Issue)</td>
+<td><code>/claude-task-worker:triage-created-issue</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>epic-issue</code></td>
+<td><code>cc-epic-issue</code> (Issue, sub-issues が全て Close)</td>
+<td><code>/claude-task-worker:create-epic-pr</code></td>
+<td>5分</td>
+</tr>
+<tr>
+<td><code>create-ui-design</code></td>
+<td><code>cc-create-ui-design</code> (Issue)</td>
+<td><code>/claude-task-worker:create-ui-design</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>apply-ui-design</code></td>
+<td><code>cc-ui-design-pr-created</code> (Issue)</td>
+<td><code>/claude-task-worker:apply-ui-design</code></td>
+<td>5分</td>
+</tr>
+<tr>
+<td><code>fix-review-point</code></td>
+<td><code>cc-fix-onetime</code> (PR)</td>
+<td><code>/claude-task-worker:fix-review-point</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>triage-pr</code></td>
+<td><code>cc-triage-scope</code> (PR)</td>
+<td><code>/claude-task-worker:triage-pr</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>resolve-conflict</code></td>
+<td><code>cc-resolve-conflict</code> (PR)</td>
+<td><code>/claude-task-worker:resolve-pr-conflict</code></td>
+<td>1分</td>
+</tr>
+<tr>
+<td><code>check-dependabot</code></td>
+<td><code>dependencies</code> (PR)</td>
+<td><code>/claude-task-worker:check-dependabot</code></td>
+<td>1時間</td>
+</tr>
+</tbody></table>
+<p>共通の挙動:</p>
+<ul>
+<li>処理中は <code>cc-in-progress</code> を付与し、同一 Issue/PR の重複実行を防ぐ</li>
+<li><code>cc-need-human-check</code> が付いた Issue は全ワーカーの対象外</li>
+<li>Issue 系ワーカーは <code>-is:blocked</code> 検索 qualifier で絞り込むため、未解決の blockedBy を持つ Issue は対象外</li>
+<li>完了時にトリガーラベルを除去し、次のワーカーへ引き継ぐラベルを付与する</li>
+<li><code>create-ui-design</code> / <code>apply-ui-design</code> は <code>uiDesign.enabled</code> が <code>true</code> のときだけ起動する（既定 <code>false</code>）</li>
+</ul>
+<h3>プラグインの構成</h3>
+<table>
+<thead>
+<tr>
+<th>ディレクトリ</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>plugin/skills/</code></td>
+<td>ワーカーが呼ぶスキル群と、対話セッション用の補助スキル（<code>commit-push</code> / <code>create-pr</code> / <code>breakdown-issues</code> / <code>edit-pencil-design</code> など）</td>
+</tr>
+<tr>
+<td><code>plugin/agents/</code></td>
+<td>サブエージェント定義（<code>explore-agent</code> / <code>frontend-implementer</code> / <code>general-purpose-assistant</code> / <code>lightweight-assistant</code> / <code>pencil-design-updater</code> / <code>requirement-todo-organizer</code>）</td>
+</tr>
+<tr>
+<td><code>plugin/hooks/</code></td>
+<td><code>SessionStart</code>（worktree セットアップ）と <code>UserPromptSubmit</code>（<code>codegraph prompt-hook</code>）のフック定義</td>
+</tr>
+<tr>
+<td><code>plugin/scripts/</code></td>
+<td>フックから呼ばれるスクリプト（<code>setup-worktree.sh</code> / <code>stop-servers.mjs</code>）</td>
+</tr>
+<tr>
+<td><code>plugin/.mcp.json</code></td>
+<td>MCP サーバー定義（<code>codegraph</code> / <code>context7</code> / <code>next-devtools</code> / <code>shadcn</code>）</td>
+</tr>
+</tbody></table>
+<h2>セットアップ</h2>
+<h3>前提条件</h3>
+<table>
+<thead>
+<tr>
+<th>名前</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://nodejs.org/" target="_blank" rel="noopener noreferrer">Node.js</a> &gt;= 22.6.0</td>
+<td>CLI の実行ランタイム</td>
+</tr>
+<tr>
+<td><a href="https://cli.github.com/" target="_blank" rel="noopener noreferrer">GitHub CLI (<code>gh</code>)</a></td>
+<td>全 GitHub 操作（認証済みであること）</td>
+</tr>
+<tr>
+<td><a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noopener noreferrer">Claude Code (<code>claude</code>)</a></td>
+<td>タスク実行エンジン</td>
+</tr>
+<tr>
+<td><a href="https://git-scm.com/" target="_blank" rel="noopener noreferrer">Git</a></td>
+<td>worktree の作成・ブランチ操作</td>
+</tr>
+<tr>
+<td><a href="https://jqlang.org/" target="_blank" rel="noopener noreferrer">jq</a></td>
+<td>プラグインスキル内での JSON 加工</td>
+</tr>
+<tr>
+<td><a href="https://www.npmjs.com/package/@colbymchenry/codegraph" target="_blank" rel="noopener noreferrer">CodeGraph</a></td>
+<td>コード探索用インデックス。任意（未導入でも探索がテキスト検索に落ちるだけ）</td>
+</tr>
+<tr>
+<td><a href="https://docs.pencil.dev/for-developers/pen-cli" target="_blank" rel="noopener noreferrer">Pen CLI</a></td>
+<td><code>.pen</code> デザインファイルの編集・参照。UIデザイン先行ワークフロー使用時のみ（要ログイン。呼び出しは <code>claude-task-worker pencil</code> 経由）</td>
+</tr>
+<tr>
+<td><a href="https://herdr.dev" target="_blank" rel="noopener noreferrer">herdr</a></td>
+<td><code>--project</code> / <code>mode: "herdr"</code> 使用時のみ</td>
+</tr>
+</tbody></table>
+<p>CLI 本体に npm の実行時依存はない（esbuild で <code>dist/index.js</code> に単一バンドルされ、Node.js 標準モジュールのみで動作する）。</p>
+<h3>インストール</h3>
+<pre><code class="language-bash">npx claude-task-worker install
+</code></pre>
+<p>マーケットプレイスの追加・プラグインのインストール・CLI 本体のグローバルインストール・CodeGraph CLI のインストールを一括で行う。いずれかが失敗しても処理は継続し、<code>[install]</code> プレフィックス付きでログ出力される（失敗時の終了コードは 1）。インストール後、Claude Code のセッションを再起動するとプラグインが有効になる。</p>
+<p>個別にやる場合:</p>
+<pre><code class="language-bash">npm install -g claude-task-worker
+claude plugin marketplace add getty104/claude-task-worker
+claude plugin install claude-task-worker@claude-task-worker
+</code></pre>
+<p>herdr が必要な場合は <code>curl -fsSL https://herdr.dev/install.sh | sh</code> または <code>brew install herdr</code>（<a href="https://herdr.dev/docs/install/" target="_blank" rel="noopener noreferrer">ドキュメント</a>）。</p>
+<h3>Pen CLI のログイン</h3>
+<p><code>.pen</code> を扱うスキル（<code>edit-pencil-design</code> / <code>inspect-pencil-node</code> / <code>resolve-pencil-conflict</code>）は Pen CLI の認証を必要とする。未ログインだと <code>.pen</code> の読み書きが失敗するため、UIデザイン先行ワークフローを使うなら<strong>インストール後に一度ログインしておく</strong>（<code>.pen</code> を触らないので <code>claude-task-worker pencil</code> ラッパー経由でなくてよい）。</p>
+<pre><code class="language-bash">pencil login    # メールアドレス + パスワード、またはメールアドレス + OTP コード
+pencil status   # 認証状態の確認
+</code></pre>
+<p>セッショントークンは <code>~/.pencil/session-cli.json</code> に保存され、以降のコマンドで再利用される。</p>
+<p>CI やワーカーを実行するマシンなど対話ログインできない環境では、環境変数 <code>PEN_CLI_KEY</code>（pen.dev の組織設定 &gt; Developer Keys で発行）を使う。保存済みトークンより優先される。</p>
+<pre><code class="language-bash">export PEN_CLI_KEY=pencil_cli_...
+</code></pre>
+<p>詳細は <a href="https://docs.pencil.dev/for-developers/pen-cli" target="_blank" rel="noopener noreferrer">Pen CLI のドキュメント</a>を参照。</p>
+<h3>更新</h3>
+<pre><code class="language-bash">claude-task-worker update
+</code></pre>
+<p>マーケットプレイス・プラグイン・CLI 本体・CodeGraph CLI をまとめて更新する。プラグインの反映にはセッション再起動が必要。</p>
+<h3>初期化</h3>
+<p>対象リポジトリで実行すると、GitHub ラベル・Issue テンプレート・GitHub Actions ワークフロー・設定ファイルが作成され、CodeGraph のインデックスが構築される。</p>
+<pre><code class="language-bash">claude-task-worker init           # 既存ファイルは保護
+claude-task-worker init --force   # 強制上書き
+</code></pre>
+<p>作成されるラベル:</p>
+<table>
+<thead>
+<tr>
+<th>ラベル</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>cc-triage-scope</code></td>
+<td>トリアージ対象マーク（Issue/PR）</td>
+</tr>
+<tr>
+<td><code>cc-issue-created</code></td>
+<td><code>create-issue</code> 由来の Issue マーク（<code>triage-created-issue</code> のトリガー）</td>
+</tr>
+<tr>
+<td><code>cc-update-issue</code></td>
+<td>Issue 更新トリガー</td>
+</tr>
+<tr>
+<td><code>cc-answer-issue-questions</code></td>
+<td>Issue 確認事項への回答トリガー</td>
+</tr>
+<tr>
+<td><code>cc-exec-issue</code></td>
+<td>Issue 実行トリガー</td>
+</tr>
+<tr>
+<td><code>cc-fix-onetime</code></td>
+<td>PR 修正トリガー（1回）</td>
+</tr>
+<tr>
+<td><code>cc-resolve-conflict</code></td>
+<td>PR コンフリクト解消トリガー</td>
+</tr>
+<tr>
+<td><code>cc-in-progress</code></td>
+<td>処理中ステータス</td>
+</tr>
+<tr>
+<td><code>cc-need-human-check</code></td>
+<td>人間の確認が必要（付与中は Issue ワーカーの対象外）</td>
+</tr>
+<tr>
+<td><code>cc-pr-created</code></td>
+<td>PR 作成完了マーク</td>
+</tr>
+<tr>
+<td><code>cc-epic-issue</code></td>
+<td>エピックマーク（Issue: サブ全 Close で <code>epic-issue</code> 起動 / PR: リリースゲート対象）</td>
+</tr>
+<tr>
+<td><code>cc-release-ready</code></td>
+<td>エピックPRがリリース可能と判定されたマーク（実際のマージは人間が実施）</td>
+</tr>
+<tr>
+<td><code>cc-create-ui-design</code></td>
+<td>UIデザイン作成トリガー</td>
+</tr>
+<tr>
+<td><code>cc-ui-design-pr-created</code></td>
+<td>デザインPR作成済み・マージ待ちマーク</td>
+</tr>
+<tr>
+<td><code>cc-ui-design-ready</code></td>
+<td>デザイン反映済みマーク（再デザイン抑止）</td>
+</tr>
+<tr>
+<td><code>cc-ui-design</code></td>
+<td>デザインPRのマーカー（<code>triage-pr</code> のレビュー観点切り替え用）</td>
+</tr>
+</tbody></table>
+<p>作成されるファイル:</p>
+<ul>
+<li><code>.github/ISSUE_TEMPLATE/cc-triage-scope.yml</code> — <code>cc-triage-scope</code> 付き Issue 作成用テンプレート</li>
+<li><code>.github/workflows/assign-creator-on-cc-triage-scope.yml</code> — Issue 作成者の自動アサイン</li>
+<li><code>claude-task-worker.json</code> — 設定ファイル。<strong>ワーカーごとの既定値は書き出さない</strong>（写経するとプラグイン更新で既定が変わっても古い値に固定されるため）。上書きしたいワーカーだけ手で追記する</li>
+</ul>
+<p>CodeGraph のセットアップとして、グローバル gitignore（<code>~/.config/git/ignore</code>）へ <code>.codegraph/</code> を冪等に追記し、<code>codegraph init</code> を実行する。CodeGraph 未インストールでも <code>init</code> 全体は失敗しない。</p>
+<h2>コマンド</h2>
+<pre><code class="language-bash">claude-task-worker &lt;command&gt; [--epic &lt;issue-number&gt;]... [--label &lt;label&gt;]... [--project &lt;name&gt;]...
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>コマンド</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>各ワーカー名</td>
+<td>単一ワーカーを起動（<code>exec-issue</code> / <code>triage-pr</code> など。上記 Worker 表を参照）</td>
+</tr>
+<tr>
+<td><code>all</code></td>
+<td>通常ワーカー9つを同時にポーリング（トリアージ系3つを除く）</td>
+</tr>
+<tr>
+<td><code>yolo</code></td>
+<td>全ワーカーを同時にポーリング（<code>all</code> + <code>triage-created-issue</code> + <code>triage-pr</code> + <code>check-dependabot</code>）</td>
+</tr>
+<tr>
+<td><code>init</code></td>
+<td>ラベル・テンプレート・設定ファイルの作成と CodeGraph セットアップ</td>
+</tr>
+<tr>
+<td><code>install</code> / <code>update</code></td>
+<td>上記「セットアップ」を参照</td>
+</tr>
+<tr>
+<td><code>usage</code></td>
+<td>Claude API 使用状況（5時間/7日間の利用率とリセット時刻）を表示し、Slack にも通知</td>
+</tr>
+<tr>
+<td><code>pencil &lt;args...&gt;</code></td>
+<td>Pencil CLI をアセット URI 修正パッチ付きで実行するラッパー（下記参照）</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>CLI のバージョンを表示（<code>--version</code> / <code>-v</code> も可）</td>
+</tr>
+</tbody></table>
+<h3><code>pencil &lt;args...&gt;</code></h3>
+<p><code>@pen.dev/cli</code>（<code>pencil</code>）にはアセットのベース URI を絶対 URI として解決できないバグがあり、<code>.pen</code> を開くと <code>Base URI must be absolute!</code> で失敗する。本コマンドはその修正を Node の loader hook（<code>dist/pen-baseuri-fix.mjs</code>）として <code>NODE_OPTIONS</code> 経由で注入したうえで <code>pencil</code> を実行するラッパー。</p>
+<pre><code class="language-bash">claude-task-worker pencil version
+claude-task-worker pencil interactive -i designs/login.pen -o designs/login.pen &lt;&lt;'EOF'
+...
+EOF
+</code></pre>
+<p>引数・stdin・stdout・stderr・終了コードはすべて素通しするため、使い方は <code>pencil</code> と同じ。<code>.pen</code> を扱うスキル・エージェント（<code>edit-pencil-design</code> / <code>inspect-pencil-node</code> / <code>resolve-pencil-conflict</code> / <code>pencil-design-updater</code> など）はすべてこのラッパー経由で <code>pencil</code> を呼ぶ。</p>
+<h3><code>--epic &lt;issue-number&gt;</code></h3>
+<p>指定したエピック Issue のサブ Issue のみを処理対象に絞る。<code>all</code> / <code>yolo</code> と Issue 系ワーカーで有効。複数指定するといずれかのエピックを親に持つサブ Issue が対象になる（OR）。</p>
+<pre><code class="language-bash">claude-task-worker all --epic 100 --epic 200
+</code></pre>
+<p><code>epic-issue</code> ワーカーだけはエピック Issue 自体が処理対象なので、指定番号は「エピック Issue 自身の番号」として照合される。</p>
+<h3><code>--label &lt;label&gt;</code></h3>
+<p>トリガーラベルに加えて指定ラベルが付いた Issue のみに絞る。複数指定すると全ラベルの AND。<code>--epic</code> と併用可能。ユーザーのスコープ指定なので、タスク完了時にワーカーが除去することはない。</p>
+<pre><code class="language-bash">claude-task-worker all --label priority-high --label needs-design
+</code></pre>
+<h3><code>--project &lt;name&gt;</code></h3>
+<p>指定したプロジェクト（またはグループ、<code>all</code>）へ <a href="https://herdr.dev" target="_blank" rel="noopener noreferrer">herdr</a> 経由でコマンドをディスパッチする。指定するとCLIはワーカーを直接実行せず、対象プロジェクトごとに独立した herdr ワークスペースを作ってそこでコマンドを実行する。</p>
+<pre><code class="language-bash">claude-task-worker all --project all
+claude-task-worker all --project frontend
+claude-task-worker exec-issue --project app-a --epic 100 --label priority-high
+</code></pre>
+<p>プロジェクト名・グループ名は <code>$XDG_CONFIG_HOME/claude-task-worker/config.json</code>（未設定なら <code>~/.config/claude-task-worker/config.json</code>）で定義する。<code>all</code> は全プロジェクトを指す予約語。</p>
+<pre><code class="language-json">{
+  "mode": "default",
+  "advisor": false,
+  "permission": "bypassPermissions",
+  "projects": {
+    "app-a": "/Users/me/repos/app-a",
+    "app-b": "/Users/me/repos/app-b"
+  },
+  "projectGroups": {
+    "frontend": ["app-a", "app-b"]
+  }
+}
+</code></pre>
+<p>ディスパッチャーの機能:</p>
+<ul>
+<li><strong>一斉起動</strong>: プロジェクトごとに <code>ctw:&lt;プロジェクト名&gt;</code> ラベルのワークスペースを作り、そこで（<code>--project</code> を除いた）同じコマンドを実行する。ワーカーが実際に起動したかを確認し、起動しなければ再送・失敗判定する</li>
+<li><strong>稼働一覧</strong>: プロジェクト名・ワークスペースID・ペインID・ステータス・稼働時間をステータステーブルに描画する</li>
+<li><strong>一括停止</strong>: SIGTERM/SIGINT で全セッションへ ctrl-c を送り、終了を待ってワークスペースを閉じる。もう一度送ると強制終了</li>
+</ul>
+<p><code>--project</code> と併用できないコマンド: <code>init</code> / <code>install</code> / <code>update</code> / <code>usage</code> / <code>version</code></p>
+<h2>設定ファイル</h2>
+<p>グローバル設定は <code>config.json</code>（上記）、リポジトリ設定は実行ディレクトリ直下の <code>claude-task-worker.json</code>。</p>
+<h3><code>config.json</code>（グローバル）</h3>
+<table>
+<thead>
+<tr>
+<th>キー</th>
+<th>既定</th>
+<th>説明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>projects</code></td>
+<td>-</td>
+<td>プロジェクト名 → 絶対パス</td>
+</tr>
+<tr>
+<td><code>projectGroups</code></td>
+<td><code>{}</code></td>
+<td>グループ名 → プロジェクト名配列</td>
+</tr>
+<tr>
+<td><code>mode</code></td>
+<td><code>"default"</code></td>
+<td>タスクの実行形態（下記）</td>
+</tr>
+<tr>
+<td><code>advisor</code></td>
+<td><code>false</code></td>
+<td><code>--advisor</code> を渡すか（下記）</td>
+</tr>
+<tr>
+<td><code>permission</code></td>
+<td><code>"bypassPermissions"</code></td>
+<td>Claude CLI の権限モード（下記）</td>
+</tr>
+</tbody></table>
+<h4><code>mode</code>（タスクの実行形態）</h4>
+<p>全ワーカー・全プロジェクトに一括適用される（個別指定は不可）。</p>
+<table>
+<thead>
+<tr>
+<th><code>mode</code></th>
+<th>挙動</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>"default"</code></td>
+<td>タスクを <code>claude -p</code>（非対話 print モード）の子プロセスとして実行</td>
+</tr>
+<tr>
+<td><code>"herdr"</code></td>
+<td>タスクを herdr のタブ内で TUI セッションとして実行。実行中の様子を herdr で覗ける</td>
+</tr>
+</tbody></table>
+<p><code>"herdr"</code> では、worktree 作成後に <code>ctw:&lt;プロジェクト名&gt;:#&lt;番号&gt;</code> ラベルのタブを作り、そのルートペインで claude を TUI 起動する。agent ステータスを監視して完了を検知し、セッション transcript から最終レポートを回収して通知に使う。<code>blocked</code>（claude が入力待ち）になっても自動失敗にせず待機し、ステータステーブルに <code>running:blocked</code> と表示するので herdr のタブを開いて直接対応できる。herdr が未インストール・未起動なら起動時にエラー終了する（<code>"default"</code> へフォールバックしない）。</p>
+<blockquote>
+<p>ℹ️ タスク完了時の通知音はワーカー側から止められない（音を鳴らすのは herdr サーバープロセスで、<code>HERDR_DISABLE_SOUND</code> もそのプロセスの環境変数として読まれるため）。無音にするには <code>~/.config/herdr/config.toml</code> に <code>[ui.sound] enabled = false</code> を書いて <code>herdr server reload-config</code> する。ただし herdr サーバー全体に効くため、対話セッションの完了音も鳴らなくなる。</p>
+</blockquote>
+<h4><code>advisor</code>（アドバイザーモデル）</h4>
+<p><code>true</code> にすると、タスク起動時に Claude CLI へ <code>--advisor &lt;model&gt;</code> を渡す。渡すモデルは <code>claude-task-worker.json</code> の <code>workers.&lt;名前&gt;.advisorModel</code>。<code>mode</code> と同じくトップレベル一括で、プロジェクト単位・ワーカー単位のオン/オフはできない。空文字が指定されたワーカーには渡さない。</p>
+<p>advisor は main モデル以上の能力が必要（Claude CLI の制約）。全ワーカーの既定 <code>model</code> が <code>opus</code> なので、<code>advisorModel</code> の既定値はすべて空文字（advisor なし）。<code>model</code> を <code>sonnet</code> 等へ下げたワーカーには <code>advisorModel: "opus"</code> を指定できる。</p>
+<h4><code>permission</code>（権限モード）</h4>
+<p>タスク起動時に Claude CLI へ渡す<a href="https://code.claude.com/docs/ja/permission-modes" target="_blank" rel="noopener noreferrer">権限モード</a>。<code>mode</code> / <code>advisor</code> と同じくトップレベル一括で、プロジェクト単位・ワーカー単位の指定はできない。</p>
+<table>
+<thead>
+<tr>
+<th><code>permission</code></th>
+<th>挙動</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>"bypassPermissions"</code>（既定）</td>
+<td>全許可。承認するユーザーが常駐しない自律実行のため既定</td>
+</tr>
+<tr>
+<td><code>"dontAsk"</code></td>
+<td>許可されていない操作は確認せずスキップする</td>
+</tr>
+<tr>
+<td><code>"auto"</code></td>
+<td>安全な操作は自動承認、危険な操作のみ確認</td>
+</tr>
+<tr>
+<td><code>"acceptEdits"</code></td>
+<td>ファイル編集は自動承認、それ以外は都度確認</td>
+</tr>
+<tr>
+<td><code>"manual"</code></td>
+<td>標準の権限確認</td>
+</tr>
+<tr>
+<td><code>"plan"</code></td>
+<td>読み取りのみ。変更は行わない</td>
+</tr>
+</tbody></table>
+<p>値は Claude CLI の <code>--permission-mode</code> にそのまま渡される（choices と同じ綴り）。ワーカーには承認するユーザーがいないため、<code>bypassPermissions</code> / <code>dontAsk</code> 以外ではタスクが承認待ちで止まりうる（<code>mode: "herdr"</code> なら herdr のタブを開いて手動で承認できる）。</p>
+<h3><code>claude-task-worker.json</code>（リポジトリ）</h3>
+<table>
+<thead>
+<tr>
+<th>キー</th>
+<th>型</th>
+<th>既定</th>
+<th>説明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>fixReviewPointCallbackCommentMessage</code></td>
+<td>string</td>
+<td>-</td>
+<td><code>fix-review-point</code> 完了時に PR へ投稿するコメント（未設定なら投稿しない）</td>
+</tr>
+<tr>
+<td><code>uiDesign</code></td>
+<td>object</td>
+<td><code>{ "enabled": false, "designDir": "designs", "yolo": false }</code></td>
+<td>UIデザイン先行ワークフロー（下記）</td>
+</tr>
+<tr>
+<td><code>workers</code></td>
+<td>object</td>
+<td><code>{}</code></td>
+<td>ワーカーごとの上書き設定（下記）</td>
+</tr>
+</tbody></table>
+<h4>ワーカーごとの設定</h4>
+<p>未指定のワーカー・フィールドは既定値にフォールバックする。</p>
+<table>
+<thead>
+<tr>
+<th>フィールド</th>
+<th>型</th>
+<th>説明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>skill</code></td>
+<td>string</td>
+<td>Claude CLI の <code>-p</code> に渡すスラッシュコマンド。<code>"&lt;skill&gt; &lt;番号&gt;"</code> の形で起動される</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>string</td>
+<td><code>--model</code> の値（<code>sonnet</code> / <code>opus</code> / <code>haiku</code>）</td>
+</tr>
+<tr>
+<td><code>advisorModel</code></td>
+<td>string</td>
+<td><code>--advisor</code> の値。空文字なら advisor なし。<code>config.json</code> の <code>advisor: true</code> のときだけ参照される</td>
+</tr>
+<tr>
+<td><code>effort</code></td>
+<td>string</td>
+<td><code>--effort</code> の値（<code>high</code> / <code>medium</code> / <code>low</code>）</td>
+</tr>
+<tr>
+<td><code>pollingIntervalSeconds</code></td>
+<td>number</td>
+<td>ポーリング間隔（秒）</td>
+</tr>
+<tr>
+<td><code>cooldownSeconds</code></td>
+<td>number</td>
+<td>タスク完了後にポーリングを止める時間（秒）。<code>0</code> でなし</td>
+</tr>
+<tr>
+<td><code>maxConcurrentTasks</code></td>
+<td>number</td>
+<td>同時実行できるタスクの最大数</td>
+</tr>
+</tbody></table>
+<p>既定値（<code>skill</code> は「<a href="#worker-%E3%81%A8%E3%82%B9%E3%82%AD%E3%83%AB%E3%81%AE%E5%AF%BE%E5%BF%9C" target="_blank" rel="noopener noreferrer">Worker とスキルの対応</a>」を参照。<code>effort</code> は全て <code>high</code>、<code>cooldownSeconds</code> は <code>0</code>、<code>maxConcurrentTasks</code> は <code>1</code>）:</p>
+<table>
+<thead>
+<tr>
+<th>ワーカー</th>
+<th><code>model</code></th>
+<th><code>advisorModel</code></th>
+<th><code>pollingIntervalSeconds</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>exec-issue</code> / <code>fix-review-point</code> / <code>answer-issue-questions</code> / <code>create-issue</code> / <code>update-issue</code> / <code>resolve-conflict</code> / <code>create-ui-design</code> / <code>triage-created-issue</code> / <code>triage-pr</code></td>
+<td><code>opus</code></td>
+<td><code>""</code>（なし）</td>
+<td>60</td>
+</tr>
+<tr>
+<td><code>epic-issue</code> / <code>apply-ui-design</code></td>
+<td><code>opus</code></td>
+<td><code>""</code>（なし）</td>
+<td>300</td>
+</tr>
+<tr>
+<td><code>check-dependabot</code></td>
+<td><code>opus</code></td>
+<td><code>""</code>（なし）</td>
+<td>3600</td>
+</tr>
+<tr>
+<td>（未知のワーカー名）</td>
+<td><code>opus</code></td>
+<td><code>""</code>（なし）</td>
+<td>60</td>
+</tr>
+</tbody></table>
+<p>設定例:</p>
+<pre><code class="language-json">{
+  "workers": {
+    "exec-issue":       { "model": "opus", "cooldownSeconds": 600, "maxConcurrentTasks": 3 },
+    "fix-review-point": { "model": "sonnet", "advisorModel": "opus", "maxConcurrentTasks": 2 },
+    "triage-pr":        { "effort": "medium", "pollingIntervalSeconds": 120 },
+    "check-dependabot": { "model": "haiku", "pollingIntervalSeconds": 7200 }
+  }
+}
+</code></pre>
+<h2>ワークフロー</h2>
+<h3>Epic（親Issue）連携</h3>
+<p>親 Issue（Issue Dependencies の Parent）を持つサブ Issue を処理する場合、ワーカーはデフォルトブランチではなく <code>cc-epic-&lt;親Issue番号&gt;</code> ブランチから worktree を作成する。エピック単位でブランチをまとめることで、サブ Issue ごとのPRを単一の統合ブランチへ集約できる。エピックブランチが remote に無ければデフォルトブランチから自動派生して push される。</p>
+<p>サブ Issue がすべて Close されると <code>epic-issue</code> ワーカーが <code>/claude-task-worker:create-epic-pr</code> を起動し、エピックブランチからまとめてPRを作る。エピックPRは <code>triage-pr</code> がマージ可能と判定してもマージせず <code>cc-release-ready</code> を付けるだけで、実際のマージ（リリース）は人間に委ねられる。</p>
+<h3>UIデザイン先行ワークフロー</h3>
+<p>UI実装 Issue について、実装の前に Pencil（<code>.pen</code>）でデザインを作り、独立したPRとしてマージしてから実装へ進むフロー。デザインを実装PRとは別に単体でレビュー・合意でき、合意済みデザインがリポジトリに永続化される。</p>
+<p><code>uiDesign.enabled</code> によるオプトインで、既定（<code>false</code>）では2つのワーカーが起動しないため、Pencil を使っていないリポジトリの挙動は本機能の追加前と完全に一致する。</p>
+<table>
+<thead>
+<tr>
+<th>キー</th>
+<th>既定</th>
+<th>意味</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>uiDesign.enabled</code></td>
+<td><code>false</code></td>
+<td>有効化。<code>false</code> の間は <code>triage-created-issue</code> がUI判定を行わず、2つのワーカーも起動しない</td>
+</tr>
+<tr>
+<td><code>uiDesign.designDir</code></td>
+<td><code>"designs"</code></td>
+<td><code>.pen</code> とスナップショットの配置先（リポジトリルートからの相対パス）</td>
+</tr>
+<tr>
+<td><code>uiDesign.yolo</code></td>
+<td><code>false</code></td>
+<td>デザインPRを自動レビュー・自動マージへ流すか。<code>true</code> のときだけデザインPRに <code>cc-triage-scope</code> を付ける</td>
+</tr>
+</tbody></table>
+<pre><code class="language-text">cc-issue-created + triage-created-issue（ルーティング）
+  ├─ UI実装タスクでない → cc-exec-issue（従来どおり）
+  └─ UI実装タスク       → cc-create-ui-design
+        → create-ui-design ワーカー
+           ・.pen を作成/更新 + snapshots/ に PNG 出力
+           ・ブランチ cc-ui-design-&lt;N&gt; を push しデザインPRを作成（Refs #N。closing keyword は使わない）
+           ・PR に cc-ui-design、Issue に cc-ui-design-pr-created を付与
+        → yolo: true  → triage-pr / fix-review-point / resolve-conflict（既存フローでレビュー・マージ）
+           yolo: false → 人がデザインPRをレビュー・マージ
+        → apply-ui-design ワーカー
+           ・デザインPRが MERGED になるまで skip
+           ・Issue description に「## UIデザイン」セクションを追記
+           ・cc-ui-design-ready + cc-exec-issue を付与
+        → exec-issue（デザインを参照元として実装）
+</code></pre>
+<p><code>triage-pr</code> は <code>cc-ui-design</code> 付きPRをコードレビューではなくデザイン向けの観点（差分が <code>.pen</code> とPNGに限定されているか、スナップショットからデザイン意図が読み取れるか、Issue 要件を満たしているか）で評価する。</p>
+<p>デザインが不要と判明した場合は <code>create-ui-design</code> が理由をコメントして <code>cc-ui-design-ready</code> + <code>cc-exec-issue</code> を付与し、人手を介さず実装へ復帰する。Pencil が使えない環境やデザインPRが却下された場合は <code>cc-need-human-check</code> で停止する。</p>
+<h2>Slack通知</h2>
+<p>環境変数 <code>CLAUDE_TASK_WORKER_SLACK_WEBHOOK_URL</code> に Slack Incoming Webhook URL を設定すると、各ワーカーのタスク完了時・失敗時に通知が送られる。未設定なら送信されない。</p>
+<pre><code class="language-bash">export CLAUDE_TASK_WORKER_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/REDACTED
+claude-task-worker all
+</code></pre>
+<p>通知には Claude API の使用状況（5時間/7日間の利用率とリセット時刻）も含まれる。使用状況の取得は macOS では <code>security</code>（Keychain）、それ以外では <code>~/.claude/.credentials.json</code> を使う。あわせて <a href="https://kyome.io/runcat/" target="_blank" rel="noopener noreferrer">RunCat Neo</a> 用のスナップショットを <code>~/.claude/runcat-usage.json</code>（<code>RUNCAT_OUT_FILE</code> で変更可）へ原子的に書き出す（Webhook 未設定でも更新される）。取得結果は360秒キャッシュされるため、値は最大6分古くなりうる。</p>
+<h2>プロセス管理</h2>
+<p>実行中のタスクはリアルタイムのステータステーブルで表示される。</p>
+<ul>
+<li>タスクID・タイトル・ステータス（running/completed/failed）・開始時刻・経過時間を表示</li>
+<li><code>mode: "herdr"</code> では実行中の行に agent ステータスが併記される（<code>running:working</code> / <code>running:blocked</code>）</li>
+<li>同一 Issue/PR の重複実行を自動防止</li>
+<li>SIGTERM/SIGINT で全子プロセスを graceful shutdown（もう一度送ると強制終了し、ラベル・worktree の後片付けを試みる）</li>
+<li>前回の異常終了で残った worktree はワーカー起動時に自動回収される（実行中タスク・対話セッションが掴んでいるものは保護される）</li>
+</ul>
+<h3>タスク実行のガード</h3>
+<p>ワーカーは応答するユーザーがいない状態でスキルを起動するため、処理が未完のままセッションが終了してラベルだけ進む事故を防ぐガードを持つ。</p>
+<ul>
+<li><strong>バックグラウンド実行の無効化</strong>: <code>CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1</code> を全タスクへ注入し、Bash の <code>run_in_background</code> やサブエージェントの自動バックグラウンド化を止める</li>
+<li><strong>ツールの無効化</strong>: <code>--disallowedTools</code> で <code>Monitor</code> / <code>ScheduleWakeup</code> / <code>AskUserQuestion</code> / <code>EnterPlanMode</code> / <code>Cron*</code> / <code>RemoteTrigger</code> / <code>EnterWorktree</code> を無効化する</li>
+<li><strong>自律実行原則の注入</strong>: <code>--append-system-prompt</code> で「ユーザーに質問しない・全ステップを完遂してから終了する・曖昧なら安全側を選ぶ・サブエージェントの完了報告を検証する」および CodeGraph 優先のコード探索方針を注入する</li>
+<li><strong>完了検証</strong>: <code>exec-issue</code> / <code>epic-issue</code> は PR の実在（または Issue のクローズ）を確認できるまで <code>cc-pr-created</code> を付けず、確認できなければ <code>cc-need-human-check</code> を付けて Issue にコメントを残す</li>
+<li><strong>空振り検知</strong>: 正常終了しても出力が空のセッションは失敗として分類し、失敗通知（stderr の末尾を含む）を送る</li>
+<li><strong>起動プロセスの後片付け</strong>: スキル終了時に <code>Stop</code> フックが <code>docker compose down</code> と、worktree を作業ディレクトリに持つ残留プロセスの <code>SIGTERM</code> をベストエフォートで実行する（worktree はスキル完了直後に削除されるため、残留プロセスが削除の妨げになるのを防ぐ）</li>
+</ul>
+<h2>開発</h2>
+<pre><code class="language-bash">npm install
+npm run build         # 型チェック（tsc --noEmit）+ esbuild で dist/index.js にバンドル
+npm run dev           # 型チェックの watch モード
+npm test              # ユニットテスト（node --experimental-strip-types --test）
+npm run lint          # ESLint（--fix で自動修正）
+npm run format        # Prettier で整形（format:check でチェックのみ）
+</code></pre>
+<p>開発版をローカルから使う場合は <code>npm install &amp;&amp; npm run build &amp;&amp; npm link</code>。</p>
+<p>コントリビューションを歓迎します。開発環境のセットアップ・PRの出し方は <a href="https://github.com/getty104/claude-task-worker/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a>、バグ報告・機能要望は <a href="https://github.com/getty104/claude-task-worker/issues/new/choose" target="_blank" rel="noopener noreferrer">Issue テンプレート</a> から。セキュリティ上の脆弱性は公開Issueではなく <a href="https://github.com/getty104/claude-task-worker/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a> の手順で報告してください。参加にあたっては <a href="https://github.com/getty104/claude-task-worker/blob/HEAD/CODE_OF_CONDUCT.md" target="_blank" rel="noopener noreferrer">CODE_OF_CONDUCT.md</a>（Contributor Covenant）を遵守してください。</p>
+<h2>ライセンス</h2>
+<p>MIT License. 詳細は <a href="https://github.com/getty104/claude-task-worker/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a> を参照してください。</p>

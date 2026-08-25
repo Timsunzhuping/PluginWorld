@@ -83,6 +83,9 @@ function rowToPlugin(row: PluginRow): Plugin {
       docs: num(row.scoreDocs),
     },
     trustFlags: (row.trustFlags as Plugin["trustFlags"]) ?? {},
+    securityGrade: (row.securityGrade as Plugin["securityGrade"]) ?? "B",
+    securityFindings:
+      (row.securityFindings as Plugin["securityFindings"]) ?? [],
     npmPackage: row.npmPackage,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

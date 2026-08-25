@@ -46,6 +46,8 @@ export async function GET(
       spec_valid: plugin.specValid,
       quality_score: plugin.qualityScore,
       score_breakdown: plugin.scoreBreakdown,
+      security_grade: plugin.securityGrade,
+      security_findings: plugin.securityFindings,
       trust_flags: plugin.trustFlags,
       npm_package: plugin.npmPackage,
       install: installOptions(plugin),

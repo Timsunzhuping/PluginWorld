@@ -1,0 +1,781 @@
+<h1>peek</h1>
+<p>A standalone database viewer that also exposes itself as an MCP server, so an AI can drive the
+interface a human is looking at.</p>
+<p><strong>English</strong> · <a href="https://github.com/Gyangu/peek-viewer/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">中文</a></p>
+<p>Human clicks and MCP tool calls travel the <strong>same command channel</strong>. There is no second write path,
+no shadow state for the AI, and no reconciliation step: the main process holds the one source of
+truth, every mutation is a Command, and the renderer only ever receives patches. Ask Claude to open
+a table and the panel appears on screen; open it yourself and the AI sees the same workspace on its
+next read.</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/overview-dark.png"></source>
+  <img alt="peek with three tiled panes: a namespace tree on the left, a table view of a customers table top right, and a SQL editor below it showing a revenue-by-plan query that has returned five rows." src="https://raw.githubusercontent.com/Gyangu/peek-viewer/HEAD/docs/images/overview-light.png" />
+</picture><p><sub>Every screenshot in this README is one <code>set_layout</code> call — see
+<a href="https://github.com/Gyangu/peek-viewer/blob/HEAD/apps/desktop/scripts/screenshot.mjs" target="_blank" rel="noopener noreferrer"><code>apps/desktop/scripts/screenshot.mjs</code></a>, which drives the built
+app over its own MCP endpoint the way an AI client would.</sub></p>
+<h2>Why peek</h2>
+<ul>
+<li><strong>The agent drives the window it is sitting in.</strong> Claude Code runs embedded over ACP as a sixth
+kind of view, connected back to peek's own MCP server.</li>
+<li><strong>Adding a database peek has never heard of is installing a directory, not editing this
+repository.</strong> All six drivers load from <code>~/.peek/packages/&lt;id&gt;/</code> rather than being compiled in.</li>
+<li><strong>Read-only is enforced by the server, not by a keyword filter.</strong> PostgreSQL and MySQL run inside
+a read-only transaction, SQLite is opened with the read-only flag plus <code>PRAGMA query_only</code>. There
+is no client-side keyword allowlist anywhere.</li>
+<li><strong>Result rows reach the agent only as an explicit attachment the human stages</strong> — a cell, a row
+selection, a view — never as ambient context.</li>
+<li><strong>Layout is state.</strong> The tiled tree is real state driven by Commands, so <code>set_layout</code> from an MCP
+client and a dragged divider are the same operation.</li>
+<li><strong>A million rows scroll.</strong> No DOM dimension is derived from the row count: a spacer sized
+<code>rowCount × rowHeight</code> is silently clamped by Chromium at about 699,000 rows, past which rows are
+not slow, they are unreachable.</li>
+<li><strong>Credentials never land in plaintext on disk.</strong> They are encrypted by the OS keychain through
+Electron's <code>safeStorage</code>, stored apart from the config that names the server.</li>
+</ul>
+<hr />
+<h2>Architecture</h2>
+<h3>Process model</h3>
+<pre><code>┌────────────────────────────────────────────────────────────────┐
+│ renderer (React 19)                                            │
+│   tiled panels · virtualized grid · tree · inspector · editor  │
+│   mirror store — a read-only replica, never edited locally     │
+└────────▲──────────────────────────────────┬────────────────────┘
+         │ state patches (IPC)              │ user intent → Command (IPC)
+┌────────┴──────────────────────────────────▼────────────────────┐
+│ main                                                           │
+│   Command Bus  ◄────  MCP HTTP server (127.0.0.1:7332)         │
+│   Workspace Store — the source of truth, immer patches out     │
+│   Connection Manager                                           │
+└────────┬───────────────────────────────────────────────────────┘
+         │ spawn + control: one utilityProcess per connection
+┌────────▼───────────────────────────────────────────────────────┐
+│ driver host (utilityProcess)                                   │
+│   driver instance · query execution · server-side cursors      │
+│   result chunks ─────── MessagePort, direct ──────► renderer   │
+└────────────────────────────────────────────────────────────────┘
+</code></pre>
+<p>Three properties fall out of that shape:</p>
+<ul>
+<li><strong>Drivers run out of process.</strong> One <code>utilityProcess</code> per connection. A wedged query or a driver
+crash cannot take the window down, and killing the process is an unconditional cancel.</li>
+<li><strong>The control plane goes through main; the data plane does not.</strong> Commands and state patches pass
+through main. Result chunks travel a <code>MessagePort</code> handed directly from the driver host to the
+renderer — once transferred, main's end is neutered, so it <em>cannot</em> intercept a data frame even in
+principle. That is the physical guarantee behind "no double serialization hop for large results".</li>
+<li><strong>MCP read tools read main's store directly</strong>, with zero renderer round-trips.</li>
+</ul>
+<h3>Command Bus</h3>
+<pre><code>  human clicks  ─┐
+                 ├─► Command Bus ─► zod validation ─► handler (pure) ─► patch broadcast ─► result
+  MCP tool call ─┘         │
+                           └─► command log (source: ui | mcp | system)
+</code></pre>
+<p>Every state change is a Command named <code>domain.verb</code> — <code>conn.open</code>, <code>view.open</code>, <code>query.run</code>,
+<code>layout.split</code>, and so on. Handlers are pure reducers over the workspace draft; side effects are
+returned as plans and executed afterwards. An MCP tool is therefore a thin shell: declare an input
+schema, map it to one or more Commands, render the outcome. The command log records the <code>source</code> of
+each entry, which makes a session both auditable and replayable.</p>
+<h3>Capability model</h3>
+<p>peek does not flatten every database into a lowest common denominator. Each driver advertises what
+it can do, and both the UI and the MCP tools adapt:</p>
+<pre><code>introspect · tabularQuery · collectionScan · keyValue · vectorSearch · valuePeek · cancel
+
+postgres      introspect · tabularQuery · collectionScan · valuePeek · cancel
+mysql/sqlite  same, via a shared dialect layer
+redis         introspect · collectionScan · keyValue · valuePeek · cancel
+qdrant        introspect · collectionScan · vectorSearch · valuePeek
+</code></pre>
+<p>Qdrant declines <code>cancel</code> rather than pretending: it has no server-side statement cancellation, and
+the REST client offers no per-request abort, so the driver can only stop between pages. A capability
+is a promise about what the UI may offer, which is why "can stop at a page boundary" is not allowed
+to pass as the same thing.</p>
+<p>Adding a database is a package and <strong>no</strong> line of peek: the driver id, the connect form, the
+capability set, the view kinds and the MCP tools all come out of the package's own
+<code>peek-package.json</code> at load time, so a database peek has never heard of reaches the picker by being
+copied into <code>~/.peek/packages/</code>. It used to be "a package plus a line" — one entry in
+<code>connections/registry.ts</code>, one in the <code>drivers</code> array of <code>driver-host/entry.ts</code>, and five more
+elsewhere — and those tables are gone. Nothing in <code>packages/core</code> changed to admit Redis, Qdrant,
+MySQL, SQLite or Neo4j; the known gaps that surfaced while proving that are listed under
+<a href="#known-limitations" target="_blank" rel="noopener noreferrer">Known limitations</a>.</p>
+<p>The per-driver table is what the UI predicts <em>before</em> a connection exists; once connected, the
+session's own capability set wins, so an older server can advertise less.</p>
+<p>Capabilities are answered at three grains, because "can this driver sort?" turned out to be the
+wrong question:</p>
+<ul>
+<li><strong>Per driver</strong> — the table above. Enough to decide whether to draw a SQL editor at all.</li>
+<li><strong>Per collection</strong> — <code>CollectionSchemaInfo.browse</code> lets a driver narrow the answer for one
+collection: which columns are sortable, which are filterable, and whether sorting gives up paging.
+Qdrant reports exactly the payload keys that carry an index, so ordering by an unindexed key is a
+named <code>BAD_REQUEST</code> from peek instead of a 400 from the server. A Redis keyspace has no global
+order and says so, so it draws inert headers and a forward-only pager. This grain is answered to
+MCP callers but does not yet reach the renderer, which is why a qdrant table view also draws inert
+headers — see <a href="#known-limitations" target="_blank" rel="noopener noreferrer">Known limitations</a>.</li>
+<li><strong>Per value</strong> — <code>core/values.ts</code> fixes one canonical JS representation per <code>LogicalType</code>, and all
+four drivers are asserted against it on a real server. Two bugs fell out of writing it down: a
+PostgreSQL <code>BIGINT 1</code> used to arrive as the string <code>"1"</code> while MySQL and SQLite sent the number,
+so the same column right-aligned in one connection and left-aligned in the next; and a <code>DATE</code>
+arrived as a <code>Date</code> at <em>local</em> midnight, which serializes to the previous day anywhere east of
+Greenwich. Dates, times, timestamps and intervals are now strings everywhere, and a 64-bit integer
+is a <code>number</code> while that is exact and a decimal string once it is not.</li>
+</ul>
+<p><code>FilterSpec</code> carries a <code>target</code> for the same reason: on a relational table a filter names a column,
+while on a schemaless collection it names a payload <em>field</em> that may not be in the result at all. A
+Qdrant scan returns <code>id</code> plus one <code>payload</code> JSON column, so by default only <code>id</code> is filterable — but
+project a payload key into a column with <code>columns</code> and the driver reports it as filterable. The
+answer to "can I click this header to filter?" is now something the type system can state.</p>
+<h3>Chunk streaming and backpressure</h3>
+<p>Result sets are streamed as columnar frames, never materialized whole:</p>
+<pre><code class="language-ts">{ resultId, seq, schema?: ColumnDef[],  // schema on seq 0 only
+  cols: unknown[][],                    // column-major, ready for Arrow later
+  rowCount: number,
+  done?: { rows, elapsedMs, truncated?, nextCursor? } }
+</code></pre>
+<ul>
+<li>PostgreSQL rows come off a server-side <code>DECLARE</code> / <code>FETCH FORWARD</code> cursor, 500–2000 rows per
+frame, targeting 256KB–1MB.</li>
+<li>The renderer keeps frames exactly as received and binary-searches <code>(row, col)</code> — no pivot to row
+objects, no copy.</li>
+<li>Cache ceiling ~200MB with <strong>LRU eviction</strong>; chunks near the viewport (±3000 rows) are protected.</li>
+<li><strong>Backpressure</strong> is an ack window: the host pauses once 4 frames are unacknowledged, and the
+renderer withholds the ack when the cache is near its ceiling or the viewport has fallen more than
+200,000 rows behind. Scrolling releases it. A stream held this way reports <code>paused</code>, which is a
+terminal-but-healthy state — the rows already loaded are valid.</li>
+<li>Values over 4KB arrive as a truncated preview carrying a ref; the full value is fetched on demand
+through <code>valuePeek</code>.</li>
+</ul>
+<hr />
+<h2>Quick start</h2>
+<p>Requirements: <strong>Node &gt;= 22</strong> (developed on 26.2), <strong>pnpm 10.32.1</strong> (pinned via <code>packageManager</code>), and
+at least one database to point at. Development and testing have happened on macOS / Apple Silicon
+only; nothing in the code is platform-specific, but no other platform has been exercised.</p>
+<pre><code class="language-bash">pnpm install          # pnpm 10 blocks install scripts by default; electron/esbuild/rollup are
+                      # allow-listed in pnpm-workspace.yaml, so no extra approval step is needed
+
+pnpm dev              # electron-vite dev: opens the window, renderer HMR, MCP server on 7332
+pnpm build            # production bundles into apps/desktop/out (main / preload / renderer)
+pnpm -r typecheck     # tsc --noEmit across every package; strict mode, no `any`
+pnpm -r test          # node:test, 2567 tests today (2097 desktop + 165 core + 60 postgres
+                      #                       + 41 redis + 38 qdrant + 83 mysql/sqlite + 83 neo4j)
+</code></pre>
+<p>The desktop suite is pure logic — no Electron, no database. Each driver suite is an integration
+suite that talks to a real server, and each reads its target from the environment:</p>
+<pre><code class="language-bash">PEEK_TEST_PG_URL="postgresql://user@localhost:5432/your_db" \
+PEEK_TEST_REDIS_URL="redis://localhost:6379" \
+PEEK_TEST_QDRANT_URL="http://localhost:6333" \
+PEEK_TEST_MYSQL_URL="mysql://root:pw@localhost:3306/peek_test" \
+PEEK_TEST_NEO4J_URL="bolt://localhost:7687" PEEK_TEST_NEO4J_PASSWORD="…" \
+pnpm -r test
+</code></pre>
+<p>Neo4j is the one that needs a password rather than a URL alone, and it has <strong>no default</strong>. That is
+deliberate: Neo4j rate-limits failed authentication, so a suite that guessed at a password would
+make the <em>next</em>, correct attempt fail too. A throwaway server is one line:</p>
+<pre><code class="language-bash">docker run -d --rm --name peek-test-neo4j -p 7687:7687 -e NEO4J_AUTH=neo4j/peektest123 neo4j:5
+</code></pre>
+<p>The Redis, Qdrant and SQL suites provision and remove their own fixtures (all Redis keys under a
+<code>peek:test:</code> prefix, a <code>peek_test_*</code> Qdrant collection, throwaway MySQL tables, a temp-directory
+SQLite file) and skip themselves entirely when the server is unreachable, so an absent service is
+never a failure.</p>
+<p>There is also an end-to-end check that no unit test can stand in for, because it launches the built
+app rather than importing source:</p>
+<pre><code class="language-bash">pnpm --filter @peek/desktop build
+node apps/desktop/scripts/smoke-drivers.mjs
+</code></pre>
+<p>It starts Electron on a throwaway port, user-data directory and config directory — so an installed
+peek neither blocks it nor is disturbed by it — then drives its MCP endpoint the way an AI client
+would: <code>connect</code>, <code>introspect</code>, then <code>open_view</code> on the first thing the tree says is openable, for
+every driver whose <code>PEEK_TEST_*</code> variable is set. That path covers what unit tests cannot: that
+<code>driver-host.js</code> resolves every driver package, that no two drivers fight over <code>process.parentPort</code>,
+and that chunks reach the renderer over the MessagePort.</p>
+<p>Two caveats worth knowing before you run it. Every statement it issues is read-only, so it is safe
+against a live database — row counts are measured against the server's own <code>count(*)</code> rather than
+hard-coded, precisely because the development database keeps changing underneath. But the schema is
+<em>not</em> discovered: the suite asserts on specific tables in the <code>public</code> schema of one particular
+development database, so pointing <code>PEEK_TEST_PG_URL</code> at an arbitrary database will fail those
+assertions — and so does leaving it <em>unset</em>, because the fallback in the test file is a different
+database again. Making the fixture self-provisioning is open work; until then, PostgreSQL is the one
+suite that needs its variable set even to fail honestly.</p>
+<p>Neo4j has a smaller version of the same requirement: the smoke check walks the namespace tree and
+opens the first thing carrying a ref, so an <strong>empty</strong> database has nothing to open and the row
+fails. A throwaway server started with the <code>docker run</code> line above is empty, so seed it once:</p>
+<pre><code class="language-bash">docker exec peek-test-neo4j cypher-shell -u neo4j -p peektest123 \
+  "CREATE (a:PeekSmoke {name:'Ada'})-[:PEEK_SMOKE_KNOWS]-&gt;(b:PeekSmoke {name:'Bob'})"
+</code></pre>
+<p>Neo4j is also the only row that opens a <strong>second</strong> view — a <code>graph</code>, the one package-contributed view
+kind in the tree. That step is what exercises the Tier C seam end to end: <code>view.open</code> accepting a
+spec the kernel has no schema for, the registration composing Cypher inside the main process, and
+the result arriving through the same machinery a table's scan uses.</p>
+<p>The chat panel's security claims have their own runnable check, for the same reason: a sentence in a
+comment saying "the agent inherits none of your Claude Code configuration" is a sentence that
+quietly stops being true.</p>
+<pre><code class="language-bash">node apps/desktop/scripts/verify-chat-security.mjs             # spends tokens: four real model turns
+node apps/desktop/scripts/verify-chat-security.mjs --offline   # free, CI-safe, skips the model
+</code></pre>
+<p>It verifies the shape of the session sandbox, that every tool on the wire comes from a tool file in
+this repository, that a prompt asking for a shell gets no shell, that a database cell phrased as an
+order is not obeyed, that the bearer token reaches neither the transcript nor stdout, and that the
+agent's own tool calls come back through peek's MCP server. Exit code 0 means every check that ran
+passed. The online mode deliberately does <em>not</em> isolate your own Claude Code configuration — the
+whole point is that your real settings do not leak into the session, and isolating them would test
+nothing.</p>
+<hr />
+<h2>Using the app</h2>
+<p>The window is a normal database GUI, and nothing about it is AI-specific:</p>
+<ul>
+<li><strong>Connect</strong> from the sidebar. Pick a driver, paste a connection string, and the namespace tree
+opens with it. The tree is lazily loaded a level at a time and cached until you refresh it. A
+connection that works is remembered under <strong>Saved</strong> — there is no "save" button, because the only
+thing worth remembering is a connection that has actually completed a handshake. Each saved entry
+says whether its password is in the system keychain, and can be reconnected, edited or forgotten.
+If the keychain is unavailable, peek says so and saves no password rather than writing one to disk.</li>
+<li><strong>Stop a query</strong> with the cancel button in any result view. If the driver cannot cancel — Qdrant is
+the one that cannot, and says so rather than pretending — the button is disabled with the reason on
+it. Nothing runs forever regardless: every fetch has a deadline behind it.</li>
+<li><strong>See what went wrong</strong> from the badge in the status bar. It counts errors and opens a panel with
+the last hundred, each copyable, so a toast that faded while you were reading rows is still there.</li>
+<li><strong>Browse a table</strong> by clicking it in the tree: a virtualized grid, scrollable to the last row of a
+million-row table. Shift-drag the scrollbar for 10× precision, Option-drag for 50×.</li>
+<li><strong>Write SQL</strong> in a query view. <code>⌘⏎</code> runs the statement; the editor is CodeMirror 6 with SQL syntax.</li>
+<li><strong>Inspect a value</strong> by double-clicking a cell; a truncated one opens on a single click and pulls
+the rest through <code>valuePeek</code>. Anything over 4KB only ever travels as a preview until you ask for
+it.</li>
+<li><strong>Arrange panels</strong> with <code>⌘\</code> (split left/right) and <code>⌘⇧\</code> (split top/bottom). Drag a divider to
+resize; the ratio is committed on release as a <code>layout.setRatio</code> command.</li>
+<li><strong>Work in tabs.</strong> Opening a view puts it in the focused panel as a new tab rather than replacing
+what is there, so clicking a second table no longer costs you the first one. <code>⌘W</code> closes the
+active tab and the panel stays behind, empty; <code>⌘⇧W</code> closes the panel itself. When a tab closes,
+its right neighbour takes over, else its left — never a jump to the front. A panel holds 12 tabs
+at most.</li>
+<li><strong>Move a view</strong> by dragging a tab. The centre of a panel body stacks the view there as a new tab;
+the four edges split that panel and drop the view into the new half; the tab strip inserts it at
+the caret, which is also how you reorder tabs inside one panel. Nothing is ever closed or swapped
+by a drag. <code>Esc</code>, or releasing outside any panel, cancels. Nothing moves until the main process
+has applied the command — the preview you see while dragging is only a preview.</li>
+<li><strong>Without the mouse</strong>: <code>⌘1</code>–<code>⌘8</code> show the Nth tab and <code>⌘9</code> the last one, <code>⌃Tab</code> / <code>⌃⇧Tab</code> cycle
+through them, and <code>⌘⌥1</code>–<code>⌘⌥9</code> focus a panel by its visual order. <code>⌘⌥←↑↓→</code> moves the focus,
+<code>⌘⇧←↑↓→</code> moves the focused view into the neighbouring panel as a tab, and <code>⌘⌥⇧←↑↓→</code> sends it
+into a new panel beyond that neighbour. Inside a tab strip, <code>←</code>/<code>→</code> move between tabs and switch
+as they go, <code>Home</code>/<code>End</code> jump to the ends, and <code>Delete</code>/<code>Backspace</code> close a tab. While the SQL
+editor has focus the arrow shortcuts are left to it — <code>Esc</code> is the way back out.</li>
+<li><strong>Switch language</strong> in the status bar. English is the default everywhere, deliberately: the window
+is a surface shared with an AI and with bug reports, so it should read the same on every machine.</li>
+</ul>
+<hr />
+<h2>Using it from Claude Code</h2>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/agent-asks-dark.png"></source>
+  <img alt="Three panes: a namespace tree, a weekly rollup query with its results, and a chat panel on the right holding a question card. The card is chipped Aggregation and reads 'events spans 2025 to 2029 — roll it up by day or by week?', with two options and an Other box. The panel header says Waiting for your answer." src="https://raw.githubusercontent.com/Gyangu/peek-viewer/HEAD/docs/images/agent-asks-light.png" />
+</picture><p><sub>An <code>ask</code> call, suspended. The client that made it is
+<a href="https://github.com/Gyangu/peek-viewer/blob/HEAD/apps/desktop/scripts/screenshot.mjs" target="_blank" rel="noopener noreferrer"><code>screenshot.mjs</code></a> — the tool call is really waiting, and the
+shot ends by clicking one of the options, because <code>chat.answer</code> refuses <code>source: 'agent'</code>: an agent
+answering its own question manufactures consent. No agent backend runs here, so this needs no API
+key and reproduces on a fresh clone.</sub></p>
+<p>peek starts its MCP server on launch, binds the loopback address only, and writes the endpoint plus a
+bearer token to <code>~/.peek/mcp.json</code> (file <code>0600</code>, directory <code>0700</code>). The token is reused across
+restarts, so a client registered once stays registered.</p>
+<pre><code class="language-bash">cat ~/.peek/mcp.json        # the "hint" field is the exact command below, token filled in
+
+claude mcp add peek --transport http http://127.0.0.1:7332/mcp \
+  --header "Authorization: Bearer &lt;token from ~/.peek/mcp.json&gt;"
+</code></pre>
+<p>The same command is one click away in the app: <strong>Settings → MCP endpoint</strong> (the gear in the sidebar)
+shows the status, the address and the token — masked by default — and copies the registration line
+for you. It is also where the port is changed and the token rotated; both warn that an already
+registered client has to be re-registered, because both invalidate it.</p>
+<p>The token is deliberately <strong>not</strong> printed to the log. It grants full control of the window and of
+every database connection open in it, and stdout is not a private place: terminal scrollback, CI
+logs and crash reports all carry it onward. The two places that hold the copyable command are the
+ones that are actually access controlled — the <code>0600</code> file and the settings panel.</p>
+<p>The <code>Authorization</code> header is required — without it every request is rejected with 401. Requests are
+additionally checked for a loopback <code>Host</code> and <code>Origin</code> (DNS-rebinding protection), and the token is
+compared in constant time.</p>
+<p>If port 7332 is busy, peek tries the next eight and tells you where it landed rather than starting
+without an MCP server; the port it settled on is what <code>~/.peek/mcp.json</code> records. A port chosen in
+the settings panel is remembered in <code>~/.peek/settings.json</code>. <code>PEEK_MCP_PORT</code> still overrides both,
+but only for that run — an integration knob, not a preference, so a scripted launch never rewrites
+what the user chose.</p>
+<p>On first launch — no connection, and nothing in the connection book — the window shows a three-step
+guide instead of an empty grid: connect a database, copy the MCP registration command, open the chat
+panel.</p>
+<h3>The sixteen tools</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Kind</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>read_workspace</code></td>
+<td>read</td>
+<td>See the current UI: layout tree, every tab of every panel in tab order with the visible one marked, per-result row counts and status, connections. Mounted is not the same as on screen — a panel shows one of its tabs. Never returns row data.</td>
+</tr>
+<tr>
+<td><code>list_connections</code></td>
+<td>read</td>
+<td>Every connection with its id, driver, status, actual capability set, and its target masked by the rules that connection's package declares — see <a href="#packages-and-trust" target="_blank" rel="noopener noreferrer">Packages and trust</a>.</td>
+</tr>
+<tr>
+<td><code>connect</code></td>
+<td>command</td>
+<td>Open a connection (<code>conn.open</code>); optionally opens a namespace tree view at the same time.</td>
+</tr>
+<tr>
+<td><code>introspect</code></td>
+<td>read</td>
+<td>Expand the namespace tree (db → schema → table), up to 3 levels at a time. Returns the <code>ref</code> values <code>open_view</code> needs. Not a Command — it is a read-only driver-host RPC.</td>
+</tr>
+<tr>
+<td><code>open_view</code></td>
+<td>command</td>
+<td>Put a view on screen (<code>view.open</code>): <code>table</code>, <code>query</code>, <code>inspector</code>, <code>tree</code>, <code>vector</code>. Appends it to the target panel as a new tab and shows it; <code>replace: true</code> closes that panel's visible view and takes its tab position instead. Opening in a <em>new panel</em> is <code>set_layout</code>, or <code>move_view</code> onto an edge.</td>
+</tr>
+<tr>
+<td><code>run_query</code></td>
+<td>command</td>
+<td>Execute a statement (<code>query.run</code>). The AI receives the first 20 rows plus the total count; the full result stays in the UI for the human to scroll. Defaults to a 200,000-row ceiling, marked <code>truncated</code>.</td>
+</tr>
+<tr>
+<td><code>set_layout</code></td>
+<td>command</td>
+<td>Declare the whole panel tree at once (<code>layout.setLayout</code>) — the way to arrange several views for comparison in a single call. Each leaf carries a <code>viewIds</code> list plus an <code>activeViewId</code>, and may also <code>open</code> new views inline, naming one of them with <code>activeOpenIndex</code>: four views side by side is four leaves, four views paged in one pane is one leaf with four <code>viewIds</code>. Caps: 16 panels, depth 6, 12 tabs per panel, each view at most once in the whole tree. A tree that leaves open views out is refused until <code>unplaced</code> says which of <code>close</code> / <code>keep</code> / <code>error</code> was meant; <code>expectRev</code> makes the write fail rather than clobber a concurrent human edit.</td>
+</tr>
+<tr>
+<td><code>set_ratio</code></td>
+<td>command</td>
+<td>Resize one split (<code>layout.setRatio</code>) — the drag of a divider, as a call. For a layout that is already right and only mis-proportioned, this is what <code>set_layout</code> costs a whole tree to do. Ratios are normalized, so <code>[65,35]</code> and <code>[0.65,0.35]</code> are one request.</td>
+</tr>
+<tr>
+<td><code>move_view</code></td>
+<td>command</td>
+<td>Move one view to one panel, without resending the tree. <code>zone: center</code> stacks it there as a tab (<code>layout.moveView</code>), optionally at an <code>index</code>; <code>left</code>/<code>right</code>/<code>top</code>/<code>bottom</code> split the target panel (<code>layout.splitWithView</code>). Naming the panel a view is already in is a tab reorder, not a no-op. This is the same zone→command mapping the drag UI uses, so an AI's gesture and a human's produce identical results.</td>
+</tr>
+<tr>
+<td><code>activate_view</code></td>
+<td>command</td>
+<td>Bring one of a panel's tabs to the front (<code>view.activate</code>), the way clicking its tab does. Opens, closes, moves and reorders nothing. This is the answer when <code>read_workspace</code> shows the view you want with <code>"visible": false</code>.</td>
+</tr>
+<tr>
+<td><code>cancel_query</code></td>
+<td>command</td>
+<td>Stop a query that is already running (<code>query.cancel</code>). Distinct from <code>run_query</code>'s <code>timeoutMs</code>, which sets a deadline up front, and from <code>waitMs</code>, which only bounds how long the caller watches.</td>
+</tr>
+<tr>
+<td><code>send_chat</code></td>
+<td>command</td>
+<td>Post a message into a chat view (<code>chat.send</code>), opening one if none is named. Attachments are named by descriptor, not inlined.</td>
+</tr>
+<tr>
+<td><code>read_chat</code></td>
+<td>read</td>
+<td>Read a chat view's transcript back: messages, tool calls, plans, and any permission request still waiting on a human.</td>
+</tr>
+<tr>
+<td><code>control_chat</code></td>
+<td>command</td>
+<td>The chat lifecycle that is not "send": cancel the turn, clear the transcript, detach the agent, set the mode, answer a permission prompt.</td>
+</tr>
+<tr>
+<td><code>notify</code></td>
+<td>command</td>
+<td>Tell the user something that reaches them when peek is not the window in front (<code>app.notify</code>): a system notification when they are elsewhere, an in-app message when they are not.</td>
+</tr>
+<tr>
+<td><code>ask</code></td>
+<td>command</td>
+<td>Put a question to the user with two to four answers and <strong>wait</strong> for the reply (<code>chat.ask</code>). The prompt appears in a chat panel, peek always adds a free-text box, and the answer returns as the tool result — so the agent keeps working in the same turn. The only tool that suspends until a person acts.</td>
+</tr>
+</tbody></table>
+<p>There is deliberately no tool that hands a full result set to the model. Layout changes go through
+the same Command Bus as the human's keyboard and mouse, so <code>read_workspace</code> always shows an AI the
+panel arrangement a human just dragged into place, and vice versa.</p>
+<h3>The chat panel</h3>
+<p>You do not have to bring your own client. peek can host Claude Code itself, as a tab:</p>
+<pre><code>  chat view (renderer)
+        │  chat.send / chat.cancel / chat.respondPermission  — ordinary Commands
+        ▼
+  Command Bus ──► ACP client (main) ──► claude-agent-acp (child process)
+                                              │
+                                              └── MCP ──► peek's own server on 127.0.0.1:7332
+</code></pre>
+<p>The agent is a child process speaking the <a href="https://agentclientprotocol.com" target="_blank" rel="noopener noreferrer">Agent Client Protocol</a>,
+launched lazily the first time a chat view is used, and handed peek's own MCP endpoint on the way
+up. So it closes the loop: the model you are talking to in the panel drives the panels around it
+through exactly the tools above, and the transcript is state like any other — <code>read_chat</code> and
+<code>control_chat</code> let a <em>second</em>, external client watch and steer the embedded one.</p>
+<p>Two rules the panel does not bend:</p>
+<ul>
+<li><strong>Rows are attachments, never ambient context.</strong> The agent sees result data only when a human
+stages it — a cell, a row selection, or a whole view — and each attachment is a descriptor
+resolved under a size budget at send time, not a blob pasted into the prompt.</li>
+<li><strong>Permissions are answered by the human.</strong> A tool call the agent is not pre-authorized for
+renders as a prompt in the panel and blocks until someone answers it.</li>
+</ul>
+<hr />
+<h2>Packages and trust</h2>
+<p>Every database peek can open is a directory under <code>~/.peek/packages/&lt;id&gt;/</code>: a <code>peek-package.json</code>
+manifest, a <code>driver.mjs</code> the connection process imports, a <code>contrib.mjs</code> holding the MCP tools and
+view kinds a package contributes, and an optional <code>ui/</code> for a view it draws itself. The six
+databases under <a href="#what-works-today" target="_blank" rel="noopener noreferrer">What works today</a> are exactly that — copied out of the app
+bundle into that directory the first time peek starts, loaded through the same code path as anything
+else there, and removable from the settings panel like anything else there.</p>
+<p><strong>peek checks the shape of a package, never its contents.</strong> The loader refuses a manifest with a
+malformed id, missing English copy, a view kind that does not say how it fetches, or a tool without
+a description or an object schema — and it names what is wrong rather than skipping the package
+quietly. That is the whole of it. There is no signature check, no hash check, no permissions
+manifest, no sandbox around the driver, and no confirmation dialog at install time.</p>
+<p>So the boundary is a trust boundary, not a technical one: <strong>what you install is what you trust</strong>, the
+same deal a VS Code extension or an MCP server offers. Concretely, at the moment a connection opens:</p>
+<ul>
+<li><strong><code>driver.mjs</code></strong> runs in a driver-host child process — one per connection — with full Node and your
+own privileges. It is handed the connection config <strong>as you typed it, password included</strong>, because
+connecting is its job. Its environment is an allowlist (<code>PATH</code>, <code>HOME</code>, <code>TMPDIR</code>, <code>LANG</code>, <code>TZ</code> and
+a Windows block), not your shell's: <code>AWS_*</code>, <code>GITHUB_TOKEN</code>, <code>npm_config_*</code> and a proxy URL with
+credentials in it are not passed on.</li>
+<li><strong><code>contrib.mjs</code></strong> runs in a package host <code>utilityProcess</code>, one per package, started on first use
+and not before. It is not given <code>safeStorage</code> — that is a main-process API, which is why the last
+bullet below is the one holding this up — and no credential-shaped variable is in its environment.
+A package cannot ask peek to decrypt the passwords of connections it does not serve.</li>
+<li><strong><code>ui/</code></strong> runs in an iframe on <code>peek-package://&lt;id&gt;</code>, which is its own origin with its own storage,
+under a CSP whose <code>connect-src</code> is <code>'none'</code>. It cannot reach the network and cannot compose a
+statement: the only thing it may put on its one <code>MessagePort</code> is a bounded state patch.</li>
+<li><strong>The main process runs no package code at all.</strong> That is why the second bullet is true.</li>
+</ul>
+<p>None of that is a sandbox, and describing it as one would be the lie worth avoiding here. A driver
+host is an ordinary Node process: it can read your files, open sockets and start programs. The split
+bounds what a <em>mistake</em> reaches; it does not stop a package that means harm.</p>
+<p>Two consequences are worth stating outright, because both used to be handled for you:</p>
+<ul>
+<li><strong>Masking a password in the UI is now the package's job.</strong> Which config fields are secret is a
+<code>redact</code> block in the manifest, and peek applies it everywhere a config is shown — <code>list_connections</code>
+and <code>read_workspace</code>, the sidebar, the command log. A package that declares <strong>no</strong> <code>redact</code> block
+loads anyway and raises a warning in the error panel; until it declares one, its config travels to
+MCP clients and to the window verbatim, password field and all. (An explicit <code>{}</code> is a different
+statement — SQLite saying it holds no secret — and is not warned about.) This used to be an
+exhaustive <code>switch</code> in <code>packages/core</code> that could not compile with a database missing from it; a
+closed set of databases is precisely what packages ended.</li>
+<li><strong>There is no kill switch.</strong> peek has no registry, no update channel and no revocation list, so
+nobody — including this project — can withdraw a package that turns out to be hostile from the
+machines it is already on. Vendors of comparable tools lean on centralized distribution for that
+backstop. peek's answer is local and manual: uninstall it. That closes the connections, kills the
+package's host process and deletes the directory; what the package wrote elsewhere while it ran is
+outside anything that button can speak for.</li>
+</ul>
+<h3>The chat panel makes the same deal, behind two switches</h3>
+<p>Out of the box the embedded agent has no file tools, no shell, and sees peek's own MCP server and
+nothing else — <code>settings.json</code>, <code>CLAUDE.md</code> and any MCP servers configured on this machine are not
+inherited, and <code>scripts/verify-chat-security.mjs</code> runs a probe against the real agent to check it.
+Settings → Agent has two switches that trade parts of that away. Both are off by default, both say
+what they cost next to themselves, and neither shows a confirmation dialog — for the same reason
+installing a package does not.</p>
+<ul>
+<li><strong>File and command tools.</strong> Turns the agent's own <code>Read</code>, <code>Write</code>, <code>Edit</code> and <code>Bash</code> back on, and
+lets you point it at a working directory of your choosing. This gives up more than a tool list:
+peek's guarantee that the panel cannot approve its own permission prompts rested on the agent
+having no way to read a file, because the bearer token that carries full control of the window sits
+in <code>~/.peek/mcp.json</code> in the clear. An agent that can read that file can present that token, and a
+permission prompt becomes a notification rather than a barrier. There is no partial version of this
+— one <code>Read</code> is the whole chain — so peek offers the switch rather than a per-tool illusion, and
+the settings panel says exactly this when it is on. Note also that <strong><code>Bash</code> reaches your databases
+directly</strong>, outside the read-only transaction peek's own drivers open — that guarantee only covers
+statements that travel through peek.</li>
+<li><strong>Your own MCP servers.</strong> Adds servers you list to the panel alongside peek's own. Their tool calls
+still go through peek's permission prompt; what happens after you approve one is between the agent
+and that server, and peek can neither see it nor account for it. In particular a database MCP
+server of your own is not bound by the read-only path either — that is something peek's own drivers
+do, and it never reaches anybody else's code. Credentials you enter here are encrypted by the
+OS keychain like every other secret peek stores, and are redacted from error messages and logs.</li>
+</ul>
+<p>Conversations started before you flip either switch are unaffected — a conversation is fixed to the
+capabilities it was created with.</p>
+<hr />
+<h2>Performance</h2>
+<p>Two benchmark scripts produce every number below. They launch the <strong>built</strong> app on a throwaway port,
+user-data directory and config directory, so an installed peek neither blocks them nor is disturbed
+by them:</p>
+<pre><code class="language-bash">pnpm --filter @peek/desktop build
+
+node apps/desktop/scripts/bench-startup.mjs   # cold/warm launch, plus bundle sizes
+node apps/desktop/scripts/bench-scroll.mjs    # run_query + frame timing + DOM node count
+</code></pre>
+<p><code>bench-startup.mjs</code> injects a timing probe into the main process with <code>NODE_OPTIONS=--import</code>, so
+the app's own source carries no instrumentation. <code>bench-scroll.mjs</code> generates its own SQLite fixture
+(no database server required), drives the app over its own MCP endpoint the way an AI client would,
+then attaches over CDP to scroll the grid and sample it. Both take <code>--json</code>.</p>
+<p>Measured on an Apple M2 Max (64GB, macOS 26.1, Retina at <code>devicePixelRatio</code> 2, 120Hz), Electron
+43.2, against the generated 1,000,000-row SQLite fixture:</p>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Launch → <code>ready-to-show</code>, warm</td>
+<td>median <strong>518ms</strong> (min 481, p95 566) — budget is 1.5s</td>
+</tr>
+<tr>
+<td>Launch → <code>ready-to-show</code>, cold (first run of a session)</td>
+<td><strong>802ms</strong></td>
+</tr>
+<tr>
+<td>Scrolling a 1,000,000-row result set, 600 frames</td>
+<td><strong>0</strong> dropped frames</td>
+</tr>
+<tr>
+<td>Per-frame main-thread work while scrolling (handler + style + layout)</td>
+<td>median <strong>0.20ms</strong>, p95 <strong>0.30ms</strong>, max <strong>0.80ms</strong></td>
+</tr>
+<tr>
+<td>DOM elements under <code>.grid-surface</code></td>
+<td><strong>279–369</strong> at 1,000,000 rows, <strong>306–396</strong> at 200,000</td>
+</tr>
+<tr>
+<td><code>run_query</code> over 1,000,000 rows, end to end</td>
+<td><strong>2124ms</strong></td>
+</tr>
+<tr>
+<td>Built bundles under <code>out/</code></td>
+<td><strong>6.3MB</strong> total — 1.6MB app, 3.7MB database packages, 1.0MB render probe</td>
+</tr>
+</tbody></table>
+<p>Three of those need reading carefully:</p>
+<ul>
+<li><strong>Frame <em>interval</em> is not a speed.</strong> rAF-to-rAF wall time is vsync-bound, so its median is the
+refresh period by construction. What the benchmark reports instead is <code>droppedFrames</code> — intervals
+past 1.5 refresh periods — and <code>scrollWork</code>, the part the application actually controls.</li>
+<li><strong>The DOM node count is the virtual-scrolling claim, stated as a measurement.</strong> It is bounded by
+the viewport and not by the result set: five times the rows produced no increase at all — in fact
+slightly fewer elements, because the two runs happened to render 41 and 44 rows respectively. The
+range within one run is the overscan window growing and shrinking at the ends of the scroll.</li>
+<li><strong>"End to end" assumes a reader who keeps scrolling.</strong> Backpressure holds the stream as soon as
+the delivered rows run far enough ahead of the viewport, so a benchmark that never scrolls
+measures the pause timeout rather than the query — the first draft of this script reported
+"60,483ms, 207,000 rows" for exactly that reason. The number above is with the viewport being
+driven to the end, which is what clears the row-count gate.</li>
+</ul>
+<h3>Why the virtual scrolling is hand-written</h3>
+<p>Chromium clamps the layout height of a single element to roughly <code>2^25</code> device pixels divided by
+<code>devicePixelRatio</code> — 33,554,248px at dpr 1, but <strong>16,777,214px at dpr 2</strong> on any Retina display. At a
+24px row that ceiling lands at about <strong>699,000 rows</strong>. A spacer element sized <code>rowCount × rowHeight</code>
+is <em>silently</em> clamped there: rows past it are not slow, they are unreachable. The cap is not even a
+constant, so hardcoding a safe value only moves the failure to the next external monitor or zoom
+level.</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/million-rows-dark.png"></source>
+  <img alt="A one-million-row result scrolled past row 800,000. The status line reads 1,000,000 rows, Done, about 41 s, 84 chunks evicted." src="https://raw.githubusercontent.com/Gyangu/peek-viewer/HEAD/docs/images/million-rows-light.png" />
+</picture><p>peek's answer is that <strong>no DOM dimension is derived from the row count</strong>. The vertical offset is a
+plain JavaScript number in virtual pixels; rows are positioned against a block origin that only moves
+every 4096 rows, which keeps every pixel value that reaches the compositor under 100k (safely inside
+float32 precision) and lets React's memoization bail out on ~99.98% of rows. The horizontal axis
+stays native scrolling. The vertical scrollbar is drawn by hand, because with
+<code>overflow-y: hidden</code> there is no native one to have.</p>
+<hr />
+<h2>What works today</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>State</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Databases</td>
+<td>PostgreSQL, Redis, Qdrant, MySQL, SQLite and Neo4j, across five packages. The packages are <strong>loaded from disk</strong> — <code>~/.peek/packages/&lt;id&gt;/</code> — rather than compiled into the app; the ones peek ships with are copied there on first start and can be uninstalled like any other. The connect dialog renders a different form per driver, because they do not describe a connection the same way — a numeric database index for Redis, a base URL and API key for Qdrant, a path on disk for SQLite. Adding a database peek has never heard of is installing a directory, not editing this repository. See <a href="#packages-and-trust" target="_blank" rel="noopener noreferrer">Packages and trust</a> for what that costs.</td>
+</tr>
+<tr>
+<td>Data access</td>
+<td>Read-only, and enforced by the server wherever a server can enforce it: PostgreSQL and MySQL run inside a read-only transaction, SQLite is opened with the read-only flag plus <code>PRAGMA query_only</code>. Redis and Qdrant have no such switch, so their drivers simply issue no write command. No client-side keyword allowlist anywhere. The one gap is a stored procedure that opens its own read-write transaction — see <a href="#known-limitations" target="_blank" rel="noopener noreferrer">Known limitations</a>.</td>
+</tr>
+<tr>
+<td>Views</td>
+<td>All six kinds are implemented: <code>table</code>, <code>query</code>, <code>inspector</code>, <code>tree</code>, <code>vector</code>, <code>chat</code>. Which ones a connection offers follows its capabilities — Redis and Qdrant have no <code>tabularQuery</code>, so no SQL editor is drawn for them; the typed key inspector appears only on Redis, and vector search only on Qdrant. <code>chat</code> is the odd one out: it is the only kind that may exist without a connection.</td>
+</tr>
+<tr>
+<td>Chat / ACP</td>
+<td>Claude Code runs as a child process behind the <a href="https://agentclientprotocol.com" target="_blank" rel="noopener noreferrer">Agent Client Protocol</a>, rendered as a chat view like any other tab — streamed assistant text, tool-call cards, plan cards, and a permission prompt the human answers. The agent is launched lazily on first use, and is handed peek's own MCP endpoint, so it drives the window it lives in. Result rows reach it only as an explicit <strong>attachment</strong> the human stages (a cell, a row selection, a view), never as ambient context.</td>
+</tr>
+<tr>
+<td>Layout</td>
+<td>The tiled tree is real state, driven by Commands: <code>⌘\</code> splits left/right, <code>⌘⇧\</code> splits top/bottom, <code>⌘W</code> closes the active tab, <code>⌘⇧W</code> closes the panel, and dragging a divider dispatches <code>layout.setRatio</code>.</td>
+</tr>
+<tr>
+<td>Tabs</td>
+<td>A panel holds up to 12 views as tabs and shows one. The strip is always visible, even for a single tab, so the body height never changes; past the width of the strip it scrolls sideways. Dragging a tab onto a panel body's centre stacks it there as a new tab, onto an edge splits, and onto a tab strip inserts it at the caret — which is also how tabs are reordered. Nothing is swapped by any gesture; <code>swap</code> survives only as an explicit <code>onOccupied</code> mode for callers that name it.</td>
+</tr>
+<tr>
+<td>Keyboard / a11y</td>
+<td>Panels are <code>role="group"</code> and tab strips are real ARIA <code>tablist</code>s. An empty panel emits neither <code>tablist</code> nor <code>tabpanel</code>: a tab list with no tabs, and a tab panel no tab controls, would announce a widget that is not there. Roving tabindex is per widget — one panel element (the focused one) and one tab per strip. Panel chrome is otherwise unconditionally tabbable, because the bodies beside it (CodeMirror, the grid's toolbar and pagination) cannot be taken out of the tab order, and pretending the surrounding chrome was out of it only made <code>Tab</code> walk into a body before the strip above it. DOM focus and <code>focusedPanel</code> sync both ways, with a guard that stops a remote MCP call from pulling the caret out of a dialog or the sidebar; closing a panel's last tab hands focus back to the panel rather than dropping it to the document. Changes that move focus announce themselves through role semantics; ones that do not are announced by a single polite live region. Splitter handles are not keyboard-resizable.</td>
+</tr>
+<tr>
+<td>Cancel / timeouts</td>
+<td>Every query, scan and vector search runs under a deadline (120s / 120s / 60s by default; <code>0</code> means none). A deadline that expires and an explicit <code>cancel_query</code> take the same escalation path — ask the driver, then kill its process — so a wedged connection cannot outlive either. All three result views draw the same cancel control; a driver without the <code>cancel</code> capability shows it disabled with the reason, rather than silently omitting it.</td>
+</tr>
+<tr>
+<td>Errors</td>
+<td>A status-bar badge counts what went wrong and opens a panel holding the last 100 entries, each copyable with its code and detail. Errors that used to exist only as a toast that had already faded are now recoverable after the fact.</td>
+</tr>
+<tr>
+<td>MCP</td>
+<td>16 tools over Streamable HTTP on loopback, bearer-token authenticated. Port 7332 by default, settable and persisted; if it is taken, the next 8 are tried and the window says where it landed.</td>
+</tr>
+<tr>
+<td>Persistence</td>
+<td>Four files and three subtrees under <code>~/.peek</code>: <code>mcp.json</code> (endpoint + token), <code>connections.json</code> (the connection book), <code>settings.json</code> (the MCP port and the execution budgets), <code>workspace.json</code> (the layout and the definition of every open view), <code>chat/</code>, <code>logs/</code> — diagnostics and the command audit — and <code>packages/</code>, the installed database packages, one directory each. Credentials never land in plaintext <strong>on disk</strong> — they are encrypted by the OS keychain through Electron's <code>safeStorage</code> and stored apart from the config that names the server; what a loaded package is handed at connect time is a different question, answered under <a href="#packages-and-trust" target="_blank" rel="noopener noreferrer">Packages and trust</a>. The workspace stores what a view <strong>is</strong> (which table, which filters, the text in a query editor) and never what happened to it in a session: no cursors, no result sets, no transcripts. <code>PEEK_NO_RESTORE=1</code> starts empty and leaves the file alone.</td>
+</tr>
+<tr>
+<td>Packaging</td>
+<td><code>pnpm build</code> emits minified bundles under <code>apps/desktop/out</code> (~6.3MB total), not an installer. <code>apps/desktop/scripts/package-mac.mjs</code> produces a macOS <code>.app</code>.</td>
+</tr>
+<tr>
+<td>i18n</td>
+<td>English is the default and is never auto-detected from the OS; a <code>zh-CN</code> catalog ships alongside it, switchable from the status bar.</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Known limitations</h2>
+<ul>
+<li><strong>A large query pauses if you do not scroll.</strong> With backpressure active, a 1,000,000-row query
+stops at roughly 200,000 rows and reports <code>paused</code> — measured at 207,000 by <code>bench-scroll.mjs</code>
+before it learned to drive the viewport. This is the design working: loaded rows are valid,
+scrolling forward resumes the stream, and re-running the query restarts it. It is not an error
+state, but it does surprise people who expect a progress bar to reach the end on its own.</li>
+<li><strong>LRU-evicted chunks cannot be re-fetched in place.</strong> Scroll far away in a result set larger than
+the ~200MB cache and back again, and the rows that were dropped are gone. The view now says so —
+the evicted range raises a notice with a button that re-runs the query — but it cannot quietly
+refill the hole, and that is a protocol limit rather than a missing feature: the rows came off a
+cursor that has since been closed, and <code>cursorToken</code> addresses the next page of a scan, not a
+position inside a finished result. A free-form query has no cursor at all. "Re-fetch rows <em>n</em>..<em>m</em>"
+is not a request any driver can currently be asked.</li>
+<li><strong>Only the execution budgets are settable.</strong> Settings → Timeouts exposes the three deadlines
+anybody holds an opinion about — query, scan and vector search — and writes them to
+<code>settings.json</code> like the MCP port. The nine protocol timeouts behind them (spawn→ready, the
+connect RPC, the cancel RPC) have no form on purpose: they are the app protecting itself from a
+wedged driver process, not a preference anyone holds, and a tunable <code>cancelMs</code> can only make
+peek worse at noticing a dead one. MCP callers can still pass <code>timeoutMs</code> per call.</li>
+<li><strong>Read-only is enforced per statement, not per account.</strong> On MySQL every checkout begins
+<code>ROLLBACK; SET SESSION TRANSACTION READ ONLY</code>, which closes every escape a client can type —
+<code>START TRANSACTION READ WRITE</code>, <code>BEGIN</code>, flipping the session variable back, <code>autocommit=0</code>, and
+XA were each tried against a real server, and only the first ever worked. What it cannot close is
+a stored procedure that <em>already exists in the database</em> and opens its own read-write transaction
+internally: <code>CALL</code> is a read-shaped statement, and the write happens on the server's side of the
+boundary. Closing that needs a MySQL account without write privileges, which is the right way to
+run peek against anything you care about.</li>
+<li><strong>A qdrant table view cannot be sorted from a column header.</strong> The driver orders a scroll by
+indexed payload keys, and it reports which ones. That per-collection answer reaches MCP callers,
+who can still order a view with <code>view.update</code>, but it does not reach the renderer: <code>ViewSummary</code>
+carries only the kind-level style, and a table view of a vector collection draws the fixed default
+projection (<code>id</code>, <code>payload</code>), neither of which is ever an index key. So the headers are inert
+rather than offering a sort that would be <code>BAD_REQUEST</code> on every collection. Making them live
+needs a <code>sortableColumns</code> allowlist carried from <code>describeCollection</code> through the view state, and
+a grid that can make headers inert one at a time.</li>
+<li><strong>Row height is fixed at 24px.</strong> Variable-height rows are not supported, and neither is wrapping a
+tall cell in place; large values open in a modal instead.</li>
+<li><strong>Accessibility stops at the panel body.</strong> The layout has real semantics — panels are labelled
+groups, tab strips are ARIA <code>tablist</code>s with roving tabindex, DOM focus tracks the focused panel,
+and layout changes are announced. Inside a panel none of that is true yet: the hand-drawn
+scrollbar has no native semantics, keyboard navigation within the grid is minimal, and dividers
+cannot be resized from the keyboard. The semantics are asserted by unit tests but have <strong>not</strong>
+been verified against a real screen reader.</li>
+<li><strong><code>VectorViewState.queryText</code> is inert.</strong> Drivers are forbidden from embedding, and nothing else in
+peek turns text into a vector, so the field can be set but never consumed. Vector search is driven
+by "more like this point" (<code>queryPointId</code>), which is the only entry point a human can operate.</li>
+<li><strong>A restored desk comes back empty until its connections are up.</strong> The layout, the tabs and the
+text in a query editor are saved and restored; the rows are not. Restoring opens the connections
+without waiting for them, so every view starts idle and fills in when its connection reports
+ready — and a query view never re-runs itself, because restoring a desk must not execute the
+statement somebody left in an editor. Result sets are memory-only by design and always will be.</li>
+<li><strong><code>cursorToken</code> values do not survive a version change.</strong> The token now names the driver that
+minted it (<code>postgres:0:400</code>), so a stale one — from an older build, or from another connection — is
+refused rather than replayed against the wrong store. That is the intended trade, and it is why
+<code>workspace.json</code> stores <code>ViewOpenSpec</code>s rather than view state: a spec has no field a cursor could
+live in, so a restored view starts its scan from the top instead of replaying a dead token.</li>
+<li><strong>Stored credentials are only as private as your user account.</strong> Passwords are encrypted by the OS
+keychain and never written in the clear, which protects a <code>connections.json</code> that leaks <em>somewhere
+else</em> — a backup, a sync folder, another account on the same machine, a file pasted into an issue.
+It does not protect against code already running as you, and a hardened runtime would not change
+that: <code>--options runtime</code> was measured against this build and AMFI does not honour it without a
+trusted signing identity, so <code>DYLD_INSERT_LIBRARIES</code> still loads into peek, and the keychain ACL —
+which checks the main binary's cdhash, left untouched by an injected dylib — waves the injected
+code through as peek. Nothing detects an edited <code>out/main/index.js</code> either (<code>asar: false</code>, so
+neither integrity fuse applies). Closing this needs Developer ID signing, which arrives with the
+first published binary; the measurement is in <code>docs/design/2026-08-15-hardened-runtime.md</code>.</li>
+</ul>
+<hr />
+<h2>Roadmap</h2>
+<blockquote>
+<p><strong>Status: early.</strong> M0 (skeleton), M1 (PostgreSQL read-only pipeline), M2 (tiled layout: view
+drag-and-drop plus the <code>set_layout</code> / <code>move_view</code> tools), M3 (Redis), M4 (Qdrant), M5
+(MySQL / SQLite), M6 (cancel and timeouts, error panel, connection persistence, a settable
+MCP port, and the capability-model gaps closed), M7 (chat session management) and M8 (database
+packages loaded from disk, plus an Electron hardening pass) are complete, and the layout has
+since grown panel tabs and keyboard accessibility. All six databases connect, introspect and
+stream rows, each from a package loaded off disk rather than compiled in
+(<a href="#packages-and-trust" target="_blank" rel="noopener noreferrer">Packages and trust</a>);
+all data access is read-only. peek has also grown a <strong>chat panel</strong>: Claude Code runs embedded
+over ACP as a sixth kind of view, connected back to peek's own MCP server, so the agent you are
+talking to drives the window it is sitting in. Everything below that is not marked complete is
+a plan, not a feature.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Milestone</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>M6</strong></td>
+<td><strong>Complete.</strong> Cancel and timeouts end to end, an error panel, connection persistence with keychain-backed credentials, a settable MCP port with token rotation, the capability-model gaps closed (per-collection browse style, a canonical JS representation per <code>LogicalType</code>, a cursor format that names its driver), and the build and measurement work: minified bundles, two benchmark scripts, a runnable chat-security verification, and dropping the general-purpose table engine from the grid.</td>
+</tr>
+<tr>
+<td><strong>M7</strong></td>
+<td><strong>Complete.</strong> Chat session management: a persistent entry point in the status bar, a session list, history restoration and deletion. No new persistence layer for the embedded agent — <code>claude-agent-acp</code> already advertises <code>loadSession</code>, so the transcript stays in the agent's own cwd (<code>~/.peek/chat</code>) and peek stores not a byte of it; a user-configured LLM endpoint has no agent side to hold it, so that one tier peek does store itself (designs 2026-08-02, 2026-08-03).</td>
+</tr>
+<tr>
+<td><strong>M8</strong></td>
+<td><strong>Complete.</strong> Database packages installed from disk, and the Electron hardening pass in the same round. <code>DriverId</code> went from a closed union to an open string, taking the number of places that adding a database touches from 15 to 7 to <strong>zero</strong>; the price is that those last checks became load-time validation instead of a compile error. Package code was moved out of the main process into a package host, because with no signature check what a package can touch once installed is the only thing left to tighten. Neo4j arrived here as the acceptance test — the first package to contribute a view kind of its own (<code>graph</code>).</td>
+</tr>
+</tbody></table>
+<p>Of the work M6 left behind: the timeout settings have a form and a home in <code>settings.json</code>, and
+<strong>layout and open views now persist</strong> (<code>workspace.json</code>, design 2026-08-15). What remains is a
+self-provisioning PostgreSQL fixture, described under <a href="#quick-start" target="_blank" rel="noopener noreferrer">Quick start</a>.</p>
+<p>M3 (Redis), M4 (Qdrant) and M5 (MySQL / SQLite) were the test of the capability model, and it held:
+<code>packages/core</code> did not change to accommodate a key-value store or a vector database. What the
+exercise surfaced is that several of core's implicit assumptions were relational — a global sort
+order, an exact <code>limit</code>, a filterable field being a result column, one JS type per logical type.
+M6 turned each of those into something a driver states rather than something core assumes; what
+remains genuinely unsolved is listed under <a href="#known-limitations" target="_blank" rel="noopener noreferrer">Known limitations</a>.</p>
+<p>Deferred on purpose and tracked in the plan: write operations (the read-only path stabilizes first,
+then a confirmation mechanism), spilling huge result sets to disk, and an Arrow binary channel (the
+chunk format is already columnar to leave room for it).</p>
+<hr />
+<h2>Repository layout</h2>
+<pre><code>peek/
+├─ packages/
+│  ├─ core/               # Command schemas, workspace types, capability + chunk protocol,
+│  │                      # errors, and the driver-host runtime every driver shares
+│  ├─ db-postgres/    # introspect · tabularQuery · collectionScan · valuePeek · cancel
+│  ├─ db-redis/       # introspect · collectionScan · keyValue · valuePeek · cancel
+│  ├─ db-qdrant/      # introspect · collectionScan · vectorSearch · valuePeek
+│  ├─ db-sql/         # MySQL + SQLite behind one dialect layer; same set as postgres
+│  └─ db-neo4j/       # same set as postgres over Cypher, plus the `graph` view kind
+├─ apps/desktop/          # electron-vite: main / preload / renderer
+│  ├─ scripts/           # smoke-drivers.mjs, verify-chat-security.mjs, the two bench-*.mjs,
+│  │                      # macOS packaging
+│  └─ src/
+│     ├─ main/            # Command Bus, workspace store, connection manager, MCP server,
+│     │                   # driver host, and the ACP client that hosts Claude Code
+│     ├─ preload/         # one narrow bridge: invoke / onPatch / onResultPort
+│     └─ renderer/        # React UI, mirror store, result cache, virtual scrolling, chat, i18n
+└─ docs/PLAN.md           # design record (English; PLAN.zh-CN.md is the Chinese original)
+</code></pre>
+<p><code>docs/PLAN.md</code> is the authoritative design document — architecture decisions, the performance budget
+this README reports against, and the milestone definitions. It was originally written in Chinese;
+that original is preserved verbatim as <code>docs/PLAN.zh-CN.md</code>, and the two are kept in sync. The
+per-change design records under <code>docs/design/</code> are Chinese for everything dated before
+2026-08-24 and English from that date on — see <code>CLAUDE.md</code>.</p>
+<hr />
+<h2>License</h2>
+<p>MIT. See <a href="https://github.com/Gyangu/peek-viewer/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><code>LICENSE</code></a>.</p>

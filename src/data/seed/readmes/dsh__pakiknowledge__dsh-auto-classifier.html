@@ -1,0 +1,182 @@
+<h1>dsh-auto-classifier — autonomous ("auto") mode for DeepSeek Harness</h1>
+<p>English | <a href="https://github.com/PAKIKNOWLEDGE/dsh-auto-classifier/blob/HEAD/README.zh.md" target="_blank" rel="noopener noreferrer">中文</a></p>
+<p>A Claude-Code-auto-mode-like permission classifier for DeepSeek Harness. Adds a fourth permission preset <strong>auto (Autonomous)</strong> beside <code>read-only / workspace-write / danger-full-access</code>: tool calls are classified automatically — dangerous operations are blocked before they run, safe ones flow, and sandbox escalations are decided by the classifier without a human watching the approval prompts.</p>
+<h2>How it works</h2>
+<p>Host-plane plugin. Two <code>{ prepend: true }</code> listeners decide BEFORE the browser answerer, active only in sessions whose permission preset is <code>auto</code>; every other session keeps the stock interactive behavior (handlers call <code>next()</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Hook</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>tools/pre-execute</code> (the tool pre-execution waterfall)</td>
+<td>Every tool call sees its name + full arguments: dangerous commands (system-directory deletion, formatting, registry writes, <code>git reset --hard</code> / force push, credential access, …) are denied BEFORE anything executes</td>
+</tr>
+<tr>
+<td><code>approval/request</code> (the approval waterfall)</td>
+<td>Sandbox escalations (<code>sandbox_permissions</code>) are auto-allowed / auto-rejected by the classifier — no browser prompt in auto sessions</td>
+</tr>
+<tr>
+<td>git snapshot</td>
+<td>Before an allowed high-risk escalation the workspace is checkpointed (<code>git add -A &amp;&amp; git commit</code>, throttled); <code>auto_snapshot</code> tool snapshots manually anytime</td>
+</tr>
+<tr>
+<td>systemPrompt section</td>
+<td>Injects autonomous-mode discipline: risk tiers, git rescue, no infinite retry loops, email-and-stop when a human decision is needed</td>
+</tr>
+<tr>
+<td>web control page (v0.1.5, bilingual since v0.1.7, model config since v0.1.10, <strong>explicit credentials since v0.1.14</strong>)</td>
+<td><strong>Settings → Plugins → Auto Classifier · 自动分类器</strong>: live config toggles (LLM judge, write-content scan, strict default, judge stages, default decision) as phone-style switches, judge-model config (<strong>provider / base URL / API key / model</strong> fields — the credentials you type are saved and the judge calls that provider <strong>directly over HTTPS</strong> (OpenAI-compatible or Anthropic), with a <strong>Test · 测试</strong> button that pings the exact credentials typed and a <strong>Save · 保存</strong> that persists them; a mode badge shows Direct · 直连 vs Service · 服务), session stats, and the recently-denied list — labels are bilingual (EN · 中文). The browser half ships via <code>exports["./client"]</code> + <code>dsh.client</code>; static bundle clients have no <code>host.call</code>, so the page fetches same-origin routes the host half registers on <code>webServer</code> (deferred with <code>ctx.inject(['webServer'])</code> since v0.1.6 — the service mounts after webStartup): <code>GET /dsh-auto-classifier/status</code>, <code>GET /dsh-auto-classifier/denials</code>, <code>POST /dsh-auto-classifier/set</code> (whitelisted live-config keys only), <code>GET/POST /dsh-auto-classifier/model</code> (dedicated judge-model endpoint; provider/baseURL/apiKey/model persisted, the API key is <strong>never returned</strong> — only a mask), <code>POST /dsh-auto-classifier/model/test</code> (live ping with the credentials typed in the form, 20s cap). Toggles apply immediately to the running classifier and persist across restarts (config.json)</td>
+</tr>
+</tbody></table>
+<h2>Rule engine (Claude Code style, tool-scoped)</h2>
+<ul>
+<li><strong>Rule syntax</strong>: <code>Tool(pattern)</code> — <code>pwsh(^git\s+commit\b)</code>, <code>write,edit(C:\Windows)</code>; comma-separated tool names allowed; a bare regex without parens applies to every tool. Patterns are case-insensitive regexes.</li>
+<li><strong>Field projection (no false positives)</strong>: command tools (pwsh/bash/run_code) scan only <code>command/code</code> (cleaned first: env-var prefixes <code>FOO=bar</code> and <code>&gt; / &gt;&gt;</code> redirections stripped); path tools (write/edit/read) scan only <code>file_path</code>; other tools are not scanned — text in file content or code that merely mentions a dangerous word is not a false positive. Approval requests scan the <code>reason</code> sentence.</li>
+<li><strong>Order</strong>: deny rules (highest priority) → in-workspace structural allow (write/edit/read only) → allow rules → LLM judge (optional) → pwsh strict default → <code>defaultDecision</code>.</li>
+<li><strong>In-workspace file operations are never judged</strong> (Claude Code Tier-1, since v0.1.3): <code>write</code>/<code>edit</code>/<code>read</code> whose resolved target lies inside the session workspace (<code>agent.session.header.cwd</code>) are allowed deterministically — edits inside the project are reviewable via version control, and the file sandbox already confines the write. Deny rules still run first, so protected targets (<code>.dsh</code> configs, credentials, system dirs, <code>.git/config|hooks</code> metadata) stay blocked.</li>
+<li><strong>Default deny table</strong> (inspired by Claude Code soft_deny): destructive file ops, disk/boot/system servicing, shutdown/reboot, account/service tampering, registry writes, git push / force-push / reset --hard, external code execution (<code>curl|bash</code>, <code>iwr|iex</code>), privilege escalation (sudo/runas/gsudo), network listeners, system-level package installs, credential files, protected-path writes, DSH/shell config tampering.</li>
+<li><strong>Default allow table</strong>: routine git (no push), package managers, language runtimes, gh/dsh/winget/scoop/choco, PowerShell cmdlets.</li>
+<li><strong>LLM judge</strong> (<code>llmJudge: true</code>): when no rule matches, the model decides semantically. It mirrors Claude Code's production classifier (a readable, un-escaped copy of that prompt lives at <code>reference/claude-automode-classifier-reference.md</code>):<ul>
+<li><strong>Two-stage</strong> (<code>judgeStages: "both"</code>, default): a fast single-token filter (cheap, errs toward blocking — Claude: FPR 8.5%) is followed by a chain-of-thought re-review <strong>only when the filter flags</strong> the call (FPR → 0.4%). <code>"fast"</code> / <code>"thinking"</code> run a single stage.</li>
+<li><strong>Reasoning-blind input</strong>: the judge sees the session's recent user messages (authorization evidence) + recent tool calls (name + projected target only, results and payload content stripped) + workspace facts (workspace root, resolved path, in-workspace, git repo). Assistant text and tool outputs are <strong>stripped</strong>.</li>
+<li><strong>HARD / SOFT tiers</strong> (since v0.1.4): HARD (external code exec, irreversible destruction, persistence, security weakening, privilege escalation, network listeners, secret exfiltration) never clears; SOFT (writes outside workspace, package mgmt outside project, git push, shared-state deletion, large-scale changes) clears only on <strong>named+specifics</strong> user intent — the user's own message names the action AND the dangerous parameter; questions are not consent; a post-block reaffirmation is strengthened consent; explicit boundaries persist until lifted. Out-of-scope items (poor code, wrong answers, looping, wasted tokens, transient retries) are never blocked.</li>
+<li><strong>suspectedBypass</strong> (since v0.1.4): a target denied earlier in the session that is re-attempted through a different tool, or whose path is embedded in a command, is flagged for the judge (<code>bypassWindow</code> recent denials participate). It is a judge signal, not an automatic denial — the judge weighs it against the user-intent evidence.</li>
+<li><strong>scanWriteContent</strong> (since v0.1.4, default <code>false</code>): when on, write/edit payloads that carry a deny-pattern hit are judged NOW, at write time (Claude's WRITTEN FILE EXECUTION), instead of the in-workspace structural allow.</li>
+<li>Failure degrades to <code>defaultDecision</code>. Applied on the pre-execute path only — escalations use rules + default, since the underlying command was already screened.</li>
+</ul>
+</li>
+<li><strong>Denial message</strong> (<code>denyMessage</code>): classifier denials return a fixed Kafka-style ruling — "Before the classifier stands a doorkeeper. Today the doorkeeper says: not yet…" — stating that this is a classifier judgement (not a sandbox denial, so <code>sandbox_permissions</code> is the wrong channel), to seek another entrance, and that a different tool is re-classified anew. Customize or empty it as you like.</li>
+<li><strong>Denial log</strong>: every classifier denial is appended to <code>~/.dsh/auto-classifier/denials.jsonl</code> (rotated past 1 MB) — a "Recently denied" review trail that survives restarts; <code>auto_status</code> prints the path.</li>
+<li><strong>Denial caps</strong>: 3 consecutive / 20 total (same as Claude Code <code>denialTracking</code>) — past a cap the classifier hard-stops and hints the agent to notify the user. DSH has no built-in mail: the hint points to the <a href="https://github.com/PAKIKNOWLEDGE/dsh-notify-skill" target="_blank" rel="noopener noreferrer">dsh-notify-skill</a> email plugin (also on the awesome-dsh-plugin list) or any notification channel you configure.</li>
+<li>Every decision is logged via <code>ctx.logger</code>; <code>auto_status</code> shows the last 20 and the cap counters.</li>
+</ul>
+<h2>Install (web profile)</h2>
+<pre><code class="language-sh"># 1. Pack and add to the profile's dependencies + bundles (physical tarball — do NOT use link:)
+#    cd dsh-auto-classifier &amp;&amp; npm pack --cache &lt;workspace-path&gt;   # workspace-write sandbox blocks npm's default cache dir
+#    package.json dependencies:  "dsh-auto-classifier": "file:C:/.../dsh-auto-classifier-0.1.0.tgz"
+#    package.json dsh.profile.bundles: append "dsh-auto-classifier"
+cd ~/.dsh/profiles/web
+pnpm add "dsh-auto-classifier@file:C:/.../dsh-auto-classifier-0.1.0.tgz" --force
+
+# 2. Validate the composed config (no server start)
+dsh --profile web --dump-config   # auto-classifier row + 4 presets
+
+# 3. Restart dsh web, then switch the session preset to auto (or /permission auto)
+</code></pre>
+<blockquote>
+<p>The plugin's <code>cordis.patch.yml</code> injects its rows as a bundle patch — never manually insert the same row ids in the profile/home layers (duplicate loader entry kills web startup). After source changes: <code>npm pack</code> → <code>pnpm add ... --force</code> (refreshes lockfile integrity).</p>
+</blockquote>
+<h2>Updating</h2>
+<p>The plugin's <code>cordis.patch.yml</code> ships inside the package, so the injected rows update with it — no manual profile-layer edits. Prefer the official <code>dsh plugin</code> form (it forwards to pnpm <strong>and</strong> reconciles <code>dsh.profile.bundles</code> against the installed state, so a package that gains its <code>dsh.bundle</code> declaration in a newer version is activated automatically, and re-adding an already-listed bundle never duplicates the entry):</p>
+<pre><code class="language-sh">dsh plugin --profile web update dsh-auto-classifier              # respects the ^0.1.x range
+# or pin explicitly (add --registry=https://registry.npmjs.org/ while npmmirror lags):
+dsh plugin --profile web add "dsh-auto-classifier@0.1.3" --registry=https://registry.npmjs.org/
+
+dsh --profile web --dump-config                                 # verify: exit 0 + auto-classifier row
+</code></pre>
+<p>Then restart dsh web. <code>auto_status</code> reports the live config — 0.1.3+ shows <code>stages: both</code> in the <code>llmJudge</code> line. A plain <code>pnpm update</code> inside the profile dir also bumps the version but skips the bundle reconciliation (fine for an in-place bump). If the previous install used a local <code>file:...tgz</code>, remove it first (<code>dsh plugin --profile web remove dsh-auto-classifier</code>) before adding from the registry, to avoid a duplicate injection.</p>
+<h2>Configuration (<code>auto-classifier</code> row in cordis.patch.yml)</h2>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>presetName</code></td>
+<td><code>auto</code></td>
+<td>The permission preset under which the classifier is authoritative</td>
+</tr>
+<tr>
+<td><code>defaultDecision</code></td>
+<td><code>allow</code></td>
+<td>Decision when no rule matches and no judge (<code>deny</code> = fail closed)</td>
+</tr>
+<tr>
+<td><code>llmJudge</code></td>
+<td><code>false</code></td>
+<td>Enable the model semantic judge (one call per unmatched operation)</td>
+</tr>
+<tr>
+<td><code>judgeProvider</code> / <code>judgeBaseURL</code> / <code>judgeApiKey</code> / <code>judgeModel</code></td>
+<td>empty</td>
+<td><strong>Explicit judge credentials</strong> (since v0.1.14), set in the web control page. When a non-empty API key + model + base URL are present, the judge calls that provider <strong>directly over HTTPS</strong> (OpenAI-compatible <code>/chat/completions</code>, or Anthropic <code>/messages</code> when the provider/base URL is Anthropic) with zero dependency on the harness llm registry or its config-file credentials. Empty <code>judgeApiKey</code> falls back to <code>llmProvider</code>/<code>llmModel</code> below.</td>
+</tr>
+<tr>
+<td><code>llmProvider</code> / <code>llmModel</code></td>
+<td><code>deepseek-official</code> / <code>deepseek-v4-flash</code></td>
+<td>Judge model via the harness llm service (fallback when no direct credentials are set)</td>
+</tr>
+<tr>
+<td><code>judgeStages</code></td>
+<td><code>both</code></td>
+<td><code>both</code> = fast filter + thinking re-review on flag; <code>fast</code> / <code>thinking</code> = single stage</td>
+</tr>
+<tr>
+<td><code>denyMessage</code></td>
+<td>Kafka doorkeeper copy</td>
+<td>Fixed text appended to classifier denials (explains the sandbox_permissions channel does not apply); empty to disable</td>
+</tr>
+<tr>
+<td><code>hardDenyMessage</code></td>
+<td>hard-boundary note</td>
+<td>Extra sentence appended when a deny RULE (HARD) blocked the call — suggests running the step outside auto mode</td>
+</tr>
+<tr>
+<td><code>judgeMaxUserMessages</code> / <code>judgeUserMessageChars</code></td>
+<td><code>3</code> / <code>400</code></td>
+<td>How many recent user messages (truncated) the judge sees as intent evidence</td>
+</tr>
+<tr>
+<td><code>judgeToolHistory</code></td>
+<td><code>6</code></td>
+<td>How many recent tool calls (name + target, stripped) the judge sees for session context</td>
+</tr>
+<tr>
+<td><code>judgeFastMaxTokens</code> / <code>judgeThinkingTimeoutMs</code></td>
+<td><code>8</code> / <code>30000</code></td>
+<td>Stage-1 output cap and stage-2 abort timeout</td>
+</tr>
+<tr>
+<td><code>scanWriteContent</code> / <code>writeContentScanChars</code></td>
+<td><code>false</code> / <code>2000</code></td>
+<td>When on, judge write/edit payloads that carry a deny-pattern hit (content truncated to this many chars)</td>
+</tr>
+<tr>
+<td><code>bypassWindow</code></td>
+<td><code>5</code></td>
+<td>How many recent denials participate in suspectedBypass matching</td>
+</tr>
+<tr>
+<td><code>pwshStrict</code></td>
+<td><code>true</code></td>
+<td>Unmatched command-tool calls go to the judge / strict default (more conservative than path tools, mirroring Claude Code's default for PowerShell)</td>
+</tr>
+<tr>
+<td><code>denyPatterns</code> / <code>allowPatterns</code></td>
+<td>built-in</td>
+<td><code>Tool(pattern)</code> regex arrays, override or extend</td>
+</tr>
+<tr>
+<td><code>denialLimitConsecutive</code> / <code>denialLimitTotal</code></td>
+<td><code>3</code> / <code>20</code></td>
+<td>Denial caps, hard-stop hint past them</td>
+</tr>
+<tr>
+<td><code>gitSnapshotOnAllow</code></td>
+<td><code>true</code></td>
+<td>Snapshot the git worktree before allowing an escalation</td>
+</tr>
+<tr>
+<td><code>gitSnapshotIntervalMs</code></td>
+<td><code>30000</code></td>
+<td>Per-session snapshot interval floor</td>
+</tr>
+</tbody></table>
+<h2>License</h2>
+<p>MIT</p>

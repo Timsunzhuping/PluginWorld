@@ -1,0 +1,254 @@
+<h1>@lanbaolu/dsh-wechat-bridge</h1>
+<p><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" />
+<img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg" alt="Node" />
+<img src="https://github.com/lanbaolu/dsh-wechat-bridge/actions/workflows/ci.yml/badge.svg" alt="CI" />
+<img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></p>
+<p>基于 <a href="https://github.com/Wechat-ggGitHub/wechat-claude-code" target="_blank" rel="noopener noreferrer">Wechat-ggGitHub/wechat-claude-code</a> 开发的 <strong>DeepSeek Harness (DSH) 微信桥接插件</strong>。</p>
+<blockquote>
+<p>⚠️ 免责声明：本项目仅用于个人学习与自动化。使用非官方微信协议存在账号风险，请自行评估并承担后果。</p>
+</blockquote>
+<p><strong>三端通用</strong>：Windows / macOS / Linux 均使用纯 Node.js 进程管理，不依赖 launchd / systemd / Windows Service；同时提供 DSH 模型工具（CLI/Headless 可用）和 Web 管理面板（Web/桌面可用）。</p>
+<h2>功能</h2>
+<ul>
+<li>微信扫码绑定个人微信后，在微信里直接与 <strong>DSH 本机 Agent</strong> 对话。</li>
+<li>复用 wechat-claude-code 的 iLink Bot 微信协议层：文字、图片、语音转文字、文件收发。</li>
+<li>守护进程由 DSH 插件管理：启动 / 停止 / 重启 / 状态 / 日志，全部走模型工具或 Web 面板。</li>
+<li>每个微信账号对应一个 DSH 会话，DSH Host 重启后会自动 <code>resume</code> 原持久化会话，对话上下文不断档；<code>/clear</code>、<code>/new</code>、<code>/stop</code>、<code>/cwd</code>、<code>/model</code>、<code>/prompt</code> 等斜杠命令可用。</li>
+<li>流式回复：DSH Agent 的 <code>assistant/chunk</code> 通过本地 SSE 推送到微信（批量发送，不刷屏）。</li>
+<li>超时安抚：DSH 超过 5 分钟无输出时自动发一条“还在处理”的消息。</li>
+<li>主动通知：agent 可通过 <code>wechat_notify</code> 工具在任务完成 / 失败 / 需要确认时主动推送微信，内置节流（每小时 ≤6 条、每日 ≤50 条，超限排队延迟发送），规避个人号风控。</li>
+<li><strong>微信内审批</strong>：agent 请求权限时推送审批消息到微信，回复 <code>/yes</code> 批准、<code>/no</code> 拒绝；超时自动拒绝（fail-closed），仅绑定账号本人可裁决，不影响桌面 GUI 会话。</li>
+<li>防卡死：微信会话自动注入通道约束提示词，禁用浏览器端交互式选项工具（手机看不到会永久阻塞），改用纯文本编号选项。</li>
+<li>文件双向：微信发图片/文件给 DSH；DSH 回复中提到的本地文件会自动推回微信。</li>
+<li>消息队列：处理中收到的普通消息会排队，等当前任务结束后继续处理（多用户下按用户独立排队，A 的长任务不阻塞 B）。</li>
+<li><strong>多用户支持</strong>：信任集 + per-user 会话。可让多个微信用户与同一 bot 对话，每人独立会话/上下文/队列/审批归属，互不可见；信任集可控、可吊销（详见下方「安全模型」）。</li>
+</ul>
+<h3>媒体能力矩阵（2026-08-21 代码核实 + 真机抽验）</h3>
+<table>
+<thead>
+<tr>
+<th>方向</th>
+<th>文本</th>
+<th>图片</th>
+<th>语音</th>
+<th>文件</th>
+<th>视频</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>微信 → DSH</td>
+<td>✅</td>
+<td>✅ CDN 下载+解密落盘</td>
+<td>✅ iLink 端转写为文本</td>
+<td>✅ 下载落盘交 agent</td>
+<td>⚠️ 仅占位提示，不下载</td>
+</tr>
+<tr>
+<td>DSH → 微信</td>
+<td>✅ 攒批聚合发送</td>
+<td>✅ 按扩展名路由直发</td>
+<td>—</td>
+<td>✅ 回复提及自动推送</td>
+<td>⏳ 未支持</td>
+</tr>
+</tbody></table>
+<p>方向对照与后续可行性方案见 <a href="https://github.com/lanbaolu/dsh-wechat-bridge/blob/HEAD/docs/feasibility-plan.md" target="_blank" rel="noopener noreferrer"><code>docs/feasibility-plan.md</code></a>。</p>
+<h2>架构</h2>
+<pre><code>微信 App ←→ iLink Bot API ←→ bridge daemon (Node.js)
+                                  │  HTTP + SSE (127.0.0.1, token 鉴权)
+                                  ▼
+                          DSH Host Plugin
+                                  │  ctx.agents.create/resume + followup
+                                  ▼
+                          DSH Agent (本机 LLM + 工具)
+</code></pre>
+<ul>
+<li><code>src/bridge/</code>：从 wechat-claude-code 移植的微信协议层 + 适配 DSH 的守护进程。</li>
+<li><code>src/index.ts</code>：DSH Host 插件，负责内部 API、Agent 生命周期、守护进程管理和模型工具。</li>
+<li><code>src/client/index.ts</code>：Web 管理面板（<code>settings.section</code> 槽位）。</li>
+</ul>
+<h2>安装</h2>
+<h3>方式一：npm 一键安装（推荐）</h3>
+<pre><code class="language-bash">npm install @lanbaolu/dsh-wechat-bridge
+dsh plugin --profile web add @lanbaolu/dsh-wechat-bridge
+dsh web
+</code></pre>
+<h3>方式二：本地路径安装（开发/个人使用）</h3>
+<p>在 DSH profile 中安装本地包：</p>
+<pre><code class="language-bash">git clone https://github.com/lanbaolu/dsh-wechat-bridge.git
+dsh plugin --profile web add /path/to/dsh-wechat-bridge
+dsh web
+</code></pre>
+<p>或者使用超级注入器（开发模式）：</p>
+<pre><code class="language-bash">dev_inject_plugin /path/to/dsh-wechat-bridge
+</code></pre>
+<h3>方式三：从源码运行</h3>
+<pre><code class="language-bash">npm install
+npm run build        # host → lib/
+npm run build:client # client → lib/client.js
+npm run typecheck
+</code></pre>
+<blockquote>
+<p>注意：<code>build:client</code> 使用 <code>tsdown</code>，需要 Node.js 22.18+ 或 24.11+（CI 使用 22/24 验证）。运行时要求仍为 Node 18+。</p>
+</blockquote>
+<h2>使用</h2>
+<h3>1. 扫码绑定</h3>
+<p>推荐在 DSH Web 设置页的「📱 微信桥接」面板中完成：</p>
+<ol>
+<li>打开 <strong>Settings / 设置</strong> → <strong>📱 微信桥接</strong>。</li>
+<li>填写 DSH 工作目录。</li>
+<li>点击 <strong>扫码绑定</strong>，用微信扫描页面上的二维码。</li>
+<li>绑定成功后直接点击 <strong>启动</strong>。</li>
+</ol>
+<p>也可以在 DSH 所在机器终端执行：</p>
+<pre><code class="language-bash">node lib/bridge/main.js setup
+</code></pre>
+<p>按提示用微信扫码，完成后选择 DSH 工作目录。</p>
+<h3>2. 启动桥接</h3>
+<p>在 DSH 对话中让模型执行：</p>
+<ul>
+<li><code>wechat_bridge_start</code></li>
+<li><code>wechat_bridge_status</code></li>
+<li><code>wechat_bridge_logs</code></li>
+<li><code>wechat_bridge_stop</code></li>
+</ul>
+<p>或者在 Web 设置页（<code>settings.section</code> 槽位）点击“启动 / 停止 / 重启”。</p>
+<h3>3. 微信端命令</h3>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/help</code></td>
+<td>显示帮助</td>
+</tr>
+<tr>
+<td><code>/clear</code></td>
+<td>清除当前 DSH 会话</td>
+</tr>
+<tr>
+<td><code>/new</code></td>
+<td>开启全新会话（等价 <code>/clear</code>）</td>
+</tr>
+<tr>
+<td><code>/stop</code></td>
+<td>停止当前任务并清空排队消息</td>
+</tr>
+<tr>
+<td><code>/status</code></td>
+<td>查看会话状态</td>
+</tr>
+<tr>
+<td><code>/cwd [路径]</code></td>
+<td>查看 / 切换工作目录</td>
+</tr>
+<tr>
+<td><code>/model [名称]</code></td>
+<td>查看 / 切换模型</td>
+</tr>
+<tr>
+<td><code>/prompt [内容]</code></td>
+<td>查看 / 设置系统提示词</td>
+</tr>
+<tr>
+<td><code>/history [数量]</code></td>
+<td>查看最近对话</td>
+</tr>
+<tr>
+<td><code>/send &lt;路径&gt;</code></td>
+<td>发送本地文件到微信</td>
+</tr>
+<tr>
+<td><code>/trust &lt;userId&gt; [备注]</code></td>
+<td>添加信任用户（manual 模式；仅 owner）</td>
+</tr>
+<tr>
+<td><code>/distrust &lt;userId&gt;</code></td>
+<td>吊销信任用户（仅 owner）</td>
+</tr>
+<tr>
+<td><code>/trustlist</code></td>
+<td>查看信任集（仅 owner）</td>
+</tr>
+<tr>
+<td><code>/trustmode [模式]</code></td>
+<td>查看/切换信任模式（owner-only / bootstrap / manual）</td>
+</tr>
+</tbody></table>
+<h2>安全模型（多用户信任集）</h2>
+<blockquote>
+<p>iLink 微信协议的扫码绑定是 <strong>bot 自身</strong> 登录（不是用户配对）。因此"多用户"的边界在协议层之上划定：把可信微信用户的 <code>from_user_id</code> 加进<strong>信任集</strong>，放行/拒绝入站。</p>
+</blockquote>
+<h3>信任模式（fail-closed 默认）</h3>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>行为</th>
+<th>适用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>owner-only</code>（默认）</td>
+<td>只认绑定账号 owner 本人，陌生人一律拒绝</td>
+<td>单用户，行为与旧版完全一致</td>
+</tr>
+<tr>
+<td><code>bootstrap</code></td>
+<td>首个联系的陌生人自动入信任集（一次性），之后不再自动</td>
+<td>快速开号试用</td>
+</tr>
+<tr>
+<td><code>manual</code></td>
+<td>仅 owner 用 <code>/trust</code> 或 Web 面板显式添加的人可对话</td>
+<td>正式多人使用</td>
+</tr>
+</tbody></table>
+<ul>
+<li>信任集持久化在 <code>trust.json</code>（0600），<code>mode</code> 是唯一真相源；<code>config.json</code> 只存 <code>notifyRejected</code>。</li>
+<li><strong>拒绝原则</strong>：陌生人消息只记日志、不回复（不泄露任何内部信息）；可选 <code>notifyRejected: true</code> 让 owner 收到「陌生人尝试联系」提醒（Web 面板或 <code>/trustmode</code> 后由面板开关）。</li>
+<li><strong>吊销即失效</strong>：<code>/distrust</code> 或面板「吊销」后，该用户新消息立刻被拒绝；其历史会话文件保留只读（不丢历史）。</li>
+</ul>
+<h3>per-user 隔离</h3>
+<ul>
+<li>每个受信用户（含 owner）一套独立：DSH 会话（<code>${botAccountId}::${userId}</code> 为 key）、会话文件、消息队列、上下文 token、<code>/history</code> <code>/status</code> <code>/cwd</code> <code>/model</code>。</li>
+<li>A 的任务进行中，B 发消息不会被阻塞（独立队列）；A 的 <code>/yes</code> <code>/no</code> 只裁决 A 自己 agent 的待审批（审批 key 归属 session key），B 无权替 A 裁决。</li>
+<li>项目绑定两级粒度：Web 面板选择项目会话 → 对该 bot 下<strong>所有</strong>用户生效；微信内 <code>/session</code> 绑定 → 仅对当前用户生效。</li>
+</ul>
+<h3>升级迁移</h3>
+<ul>
+<li>旧单用户数据自动迁移：<code>sessions/&lt;accountId&gt;.json</code> → <code>sessions/&lt;accountId&gt;__&lt;ownerUserId&gt;.json</code>，<code>session-ids.json</code> 旧 key → <code>${accountId}::${ownerUserId}</code>，迁移留痕日志，绝不丢历史；无法确定 owner 的旧数据保留原样只读。</li>
+</ul>
+<blockquote>
+<p>⚠️ <strong>验证状态（如实标注）</strong>：信任集判定与迁移逻辑有纯函数单测覆盖（39 项）；
+owner-only 模式已真机回归（行为与旧版一致）。<strong>多用户路径（bootstrap 入集、双用户隔离并发）
+真机验证待补</strong>——需要第二个微信账号走查，在此之前请仅在受控环境开启 <code>bootstrap</code>/<code>manual</code> 模式。</p>
+</blockquote>
+<h2>数据目录</h2>
+<p>默认 <code>~/.dsh/wechat-bridge/</code>（可用 <code>DSH_HOME</code> 调整）：</p>
+<pre><code>~/.dsh/wechat-bridge/
+├── accounts/       # 微信账号凭证（0600）
+├── sessions/       # 每个微信账号的本地会话状态
+├── session-ids.json # 微信账号 → DSH 持久化会话 ID 映射（用于重启后 resume）
+├── trust.json       # 多用户信任集（模式 + 信任用户，0600）
+├── context-tokens.json # per-user context_token（主动推送/审批通行证）
+├── pending-queue/  # 发送失败暂存队列
+├── daemon-port.json # 守护进程 notify 端点端口（token 鉴权）
+├── notify-stats.json # 主动通知每日配额计数
+├── config.json     # 工作目录 / 模型 / 系统提示词
+└── logs/           # 运行日志
+</code></pre>
+<h2>安全说明</h2>
+<ul>
+<li>守护进程与 DSH 插件之间的内部 API 只监听 <code>127.0.0.1</code>，并使用随机 token 鉴权。</li>
+<li>微信账号凭证仅保存在本机 <code>~/.dsh/wechat-bridge/accounts/</code>，权限为 0600。</li>
+<li>日志中的 token / secret / password 会自动脱敏。</li>
+<li>请勿把真实账号凭证、token 或日志提交到 Issue / PR。</li>
+</ul>
+<h2>贡献</h2>
+<p>欢迎提交 Issue 和 PR。请先阅读 <a href="https://github.com/lanbaolu/dsh-wechat-bridge/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer"><code>CONTRIBUTING.md</code></a>，并查看 <a href="https://github.com/lanbaolu/dsh-wechat-bridge/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer"><code>SECURITY.md</code></a> 了解安全报告方式。</p>
+<h2>License</h2>
+<p><a href="https://github.com/lanbaolu/dsh-wechat-bridge/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>

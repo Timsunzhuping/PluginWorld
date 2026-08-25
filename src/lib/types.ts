@@ -45,6 +45,17 @@ export interface TrustFlags {
   hasLicense?: boolean;
   hasTests?: boolean;
   specValid?: boolean;
+  /** Additional community sources this plugin was found in */
+  npmListed?: boolean;
+  glamaListed?: boolean;
+}
+
+export type SecurityGrade = "A+" | "A" | "B" | "C" | "D";
+
+export interface SecurityFinding {
+  id: string;
+  severity: "critical" | "warning" | "info";
+  message: string;
 }
 
 export interface Plugin {
@@ -70,6 +81,9 @@ export interface Plugin {
   qualityScore: number;
   scoreBreakdown: ScoreBreakdown;
   trustFlags: TrustFlags;
+  /** Security rating (assigned by the pre-index security scan; D is never listed) */
+  securityGrade: SecurityGrade;
+  securityFindings: SecurityFinding[];
   /** npm package name (dsh / some mcp), used to generate install commands */
   npmPackage: string | null;
   createdAt: string;

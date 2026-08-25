@@ -1,0 +1,208 @@
+<h1>codex-lcm</h1>
+<p>Local, lossless context management for OpenAI Codex CLI.</p>
+<p>codex-lcm captures Codex conversation events in SQLite, compacts older context into a hierarchy of summaries without deleting the source messages, restores relevant context when a session starts, and exposes lexical recall through a local MCP server.</p>
+<blockquote>
+<p><strong>Meaning of “lossless”:</strong> source content is retained after configured secret redaction. Searchable tool previews are bounded, while complete redacted tool input and output remain available through paged expansion.</p>
+</blockquote>
+<h2>Status and platform</h2>
+<p>codex-lcm is beta software for macOS. It relies on Codex hooks and POSIX <code>flock</code>; Windows and Linux are not currently supported or claimed.</p>
+<h2>Features</h2>
+<ul>
+<li><strong>Live capture:</strong> user prompts, assistant responses, and tool activity are captured through Codex hooks.</li>
+<li><strong>Durable local storage:</strong> SQLite in WAL mode stores raw messages, structured message parts, summaries, and FTS5 indexes.</li>
+<li><strong>Hierarchical compaction:</strong> older messages become leaf summaries; eligible summary runs can be condensed into deeper DAG nodes. Source rows are never deleted automatically.</li>
+<li><strong>Context restore:</strong> active summaries and the newest unsummarized messages are injected at session start within a strict size bound.</li>
+<li><strong>Local recall:</strong> six stdio MCP tools provide lexical search, recent-session lookup, metadata inspection, and paged source expansion.</li>
+<li><strong>Fail-open hooks:</strong> capture or compaction failures do not block a Codex turn.</li>
+<li><strong>Safety controls:</strong> secret redaction, per-session compaction locks, atomic message/FTS writes, provider-call reservations, progress checks, and private default file permissions.</li>
+</ul>
+<h2>Install from a repository checkout</h2>
+<pre><code class="language-bash">python3 -m venv ~/.codex-lcm/venv
+~/.codex-lcm/venv/bin/python -m pip install .
+~/.codex-lcm/venv/bin/codex-lcm install
+~/.codex-lcm/venv/bin/codex-lcm doctor
+</code></pre>
+<p>Restart Codex after installation. Use <code>/hooks</code> in Codex to inspect and trust the installed hooks.</p>
+<p>The installer merges codex-lcm entries into <code>~/.codex/hooks.json</code> and <code>~/.codex/config.toml</code>. It creates timestamped backups before changing existing files. Running the installer again is idempotent.</p>
+<p>A source checkout also includes <code>scripts/install.sh</code>, which performs the same isolated installation and verification.</p>
+<h3>Optional LLM summarization</h3>
+<p>On Python 3.11+, the core package has no third-party runtime dependencies. Python 3.10 installs the <code>tomli</code> compatibility backport for safe TOML configuration handling. Without an LLM client, compaction uses deterministic head/tail truncation.</p>
+<p>To enable OpenAI-compatible summarization, install the optional extra and configure credentials:</p>
+<pre><code class="language-bash">~/.codex-lcm/venv/bin/python -m pip install ".[llm]"
+export CODEX_LCM_API_KEY="..."
+</code></pre>
+<p><code>OPENAI_API_KEY</code> is also recognized. Use <code>CODEX_LCM_BASE_URL</code> or <code>OPENAI_BASE_URL</code> for an OpenAI-compatible endpoint. The <code>CODEX_LCM_*</code> provider settings are treated as a pair and take precedence as a pair, so a global key is never sent to a scoped endpoint. When <code>CODEX_LCM_BASE_URL</code> is set, configure <code>CODEX_LCM_API_KEY</code> too.</p>
+<h2>CLI</h2>
+<pre><code class="language-text">codex-lcm install                       Wire hooks and the MCP server into Codex
+codex-lcm uninstall                     Remove codex-lcm wiring and keep stored data
+codex-lcm status                        Show database statistics
+codex-lcm doctor                        Verify package, database, hooks, and MCP wiring
+codex-lcm compact --session &lt;id&gt;        Compact one session synchronously
+codex-lcm compact --all                 Compact every recorded session synchronously
+</code></pre>
+<p>Uninstalling does not delete <code>~/.codex-lcm/</code> or its database.</p>
+<h2>MCP tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>lcm_status</code></td>
+<td>Database and active-session statistics</td>
+</tr>
+<tr>
+<td><code>lcm_grep</code></td>
+<td>Literal and FTS5 lexical search over messages and summaries</td>
+</tr>
+<tr>
+<td><code>lcm_recall</code></td>
+<td>Ranked lexical recall with bounded result counts</td>
+</tr>
+<tr>
+<td><code>lcm_expand</code></td>
+<td>Summary-source inspection or paged raw-message recovery</td>
+</tr>
+<tr>
+<td><code>lcm_recent</code></td>
+<td>Sessions updated inside a UTC look-back window</td>
+</tr>
+<tr>
+<td><code>lcm_describe</code></td>
+<td>Session or summary metadata</td>
+</tr>
+</tbody></table>
+<p>Recall is lexical, not semantic: there are no embeddings or vector-similarity claims in this release.</p>
+<h2>Configuration</h2>
+<p>Configuration is read from environment variables.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th align="right">Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CODEX_LCM_DB_PATH</code></td>
+<td align="right"><code>~/.codex-lcm/codex-lcm.db</code></td>
+<td>SQLite database path</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_FRESH_TAIL</code></td>
+<td align="right"><code>25</code></td>
+<td>Newest raw messages protected from compaction</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_LEAF_CHUNK_TOKENS</code></td>
+<td align="right"><code>20000</code></td>
+<td>Maximum estimated tokens in a leaf chunk</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_LEAF_MIN_FANOUT</code></td>
+<td align="right"><code>3</code></td>
+<td>Active leaf summaries required for condensation</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_CONDENSED_MIN_FANOUT</code></td>
+<td align="right"><code>3</code></td>
+<td>Active deeper summaries required for condensation</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_MAX_ROUNDS</code></td>
+<td align="right"><code>5</code></td>
+<td>Compaction rounds per worker run</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_MAX_SUMMARY_CALLS</code></td>
+<td align="right"><code>12</code></td>
+<td>Provider attempts allowed per session and call window</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_SUMMARY_CALL_WINDOW_MS</code></td>
+<td align="right"><code>600000</code></td>
+<td>Provider-attempt accounting window</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_SUMMARY_TIMEOUT_MS</code></td>
+<td align="right"><code>60000</code></td>
+<td>Provider request timeout</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_PROGRESS_THRESHOLD</code></td>
+<td align="right"><code>0.10</code></td>
+<td>Marks a compaction run stalled below this savings ratio</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_ADDITIONAL_CONTEXT_LIMIT</code></td>
+<td align="right"><code>5000</code></td>
+<td>Restore-context budget in estimated tokens</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_COMPACTION_BACKLOG</code></td>
+<td align="right"><code>5</code></td>
+<td>Extra unsummarized messages allowed before <code>Stop</code> starts a worker</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_COMPACTION_MODEL</code></td>
+<td align="right"><code>gpt-4.1-mini</code></td>
+<td>Leaf summarization model</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_CONDENSATION_MODEL</code></td>
+<td align="right"><code>gpt-4.1</code></td>
+<td>Condensation model</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_API_KEY</code> / <code>OPENAI_API_KEY</code></td>
+<td align="right">—</td>
+<td>Optional provider credential</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_BASE_URL</code> / <code>OPENAI_BASE_URL</code></td>
+<td align="right">—</td>
+<td>Optional OpenAI-compatible endpoint</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_CAPTURE_TOOLS</code></td>
+<td align="right"><code>1</code></td>
+<td>Set to <code>0</code> to disable tool capture</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_TOOL_INPUT_MAX_CHARS</code></td>
+<td align="right"><code>2000</code></td>
+<td>Searchable tool-input preview length</td>
+</tr>
+<tr>
+<td><code>CODEX_LCM_TOOL_RESULT_MAX_CHARS</code></td>
+<td align="right"><code>2000</code></td>
+<td>Searchable tool-output preview length</td>
+</tr>
+</tbody></table>
+<p>The default data directory is mode <code>0700</code>; the database, WAL sidecars, lock files, and compaction log are mode <code>0600</code> on POSIX systems.</p>
+<h2>Data and security boundaries</h2>
+<ul>
+<li>Redaction occurs before persistence for known API keys, tokens, authorization headers, password/secret assignments, JWTs, and PEM private keys.</li>
+<li>Credential-bearing Git remote URLs are stored without user information, query parameters, or fragments.</li>
+<li>Redaction is defence in depth, not a guarantee that every possible secret format will be recognized.</li>
+<li>Complete redacted tool payloads can still contain private conversation or project data. Protect the local account and database backups accordingly.</li>
+<li>No data is sent to an LLM provider unless the optional client is installed and provider credentials or a base URL are configured.</li>
+<li>Automatic retention and deletion are intentionally absent. The application does not silently discard source history.</li>
+</ul>
+<h2>Development</h2>
+<p>Use a project-local environment; tests never need the live Codex profile or database.</p>
+<pre><code class="language-bash">python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pytest -q
+.venv/bin/python tests/smoke_test.py
+.venv/bin/python tests/reliability_test.py
+.venv/bin/python tests/package_test.py
+.venv/bin/ruff check .
+.venv/bin/bandit -q -r codex_lcm
+</code></pre>
+<p>The package test builds and installs into a throwaway home directory and virtual environment. The smoke and reliability scripts also use temporary databases.</p>
+<p>See <a href="https://github.com/Mallet-Dev/codex-lcm/blob/HEAD/DESIGN.md" target="_blank" rel="noopener noreferrer">DESIGN.md</a> for the storage model, invariants, hook flow, and failure behaviour.</p>
+<h2>License</h2>
+<p>MIT</p>

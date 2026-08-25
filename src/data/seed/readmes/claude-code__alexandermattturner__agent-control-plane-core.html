@@ -1,0 +1,191 @@
+<h1>agent-control-plane-core</h1>
+<p><strong>One shape for "a coding agent is about to run a tool" and "here's what my
+guardrail decided" — so you write your tool once and it works across every
+agent.</strong></p>
+<h2>The problem this solves</h2>
+<p>Coding agents — Claude Code, Codex, Gemini CLI, opencode, Amp, and friends — all
+let you hook into their tool-call loop: before a shell command runs, after a file
+is written, when a prompt is submitted. That's where you'd plug in a security
+guardrail, an audit log, a secret redactor, a policy engine.</p>
+<p>But <strong>every agent speaks its own protocol.</strong> One sends you <code>tool_name</code> +
+<code>tool_input</code> on stdin and wants <code>{"permissionDecision":"deny"}</code> back plus exit
+code 2. Another names the fields differently, blocks by throwing inside a plugin,
+or can only <em>observe</em> and not veto. The field names differ, the "block this"
+signal differs, and each one drifts on its own release cadence.</p>
+<p>So if you build a tool that touches more than one agent, you end up writing and
+maintaining <strong>N copies of the same logic</strong> — one per agent — and re-testing all
+of them every time an agent ships a new field. That's the tax this package
+removes.</p>
+<h2>What it gives you</h2>
+<ul>
+<li><strong><code>ToolCallEvent</code></strong> — one normalized, agent-agnostic view of "an agent event"
+(a tool about to run, a tool that just ran, a prompt, a session start).</li>
+<li><strong><code>Verdict</code></strong> — one normalized way to say what your guardrail decided:
+<code>allow</code> / <code>deny</code> / <code>ask</code>, optionally with a rewritten input or extra context.</li>
+<li><strong>Adapters</strong> — a thin <code>{ parse, render }</code> translator per agent, plus the
+declaration of what that agent's transport cannot carry. <code>parse</code> turns that
+agent's raw hook payload into a <code>ToolCallEvent</code>; <code>render</code> turns your <code>Verdict</code>
+back into the <strong>real</strong> native signal that agent enforces (the right JSON body,
+exit code, or thrown error — not just a print).</li>
+</ul>
+<p>You write your logic <strong>once</strong> against the normalized types. Adding support for a
+new agent is a new adapter (~one file + fixtures), not a rewrite of your tool.
+The agent-specific field names live <strong>only</strong> inside that agent's adapter.</p>
+<h2>Who wants this</h2>
+<p>Anyone building a tool that sits in the tool-call loop of <strong>more than one</strong>
+coding agent, and doesn't want to fork it per agent:</p>
+<ul>
+<li><strong>Security guardrails</strong> — deny-listers, command/path sanitizers, permission gates.</li>
+<li><strong>Observability &amp; audit</strong> — log or replay every tool call in a uniform shape.</li>
+<li><strong>Redaction / DLP</strong> — strip secrets from tool inputs or outputs before they move.</li>
+<li><strong>Policy engines</strong> — one rule set enforced identically no matter which agent runs.</li>
+</ul>
+<p>If you only ever target a single agent, you don't need this — just use that
+agent's native hooks. The value is entirely in the <em>N-agents</em> case.</p>
+<blockquote>
+<p><strong>Not a security boundary.</strong> A <code>Verdict</code> is advisory: a useful first filter,
+never the last line of defense. Some agents can't enforce a <code>deny</code> at all (the
+adapter marks those <code>observe_only</code>), so a real deployment still needs a sandbox
+underneath. Treat the control plane as a policy layer on top of isolation, not
+a replacement for it.</p>
+</blockquote>
+<h2>Install</h2>
+<pre><code class="language-bash">pnpm add agent-control-plane-core
+</code></pre>
+<h2>The model</h2>
+<pre><code class="language-js">// ToolCallEvent — a normalized, agent-agnostic view of one agent event.
+{
+  schema_version: 1,
+  event: "pre_tool" | "post_tool" | "prompt_submit" | "session_start" | "unknown",
+  tool: string | null,              // "Bash" | "Edit" | "Write" | "Read" | "WebFetch" | &lt;passthrough&gt; | null
+  input: object,                    // tool input; a submitted prompt folds into input.prompt
+  response?: unknown,               // post_tool only
+  this_call_vetoable: boolean,      // false ⇒ a deny here is advisory only; the guardrail cannot block THIS call
+  meta: {
+    agent: string,                  // "claude" | "codex" | …
+    native_event: string,           // original native event name, preserved verbatim
+    session_id?, cwd?, permission_mode?, transcript_path?,
+    passthrough: object,            // every unmodelled native top-level field, verbatim
+  }
+}
+
+// Verdict — a normalized guardrail decision.
+{
+  decision: "allow" | "deny" | "ask",
+  mutated_input?: object,           // replacement tool input
+  additional_context?: string,      // extra context to splice into the agent's stream
+  reason?: string,                  // shown on deny/ask
+}
+</code></pre>
+<p>An <strong>Adapter</strong> is <code>{ AGENT, COVERAGE, UNRENDERED_FIELDS, parse, render }</code>:</p>
+<pre><code class="language-js">parse(nativeEvent) -&gt; ToolCallEvent      // never throws on unknown input
+render(verdict, event) -&gt; nativeResponse // the agent's native shape
+
+// Which Verdict content fields this host has NO native channel for, per event
+// kind. Every EventKind needs a row: an omission would read as "every field
+// reaches a channel here", which is the reverse of the truth on a transport
+// that carries none.
+UNRENDERED_FIELDS = Object.freeze({
+  [EventKind.PRE_TOOL]: readonlySet(["mutated_output"]),
+  [EventKind.POST_TOOL]: readonlySet(["mutated_output"]),
+  [EventKind.PROMPT_SUBMIT]: UNRENDERED_ON_UNKNOWN,
+  [EventKind.SESSION_START]: UNRENDERED_ON_UNKNOWN,
+  [EventKind.UNKNOWN]: UNRENDERED_ON_UNKNOWN,
+})
+</code></pre>
+<p><code>readonlySet([])</code> is the row for a kind that carries all three;
+<code>UNRENDERED_ON_UNKNOWN</code> is the row for one that carries none. Both come from
+<code>agent-control-plane-core/contract</code>. Build every row with <code>readonlySet</code> — a
+plain <code>Set</code> exposes <code>clear()</code>, so a consumer could empty a declaration after
+conformance certified it, and <code>Object.freeze</code> does not stop that. Freeze the map
+itself too: an immutable row still leaves a consumer free to swap a whole row
+for one claiming another channel. A render that ships a field the row
+declares dropped fails conformance, and so does a row that declares a channel
+the render does not carry.</p>
+<h2>Usage</h2>
+<pre><code class="language-js">import { claudeAdapter } from "agent-control-plane-core/claude";
+
+// 1. Normalize the agent's raw hook payload.
+const event = claudeAdapter.parse(rawHookJson);
+
+// 2. Your guardrail decides, using only the normalized types.
+const verdict =
+  event.tool === "Bash" &amp;&amp; /rm -rf/.test(String(event.input.command))
+    ? { decision: "deny", reason: "destructive command blocked" }
+    : { decision: "allow" };
+
+// 3. Render back to the agent's native response.
+process.stdout.write(JSON.stringify(claudeAdapter.render(verdict, event)));
+</code></pre>
+<p>The core contract and every adapter (<code>claude</code>, <code>codex</code>, <code>amp</code>, <code>gemini</code>) are
+also on the default entry:</p>
+<pre><code class="language-js">import {
+  EventKind,
+  Decision,
+  claudeAdapter,
+  codexAdapter,
+  ampAdapter,
+  geminiAdapter,
+  runAdapterConformance,
+} from "agent-control-plane-core";
+</code></pre>
+<h2>Drift discipline (the point of the seam)</h2>
+<p>Agent protocols drift <strong>additively and independently</strong> — N agents, N release
+cadences. So <code>parse</code> <strong>never throws</strong> on an event type or tool-input field it
+does not model: an unrecognized event becomes <code>EventKind.UNKNOWN</code> with its native
+name kept in <code>meta.native_event</code>, and every unmodelled field survives in <code>input</code>
+or <code>meta.passthrough</code>. An additive upstream change is a <strong>no-op</strong>, not an outage.</p>
+<p>The core models only the stable middle — four event kinds, three decisions, and
+the <code>Bash</code>/<code>Edit</code>/<code>Write</code>/<code>Read</code>/<code>WebFetch</code> tool inputs (<code>MODELED_TOOLS</code>). Exotic
+per-agent tools pass through untouched.</p>
+<h2>Writing a new adapter</h2>
+<p>An adapter for cursor/cline/gemini-cli/aider is a thin, independently-pinned
+translator with its own golden fixtures. It must pass the conformance suite:</p>
+<pre><code class="language-js">import { test } from "node:test";
+import assert from "node:assert/strict";
+import { runAdapterConformance } from "agent-control-plane-core/conformance";
+import { myAdapter } from "./my-adapter.mjs";
+import fixtures from "./fixtures/my-agent.json" with { type: "json" };
+
+test("my adapter conforms", () =&gt; {
+  runAdapterConformance({ adapter: myAdapter, fixtures, assert });
+});
+</code></pre>
+<p>The harness pins both directions and rejects a vacuous suite:</p>
+<ol>
+<li><code>parse(native)</code> deep-equals the fixture's golden <code>event</code>.</li>
+<li><code>render(verdict, event)</code> deep-equals the fixture's golden native response, for
+each verdict scenario.</li>
+<li>The fixture set collectively renders an <code>allow</code>, a <code>deny</code>, an <code>ask</code>, <strong>and</strong> a
+<code>mutated_input</code> — so a suite can't pass while skipping a decision the contract
+requires every adapter to express.</li>
+<li>Every <code>Verdict</code> content field either reaches this host's wire or is declared
+in <code>UNRENDERED_FIELDS</code> for that event kind, checked both ways on a
+synthesized verdict — so an adapter with no channel for a field must say so,
+and a declared drop that still ships the value fails. Set the optional
+<code>NATIVE_EVENT_FOR</code> to have a kind your fixtures skip probed on its real
+native event rather than on your unrecognized-event branch.</li>
+<li>A deny the adapter cannot enforce (<code>this_call_vetoable: false</code>) must render as
+something OTHER than that host's allow signal — an ask, or an advisory body.
+The harness probes this itself on a non-vetoable variant of every pre-tool
+fixture event, so an adapter that collapses the objection onto "run it" fails
+even with no non-vetoable fixture of its own. <code>observe_only</code> renders are
+exempt: that transport has no pre-emption channel to differ in.</li>
+</ol>
+<p>See <code>src/fixtures/claude.json</code> and <code>src/fixtures/codex.json</code> for the format.</p>
+<h2>Versioning</h2>
+<p><code>src/control-plane.mjs</code> is the frozen contract and its own single source of
+truth. <code>SCHEMA_VERSION</code> / <code>CONTROL_PLANE_SCHEMA</code> are pinned by a test. <strong>Adding</strong>
+an optional field or a modeled tool is backward-compatible and stays at v1;
+<strong>renaming/removing</strong> a field or changing a decision/event vocabulary is breaking
+and bumps the version.</p>
+<h2>Development</h2>
+<pre><code class="language-bash">./setup.sh          # install deps + git hooks
+pnpm test           # node --test
+pnpm test:coverage  # c8, 100% lines/branches/functions per file
+pnpm check          # tsc --noEmit (JSDoc types)
+pnpm lint           # eslint
+pnpm build          # emit .d.mts declarations into types/
+</code></pre>
+<h2>License</h2>
+<p>MIT</p>

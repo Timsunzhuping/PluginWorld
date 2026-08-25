@@ -1,0 +1,664 @@
+<h1>Evo2-7B Bioinformatics MCP Server</h1>
+<p>一个把 NVIDIA 托管的 <strong>Evo2-7B Forward API</strong> 封装成 MCP (Model Context Protocol) Tools 的服务器，让 Claude Code、Cursor、Codex 等 Agent 可以用自然语言驱动 Evo2：</p>
+<pre><code>Agent
+  ↓
+MCP Tool
+  ↓
+Evo2 MCP Server（本项目）
+  ↓
+NVIDIA Evo2-7B Forward API
+  ↓
+forward outputs → likelihood / variant scores
+  ↓
+Agent
+</code></pre>
+<pre><code class="language-text">POST https://health.api.nvidia.com/v1/biology/arc/evo2-7b/forward
+Authorization: Bearer $NVIDIA_API_KEY
+</code></pre>
+<hr />
+<h2>1. 项目介绍</h2>
+<p>提供 5 个 MCP Tools：</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>evo2_forward</code></td>
+<td>对 DNA sequence 执行 Evo2-7B forward inference，返回指定 layer 的输出统计（或保存原始 tensor）</td>
+</tr>
+<tr>
+<td><code>evo2_score</code></td>
+<td>计算 Evo2 模型对 DNA sequence 的 model-based likelihood（total / mean / per-position）</td>
+</tr>
+<tr>
+<td><code>evo2_variant_score</code></td>
+<td>比较单个 nucleotide variant 对 Evo2 sequence likelihood 的影响（Δ log-likelihood）</td>
+</tr>
+<tr>
+<td><code>evo2_batch_score</code></td>
+<td>批量比较多个 nucleotide variants（复用一次 WT forward，并发受限，自动去重）</td>
+</tr>
+<tr>
+<td><code>evo2_score_fasta</code></td>
+<td>对 FASTA 中每个 record 评分（本地路径受 <code>EVO2_MCP_ALLOWED_DIRS</code> 沙箱限制）</td>
+</tr>
+</tbody></table>
+<p>本项目是 <strong>Bioinformatics MCP Tool Server</strong>，不是简单的 HTTP API wrapper：</p>
+<ul>
+<li>自动校验 / 规范化 DNA sequence（大写、去空白、非法字符明确报错）</li>
+<li>基于官方语义计算 likelihood（byte-level tokenizer + causal shift，见 §17）</li>
+<li>输出分层设计（summary / raw / save），防止 MCP context 爆炸</li>
+<li>完整错误分类（400/401/403/404/408/413/422/429/5xx/timeout）+ retry/backoff</li>
+<li>API Key 只从环境变量读取，绝不写死、绝不进日志</li>
+<li>配套批量脚本：<code>scripts/score_fasta.py</code>（批量 FASTA 评分 + <strong>embedding 提取</strong>，见 §18）与 <code>scripts/analyze_run.py</code>（聚类/分类/回归下游分析，见 §19）</li>
+</ul>
+<h2>2. Evo2 API 介绍</h2>
+<p><a href="https://github.com/ArcInstitute/evo2" target="_blank" rel="noopener noreferrer">Evo2</a>（Arc Institute / NVIDIA）是 DNA 基础模型（StripedHyena2 架构），7B 版 32 层、Apache-2.0、训练上下文达 1M bp。NVIDIA 提供托管 NIM 服务：</p>
+<ul>
+<li><strong>Forward 端点</strong>：<code>POST https://health.api.nvidia.com/v1/biology/arc/evo2-7b/forward</code></li>
+<li><strong>请求体</strong>（官方 OpenAPI <code>ForwardInputs</code>）：<pre><code class="language-json">{ "sequence": "ACGTACGT...", "output_layers": ["output_layer"] }
+</code></pre>
+<code>output_layers</code> 支持 1–100 个 layer 名（如 <code>output_layer</code>、<code>decoder.layers.24.mlp.linear_fc2</code>、<code>decoder.layers.3.self_attention</code>、<code>embedding</code>、<code>decoder.final_norm</code>）。</li>
+<li><strong>响应体</strong>（官方 OpenAPI <code>ForwardOutputs</code>）：<code>{"data": "&lt;base64 编码的 NPZ&gt;", "elapsed_ms": &lt;int&gt;}</code>；超大响应可能以 <code>Content-Type: application/zip</code>（原始 NPZ 字节）返回。</li>
+<li><strong><code>output_layer</code> = 最终 logits</strong>，shape <code>[seq_len, batch_size, 512]</code>（512 是 byte-level tokenizer 的 padded vocabulary size）。</li>
+</ul>
+<blockquote>
+<p>⚠️ <strong>Deprecation 提醒（2026-08-24 核实）</strong>：build.nvidia.com 上托管的 <code>arc/evo2-7b</code> 端点已标记 <strong>Deprecated</strong>（页面提示 "This NIM Endpoint has been deprecated"）。官方 NIM 文档（<code>docs.nvidia.com/nim/bionemo/evo2/latest/</code>）描述的 API 与托管端点完全一致；如托管端点不可用，可改为自托管 NIM 容器，把 <code>EVO2_MCP_BASE_URL</code> 指向 <code>http://localhost:8000/biology/arc/evo2</code>。</p>
+</blockquote>
+<h3>已核实的官方事实（实现依据，2026-08-24）</h3>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>结论</th>
+<th>来源</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>响应格式</td>
+<td>JSON <code>{"data": base64-NPZ, "elapsed_ms"}</code>；或 <code>application/zip</code> 原始 NPZ</td>
+<td>NVIDIA NIM endpoints 文档 + 托管 OpenAPI schema（<code>ForwardOutputs</code>）</td>
+</tr>
+<tr>
+<td><code>output_layer</code> shape</td>
+<td><code>[seq_len, batch_size, 512]</code>，float，<strong>就是 logits</strong></td>
+<td>同上（"Final output/logits"）</td>
+</tr>
+<tr>
+<td>vocabulary 大小</td>
+<td>512（padded）；byte-level tokenizer，每 bp = 1 个 token</td>
+<td>NVIDIA 文档 + Arc/vortex <code>CharLevelTokenizer(512)</code></td>
+</tr>
+<tr>
+<td>A/C/G/T → logits index</td>
+<td>A=65, C=67, T=84, G=71（ASCII 字节值）</td>
+<td>NVIDIA 文档原文 + <code>np.frombuffer(text.encode(), np.uint8)</code></td>
+</tr>
+<tr>
+<td>BOS/EOS/offset</td>
+<td>默认无 BOS（Arc <code>score_sequences</code> <code>prepend_bos=False</code>）；eod_id=0, pad_id=1</td>
+<td>Arc <code>evo2/models.py</code> + <code>evo2/scoring.py</code></td>
+</tr>
+<tr>
+<td>likelihood 计算</td>
+<td><code>log_softmax(logits, -1)</code> 后 causal shift：<code>logits[:, :-1]</code> vs <code>input_ids[:, 1:]</code>；<strong>position 0 不参与计分</strong>，长度 N 的序列得 N-1 个分数</td>
+<td>Arc <code>evo2/scoring.py</code> <code>logits_to_logprobs</code></td>
+</tr>
+<tr>
+<td>特殊 token</td>
+<td>输出中只有 A/C/G/T 4 个 token 有意义（NIM 文档原文）</td>
+<td>NVIDIA 文档</td>
+</tr>
+</tbody></table>
+<h3>实测与文档的差异（2026-08-24 live 验证，任务要求记录实际接口）</h3>
+<p>用真实 key 探测托管 <code>health.api.nvidia.com</code> 端点后发现<strong>文档中的 layer 名在托管端不适用</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>请求的 layer 名</th>
+<th>托管 API 实际行为</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>output_layer</code>（文档名）</td>
+<td>❌ <code>422 {"error":"StripedHyena has no attribute 'output_layer'"}</code></td>
+</tr>
+<tr>
+<td><code>decoder.layers.N.*</code> / <code>embedding</code> / <code>final_norm</code></td>
+<td>❌ 422 <code>has no attribute</code></td>
+</tr>
+<tr>
+<td><strong><code>unembed</code></strong>（模型属性名）</td>
+<td>✅ <strong>最终 logits</strong>：NPZ key <code>unembed.output</code>，shape <code>(1, seq_len, 512)</code>，dtype <strong>float64</strong></td>
+</tr>
+<tr>
+<td><code>embedding_layer</code></td>
+<td>✅ <code>embedding_layer.output</code>，<code>(1, seq, 4096)</code></td>
+</tr>
+<tr>
+<td><code>norm</code></td>
+<td>✅ <code>norm.output</code>，<code>(1, seq, 4096)</code></td>
+</tr>
+<tr>
+<td><code>blocks.N.mlp</code> / <code>blocks.N</code></td>
+<td>✅ <code>blocks.N.mlp.output</code>，<code>(1, seq, 4096)</code></td>
+</tr>
+</tbody></table>
+<p>应对措施（已实现并 live 通过）：</p>
+<ul>
+<li>新增 <code>EVO2_MCP_LOGITS_LAYER</code> 配置（默认 <code>auto</code>）：评分工具先尝试文档名 <code>output_layer</code>，若收到 <code>422 has no attribute</code>（托管端）自动切换到 <code>unembed</code> 并缓存，之后不再重复探测；自托管 NIM 2.x 容器则一次成功，零额外请求。</li>
+<li>NPZ 解析器同时支持裸 key（<code>output_layer</code>）和 <code>&lt;name&gt;.output</code>（<code>unembed.output</code>）两种 key 格式，并按"末维 = 512"启发式兜底。</li>
+<li><code>422</code> 错误信息现在会提示托管端可用的属性名。</li>
+</ul>
+<blockquote>
+<p>如果返回的 <code>seq_len</code> 与输入序列长度不一致（例如服务端加了 padding/BOS），本服务器<strong>拒绝</strong>计算 likelihood 并返回 raw 统计 + 明确说明，绝不猜测对齐。</p>
+</blockquote>
+<h2>3. NVIDIA API Key 获取方法</h2>
+<ol>
+<li>打开 <a href="https://build.nvidia.com/" target="_blank" rel="noopener noreferrer">https://build.nvidia.com/</a>，右上角 <strong>Get API Key</strong>（需要登录 NVIDIA 账号）。</li>
+<li>创建一个 key（形如 <code>nvapi-xxxxxxxx...</code>）。</li>
+<li>把它设置到环境变量，<strong>不要写进代码 / 配置 / Git</strong>：<pre><code class="language-bash">export NVIDIA_API_KEY="nvapi-xxxxxxxx"
+</code></pre>
+或者复制 <code>.env.example</code> 为 <code>.env</code> 并填入（<code>.env</code> 已被 <code>.gitignore</code> 忽略）。</li>
+</ol>
+<h2>4. 安装</h2>
+<pre><code class="language-bash"># 推荐：pip / uv
+pip install -e ".[dev]"
+# 或
+uv sync --extra dev
+
+# 推荐（本项目自带）：pixi 项目本地环境
+pixi install
+pixi run test
+</code></pre>
+<p>要求 Python &gt;= 3.10（推荐 3.11+）。核心依赖：<code>mcp&gt;=2.0</code>、<code>httpx&gt;=0.27</code>、<code>numpy&gt;=1.26</code>、<code>pydantic&gt;=2.6</code>、<code>python-dotenv&gt;=1.0</code>。分析脚本（<code>scripts/analyze_run.py</code>）额外需要 dev 依赖：<code>scikit-learn</code>、<code>pandas</code>、<code>matplotlib</code>。</p>
+<h2>5. 环境变量</h2>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>NVIDIA_API_KEY</code></td>
+<td>无（必填）</td>
+<td>API Key，只从这里读取</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_BASE_URL</code></td>
+<td><code>https://health.api.nvidia.com/v1/biology/arc/evo2-7b</code></td>
+<td>服务地址（自托管 NIM 时修改）</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_TIMEOUT</code></td>
+<td><code>120</code></td>
+<td>HTTP 读超时（秒）</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_MAX_RETRIES</code></td>
+<td><code>4</code></td>
+<td>408/429/5xx 最大重试次数</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_MAX_CONCURRENCY</code></td>
+<td><code>2</code></td>
+<td>batch/FASTA 并发上限</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_ALLOWED_DIRS</code></td>
+<td>空</td>
+<td>FASTA 允许读取的目录（<code>:</code> 分隔）</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_OUTPUT_DIR</code></td>
+<td><code>./output</code></td>
+<td><code>mode="save"</code> 输出目录（也是 save_path 唯一允许的位置）</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_ALLOW_AMBIGUOUS</code></td>
+<td><code>0</code></td>
+<td>设为 <code>1</code> 允许 N 碱基透传（见 §15）</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_MAX_SEQUENCE_LENGTH</code></td>
+<td><code>1000000</code></td>
+<td>序列长度硬上限</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_RAW_INLINE_MAX</code></td>
+<td><code>4096</code></td>
+<td><code>mode="raw"</code> 允许内联的 tensor 元素总数上限</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_MAX_PER_POSITION</code></td>
+<td><code>5000</code></td>
+<td>per-position 列表返回上限（超出取头尾）</td>
+</tr>
+<tr>
+<td><code>EVO2_MCP_LOGITS_LAYER</code></td>
+<td><code>auto</code></td>
+<td>评分用的 logits layer 名：<code>auto</code> 自动探测（文档名 <code>output_layer</code> 失败时切到托管端 <code>unembed</code>）；也可显式指定</td>
+</tr>
+</tbody></table>
+<h2>6. CLI 启动</h2>
+<pre><code class="language-bash"># 三种方式等价
+python -m evo2_mcp
+evo2-mcp
+uv run evo2-mcp      # 用 uv 管理的项目环境
+# pixi 环境：
+pixi run evo2-mcp
+</code></pre>
+<p>服务器通过 <strong>stdio</strong> 与 MCP 客户端通信，正常启动后不会有输出（等待 MCP 握手）。</p>
+<h2>7. MCP 配置</h2>
+<h3>Claude Code（<code>.mcp.json</code>）</h3>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "evo2": {
+      "command": "uv",
+      "args": ["run", "evo2-mcp"],
+      "env": {
+        "NVIDIA_API_KEY": "${NVIDIA_API_KEY}"
+      }
+    }
+  }
+}
+</code></pre>
+<blockquote>
+<p>注意：<code>${NVIDIA_API_KEY}</code> 是否被客户端展开取决于客户端实现。<strong>最稳妥</strong>的方式是直接填入真实 key：</p>
+</blockquote>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "evo2": {
+      "command": "uv",
+      "args": ["run", "evo2-mcp"],
+      "env": {
+        "NVIDIA_API_KEY": "YOUR_API_KEY"
+      }
+    }
+  }
+}
+</code></pre>
+<p>但 <strong>千万不要把含真实 key 的 <code>.mcp.json</code> 提交到 Git</strong>（把该文件加入 <code>.gitignore</code>，或用环境变量/密钥管理工具注入）。也可以不传 <code>env</code>，让服务器进程自己从环境或 <code>.env</code> 读取 <code>NVIDIA_API_KEY</code>：</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "evo2": {
+      "command": "uv",
+      "args": ["run", "evo2-mcp"]
+    }
+  }
+}
+</code></pre>
+<h3>Cursor（<code>~/.cursor/mcp.json</code> 或项目 <code>.cursor/mcp.json</code>）</h3>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "evo2": {
+      "command": "uv",
+      "args": ["run", "evo2-mcp"],
+      "env": { "NVIDIA_API_KEY": "YOUR_API_KEY" }
+    }
+  }
+}
+</code></pre>
+<h3>Codex（<code>~/.codex/config.toml</code>）</h3>
+<pre><code class="language-toml">[mcp_servers.evo2]
+command = "uv"
+args = ["run", "evo2-mcp"]
+env = { "NVIDIA_API_KEY" = "YOUR_API_KEY" }
+</code></pre>
+<h3>自托管 NIM</h3>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "evo2": {
+      "command": "uv",
+      "args": ["run", "evo2-mcp"],
+      "env": {
+        "EVO2_MCP_BASE_URL": "http://localhost:8000/biology/arc/evo2"
+      }
+    }
+  }
+}
+</code></pre>
+<h2>8. Tool 列表</h2>
+<h3><code>evo2_forward(sequence, output_layers=["output_layer"], mode="summary", save_path=None)</code></h3>
+<p>对 DNA sequence 执行 Evo2-7B forward inference。<code>mode</code>：</p>
+<ul>
+<li><code>"summary"</code>（默认）：每层返回 <code>shape / dtype / min / max / mean / std</code>，context 安全；</li>
+<li><code>"save"</code>：把原始 tensor 存成 <code>.npz</code>（<code>output/evo2_forward_&lt;时间戳&gt;.npz</code>），返回路径；</li>
+<li><code>"raw"</code>：内联完整 tensor（仅当元素总数 ≤ <code>EVO2_MCP_RAW_INLINE_MAX</code>，默认 4096，防止 context 爆炸）。</li>
+</ul>
+<blockquote>
+<p><strong>layer 名注意</strong>：托管 <code>health.api.nvidia.com</code> 端点接受的是模型属性名（logits 用 <strong><code>unembed</code></strong>，另有 <code>embedding_layer</code>、<code>norm</code>、<code>blocks.N.mlp</code>），文档名 <code>output_layer</code>/<code>decoder.layers.N.*</code> 只适用于自托管 NIM 2.x 容器。<code>evo2_score</code>/<code>evo2_variant_score</code>/<code>evo2_batch_score</code>/<code>evo2_score_fasta</code> 会自动探测，无需手动指定；只有直接调用 <code>evo2_forward</code> 时需要按实际端点选名。</p>
+</blockquote>
+<h3><code>evo2_score(sequence, include_per_position=False)</code></h3>
+<p>计算 Evo2 对序列的 likelihood：</p>
+<pre><code class="language-json">{
+  "sequence_length": 123,
+  "total_log_likelihood": -123.45,
+  "mean_log_likelihood": -1.2345,
+  "scored_positions": 122,
+  "per_position_log_likelihood": null,
+  "method_notes": "...",
+  "disclaimer": "..."
+}
+</code></pre>
+<p>语义（与 Arc 官方实现一致）：<code>logits[i]</code> 预测位置 <code>i+1</code> 的碱基，在完整 512 vocab 上做 log-softmax 后取目标碱基字节索引；<strong>position 0 不参与计分</strong>，因此 <code>scored_positions = length - 1</code>，<code>mean</code> 是对这 N-1 个值取平均。<code>per_position_log_likelihood[k]</code> 对应序列 0-based 位置 <code>k+1</code>（即 1-based 位置 <code>k+2</code>）。若 API 返回的 <code>seq_len</code> 无法与序列对齐，<strong>不伪造结果</strong>，返回 raw 统计并明确说明：</p>
+<pre><code class="language-text">Likelihood calculation is not supported until the API output format is verified.
+</code></pre>
+<h3><code>evo2_variant_score(sequence, position, ref, alt, coordinate="1-based", include_per_position=False)</code></h3>
+<pre><code class="language-json">{
+  "position": 100,
+  "ref": "A",
+  "alt": "G",
+  "wildtype_log_likelihood": -500.1,
+  "mutant_log_likelihood": -500.5,
+  "delta_log_likelihood": -0.4,
+  "interpretation": "The mutant sequence is less likely than the wildtype under Evo2-7B ... (NOT a clinical pathogenicity call)"
+}
+</code></pre>
+<p>校验链：position 范围 → coordinate 换算 → ref 必须与序列该位一致 → ref≠alt → 1-based 位置 1（0-based 0）不可评分（causal LM 无法给第一个 token 赋概率）→ 明确报错。</p>
+<h3><code>evo2_batch_score(sequence, variants, coordinate="1-based")</code></h3>
+<pre><code class="language-json">{
+  "sequence_length": 300,
+  "wildtype_log_likelihood": -1200.0,
+  "variants": [
+    { "position": 100, "ref": "A", "alt": "G", "delta_log_likelihood": -0.42 },
+    { "position": 200, "ref": "C", "alt": "T", "delta_log_likelihood": 0.13 }
+  ]
+}
+</code></pre>
+<ul>
+<li><strong>WT forward 只计算一次</strong>并复用于所有 variant；</li>
+<li>相同 <code>(position, alt)</code> 的 mutant 只 forward 一次（memoize）；</li>
+<li>并发受 <code>EVO2_MCP_MAX_CONCURRENCY</code> 限制（默认 2，尊重 NVIDIA rate limit）；</li>
+<li>单个 variant 失败不影响整个 batch（逐条返回 <code>error</code>）。</li>
+</ul>
+<h3><code>evo2_score_fasta(fasta_path=None, fasta_text=None)</code></h3>
+<pre><code class="language-text">&gt;sequence_1
+ACGTACGT...
+&gt;sequence_2
+TTGGCCAA...
+</code></pre>
+<ul>
+<li><code>fasta_text</code>：内联 FASTA（默认可用，有大小/记录数上限）；</li>
+<li><code>fasta_path</code>：仅当文件位于 <code>EVO2_MCP_ALLOWED_DIRS</code> 内才允许读取，否则明确拒绝；</li>
+<li>逐条返回 <code>total_log_likelihood / mean_log_likelihood</code>，单条错误不影响其余。</li>
+</ul>
+<h2>9. 使用示例</h2>
+<pre><code class="language-json">{
+  "sequence": "acgtACGT acgt",           // 小写 + 空白自动处理
+  "output_layers": ["output_layer"],
+  "mode": "summary"
+}
+</code></pre>
+<p>返回：</p>
+<pre><code class="language-json">{
+  "sequence_length": 12,
+  "requested_output_layers": ["output_layer"],
+  "returned_layers": ["output_layer"],
+  "layer_stats": [
+    { "name": "output_layer", "shape": [12, 1, 512], "dtype": "float32",
+      "size": 6144, "min": -3.21, "max": 4.02, "mean": 0.01, "std": 0.98 }
+  ],
+  "api": { "elapsed_ms": 87 }
+}
+</code></pre>
+<p>Agent 想要完整 logits 时：</p>
+<pre><code class="language-json">{ "sequence": "ACGT...", "mode": "save" }
+</code></pre>
+<pre><code class="language-json">{
+  "saved": true,
+  "path": "/abs/path/output/evo2_forward_20260824_153000.npz",
+  "bytes_on_disk": 24576,
+  "layer_stats": [...]
+}
+</code></pre>
+<h2>10. FASTA 示例</h2>
+<pre><code class="language-json">{
+  "fasta_text": "&gt;geneA\nACGTACGTACGT\n&gt;geneB\nTTGGCCAATTGG"
+}
+</code></pre>
+<p>（或 <code>"fasta_path": "/data/genomes/genes.fa"</code>，需配置 <code>EVO2_MCP_ALLOWED_DIRS=/data/genomes</code>）</p>
+<p>大批量 FASTA（如整目录的 enhancer/promoter）评分 + 提取 embedding，用 <code>scripts/score_fasta.py</code>（见 §18）—— 每次运行输出独立 run 文件夹（<code>scores.csv</code> + <code>embeddings.npz</code>）。</p>
+<h2>11. Variant scoring 示例</h2>
+<pre><code class="language-json">{
+  "sequence": "ACGTACGTACGTACGTACGT",
+  "position": 10,
+  "ref": "A",
+  "alt": "G"
+}
+</code></pre>
+<h2>12. Batch scoring 示例</h2>
+<pre><code class="language-json">{
+  "sequence": "ACGTACGTACGTACGTACGT",
+  "variants": [
+    { "position": 10, "ref": "A", "alt": "G" },
+    { "position": 12, "ref": "T", "alt": "C" },
+    { "position": 14, "ref": "A", "alt": "T" }
+  ]
+}
+</code></pre>
+<p>典型 Agent 工作流（对应"分析序列上所有 SNP，找 Evo2 score 变化最大的前 20 个"）：</p>
+<pre><code class="language-text">读取输入 → 解析 DNA / VCF → 生成 WT / mutant → evo2_batch_score
+→ 按 |delta_log_likelihood| 排序 → 取前 20 → 保存 CSV → 解释结果
+</code></pre>
+<h2>13. 错误处理</h2>
+<table>
+<thead>
+<tr>
+<th>HTTP</th>
+<th>含义</th>
+<th>本服务器行为</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>400</td>
+<td>Bad Request（含非法序列等）</td>
+<td>直接报错，附响应摘要</td>
+</tr>
+<tr>
+<td>401</td>
+<td><strong>API Key 无效</strong></td>
+<td>直接报错，提示检查 <code>NVIDIA_API_KEY</code></td>
+</tr>
+<tr>
+<td>403</td>
+<td>无权限（托管端点已弃用等）</td>
+<td>直接报错，提示可能原因</td>
+</tr>
+<tr>
+<td>404</td>
+<td>路径不存在</td>
+<td>直接报错，提示检查 <code>EVO2_MCP_BASE_URL</code></td>
+</tr>
+<tr>
+<td>408</td>
+<td>服务端超时</td>
+<td><strong>有限重试</strong>（backoff）后报错</td>
+</tr>
+<tr>
+<td>413</td>
+<td>Payload 过大</td>
+<td>直接报错，提示减小序列或 layer 数量</td>
+</tr>
+<tr>
+<td>422</td>
+<td>参数校验失败</td>
+<td>直接报错，附详情</td>
+</tr>
+<tr>
+<td>429</td>
+<td><strong>Rate limit</strong></td>
+<td><strong>重试 + exponential backoff</strong>（尊重 <code>Retry-After</code>，上限 60s），上限 <code>EVO2_MCP_MAX_RETRIES</code></td>
+</tr>
+<tr>
+<td>5xx</td>
+<td>NVIDIA 服务端错误</td>
+<td><strong>有限重试</strong>后报错</td>
+</tr>
+<tr>
+<td>timeout</td>
+<td>请求超时（<code>EVO2_MCP_TIMEOUT</code> 秒）</td>
+<td>明确报错：<code>NVIDIA Evo2 API request timed out.</code>，不抛裸 traceback</td>
+</tr>
+</tbody></table>
+<p>所有错误通过 MCP 返回结构化 JSON：<code>{"error": "Evo2APIError", "message": "..."}</code>。<code>evo2_batch_score</code> 中单条失败返回 <code>{"error": ..., "status": ...}</code>，不中断整批。</p>
+<h2>14. Rate limit</h2>
+<p>NVIDIA 托管 NIM 有 rate limit。设计对策：</p>
+<ul>
+<li><code>EVO2_MCP_MAX_CONCURRENCY</code>（默认 2）限制并发；</li>
+<li>429 → exponential backoff（1s, 2s, 4s, 8s, 16s…，封顶 30s + 抖动；若有 <code>Retry-After</code> 优先遵循但封顶 60s）；</li>
+<li>重试上限 <code>EVO2_MCP_MAX_RETRIES</code>（默认 4），<strong>不会无限重试</strong>；</li>
+<li>batch 内 WT 只算一次、相同 mutant 去重，减少请求数。</li>
+</ul>
+<h2>15. 安全说明</h2>
+<ul>
+<li><strong>API Key</strong>：只从 <code>NVIDIA_API_KEY</code> 环境变量（或 <code>.env</code>）读取；代码中没有任何硬编码 key；日志只记录 URL、序列长度、layer 名，<strong>不记录序列内容和 key</strong>；错误信息只包含响应前 500 字符摘要。</li>
+<li><strong>序列隐私</strong>：所有日志/错误只含 <code>preview</code>（如 <code>ACGT...GCTA (len=12345)</code>）。</li>
+<li><strong>路径沙箱</strong>：<ul>
+<li>FASTA 读取仅限 <code>EVO2_MCP_ALLOWED_DIRS</code>；未配置时拒绝一切本地路径；</li>
+<li><code>mode="save"</code> 的 <code>save_path</code> 必须位于 <code>EVO2_MCP_OUTPUT_DIR</code> 内；</li>
+</ul>
+</li>
+<li><strong><code>.gitignore</code></strong> 已包含 <code>.env</code>、<code>*.env</code>、<code>output/</code>、<code>*.npz</code>。</li>
+<li><strong>N 碱基</strong>：默认拒绝并明确报错（Evo2 模型未在含糊碱基上评测过，文档只保证 A/C/G/T 有意义）。如确需透传 N，用 <code>EVO2_MCP_ALLOW_AMBIGUOUS=1</code> 启动 —— 这是显式选择，不是静默丢弃。</li>
+<li><strong>Don't execute</strong>：本服务器不做任何 shell 执行；Agent 通过 FASTA/序列输入只能触发受限的 HTTP 请求。</li>
+</ul>
+<h2>16. 生物学解释限制</h2>
+<ul>
+<li>Evo2 score 是 <strong>model-based sequence likelihood change</strong>，不是实验证据，更不是临床致病性诊断。</li>
+<li><code>delta_log_likelihood &lt; 0</code> 只能解读为"突变体序列在模型下<strong>更不可能</strong>"，不能解读为"致病"。</li>
+<li>需要 downstream 验证（实验、群体频率、ClinVar 注释、蛋白结构影响等）才能谈 pathogenicity。</li>
+<li>每个 Tool 的 description 都带有以下声明（MCP 客户端可见）：</li>
+</ul>
+<pre><code class="language-text">This is a DNA foundation model inference tool. It does not provide clinical
+diagnosis. Model scores should not be interpreted as pathogenicity labels
+without additional validation.
+</code></pre>
+<h2>17. 实现依据与验证来源（2026-08-24）</h2>
+<ul>
+<li>NVIDIA NIM for Evo 2 — Endpoints：<a href="https://docs.nvidia.com/nim/bionemo/evo2/latest/endpoints.html" target="_blank" rel="noopener noreferrer">https://docs.nvidia.com/nim/bionemo/evo2/latest/endpoints.html</a></li>
+<li>NVIDIA NIM for Evo 2 — Quickstart：<a href="https://docs.nvidia.com/nim/bionemo/evo2/latest/quickstart-guide.html" target="_blank" rel="noopener noreferrer">https://docs.nvidia.com/nim/bionemo/evo2/latest/quickstart-guide.html</a></li>
+<li>NVIDIA 托管 API 参考（arc/evo2-7b-forward OpenAPI schema）：<a href="https://docs.api.nvidia.com/nim/reference/arc-evo2-7b-infer" target="_blank" rel="noopener noreferrer">https://docs.api.nvidia.com/nim/reference/arc-evo2-7b-infer</a></li>
+<li><strong>托管端点实测（2026-08-24，真实 key）</strong>：<code>output_layer</code> 返回 422 <code>StripedHyena has no attribute 'output_layer'</code>；<code>unembed</code> 返回 logits（NPZ key <code>unembed.output</code>，shape <code>(1, seq, 512)</code>，float64）—— 因此评分工具默认 <code>EVO2_MCP_LOGITS_LAYER=auto</code> 自动探测</li>
+<li><strong>批量实测（2026-08-25，真实 key，3800+ 条 K562 enhancer/promoter）</strong>：<ul>
+<li>序列 <strong>&gt; ~100 kb 时托管端返回 422</strong>（PyTorch <code>canUse32BitIndexMath</code> 限制）—— 批量跑用 <code>--skip-longer-than 100000</code>；</li>
+<li>并发下 layer 名自动探测的<strong>竞态已修复</strong>（<code>forward_logits</code> 用局部变量记录尝试名）并加了回归测试；</li>
+<li>embedding 提取：<code>norm</code>/<code>embedding_layer</code>/<code>blocks.N</code> 均可用，shape <code>(1, seq, 4096)</code> float64（mean-pool 后 4096 维）。</li>
+</ul>
+</li>
+<li>Arc Institute Evo2 仓库（<code>scoring.py</code>、<code>models.py</code>）：<a href="https://github.com/ArcInstitute/evo2" target="_blank" rel="noopener noreferrer">https://github.com/ArcInstitute/evo2</a></li>
+<li>vortex <code>CharLevelTokenizer</code>（Evo2 官方 tokenizer 实现）：PyPI <code>vtx</code> 1.1.0 源码 <code>vortex/model/tokenizer.py</code></li>
+<li>Evo2 模型卡：<a href="https://huggingface.co/ArcInstitute/evo2_7b" target="_blank" rel="noopener noreferrer">https://huggingface.co/ArcInstitute/evo2_7b</a></li>
+</ul>
+<p>若 NVIDIA 调整 API，请以官方最新文档为准；<code>EVO2_MCP_BASE_URL</code> 可随时切换。</p>
+<h2>18. 批量评分与 Embedding 提取（scripts/score_fasta.py）</h2>
+<p>MCP Tools 适合 Agent 交互式调用；<strong>大批量 FASTA 评分</strong>用配套脚本 <code>scripts/score_fasta.py</code>（真实 API 已用 3800+ 条 K562 enhancer/promoter 验证）。</p>
+<p><strong>每次运行自动创建一个带时间戳的独立文件夹</strong>：</p>
+<pre><code class="language-text">output/run_20260825_104403/
+├── scores.csv            # 每序列一行：id, header, length, total/mean LL, ...
+│                         #   + embedding_key（与 embeddings.npz 的 record_ids 对齐）
+└── embeddings.npz        # embeddings: (n, 4096) float32 mean-pooled 矩阵
+                          # record_ids: 与矩阵行一一对应的键（来源__序列id）
+</code></pre>
+<pre><code class="language-bash"># 小样本（指定 id）
+.pixi/envs/dev/bin/python scripts/score_fasta.py \
+  --fasta /path/cis/enhancers.fa /path/cis/promoters.fa \
+  --ids K562_TE_629,K562_MPT_6842 --allow-ambiguous
+
+# 全量（跳过 &gt;100kb —— 托管端对该长度返回 422；保留原始 embedding）
+.pixi/envs/dev/bin/python scripts/score_fasta.py \
+  --fasta /path/cis/enhancers.fa /path/cis/promoters.fa \
+         /path/trans/enhancers.fa /path/trans/promoters.fa \
+  --skip-longer-than 100000 --allow-ambiguous \
+  --embedding-layer norm --keep-raw-embeddings
+</code></pre>
+<p>关键参数：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--embedding-layer norm|blocks.31|embedding_layer|none</code></td>
+<td>提取哪个 layer 的 embedding（默认 <code>norm</code>）；<code>none</code> 只评分</td>
+</tr>
+<tr>
+<td><code>--keep-raw-embeddings</code></td>
+<td>额外保存每条<strong>原始逐位</strong> embedding <code>(1, seq, 4096)</code> 到 <code>embeddings_raw/</code>（<strong>磁盘占用大</strong>：10 kb 序列 ≈ 328 MB；默认不存）</td>
+</tr>
+<tr>
+<td><code>--skip-longer-than 100000</code></td>
+<td>跳过超过该长度的序列（托管 API 限制，见 §17）</td>
+</tr>
+<tr>
+<td><code>--allow-ambiguous</code></td>
+<td>允许 N 碱基透传（5 条含 N 的序列照常跑并带 caveat 警告）</td>
+</tr>
+<tr>
+<td><code>--max-concurrency 2</code></td>
+<td>并发数（默认 2，尊重 rate limit）</td>
+</tr>
+<tr>
+<td><code>--out / --embeddings-out / --embedding-raw-dir</code></td>
+<td>覆盖默认 run 文件夹布局</td>
+</tr>
+</tbody></table>
+<p><strong>效率设计</strong>：每条序列只发一次请求（<code>output_layers=["unembed","norm"]</code>，logits 与 embedding 同取）；logits layer 名整次运行只探测一次；相同并发由信号量限制。</p>
+<h2>19. Embedding 关联与下游分析（scripts/analyze_run.py）</h2>
+<p><code>embeddings.npz</code> 是 mean-pooled 的序列表示（每序列一个 4096 维向量），适合直接做聚类、分类、回归。加载与关联：</p>
+<pre><code class="language-python">import csv, numpy as np
+
+run = "output/run_20260825_104403"
+rows = list(csv.DictReader(open(f"{run}/scores.csv")))
+d = np.load(f"{run}/embeddings.npz", allow_pickle=True)
+X = d["embeddings"]                        # (n, 4096) float32
+ids = [str(x) for x in d["record_ids"]]    # 与 X 行一一对应
+key_to_row = {r["embedding_key"]: r for r in rows if r.get("embedding_key")}
+scores = [key_to_row[k] for k in ids]      # scores[i] ↔ X[i]
+</code></pre>
+<p>一键跑完整分析（KMeans 聚类、enhancer-vs-promoter 分类、embedding→likelihood 回归、PCA 图）：</p>
+<pre><code class="language-bash">.pixi/envs/dev/bin/python scripts/analyze_run.py output/run_20260825_104403 --k 3
+</code></pre>
+<p>输出 <code>analysis_&lt;run&gt;.npz</code>（合并后的 <code>X</code> + <code>keys</code>）和 <code>analysis_&lt;run&gt;.png</code>。分析要点：</p>
+<ul>
+<li>4096 维向量做相似度/聚类前先<strong>单位化</strong>（脚本已做）；</li>
+<li>小样本时分类/回归自动跳过（保护阈值 ≥6 条）；全量 3806 条跑完后这些分析才有统计意义；</li>
+<li>键 <code>cis_enhancers__xxx</code> → 类别 enhancers、区域 cis；<code>trans_*</code> 同理（<code>parse_source</code> 可改标签维度做 cis-vs-trans 分类）。</li>
+</ul>
+<h2>开发与测试</h2>
+<pre><code class="language-bash">pixi install          # 或 pip install -e ".[dev]"
+pixi run test         # 运行 pytest（全部 mock，不调用真实 API）
+</code></pre>
+<p>离线测试 <strong>91 passed / 4 skipped</strong>（skip = live 门控）。覆盖：序列校验、大小写/空白归一化、非法字符、缺 API key、forward 请求构造、401/408/429/5xx/timeout、layer 名自动探测（含并发竞态回归）、variant 校验、variant/batch 评分数学正确性（对照 Arc 语义独立复算）、NPZ 解码（JSON base64 / zip / 旧版 JSON tensor / <code>&lt;layer&gt;.output</code> key）、FASTA 沙箱、MCP session 集成、脚本纯函数（pooling/键名）等。</p>
+<p><strong>真实 API 冒烟测试</strong>（需要真实 key，默认跳过）。key 从 <code>.env</code> 自动读取（<code>Settings.from_env()</code> 已加载）：</p>
+<pre><code class="language-bash">EVO2_MCP_RUN_LIVE=1 .pixi/envs/dev/bin/python -m pytest tests/test_live_api.py -v -s
+</code></pre>
+<p>live 测试会真实请求 NVIDIA 端点，验证：logits layer 自动探测（<code>unembed</code>）、真实 NPZ 解析（<code>(1, seq, 512)</code> float64）、<code>evo2_score</code> 与手工从原始 logits 复算一致、variant score。</p>
+<h2>项目结构</h2>
+<pre><code class="language-text">.
+├── pyproject.toml
+├── README.md
+├── .env.example
+├── .gitignore
+├── src/evo2_mcp/
+│   ├── __main__.py      # python -m evo2_mcp 入口
+│   ├── config.py        # 环境变量配置
+│   ├── sequence.py      # DNA 校验/归一化
+│   ├── api_client.py    # HTTP 客户端（retry/backoff/错误分类/响应解码 + layer 自动探测）
+│   ├── forward_output.py# NPZ 解码 + likelihood 计算 + embedding 提取
+│   ├── fasta.py         # FASTA 解析 + 读取沙箱
+│   ├── tools.py         # 5 个 Tool 的实现
+│   └── server.py        # MCP server（stdio）
+├── scripts/
+│   ├── score_fasta.py   # 批量 FASTA 评分 + embedding 提取（每次运行独立 run 文件夹）
+│   └── analyze_run.py   # 下游分析：加载/关联 → 聚类/分类/回归 + PCA 图
+├── tests/               # pytest（全 mock，91 用例）+ 可选 live test
+└── output/              # mode="save" 的 .npz 输出 + run_*/ 运行结果（git 忽略）
+</code></pre>

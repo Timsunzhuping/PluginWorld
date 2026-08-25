@@ -116,6 +116,30 @@ GET /api/v1/plugins/{ecosystem}/{owner}/{name}?include=readme`}</CodeBlock>
         <Param name="docs" type="0–10" desc="README length, structure, code examples" />
       </div>
 
+      <h2 id="security-rating" className="mt-12 text-xl font-bold text-ink">
+        Security rating
+      </h2>
+      <p className="mt-3 text-[14.5px] leading-relaxed text-muted">
+        Every plugin passes a security scan <em>before</em> it is indexed, on
+        every daily sync: install-script pattern matching, obfuscation signals,
+        typosquat detection against popular names, suspicious URL checks
+        (shorteners, raw IPs, punycode), leaked-secret detection and
+        star-velocity anomaly analysis. The result is a letter grade, returned
+        as <code className="font-mono text-[13px] text-ink">security_grade</code>:
+      </p>
+      <div className="mt-4">
+        <Param name="A+" type="Trusted" desc="Zero findings and a verified publisher (official org, claimed owner, or official-registry listed)" />
+        <Param name="A" type="Safe" desc="Zero findings: license present, spec-valid manifest, clean scan" />
+        <Param name="B" type="Low risk" desc="Minor findings only — e.g. missing license or manifest, isolated warnings" />
+        <Param name="C" type="Caution" desc="Accumulated warnings: suspicious URLs, leaked secrets (redacted), star-velocity anomalies" />
+        <Param name="D" type="Blocked" desc="Critical findings (malicious install scripts, typosquatting) — never listed; quarantined" />
+      </div>
+      <p className="mt-4 text-[14px] leading-relaxed text-muted">
+        Detail responses also include{" "}
+        <code className="font-mono text-[13px] text-ink">security_findings[]</code>{" "}
+        with each finding&apos;s id, severity and message.
+      </p>
+
       <h2 className="mt-12 text-xl font-bold text-ink">Tips for AI agents</h2>
       <p className="mt-3 text-[14.5px] leading-relaxed text-muted">
         Recommended flow: search with{" "}

@@ -1,0 +1,180 @@
+<h1>7dayrag</h1>
+<p>Production-oriented RAG + AI-agent workflow exposed as a FastAPI service. Built as the
+reference implementation for a 7-day SaaS AI engagement — grounded Q&amp;A over business data
+with citations, refusal guardrails, and a tool-using agent that calls internal APIs.</p>
+<p>See <a href="https://github.com/HamdanProfessional/7dayrag/blob/HEAD/ARCHITECTURE.md" target="_blank" rel="noopener noreferrer">ARCHITECTURE.md</a> for design rationale and the day-by-day delivery plan.</p>
+<h2>Quick start (zero API keys required)</h2>
+<p>The app runs fully offline in <strong>stub mode</strong> (deterministic pseudo-embeddings + scripted LLM).
+Add real keys later to switch to OpenAI/Anthropic with automatic failover.</p>
+<pre><code class="language-bash"># 1. Postgres + pgvector
+docker compose up -d db
+
+# 2. Python deps
+pip install -r requirements.txt
+
+# 3. Configure (or skip: defaults match compose)
+copy .env.example .env
+
+# 4. Create schema + load the sample knowledge base
+python -m scripts.seed_sample_data
+
+# 5. Serve
+uvicorn app.main:app --port 8000 --reload
+</code></pre>
+<h2>Try it</h2>
+<pre><code class="language-bash"># Grounded Q&amp;A with citations
+curl -X POST localhost:8000/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the uptime SLA for Business plans?"}'
+
+# Agent that calls tools (ticket lookup)
+curl -X POST localhost:8000/api/v1/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{"task": "Check ticket TICKET-1001 and summarize its status."}'
+
+# Raw hybrid retrieval (debug/tuning)
+curl -X POST localhost:8000/api/v1/documents/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "refund window annual plan", "top_n": 3}'
+</code></pre>
+<p>Interactive docs: <a href="http://localhost:8000/docs" target="_blank" rel="noopener noreferrer">http://localhost:8000/docs</a></p>
+<h2>API</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/healthz</code>, <code>/readyz</code></td>
+<td>liveness; readiness (DB + providers)</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/v1/documents</code></td>
+<td>upsert document → chunk → embed → index</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/v1/documents/search</code></td>
+<td>hybrid retrieval with fused scores</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/v1/query</code></td>
+<td>grounded Q&amp;A <code>{question}</code> → answer + citations</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/v1/agent/run</code></td>
+<td>bounded tool-calling agent, audited to <code>agent_runs</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/v1/admin/seed</code></td>
+<td>reload sample KB</td>
+</tr>
+</tbody></table>
+<p>Every response carries an <code>x-request-id</code>; errors are structured <code>{error: {code, message}}</code>.</p>
+<h2>Configuration</h2>
+<p>All via environment / <code>.env</code> (see <code>.env.example</code>). Key settings:</p>
+<ul>
+<li><code>LLM_PROVIDER</code>: <code>openai</code> | <code>anthropic</code> | <code>stub</code> | <code>auto</code> (<code>auto</code> walks <code>PROVIDER_ORDER</code>
+with per-provider retry + backoff and failover; ends at <code>stub</code> if no keys are set)</li>
+<li><code>OPENAI_BASE_URL</code>: point at any OpenAI-compatible endpoint (Ollama, vLLM, gateways)</li>
+<li><code>MIN_VECTOR_SCORE</code>: best-hit cosine floor below which the API refuses instead of guessing</li>
+<li><code>TICKETS_API_BASE_URL</code> / <code>ACCOUNTS_API_BASE_URL</code>: point agent tools at real internal APIs;
+blank = built-in sandbox data</li>
+<li><code>REDIS_URL</code>, <code>CACHE_ENABLED</code>, <code>CACHE_TTL_SECONDS</code>, <code>RATE_LIMIT_PER_MINUTE</code>: caching +
+rate limiting; a missing Redis only costs performance, never availability</li>
+</ul>
+<h2>Redis (caching + rate limiting)</h2>
+<p>Grounded answers are cached (keyed by question + config) and <code>/api/v1/*</code> is rate limited
+per client IP with a fixed 60s window. Responses carry <code>x-ratelimit-remaining</code>; exceeding
+the limit returns structured <code>429</code>. <code>/readyz</code> reports Redis health; the API fails open if
+Redis is down. Only non-refusal answers are cached (refusals can change as docs update).</p>
+<pre><code class="language-bash">docker compose up -d redis   # or just: docker compose up -d  (brings up db+redis+api+n8n)
+</code></pre>
+<h2>MCP server</h2>
+<p>Expose the same capabilities to Claude Desktop or any MCP client:</p>
+<pre><code class="language-bash">python mcp_server.py        # stdio transport
+</code></pre>
+<p>Tools: <code>search_knowledge_base</code>, <code>answer_question</code>, <code>run_agent</code>, <code>lookup_ticket</code>, <code>lookup_account</code>.
+Claude Desktop config snippet:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "7dayrag": {
+      "command": "python",
+      "args": ["/absolute/path/to/7dayrag/mcp_server.py"]
+    }
+  }
+}
+</code></pre>
+<h2>n8n workflow automation</h2>
+<p><code>docker compose up -d n8n</code> → open <a href="http://localhost:5678" target="_blank" rel="noopener noreferrer">http://localhost:5678</a> → import from <code>workflows/</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Workflow</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ticket_triage.json</code></td>
+<td>Webhook <code>POST /webhook/ticket-triage</code> <code>{ticket_id}</code> → validates input → runs the 7dayrag agent → returns triage summary (with error branch). Swap in a Slack/email node where the summary responds.</td>
+</tr>
+<tr>
+<td><code>kb_sync.json</code></td>
+<td>Nightly schedule → re-syncs the knowledge base via <code>/api/v1/admin/seed</code>; replace with your CMS/Git/S3 source feeding <code>/api/v1/documents</code>.</td>
+</tr>
+</tbody></table>
+<p>Workflows call <code>http://api:8000</code> (compose network). If you run n8n outside Compose,
+change the base URL to <code>http://localhost:8000</code>.</p>
+<p>Test the triage webhook after activating:</p>
+<pre><code class="language-bash">curl -X POST localhost:5678/webhook/ticket-triage \
+  -H "Content-Type: application/json" -d '{"ticket_id": "TICKET-1001"}'
+</code></pre>
+<h2>How grounding works</h2>
+<ol>
+<li>Question is embedded (same model as ingestion) and run through <strong>hybrid retrieval</strong>:
+pgvector cosine top-K + Postgres full-text top-K, fused with Reciprocal Rank Fusion.</li>
+<li>If the best hit's vector score is below <code>MIN_VECTOR_SCORE</code> → refusal (no LLM call).</li>
+<li>Otherwise the numbered context goes to the model with strict rules: cite as <code>[n]</code>,
+answer only from context, reply <code>NOT_ENOUGH_CONTEXT</code> otherwise.</li>
+<li>Citations in the answer are mapped back to source documents and returned.</li>
+</ol>
+<h2>Tests</h2>
+<pre><code class="language-bash">docker compose up -d db      # integration tests need Postgres on :5433
+pytest tests -q              # unit + integration; integration skips cleanly without DB
+ruff check app tests scripts
+</code></pre>
+<p>21 tests: chunking invariants, RRF fusion, embedding determinism, stub provider behavior,
+agent loop parsing, plus end-to-end API round-trips against real Postgres/pgvector.</p>
+<h2>Deploy (staging)</h2>
+<pre><code class="language-bash">cp .env.example .env   # add OPENAI_API_KEY
+docker compose up -d --build
+curl localhost:8000/readyz
+curl -X POST localhost:8000/api/v1/admin/seed
+</code></pre>
+<p>For AWS: same images → ECS Fargate + RDS Postgres (enable <code>pgvector</code> extension).
+For DigitalOcean: droplet + managed Postgres. Secrets via environment/secret manager only.</p>
+<h2>Project layout</h2>
+<pre><code>app/
+  api/        FastAPI routes (documents, query, agent, health/admin)
+  agent/      tool registry (KB search, ticket/account lookup) + bounded agent loop
+  llm/        provider abstraction: openai, anthropic, stub + retry/failover router
+  rag/        chunking, ingestion, hybrid retrieval (RRF), grounded generation
+  cache.py    Redis: response cache + fixed-window rate limiting (fail-open)
+  config.py   env-driven settings · db.py engine/session · db_init.py schema bootstrap
+data/sample_docs/*.md    demo knowledge base
+scripts/seed_sample_data.py
+workflows/*.json         importable n8n automations (ticket triage, KB sync)
+mcp_server.py            MCP tool server (stdio) for Claude Desktop / MCP clients
+tests/
+</code></pre>
+<h2>Next steps (post-engagement backlog)</h2>
+<p>Streaming (SSE), feedback capture into an eval set, reranker stage, multi-tenant RLS,
+scheduled re-indexing, prompt versioning/A-B, cost dashboards.</p>

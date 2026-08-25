@@ -12,9 +12,34 @@
 - **Dual-mode data layer**
   - No `DATABASE_URL` → **snapshot mode**: reads `src/data/seed/`, deployable with zero config
   - With `DATABASE_URL` → **Postgres mode** (Supabase/Neon + Drizzle): FTS search, claims, events, trending
-- **Indexing pipeline** (`scripts/sync/`): GitHub topic crawl (`dsh-plugin` / `claude-code-plugin` / `mcp-server`) + official MCP Registry sync → per-ecosystem spec validation → install-script static scan → secret redaction → unified quality scoring → snapshot / DB upsert
-- **GitHub Actions cron** (every 6 hours) auto-syncs and triggers ISR revalidation
+- **Daily community scan** (`scripts/sync/`, GitHub Actions cron at 02:00 UTC) over the
+  world's mainstream plugin communities:
+  - GitHub topics (`dsh-plugin` / `claude-code-plugin` / `mcp-server`, top 500 by stars each)
+  - Official MCP Registry (registry.modelcontextprotocol.io)
+  - npm registry (keywords `dsh-plugin`, `cordis-plugin`, `claude-code`, `mcp-server`, ranked by monthly downloads)
+  - Glama MCP directory (metaregistry)
+- **Pre-index security scan → rating**: every candidate is scanned BEFORE listing;
+  grade D is quarantined, never indexed (see below)
 - **Public REST API** (`/api/v1/*`): built for AI agents, CORS open, 60 req/min rate limit
+
+## Security rating (assigned before indexing, re-checked daily)
+
+The scanner (`src/lib/security.ts`) checks: malicious install-script patterns,
+code-obfuscation signals, typosquatting against popular names (edit-distance +
+adoption-gap heuristic), suspicious URLs (shorteners / raw IPs / punycode),
+leaked credentials in docs (also auto-redacted), insecure http:// MCP remotes,
+and star-velocity anomalies (star farming).
+
+| Grade | Meaning | Rule |
+|---|---|---|
+| **A+** | Trusted | Zero findings + verified publisher (official org / claimed owner / registry-listed) |
+| **A** | Safe | Zero findings |
+| **B** | Low risk | Minor findings only (missing license/manifest, isolated warnings; score ≥ 70) |
+| **C** | Caution | Accumulated warnings (score < 70) |
+| **D** | Blocked | Critical findings — **never listed**, written to `src/data/seed/quarantine.json` |
+
+Scoring: 100 − (critical 60 / warning 15 / info 5). Grades surface on every
+plugin card, detail page and in the API (`security_grade`, `security_findings`).
 
 ## Quick start
 
@@ -42,7 +67,8 @@ GITHUB_TOKEN=xxx npm run sync   # higher API limits; also enriches registry-only
    ```
    Set `DATABASE_URL` in Vercel and redeploy — the site switches to DB mode automatically
 4. (Recommended) Add `DATABASE_URL` and `REVALIDATE_SECRET` to the repo's Actions secrets
-   and `SITE_URL` to its variables — `.github/workflows/sync.yml` syncs every 6 hours.
+   and `SITE_URL` to its variables — `.github/workflows/sync.yml` runs the full
+   community scan daily at 02:00 UTC.
    Also set Settings → Actions → Workflow permissions to **Read and write** so the
    cron job can commit refreshed snapshots
 5. (Optional) GitHub OAuth for plugin claims: create an

@@ -1,0 +1,105 @@
+<h1>Shop MCP Server</h1>
+<p>Локальный MCP-сервер для аналитики SQLite-базы интернет-магазина. AI-агент вызывает MCP-инструмент, сервер преобразует запрос в безопасный SQL <code>SELECT</code>, напрямую читает <code>shop.db</code> и возвращает структурированный результат.</p>
+<pre><code class="language-text">Host-приложение
+├── AI-агент / LLM
+└── MCP-клиент
+        │ JSON-RPC / stdio
+        ▼
+    Shop MCP Server
+        │ read-only SQLite
+        ▼
+    data/shop.db
+</code></pre>
+<h2>Возможности</h2>
+<ul>
+<li>прямое подключение к SQLite без HTTP и отдельного DB-сервера;</li>
+<li>MCP-транспорт <code>stdio</code>;</li>
+<li>обнаружение <code>query_shop</code> и <code>inspect_database</code> через <code>tools/list</code>;</li>
+<li>восемь примеров задания в описании и JSON Schema инструмента;</li>
+<li>обычный текст, JSON intent или готовый безопасный <code>SELECT</code>;</li>
+<li>исключение заказов <code>cancelled</code> из всей аналитики;</li>
+<li>пагинация и ограничение результата;</li>
+<li>многоуровневая read-only защита.</li>
+</ul>
+<h2>Установка</h2>
+<p>Требуется Python 3.11 или новее.</p>
+<pre><code class="language-bash">python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+</code></pre>
+<p>Подготовленная база уже находится в <code>data/shop.db</code>. В ней 150 клиентов, поле <code>customers.country</code> заполнено у всех клиентов, а 45 клиентов относятся к <code>Germany</code>.</p>
+<h2>Повторная подготовка базы</h2>
+<p>Исходная база не изменяется. Команда создаёт новую рабочую копию и добавляет <code>country TEXT NOT NULL</code> с воспроизводимыми синтетическими значениями:</p>
+<pre><code class="language-bash">.venv/bin/shop-prepare-db /path/to/original/shop.db ./data/shop.db
+</code></pre>
+<p>Распределение зависит только от <code>customers.id</code>, поэтому повторная подготовка даёт те же значения. Страны являются тестовыми данными и не описывают реальное местонахождение клиентов.</p>
+<h2>Настройка пути</h2>
+<p>Путь определяется в таком порядке:</p>
+<ol>
+<li><code>SHOP_DB_PATH</code>;</li>
+<li>JSON-файл из <code>SHOP_MCP_CONFIG</code> или <code>config/shop_mcp.json</code>;</li>
+<li><code>data/shop.db</code> относительно рабочей директории.</li>
+</ol>
+<p>Пример переменной окружения находится в <code>.env.example</code>, а конфигурация MCP-клиента — в <code>config/mcp.example.json</code>. Замените <code>/absolute/path/to/MCPDeveloper</code> на абсолютный путь к проекту.</p>
+<h2>Запуск</h2>
+<p>Обычно сервер запускает MCP-клиент из своей конфигурации. Для ручного запуска процесса:</p>
+<pre><code class="language-bash">SHOP_DB_PATH=./data/shop.db .venv/bin/python -m shop_mcp.server
+</code></pre>
+<p><code>stdout</code> зарезервирован для MCP JSON-RPC. Диагностика не выводится в протокольный поток.</p>
+<h2>Инструменты</h2>
+<h3><code>inspect_database</code></h3>
+<p>Аргументы:</p>
+<pre><code class="language-json">{"action": "list_tables"}
+</code></pre>
+<p>или:</p>
+<pre><code class="language-json">{"action": "describe_table", "table": "customers"}
+</code></pre>
+<h3><code>query_shop</code></h3>
+<p>Аргументы:</p>
+<pre><code class="language-json">{
+  "request": "Сколько клиентов из Германии?",
+  "limit": 100,
+  "offset": 0
+}
+</code></pre>
+<p>Примеры, объявляемые через <code>tools/list</code>:</p>
+<ol>
+<li>Какие таблицы есть в базе и какие в них поля?</li>
+<li>Сколько клиентов из Германии?</li>
+<li>В какой стране больше всего клиентов?</li>
+<li>Какой клиент потратил больше всего? Верни имя, email и общую сумму.</li>
+<li>Покажи топ-5 товаров по проданному количеству и выручке.</li>
+<li>Покажи топ-3 категории по выручке.</li>
+<li>Какая выручка была в 2025 году?</li>
+<li>Какой клиент сделал больше всего заказов?</li>
+</ol>
+<p>Можно передать структурированный intent:</p>
+<pre><code class="language-json">{
+  "request": "{\"intent\": \"revenue_by_year\", \"year\": 2025}"
+}
+</code></pre>
+<p>Или готовый запрос:</p>
+<pre><code class="language-json">{
+  "request": "SELECT name, category FROM products ORDER BY name"
+}
+</code></pre>
+<h2>Бизнес-правила</h2>
+<ul>
+<li><code>orders.status = 'cancelled'</code> не участвует в метриках.</li>
+<li>Расходы клиентов и годовая выручка считаются по <code>orders.total_amount</code>.</li>
+<li>Выручка товаров и категорий считается как <code>quantity * unit_price</code>.</li>
+<li>Интервал года полуоткрытый: от 1 января включительно до 1 января следующего года исключительно.</li>
+<li>В поставленной базе все заказы относятся к 2026 году, поэтому выручка за 2025 год равна <code>0</code>.</li>
+</ul>
+<h2>Безопасность</h2>
+<p>Сервер открывает SQLite через <code>mode=ro</code>, включает <code>query_only</code>, устанавливает SQLite authorizer, запрещает несколько выражений, DML, DDL, <code>ATTACH</code>, изменяющие <code>PRAGMA</code>, загрузку расширений и ограничивает время выполнения.</p>
+<p>Любая попытка выполнить операцию, отличную от <code>SELECT</code>, возвращает точный ответ:</p>
+<pre><code class="language-text">Не доступный вариант запроса
+</code></pre>
+<p>Внутренние ошибки SQLite, stack trace и локальные пути клиенту не возвращаются.</p>
+<h2>Проверка</h2>
+<pre><code class="language-bash">.venv/bin/pytest
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+</code></pre>
+<p>Тесты включают реальный запуск MCP-сервера как subprocess, подключение <code>ClientSession</code> через <code>stdio</code>, <code>tools/list</code>, вызов обоих инструментов, аналитические сценарии и попытки изменения базы.</p>
+<p>Полная утверждённая спецификация находится в <code>docs/specification.md</code>.</p>

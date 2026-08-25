@@ -1,0 +1,231 @@
+<h1>Letterbox</h1>
+
+<p><img src="https://img.shields.io/badge/status-reference%20implementation-blue" alt="Status: Reference Implementation" /> <img src="https://img.shields.io/badge/python-3.10+-blue" alt="Python 3.10+" /> <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" /> <img src="https://img.shields.io/badge/platform-POSIX-lightgrey" alt="POSIX only" /></p>
+<blockquote>
+<p>📌 <strong>Built for internal production use.</strong> Architecture proven across months of daily AI development. Open-sourced as a reference implementation.</p>
+</blockquote>
+<p><strong>In plain terms:</strong> If you use AI coding assistants in the terminal, you normally work with one at a time — and getting two of them to collaborate means copy-pasting messages between windows yourself. Letterbox lets two assistants (say, Claude and Gemini, or Gemini and Mistral's Vibe) talk <em>directly</em> to each other and work a task together, hands-free.</p>
+<p><strong>The result:</strong> one agent can plan while another reviews, or the two can split the work between them — collaborating on their own while you watch, instead of relaying every message by hand.</p>
+<p><em>A small file-based comms protocol that lets two AI agents in separate terminals talk to each other in real time.</em></p>
+<p><strong>Letterbox</strong> lets two terminal coding agents — Claude Code, Gemini CLI, Antigravity, or Mistral's Vibe — hold a real-time conversation by passing message files through a shared directory. When one agent speaks, a <code>📬</code> notification is injected into the other's terminal and wakes it to read and reply. No network, no server, no shared memory: just JSON files in a folder and the OS's atomic-rename. It's the messaging layer that was built for an internal planning loop, extracted into a standalone, versioned tool in 2026. If you've ever wanted two CLI agents to collaborate on a task without you copy-pasting between windows, this is for you. It gets the occasional update at the author's whim (the launcher tells you when a newer one is out) — but it's unsupported: no roadmap, no feature requests, not a community project.</p>
+<p>The bridge is genuinely cross-harness: <strong>Claude on one side, Gemini on the other</strong>, talking through the same channel, has been verified live. The one wrinkle is setup — Claude wires itself automatically, while Gemini and Antigravity load letterbox from their own settings. The <a href="#setup-per-harness" target="_blank" rel="noopener noreferrer">Setup</a> section walks through both.</p>
+<h2>Why it exists</h2>
+<p>I work with two AI collaborators every day — Claude and Gemini — each living in whatever terminal harness it runs in (Claude Code, Gemini CLI, Antigravity CLI, and now Mistral's Vibe). Letterbox is how I get them talking to <em>each other</em> instead of through me.</p>
+<p>That happens in two modes. Sometimes it's <strong>manual</strong>: we're brainstorming and I want to loop the other model into the conversation. Sometimes it's <strong>automated</strong> — in the planning loop, Claude drafts a plan and each plan is routed to Gemini for review as a built-in stage. Letterbox carries both the same way.</p>
+<p>It's harness-agnostic by design — <strong>Claude Code ↔ Gemini CLI ↔ Antigravity CLI ↔ Vibe</strong> in any combination — and same-model pairs work just as well: two Claude tabs, or two Gemini tabs, talking over one channel.</p>
+<h2>What it is</h2>
+<p>Each <code>letterbox &lt;harness&gt;</code> launch runs <strong>two coordinated processes</strong> inside one terminal:</p>
+<pre><code>  letterbox claude --channel demo --as alice
+        │
+        ├─ PTY-Parent  (the foreground letterbox process)
+        │    • spawns the harness CLI as a PTY child
+        │    • watches the channel directory for peer writes
+        │    • injects 📬 notifications into the PTY on arrival
+        │
+        └─ the harness spawns:
+             └─ letterbox mcp  (stdio MCP server, agent-spawned)
+                  • send_message / check_messages / acknowledge
+                  • check_latest_message / channel_info / list_channels
+
+  Both sides coordinate ONLY through the filesystem:
+
+        ~/.letterbox/channels/demo/
+          msg-*.json           ← one file per message
+          .read/alice.json     ← per-agent read markers
+          .read/bob.json
+</code></pre>
+<p>There is no daemon, no IPC, no background service. The filesystem <em>is</em> the coordination medium — the PTY-Parent's watcher sees a new <code>msg-*.json</code> appear and renders a notification; the channel directory is durable, inspectable, and <code>cat</code>-able. Crash recovery is trivial because nothing valuable lives in memory.</p>
+<p><strong>How the agent gets the letterbox tools differs per harness</strong>, and it's the one thing you configure once:</p>
+<ul>
+<li><strong>Claude Code</strong> takes a launch flag, so letterbox wires it <em>automatically</em> — it generates a temporary MCP config and passes <code>--mcp-config</code> to <code>claude</code>. Nothing for you to set up.</li>
+<li><strong>Gemini CLI and Antigravity</strong> don't take that flag; they load MCP servers from their own settings file. You add a one-line, channel-agnostic <code>letterbox</code> entry there once, and the launcher hands each session its channel and identity through environment variables at launch — so you never edit settings per channel.</li>
+<li><strong>Vibe</strong> loads MCP servers from <code>~/.vibe/config.toml</code>. Its MCP subprocess inherits only a trimmed environment, so a one-time bridge script is needed to relay <code>LETTERBOX_CHANNEL</code> / <code>LETTERBOX_SENDER</code> from Vibe's own process env. Once that's in place, any channel works exactly like Gemini. See the <a href="#vibe-mistral" target="_blank" rel="noopener noreferrer">Vibe setup</a> section.</li>
+</ul>
+<h2>Who it's for</h2>
+<ul>
+<li>People running terminal coding agents who want <strong>autonomous AI↔AI dialogue</strong> on one machine, without babysitting copy-paste between windows.</li>
+<li>People who value <strong>files as the source of truth</strong> — auditable, greppable, no opaque protocol, no magic.</li>
+</ul>
+<h2>Who it's NOT for</h2>
+<ul>
+<li>Anyone wanting a <strong>hosted or networked</strong> chat service — the message protocol is filesystem-local and never touches the network. (The launcher makes one optional, best-effort version check at startup; disable it with <code>LETTERBOX_NO_UPDATE_CHECK=1</code>.)</li>
+<li>Anyone wanting a <strong>multi-user platform</strong> — it's a point-to-point bridge between agents on one machine, not a many-user hub (see <a href="#built-for-two" target="_blank" rel="noopener noreferrer">Built for two</a>).</li>
+<li><strong>Windows-native</strong> users — v1 is POSIX-only (see <a href="#what-we-dont-support" target="_blank" rel="noopener noreferrer">What we don't support</a>).</li>
+<li>Anyone wanting a <strong>supported product</strong> — letterbox is versioned and gets the occasional update at the author's whim (the launcher tells you when a newer one is out), but there's no roadmap, no SLA, and no commitment to take feature requests or keep maintaining it. Use it as-is; pull a newer version if it helps.</li>
+</ul>
+<h2>Built for two</h2>
+<p>Letterbox is a <strong>two-way bridge at heart</strong> — one peer talking to one peer is what it's designed and tuned for. Three or more agents <em>can</em> share a channel: directed addressing (<code>send_message(to="&lt;label&gt;")</code>) and the <code>participants</code> list make it workable, and same-channel broadcasts reach everyone. But a shared channel is a <strong>broadcast bus</strong> — every message wakes every participant. Without orchestration (turn-taking, a designated coordinator, or rules about who speaks when), an N-way room becomes a notification storm that can chew through a model's message/usage limits surprisingly fast. If you want three or more, bring your own conductor. The substrate is honest about who's in the room; the etiquette is on you.</p>
+<h2>Install</h2>
+<p>Letterbox is installed from source (a wheel is buildable; it is not currently published to PyPI). From the repo root:</p>
+<pre><code class="language-bash">pip install -e .          # or: pip install -e ".[dev]" for the test extras
+</code></pre>
+<p>This puts the <code>letterbox</code> command on your <code>PATH</code>. The command must resolve by name — each agent spawns <code>letterbox mcp</code> itself — so this is load-bearing. Confirm it:</p>
+<pre><code class="language-bash">which letterbox           # note this absolute path; Gemini/Antigravity setup needs it
+</code></pre>
+<p>You also need the harness you're launching (<code>claude</code>, <code>gemini</code>, <code>antigravity</code>, or <code>vibe</code>) installed, on your <code>PATH</code>, and logged in. Letterbox launches it for you.</p>
+<h3>Updating</h3>
+<p>Letterbox is versioned (<code>letterbox.__version__</code>, the single source of truth); since there's no PyPI release, the git <code>main</code> HEAD <em>is</em> the release. On a human-facing launch the CLI makes one best-effort check (at most once a day, cached under <code>~/.cache/letterbox/</code>) and prints a one-line notice if a newer version exists. To update:</p>
+<pre><code class="language-bash">pip install --upgrade "git+https://github.com/dovahkiin-v/letterbox"
+</code></pre>
+<p>This is the <strong>only</strong> network call letterbox ever makes — the messaging protocol stays fully local. It runs with a tight timeout and is fully fail-silent: if it can't reach GitHub it simply prints nothing and never delays your launch. It is never run for <code>letterbox mcp</code> (the agent's stdio server). Disable it entirely with <code>LETTERBOX_NO_UPDATE_CHECK=1</code>.</p>
+<h2>Setup per harness</h2>
+<p>You only do this once per harness. Skip the harnesses you won't use.</p>
+<h3>Claude Code — nothing to do</h3>
+<p>Letterbox wires Claude automatically: at launch it writes a temporary MCP config (mode <code>0600</code>) and passes <code>--mcp-config &lt;path&gt;</code> to <code>claude</code>. The letterbox tools appear in that session and nowhere else. There is no settings file to edit.</p>
+<h3>Gemini CLI — two one-time steps</h3>
+<p><strong>1. Register the MCP server</strong> in <code>~/.gemini/settings.json</code> (create the file if it doesn't exist). Use the <strong>absolute path</strong> to your installed <code>letterbox</code> (from <code>which letterbox</code> above), and pass only <code>["mcp"]</code> — no channel, no identity:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "letterbox": {
+      "command": "/absolute/path/to/letterbox",
+      "args": ["mcp"]
+    }
+  }
+}
+</code></pre>
+<p>This entry is <strong>channel-agnostic on purpose.</strong> The launcher exports <code>LETTERBOX_CHANNEL</code>, <code>LETTERBOX_SENDER</code>, and <code>LETTERBOX_INSTANCE_ID</code> into Gemini's environment at launch, and the MCP server reads them — so the same single entry serves every channel and you never edit it again. (This mirrors how the Forge orchestrators pass a channel via an env var.)</p>
+<p><strong>2. Trust the folder you launch from.</strong> Gemini refuses to run in an untrusted directory without an interactive <em>"do you trust this folder?"</em> prompt — and a blocking TUI prompt would stall the automation. Pre-trust the launch directory (or a parent) in <code>~/.gemini/trustedFolders.json</code>:</p>
+<pre><code class="language-json">{
+  "/home/you/projects": "TRUST_PARENT"
+}
+</code></pre>
+<p><code>TRUST_FOLDER</code> trusts exactly that directory; <code>TRUST_PARENT</code> trusts it and everything beneath, so one entry covers all your project folders. (Tip: don't reach for Gemini's <code>--skip-trust</code> flag to dodge this — it forces a workspace-system-prompt lookup that crashes even in already-trusted directories. Trust the folder instead.)</p>
+<h3>Antigravity (<code>agy</code>)</h3>
+<p>Launch it as <strong><code>letterbox agy …</code></strong> (the long form <code>letterbox antigravity …</code> also works — <code>agy</code> is just an alias matching the binary name). Antigravity receives its per-launch channel and identity through the same environment variables as Gemini; what differs is how you register the MCP server. <code>agy</code> loads MCP servers from <strong>plugins</strong>, so you install letterbox as a tiny local plugin (a directory with two JSON files):</p>
+<pre><code class="language-bash"># 1. Build the plugin (one directory, two files). Use the absolute
+#    `letterbox` path from `which letterbox`.
+mkdir -p ~/.letterbox/agy-plugin/letterbox
+cat &gt; ~/.letterbox/agy-plugin/letterbox/plugin.json &lt;&lt;'JSON'
+{ "name": "letterbox", "version": "1.0.0",
+  "description": "Letterbox file-based AI-to-AI comms bridge." }
+JSON
+cat &gt; ~/.letterbox/agy-plugin/letterbox/mcp_config.json &lt;&lt;'JSON'
+{ "mcpServers": { "letterbox": {
+    "command": "/absolute/path/to/letterbox", "args": ["mcp"] } } }
+JSON
+
+# 2. Install it (and confirm).
+agy plugin install ~/.letterbox/agy-plugin/letterbox
+agy plugin list
+</code></pre>
+<p>The <code>mcp_config.json</code> is channel-agnostic for the same reason Gemini's settings entry is — the launcher passes the channel and identity by environment at launch. Like Gemini, <code>agy</code> also gates on folder trust: it honours a <code>trustedWorkspaces</code> list in <code>~/.gemini/antigravity-cli/settings.json</code>, so add the directory you launch from there if it isn't already.</p>
+<blockquote>
+<p><strong>Status:</strong> the PTY layer (notifications + message delivery, both directions) is <strong>verified live</strong>, and the plugin install above wires the tools cleanly. The full tools-in-<code>agy</code> round trip is freshly working and lightly exercised — treat Antigravity as <strong>the newest of the three</strong> and report anything odd.</p>
+</blockquote>
+<h3>Vibe (Mistral)</h3>
+<p>Launch it as <strong><code>letterbox vibe …</code></strong>. Vibe loads MCP servers from <code>~/.vibe/config.toml</code>, but its MCP subprocess inherits only a trimmed environment (<code>HOME</code>, <code>PATH</code>, <code>SHELL</code>, <code>TERM</code>, <code>USER</code>, <code>LOGNAME</code>) — so <code>LETTERBOX_CHANNEL</code> etc. don't reach it via normal inheritance. A small one-time bridge script fixes this by reading them from Vibe's process via <code>/proc</code> at spawn time. After that, any channel works exactly like Gemini — no config editing per channel.</p>
+<p><strong>1. Install the bridge script</strong> (ships with letterbox):</p>
+<pre><code class="language-bash">cp "$(python3 -c 'import letterbox.data, pathlib; print(pathlib.Path(letterbox.data.__file__).parent / "vibe-mcp-bridge.sh")')" \
+   ~/.letterbox/vibe-mcp-bridge.sh
+chmod +x ~/.letterbox/vibe-mcp-bridge.sh
+</code></pre>
+<p><strong>2. Register it</strong> in <code>~/.vibe/config.toml</code>. Replace any existing <code>letterbox</code> entry with:</p>
+<pre><code class="language-toml">[[mcp_servers]]
+name = "letterbox"
+transport = "stdio"
+command = "/home/YOU/.letterbox/vibe-mcp-bridge.sh"
+args = []
+</code></pre>
+<p>Use your actual home path (not <code>~</code> — Vibe may not expand it). The entry is <strong>channel-agnostic on purpose</strong>: the bridge script reads the channel and identity from Vibe's process env at runtime, exactly as Gemini reads them from its environment.</p>
+<p><strong>3. Done.</strong> Any channel works:</p>
+<pre><code class="language-bash">letterbox vibe --channel blueberry-fields --as mistral
+</code></pre>
+<p>Vibe also launches with <code>--yolo</code> (auto-approve) so injected notifications can wake it without blocking on a per-tool prompt.</p>
+<blockquote>
+<p><strong>Note:</strong> the bridge script uses <code>/proc/$PPID/environ</code> to read Vibe's environment — Linux-only, which aligns with letterbox's POSIX-only stance. macOS support would need a different mechanism (<code>ps -p $PPID -Ewww</code>); not currently shipped.</p>
+</blockquote>
+<blockquote>
+<p><strong>Status:</strong> 📬 wake injection is confirmed working (STEP 0 verified that Vibe's <code>ChatTextArea</code> overrides Enter to submit, so the standard PTY inject path applies). Treat Vibe as <strong>the newest of the four</strong> and report anything odd.</p>
+</blockquote>
+<h2>Quickstart</h2>
+<p>Open <strong>two terminals</strong> and point each at the same channel with a distinct identity. With no config file, letterbox's built-in defaults supply the shared global state directory (<code>~/.letterbox</code>).</p>
+<p>A genuine cross-harness bridge — Claude talking to Gemini (complete the <a href="#gemini-cli--two-one-time-steps" target="_blank" rel="noopener noreferrer">Gemini setup</a> first):</p>
+<pre><code class="language-bash"># Terminal 1
+letterbox claude --channel demo --as claude
+
+# Terminal 2
+letterbox gemini --channel demo --as gemini
+</code></pre>
+<p>Or two of the same harness, if you'd rather keep it simple:</p>
+<pre><code class="language-bash"># Terminal 1
+letterbox claude --channel demo --as alice
+
+# Terminal 2
+letterbox claude --channel demo --as bob
+</code></pre>
+<p>Both sessions start and sit quietly. Now nudge the agent in Terminal 1 — for example, <em>"Send a message to your peer."</em> From there, each <code>📬</code> notification wakes the other agent to read and reply: that handoff is the whole point. The <code>--as &lt;label&gt;</code> names make the transcript readable; underneath, message filtering uses a per-launch instance id, not the label.</p>
+<p>A couple of honest notes:</p>
+<ul>
+<li><strong>You never run <code>letterbox mcp</code> yourself.</strong> That subcommand is the stdio MCP server, spawned by the harness — it's for the agent, not for you. Run by hand in a terminal, it tells you so and exits.</li>
+<li><strong>Launch args are autonomous by design.</strong> The Claude adapter launches with <code>--dangerously-skip-permissions</code> and the Gemini adapter with <code>--yolo</code>, because injected messages can't wake an agent that's blocked on a per-action approval prompt. If that's not a tradeoff you want, letterbox isn't the right fit — override the args in <code>letterbox.toml</code> or step away.</li>
+</ul>
+<p>For a full, narrated walkthrough (two Claudes debating whether a hot dog is a sandwich), see the sample project under <a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/examples/two-claudes-debating/" target="_blank" rel="noopener noreferrer"><code>examples/two-claudes-debating/</code></a>.</p>
+<h2>Knowing the bridge state</h2>
+<p>Because a settings-wired harness loads letterbox on <em>every</em> session, an agent may have the letterbox tools available without an active bridge — for instance, a plain Gemini session you never launched through letterbox. Letterbox handles this calmly and gives the agent a way to check:</p>
+<ul>
+<li><strong>A plain session is dormant, not broken.</strong> With no channel, the MCP server still connects (the harness shows a calm "connected"), but the messaging tools stay quiet — they fail with a clear, actionable message <em>only if actually called</em>, and never on their own. A deliberate plain session is never spammed; a genuinely misconfigured bridge surfaces the moment the agent tries to talk.</li>
+<li><strong><code>channel_info</code> is the agent's bridge oracle.</strong> Calling it answers, server-side: is a bridge active at all? On what channel, as whom? Who is the peer (observed from its most recent message), how many unread, and when did it last speak? An agent unsure of its situation can ask before sending — <em>"peer last spoke 90 s ago"</em> reads very differently from <em>"never."</em></li>
+</ul>
+<h2>Watching and listing channels</h2>
+<p>From any terminal, watch the raw conversation or see what channels exist:</p>
+<pre><code class="language-bash">letterbox tail --channel demo --follow   # stream messages as JSON, one per line
+letterbox list-channels                  # list channels with last-activity
+</code></pre>
+<p>To scaffold a starting <code>letterbox.toml</code> instead of relying on defaults:</p>
+<pre><code class="language-bash">letterbox init --channel demo            # writes ./letterbox.toml (project-local)
+letterbox init --global                  # writes ~/.letterbox/config.toml instead
+</code></pre>
+<h2>Operations</h2>
+<ul>
+<li><strong>Reading catches you up; the inbox drains itself.</strong> <code>check_messages</code> returns unread peer messages and advances that agent's read marker as it goes — so successive calls page through the backlog and a drained inbox stays drained, no manual bookkeeping. <code>check_latest_message</code> is a non-advancing peek for the common <em>"what did they just say?"</em>, and <code>acknowledge</code> is there for explicit, single-message control.</li>
+<li><strong>A restart is a fresh start, not a replay.</strong> On launch, an agent's read marker is aligned to the newest message already on disk, so it sees only what arrives <em>after</em> it joined — it won't be flooded with a whole channel's history from a previous session. The history is still there and reachable on demand (<code>check_messages</code> with a <code>since_id</code> cursor); it just isn't forced on you.</li>
+<li><strong>Retention is manual.</strong> Messages live in the channel directory until you prune them; there is no automatic deletion (surprise deletion is unacceptable in comms infrastructure). Per-agent <code>.read/</code> markers track read state — they advance markers, never touch the files, and never affect the peer's view.</li>
+<li><strong>Practical ceiling: ~10,000 unpruned messages per channel.</strong> Beyond that, <code>check_messages</code> and <code>list-channels</code> may show noticeable latency. Prune above that point.</li>
+<li><strong><code>letterbox prune</code> is the safe way to reclaim space.</strong> It is <strong>dry-run by default</strong> — it prints what <em>would</em> happen and touches nothing. <code>--yes-i-am-sure</code> moves matched files to a reversible <code>cold/</code> subdirectory; <code>--delete --yes-i-am-sure</code> (double-gated) deletes for good. This is the only destructive command in letterbox.</li>
+</ul>
+<pre><code class="language-bash">letterbox prune --channel demo --keep-last 100                   # preview (dry run)
+letterbox prune --channel demo --keep-last 100 --yes-i-am-sure   # move to cold/
+letterbox prune --help                                           # all selection rules
+</code></pre>
+<p>A channel is just a folder, so <code>rm -rf ~/.letterbox/channels/demo</code> works too — letterbox locks nothing.</p>
+<h2>Security model</h2>
+<p>The full threat model lives in <a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/docs/PROTOCOL.md" target="_blank" rel="noopener noreferrer"><code>docs/PROTOCOL.md</code></a>. In brief:</p>
+<ul>
+<li><strong>The peer agent on a channel is untrusted.</strong> Its message bodies may carry prompt-injection payloads, ANSI escapes, or shell metacharacters. Letterbox treats both sides as untrusted.</li>
+<li><strong>Notifications render only from trusted context.</strong> The <code>📬</code> notification template substitutes variables drawn from the watcher's <em>own</em> configuration and observations (<code>{channel}</code>, <code>{sender}</code>, <code>{message_id}</code>, <code>{timestamp}</code>) — <strong>never</strong> from the peer's message payload. A malicious peer can write anything into its file; none of it reaches the injected notification. Message bodies are surfaced only when the agent explicitly calls <code>check_messages</code>. The same holds for <code>channel_info</code>'s peer fields: they're observed from traffic and informational, never fed into a notification.</li>
+<li><strong>No execution path.</strong> Letterbox never <code>exec</code>s, <code>eval</code>s, or shells a message body or metadata field. Subprocesses are spawned with argv lists (never <code>shell=True</code>), and only to launch the harness configured in <code>letterbox.toml</code>.</li>
+<li><strong>Path safety.</strong> Channel names and message ids are validated against a strict pattern before any filesystem operation — <code>../etc</code> or anything with a slash is refused.</li>
+<li><strong>Filesystem permissions.</strong> <code>~/.letterbox/</code> and channel directories are created <code>0700</code> (user-only); the generated MCP config is <code>0600</code>.</li>
+</ul>
+<p><strong>What letterbox does NOT defend against:</strong> a compromised local user account (filesystem permissions are the only barrier), the consuming harness's own prompt-injection vulnerabilities, or trust boundaries introduced by cross-machine sync (NFS, syncthing). It is not an encryption-at-rest or network-trust layer — those are out of scope by design.</p>
+<h2>Scope and anti-scope</h2>
+<p>What letterbox deliberately does <em>not</em> do is the point, not a gap:</p>
+<ul>
+<li><strong>No LLM calls.</strong> Letterbox never invokes a language model, spends a token, or holds an API key. The notification template is rendered text, not a prompt.</li>
+<li><strong>No telemetry, no metrics, no analytics.</strong> Nothing is collected, no dashboards, no usage tracking.</li>
+<li><strong>No phone-home, no auto-update, no version check.</strong> Letterbox never contacts any server. First run is silent.</li>
+<li><strong>No network.</strong> It is filesystem-local. Cross-machine use is your filesystem-sync's business, not letterbox's.</li>
+</ul>
+<p>This anti-scope is what lets letterbox be small, inert, auditable, and durable.</p>
+<h2>Accessibility</h2>
+<ul>
+<li><strong>Plain text by default</strong> (<code>--format=plain</code>) — pipe- and screen-reader-friendly; <code>tail</code> emits message JSON on stdout for <code>jq</code>. Structured/colored output is opt-in (<code>--format=rich</code>).</li>
+<li><strong>No color-only signaling.</strong> <code>--color=auto|always|never</code> controls color independently; color is never the only way a state is conveyed.</li>
+<li><strong>stdout is data, stderr is logs</strong> — commands pipe cleanly.</li>
+<li><strong>UTF-8 throughout.</strong> The tool's own strings are English; message bodies are whatever language you write.</li>
+<li><strong>Calm surface.</strong> No spinners, no telemetry banners, no upgrade nags. Quiet success, clear errors — errors cite the path, the line, or the valid options.</li>
+</ul>
+<h2>What we don't support</h2>
+<p><strong>Letterbox v1 is POSIX-only (Linux and macOS).</strong> The PTY spawn-and-inject layer is built on POSIX primitives; Windows support via the stdlib <code>pty</code> module is incomplete and not shipped. If you're on Windows, letterbox won't run for you in v1 — better to know now than to hit a crash.</p>
+<h2>See also</h2>
+<ul>
+<li><a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/examples/two-claudes-debating/" target="_blank" rel="noopener noreferrer"><code>examples/two-claudes-debating/</code></a> — the hands-on walkthrough: two Claude Code sessions debating in real time.</li>
+<li><a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/skills/letterbox/SKILL.md" target="_blank" rel="noopener noreferrer"><code>skills/letterbox/SKILL.md</code></a> — the agent-facing <strong>usage</strong> guide: how an LLM uses a live bridge (broadcast, directed messages, participants).</li>
+<li><a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/skills/letterbox-setup/SKILL.md" target="_blank" rel="noopener noreferrer"><code>skills/letterbox-setup/SKILL.md</code></a> — the agent-facing <strong>setup</strong> guide: the one-time per-harness MCP wiring, the one-label-per-channel rule, and the post-upgrade relaunch procedure.</li>
+<li><a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/docs/AGENT_POINTER.md" target="_blank" rel="noopener noreferrer"><code>docs/AGENT_POINTER.md</code></a> — a short drop-in block to paste into a project's <code>CLAUDE.md</code> / <code>GEMINI.md</code> / <code>AGENTS.md</code> so an agent knows it's on a bridge.</li>
+<li>The full file-format and protocol reference lives in <a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/docs/PROTOCOL.md" target="_blank" rel="noopener noreferrer"><code>docs/PROTOCOL.md</code></a>.</li>
+<li><a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/DECISIONS.md" target="_blank" rel="noopener noreferrer"><code>DECISIONS.md</code></a> — the architecture decision records (ADRs) behind every load-bearing choice, including the per-harness MCP wiring (ADR-054/055), dormant mode and the <code>channel_info</code> oracle (ADR-056), the submit-timing fix (ADR-057), the self-maintaining read marker (ADR-058), the per-channel duplicate-instance guard (ADR-061), N-party directed addressing + participants (ADR-062), and the Vibe adapter + Textual submit contract (ADR-067).</li>
+<li><a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><code>LICENSE</code></a> — MIT.</li>
+</ul>
+<h2>Status</h2>
+<p>Letterbox is a versioned, unsupported artifact — MIT-licensed, at <a href="https://github.com/dovahkiin-v/letterbox" target="_blank" rel="noopener noreferrer"><code>github.com/dovahkiin-v/letterbox</code></a>. It ships complete and stands as documented; it is a personal artifact, not a product, and is not soliciting contributions. <strong>Unsupported</strong> means no roadmap, no SLA, and no promise to fix issues or take feature requests — but it is <strong>not frozen</strong>: the author may cut a later version at their own whim, with no schedule. The launcher's once-a-day update check tells you when that happens (<code>LETTERBOX_NO_UPDATE_CHECK=1</code> to silence it). See <a href="https://github.com/dovahkiin-v/letterbox/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer"><code>CONTRIBUTING.md</code></a> for what that means in practice.</p>

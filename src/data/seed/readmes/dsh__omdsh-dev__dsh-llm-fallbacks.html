@@ -1,0 +1,206 @@
+<h1>dsh-llm-fallbacks</h1>
+<p><a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer">English</a> | <a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">中文</a></p>
+<p><a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license" /></a>
+<img src="https://img.shields.io/badge/node-%3E%3D22-339933.svg" alt="node" />
+<img src="https://img.shields.io/badge/pnpm-%3E%3D10-f69220.svg" alt="pnpm" />
+<img src="https://img.shields.io/badge/dsh%20tui-compatible-4B32C3.svg" alt="dsh tui" />
+<img src="https://img.shields.io/badge/DSH-0.1.1--rc.2-4B32C3.svg" alt="dsh" />
+<a href="https://dshfind.com/zh/plugins/omdsh-dev/dsh-llm-fallbacks?ref=badge" target="_blank" rel="noopener noreferrer"><img src="https://dshfind.com/api/badge/omdsh-dev/dsh-llm-fallbacks?lang=en" alt="dshfind" /></a></p>
+<p>Automatic provider/model fallback chains for dsh (DeepSeek Harness): when an agent's LLM requests keep failing — retries exhausted, auth errors, quota exceeded, rate limiting (429) — the plugin switches provider/model along the fallback chain for the current role, and the current step/turn continues on the target model: tasks are not interrupted by model problems.</p>
+<p>Works in both dsh front ends: the <strong>web</strong> profile (Settings → Plugins → Fallbacks card) and the <strong>dsh-tui</strong> terminal profile (<code>/fallbacks</code> session diagnostics, <code>/fallbacks config</code> readback, and the <code>/settings</code> fallbacks section for editing).</p>
+<h2>Time slots</h2>
+<p>Time slots rotate the <strong>effective root chain</strong> by wall-clock windows: each slot row carries its own fallback chain, and the first row whose window contains the current moment replaces the all-day chain for the next root request — the all-day chain stays as the last resort when no slot matches. Peak and valley windows can therefore use different chains while the failure walk (fallback switch) remains untouched.</p>
+<p><img src="https://raw.githubusercontent.com/omdsh-dev/dsh-llm-fallbacks/HEAD/docs/assets/screenshot-1-en.png" alt="Time slots" /></p>
+<p>Four frozen UTC+8 presets (windows are code constants; preset rows lock <code>tz</code> to Asia/Shanghai):</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Window</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>liang-peak</code></td>
+<td>Monday–Friday 09:00–12:00 and 14:00–18:00</td>
+</tr>
+<tr>
+<td><code>liang-valley</code></td>
+<td>every other UTC+8 time (complement of Liang Peak)</td>
+</tr>
+<tr>
+<td><code>glm-peak</code></td>
+<td>Monday–Friday 14:00–18:00</td>
+</tr>
+<tr>
+<td><code>glm-valley</code></td>
+<td>every other time (complement of GLM Peak)</td>
+</tr>
+</tbody></table>
+<p>GLM Peak and GLM Valley are offered in the card picker only when <code>zai-coding-cn</code> is configured.</p>
+<p>The first extra row whose window contains the current moment (in <code>fallbacks.tz</code>, default Asia/Shanghai) wins; no match → the all-day <code>rootChain</code>, whose tail (Default model) must be exactly one official V4 model — <code>deepseek-official/deepseek-v4-flash</code> XOR <code>deepseek-official/deepseek-v4-pro</code>. Slot rotation is a routing seed, not a failure decision: it applies on the next root request, consumes no cooldown, and is logged as a time-slot switch — failure walks keep fallback switch. Full semantics → <a href="#time-slot-presets" target="_blank" rel="noopener noreferrer">Time-slot presets</a> and <a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/configuration.md" target="_blank" rel="noopener noreferrer">docs/configuration.md</a>.</p>
+<h2>Quick start</h2>
+<h3>Install</h3>
+<pre><code class="language-sh">dsh plugin --profile web add dsh-llm-fallbacks      # web profile (Settings → Fallbacks card)
+dsh plugin --profile dsh-tui add dsh-llm-fallbacks  # dsh-tui terminal profile
+</code></pre>
+<p>Same plugin, either front end — the only difference is the <code>--profile</code> flag. Pin a version with <code>@&lt;version&gt;</code>. A registry install fetches the <strong>built package</strong> (<code>dist/</code>), nothing builds on the target machine. Registry / git / local-directory variants, uninstall, and <code>--dump-config</code> verification → <a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/install.md" target="_blank" rel="noopener noreferrer">docs/install.md</a>.</p>
+<h3>Repair existing sessions (versions before 0.2.2)</h3>
+<p>Versions before 0.2.2 wrote durable <code>fallbacks/switch</code> session events that newer dsh releases refuse to load (issue #52 — the apply()-time event-type registration is ineffective because plugin and host resolve different module instances). If existing sessions fail to open after an upgrade, clone this repository and repair the logs (stop dsh first):</p>
+<pre><code class="language-sh">git clone https://github.com/omdsh-dev/dsh-llm-fallbacks.git
+cd dsh-llm-fallbacks
+pnpm install
+pnpm repair:fallbacks-switch-logs -- --dry-run            # preview which sessions would change
+pnpm repair:fallbacks-switch-logs -- --apply --backup     # mark legacy events ignorable
+</code></pre>
+<p>The script scans <code>~/.dsh/sessions</code> by default (override with <code>--root &lt;dir&gt;</code>), marks legacy <code>fallbacks/switch</code> events <code>ignorable: true</code> so the host read path accepts the session again, and keeps a <code>&lt;file&gt;.bak</code> per repaired log. <code>--apply</code> requires <code>--backup</code> and must run with dsh stopped. From 0.2.2 on, the plugin stops writing durable switch events, so no new sessions need repair.</p>
+<h3>Configuration surfaces</h3>
+<p>The plugin's settings live in a shared <code>fallbacks:</code> namespace, editable from three surfaces:</p>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>What it is</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Web settings card</strong></td>
+<td>Settings → Plugins → Fallbacks</td>
+<td>Full GUI editor for the <code>fallbacks:</code> namespace; writes the shared settings document</td>
+</tr>
+<tr>
+<td><strong><code>$DSH_HOME/settings.yaml</code></strong></td>
+<td><code>fallbacks:</code> section in the dsh settings document</td>
+<td>The shared source of truth — the same file the web card writes; readable and editable everywhere, including scripted setups</td>
+</tr>
+<tr>
+<td><strong>TUI <code>/settings</code></strong></td>
+<td>fallbacks section in the dsh-tui settings screen</td>
+<td>dsh-tui ≥ v0.8.5; native fields for simple keys, JSON text fields for complex structures (see <a href="#dsh-tui-profile-terminal" target="_blank" rel="noopener noreferrer">dsh-tui profile (terminal)</a>)</td>
+</tr>
+</tbody></table>
+<p>Pick the surface that matches your front end: web users get the card, terminal users get <code>/settings</code>, and the YAML file works everywhere. (<code>/fallbacks</code> and <code>/fallbacks config</code> are diagnostics — read-only views, not edit surfaces.)</p>
+<h3>Minimal configuration</h3>
+<p>Add a <code>fallbacks:</code> section to the shared settings document (<code>$DSH_HOME/settings.yaml</code> — see <a href="#configuration-surfaces" target="_blank" rel="noopener noreferrer">Configuration surfaces</a>):</p>
+<pre><code class="language-yaml">fallbacks:
+  enabled: true            # feature switch — defaults to off (plugin is a no-op otherwise)
+  rootChain:               # all-day chain: leading entries = fallback walk, last = Default model (official V4)
+    - anthropic/claude-3-5-sonnet          # walked first
+    - deepseek-official/deepseek-v4-flash  # last resort (Flash or Pro)
+  timeSlots:               # optional: rotate the effective root chain by wall-clock windows
+    - kind: preset         # frozen UTC+8 window; only the chain is editable
+      preset: liang-peak   # Monday–Friday 09:00–12:00 and 14:00–18:00
+      chain:
+        - anthropic/claude-3-5-sonnet
+    - kind: custom         # custom window (may wrap midnight)
+      name: evening        # optional display name
+      start: '22:00'
+      end: '02:00'
+      days: [1, 5]         # optional; omitted/empty = every day (0=Sunday…6=Saturday)
+      chain:
+        - openai/gpt-4o
+  roles:                   # optional: declare role entities, then reference them from rules
+    list:
+      - id: reviewer       # unique id; "inherit" is reserved
+        persona: Code-review subagents
+        chain:
+          - openai/gpt-4o-mini
+        fallback: inherit-root   # role chain first, then the inherited rootChain
+    rules:                 # subagent-only: rules never match root requests
+      - role: reviewer     # all subagents → the reviewer role
+</code></pre>
+<p>Build the section up in four steps:</p>
+<p><strong>1. Enable the plugin.</strong> <code>enabled: true</code> turns the fallback engine on. It defaults to <strong>off</strong> — with no chains configured the plugin is a complete no-op.</p>
+<p><strong>2. Set the all-day <code>rootChain</code>.</strong> Leading entries are the fallback chain, walked first when a request fails; the <strong>last</strong> entry is the Default model.</p>
+<blockquote>
+<p><strong>Conformance</strong>: the last entry must be exactly one official V4 model — <code>deepseek-official/deepseek-v4-flash</code> XOR <code>deepseek-official/deepseek-v4-pro</code>. The settings card and gateway reject any other tail on save; a legacy non-official tail warns at startup and keeps working as a fallback-only walk, but cannot be saved as-is.</p>
+</blockquote>
+<p><strong>3. Add <code>timeSlots</code> (optional).</strong> Rows rotate the effective root chain by wall-clock windows. Preset rows use frozen UTC+8 windows (only their chain is editable; while a preset row exists, <code>tz</code> locks to <code>Asia/Shanghai</code>); custom rows take <code>start</code>/<code>end</code> (may wrap midnight) and an optional <code>days</code> list. The first row whose window contains the current moment wins; no match → the all-day <code>rootChain</code>. Rotation is a routing seed — it applies on the next root request and consumes no cooldown (see <a href="#time-slots" target="_blank" rel="noopener noreferrer">Time slots</a>).</p>
+<p><strong>4. Add <code>roles</code> (optional).</strong> Declare role entities in <code>roles.list</code> (id, persona, chain, optional <code>fallback</code> policy), then map subagents to them with <code>roles.rules</code>. Rules never match root requests — with no rule match (or on a root request) the built-in <code>inherit</code> role applies and appends the <code>rootChain</code>.</p>
+<p>Full reference (role entities, fallback strategies, rules, selectors, preset roles, time-slot presets) → <a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/configuration.md" target="_blank" rel="noopener noreferrer">docs/configuration.md</a>.</p>
+<blockquote>
+<p><strong>Upgrade note (behavior change)</strong>: an existing <code>fallbacks:</code> section <strong>without an explicit <code>enabled</code> key</strong> resolves to <code>false</code> after upgrading — add <code>enabled: true</code> to keep the plugin active.</p>
+</blockquote>
+<h3>Verify</h3>
+<p>Save the config and restart the session, then type <code>/fallbacks</code> — the read-only in-session diagnostics (origin, resolved role, chain, recent fallback switches, cooldown status). In a dsh-tui profile, <code>/fallbacks config</code> reads back the composed configuration; see <a href="#dsh-tui-profile-terminal" target="_blank" rel="noopener noreferrer">dsh-tui profile (terminal)</a>.</p>
+<h2>Features</h2>
+<ul>
+<li><strong>Automatic fallback for root and subagents</strong>: any agent switches down the chain to the next available provider/model on model failure — no manual model switching.</li>
+<li><strong>Two-block config</strong>: <code>rootChain</code> for the root agent; declared role entities (<code>roles.list</code>) referenced by <code>roles.rules</code> (or the built-in <code>inherit</code>).</li>
+<li><strong>Chain as root primary from the picker</strong>: when <code>enabled</code> is on, the host model picker (web and TUI alike) shows a virtual <code>FallbacksChain</code> / <code>Auto</code> row — selecting it uses the configured chain as the root primary (a conforming all-day head is required for the override to succeed); selecting a real model keeps fallback-only (see <a href="#fallbackschain-in-the-model-picker" target="_blank" rel="noopener noreferrer">FallbacksChain in the model picker</a>).</li>
+<li><strong>Time slots</strong>: optional <code>fallbacks.timeSlots</code> rows rotate the effective root chain by wall-clock windows in the config-level <code>tz</code> timezone (default <code>Asia/Shanghai</code>) — four frozen UTC+8 presets (<code>liang-peak</code> / <code>liang-valley</code> / <code>glm-peak</code> / <code>glm-valley</code>, windows are code constants, models-only edits) or custom <code>start</code>/<code>end</code>/<code>days</code> windows. The first matching row wins; the all-day row is always last. A slot change applies on the <strong>next</strong> root request and is logged as a <strong>time-slot switch</strong> — a routing seed, never a failure decision: it consumes no cooldown and does not count against <code>maxSwitchesPerStep</code>. Failure walks keep the <strong>fallback switch</strong> copy (see <a href="#time-slot-presets" target="_blank" rel="noopener noreferrer">Time-slot presets</a>).</li>
+<li><strong>Dispatch-time role resolution</strong>: on a subagent's first request its role is resolved in three stages — explicit (<code>agentPreset</code> matches a declared role id) → deterministic rules (unchanged) → LLM auto-match from the declared role taxonomy (<code>fallbacks.roleAutoMatch</code>, default <code>true</code>). The resolved role's chain-head model is injected into the first request and recorded via an explicit <code>role → model</code> log line (no durable <code>fallbacks/switch</code> event is written — issue #52 stop-write); set <code>roleAutoMatch: false</code> to disable the LLM auto-match stage (the explicit <code>agentPreset</code> stage still applies — with no explicit role this reproduces the previous rules-only behavior). The settings card always renders an <strong>Enable role auto-match</strong> switch (default <code>true</code>) to toggle it — the schema default applies even to legacy configs that never declared the key.</li>
+<li><strong>Cooldown and revert</strong>: failed / switched-away models are not re-selected during cooldown; <code>revertPolicy: cooldown-expiry</code> returns to the primary model automatically.</li>
+<li><strong>Visible behavior</strong>: every switch is recorded in an info-level log line (from/to/role/reason) — no silent model switching. The plugin deliberately writes <strong>no</strong> durable <code>fallbacks/switch</code> session events (issue #52: the apply()-time event-type registration was proven ineffective, and a session containing the event refused to load after a dsh restart). Sessions written by older plugin versions that contain such events are repaired by <code>scripts/repair-fallbacks-switch-logs.ts</code>, which marks legacy events ignorable so affected sessions load again.</li>
+<li><strong>Safety valves</strong>: <code>maxSwitchesPerStep</code> caps switches per step and <code>alwaysModeRetryCap</code> caps always-mode retries — chain loops cannot amplify latency.</li>
+<li><strong>No-config no-op</strong>: with no chains configured the plugin behaves exactly like not being installed (<code>enabled</code> is off by default — see <a href="#minimal-configuration" target="_blank" rel="noopener noreferrer">Minimal configuration</a>).</li>
+</ul>
+<h2>dsh-tui profile (terminal)</h2>
+<p>In a dsh-tui profile the plugin has three operator surfaces, with a strict duty split:</p>
+<ul>
+<li><strong><code>/fallbacks</code></strong> — what happened this session: origin, resolved role, effective chain, recent fallback switches, cooldown status. Read-only.</li>
+<li><strong><code>/fallbacks config</code></strong> — what is configured: composed-config readback (trigger codes, root chain, time slots, timezone, roles, role rules, cooldown, revert policy, safety valves, presets, role auto-match). Read-only apart from the one action command <strong><code>/fallbacks config revert-seed &lt;role-id&gt;</code></strong>, which restores a seeded role's persona to its declared seed default (a web-card action the settings seam cannot express).</li>
+<li><strong><code>/settings</code></strong> — the edit surface. The plugin registers a <strong>fallbacks</strong> section with full parity to the web settings card: booleans (<code>enabled</code>, <code>roleAutoMatch</code>) render as toggles, selects (<code>presets</code>, <code>revertPolicy</code>) as pickers, and numbers (<code>cooldownMs</code>, <code>maxSwitchesPerStep</code>, <code>alwaysModeRetryCap</code>) as numeric inputs; complex structures (<code>rootChain</code>, <code>timeSlots</code>, <code>roles.list</code>, <code>roles.rules</code>) are JSON text fields and <code>triggerCodes</code> a comma-separated text field. Invalid drafts (bad JSON, non-conforming chains, malformed time-slot rows) block the save — the section never corrupts the config.</li>
+</ul>
+<p><strong>Requirements</strong>: the <code>/settings</code> fallbacks section needs <strong>dsh-tui ≥ v0.8.5</strong> (commit <code>c51661f</code> or later on <code>main</code>; the settings seam shipped in v0.8.0, the groups shape + validation in v0.8.5). On an older dsh-tui the section is absent, and file editing remains the only TUI edit surface.</p>
+<p>File editing still works everywhere: the shared <code>$DSH_HOME/settings.yaml</code> (<code>fallbacks:</code> section — the same file the web card writes) for global settings, or the profile patch <code>~/.dsh/profiles/dsh-tui/cordis.patch.yml</code> (<code>config:</code> overrides on the plugin row) for dsh-tui-specific values. A patch row <strong>replaces</strong> the targeted row's whole <code>config</code> — restate every field you want to keep (schema defaults fill the rest).</p>
+<h2>FallbacksChain in the model picker</h2>
+<p>When <code>enabled: true</code>, the plugin registers a virtual provider, <strong>FallbacksChain</strong>, with a single catalog row: <strong>Auto</strong>. The web profile and dsh-tui both see the row: they share the same adapter catalog, so the row needs no settings-page wiring or host patch (it is independent of the <code>/settings</code> fallbacks section, which edits configuration rather than the picker catalog). The row is visible whenever the plugin is enabled — a legacy or empty all-day chain does NOT hide it (the override just refuses to fire).</p>
+<p>Selecting <strong>FallbacksChain / Auto</strong> uses the configured chain as the root <strong>primary</strong>: root requests route to the effective chain's first exact <code>provider/model</code> at request time, and the fallback engine degrades from that head as usual. Selecting any real catalog model keeps the v0.2.2 fallback-only behavior — the session model is primary and the chain engages only after it fails.</p>
+<p>There is <strong>no <code>rootMode</code> switch</strong> — no config key, YAML field, settings toggle, or gateway flag. The mode is the session's <code>{provider, model}</code> selection itself: <code>FallbacksChain</code> = chain primary; any real model = fallback-only.</p>
+<p>Notes:</p>
+<ul>
+<li><strong>Picker label</strong>: the row's catalog <code>name</code> (what the composer trigger shows) is live — <code>Auto: DeepSeek V4 Flash[Liang Peak]</code> / <code>Auto: DeepSeek V4 Flash[all-day]</code> (catalog display name, not the model id); the id stays <code>Auto</code>. Bare <code>Auto</code> if the all-day tail is not conforming. Refresh by reopening the picker.</li>
+<li><strong>Root only</strong>: the row is about the root agent. Subagent role resolution and injection are unchanged; a subagent session that inherits the selection still routes through the chain head — the virtual row is a thin delegate, never a second routing engine.</li>
+<li><strong>Conformance gate on the tail</strong>: a successful override/delegate requires the all-day chain to be <strong>tail-conforming</strong> — its last entry must be exactly one official V4 model (<code>deepseek-official/deepseek-v4-flash</code> or <code>deepseek-official/deepseek-v4-pro</code>, the card's Default model panel); leading entries (Default fallback chain) are walked first. Disabling the plugin hides the row again (slot-row/chain edits never churn registration).</li>
+<li><strong>Stale selection</strong>: if the row disappears (plugin disabled) while <code>FallbacksChain / Auto</code> is selected, the session keeps showing it as the current model with <code>routable: false</code> — pick a real model from the catalog to continue (host-native catalog semantics).</li>
+<li><strong>Capabilities follow the head</strong>: the row's model metadata (context window, modalities, reasoning) mirrors the current effective head; retry attribution follows the permissive default — retries/failures are accounted to the real head pair, not to the <code>FallbacksChain</code> provider. Full semantics → <a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/configuration.md" target="_blank" rel="noopener noreferrer">docs/configuration.md</a>.</li>
+</ul>
+<h2>Time-slot presets</h2>
+<p>Time slots are introduced in the <a href="#time-slots" target="_blank" rel="noopener noreferrer">featured overview</a> above; this section is the reference. Time-slot rows rotate the <strong>effective root chain</strong> by wall-clock windows — useful for peak/valley pricing without confusing wall-clock rotation with failure fallback. The copy split is strict: slot rotation logs and UI say <strong>time-slot switch</strong>; the failure walk keeps <strong>fallback switch</strong>; the conversation notice Model downgraded stays on the failure path only.</p>
+<ul>
+<li><strong>Match order</strong>: at every root request, the first extra row whose window contains the current moment (in <code>fallbacks.tz</code>, default <code>Asia/Shanghai</code> / UTC+8) wins — that row's chain <strong>replaces</strong> the all-day chain. No row matches → the all-day <code>rootChain</code> is used. The all-day row is always last and <strong>required</strong>: its last entry must be exactly one official V4 model (Flash XOR Pro; leading Default fallback chain entries are walked first).</li>
+<li><strong>Presets</strong> (frozen, not user-editable): <code>liang-peak</code> = Monday–Friday 09:00–12:00 <strong>and</strong> 14:00–18:00; <code>liang-valley</code> = every other UTC+8 time; <code>glm-peak</code> = Monday–Friday 14:00–18:00; <code>glm-valley</code> = every other time. One preset id = one row; the card picker never offers a duplicate.</li>
+<li><strong>Custom rows</strong>: <code>start</code> / <code>end</code> (<code>HH:mm</code>, may wrap midnight) + optional <code>days</code> (0=Sunday…6=Saturday; omitted/empty = every day) + models.</li>
+<li><strong>Next-request apply</strong>: a slot boundary crossing never preempts an in-flight step — the new row takes effect on the next root request. Rotation is mount-only: info log + card/<code>/fallbacks</code> status line, no durable switch event.</li>
+<li><strong>Settings card</strong>: the Main agent section groups Time slots (extra rows — add preset / add custom / remove / reorder by buttons or <strong>drag</strong>; preset rows show a read-only window summary and edit models only; custom rows carry an editable name; the <strong>timezone picker</strong> lives here and <strong>locks to Asia/Shanghai while any preset row exists</strong>, since preset windows are frozen UTC+8 constants), Default fallback chain (walked first when no slot matches) and Default model (the official V4 Flash | Pro last-resort fallback). Rows are collapsible to name + first model. There is no <code>timeSlots.enabled</code> master switch (adding a row is the opt-in) and no <code>rootMode</code> control.</li>
+</ul>
+<h2>Preset roles</h2>
+<p>The plugin ships <strong>7 bundled generic subagent roles</strong> out of the box — <code>designer</code> / <code>librarian</code> / <code>reviewer</code> / <code>scout</code> / <code>security-reviewer</code> / <code>sonic</code> / <code>task</code> — declared automatically on <code>apply</code> as seeded <code>roles.list</code> rows (<code>{ id, persona }</code>): idempotent, and never overwriting an operator persona. They appear in the Settings card (seed badge, id immutable) and in the <code>/fallbacks config</code> role summary, ready for <code>roles.rules</code> to reference.</p>
+<ul>
+<li><strong>Switch</strong>: <code>fallbacks.presets</code> — <code>'bundled'</code> (default) declares the preset roles on apply; <code>'none'</code> disables the automatic declaration (already-materialized rows stay).</li>
+<li>Full semantics (upgrade behavior, conflict handling, library reuse of <code>presetRoles</code>) → <a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/configuration.md" target="_blank" rel="noopener noreferrer">docs/configuration.md</a>.</li>
+</ul>
+<h2>Mount-only (no dsh modification)</h2>
+<p>The plugin installs as a <strong>pure mount</strong>: bundle insert + client inject + its own gateway channel (<code>/api/fallbacks/get|set|reset</code>) — no dsh patches, no postinstall step, and dsh upgrades never require re-patching. Stale leftover patches from an older patched install are harmless.</p>
+<h2>Documentation</h2>
+<table>
+<thead>
+<tr>
+<th>Doc</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/install.md" target="_blank" rel="noopener noreferrer">docs/install.md</a></td>
+<td>profile install (web + dsh-tui) / registry / git / local variants / uninstall / <code>--dump-config</code> verification</td>
+</tr>
+<tr>
+<td><a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/configuration.md" target="_blank" rel="noopener noreferrer">docs/configuration.md</a></td>
+<td>full <code>fallbacks</code> namespace reference, selector syntax, example YAML, plugin-config card usage, TUI readback, behavior notes, preset roles</td>
+</tr>
+<tr>
+<td><a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/consumer-api.md" target="_blank" rel="noopener noreferrer">docs/consumer-api.md</a></td>
+<td>developer consumption contract: library API + named <code>llm-fallbacks</code> service + role seeds, export inventory, lifecycle, typing</td>
+</tr>
+<tr>
+<td><a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/release.md" target="_blank" rel="noopener noreferrer">docs/release.md</a></td>
+<td>release process: Trusted Publishing setup, Release prep SOP, fragment format, rollback</td>
+</tr>
+<tr>
+<td><a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/docs/verification.md" target="_blank" rel="noopener noreferrer">docs/verification.md</a></td>
+<td>verification records (test matrix, bundle layer order, runtime contracts, QA gate script)</td>
+</tr>
+</tbody></table>
+<h2>License</h2>
+<p>Released under the <strong>MIT</strong> License — see <a href="https://github.com/omdsh-dev/dsh-llm-fallbacks/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>. The LICENSE file is authoritative for copyright and license terms.</p>

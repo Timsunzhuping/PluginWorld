@@ -1,0 +1,100 @@
+<h1>Code Context Storage MCP</h1>
+<p><code>code-context-storage-mcp</code> 是代码上下文知识库的本地存储与 MCP 协议服务。它把代码节点、调用边、语义信息、证据、业务目录/映射和版本快照保存到 SQLite，并通过 FastMCP 的 stdio transport 对外提供结构化 tools。</p>
+<p>项目定位在“Skill / 外部 AI”和持久化业务能力之间：调用方通过 MCP tools 读写知识库，不应直接访问 SQLite。MVP 面向单个代码仓库和固定源码版本，重点支持索引/工件导入、受版本约束的查询、业务映射、证据校验、增量同步、快照发布与评测。</p>
+<h2>Features</h2>
+<ul>
+<li>SQLite 持久化代码事实：<code>node</code>、<code>edge</code>、<code>evidence</code>、<code>node_semantic</code>。</li>
+<li>基于语义与业务词的节点召回，以及受预算约束的图上下文、路径和影响分析。</li>
+<li>业务目录、context、mapping 和 mapping steps；候选与已确认结果有明确状态。</li>
+<li>staging → published 的快照发布流程，包含幂等操作、CAS 并发保护和 stale 传播/恢复。</li>
+<li>MCP protocol v2 envelope：<code>request_id</code>、<code>operation_id</code>、schema/tool version 和结构化错误。</li>
+<li>测试覆盖单元、契约、黑盒和真实 stdio MCP 适配器场景。</li>
+</ul>
+<p>不属于本项目范围的内容包括代码生成/执行、跨仓库统一图谱、未经人工确认的自动业务建模，以及把运行时观测混入静态代码事实。完整边界见 <a href="https://github.com/Jrains-ux/code-context-storage-mcp/blob/HEAD/docs/design/2026-08-20-code-context-knowledge-base-mvp-design.md" target="_blank" rel="noopener noreferrer">MVP 设计文档</a>。</p>
+<h2>Requirements</h2>
+<ul>
+<li>Python 3.11 或更高版本</li>
+<li><code>pip</code></li>
+<li>Windows PowerShell 示例中的工作目录为本仓库根目录</li>
+</ul>
+<p>依赖由 <code>pyproject.toml</code> 声明，核心运行时依赖为 <code>fastmcp==3.4.7</code>。</p>
+<h2>Install</h2>
+<p>推荐使用虚拟环境：</p>
+<pre><code class="language-powershell">python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+</code></pre>
+<p>如果 PowerShell 禁止激活脚本，可以不激活环境，直接使用 <code>.\.venv\Scripts\python.exe</code> 执行下面的命令。</p>
+<h2>Run the MCP server</h2>
+<p>安装后使用项目提供的命令行入口：</p>
+<pre><code class="language-powershell">code-context-storage-mcp --database .data\context.db
+</code></pre>
+<p>或直接使用模块入口：</p>
+<pre><code class="language-powershell">python -m code_context_storage_mcp.server --database .data\context.db
+</code></pre>
+<p>两种启动方式都使用 stdio transport。进程从 stdin 读取 MCP JSON-RPC 消息并将响应写入 stdout，因此不要在 stdout 中追加普通日志；数据库默认路径是 <code>.data/context.db</code>，可通过 <code>--database</code> 指定其他 SQLite 文件。</p>
+<p>查看命令行参数：</p>
+<pre><code class="language-powershell">code-context-storage-mcp --help
+</code></pre>
+<h2>MCP client configuration</h2>
+<p>stdio 客户端应启动以下命令，并把请求写入 stdin：</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "code-context-storage": {
+      "command": "code-context-storage-mcp",
+      "args": ["--database", ".data/context.db"]
+    }
+  }
+}
+</code></pre>
+<p>未安装 console script 时，可以把 <code>command</code> 改为 Python，<code>args</code> 改为：</p>
+<pre><code class="language-json">["-m", "code_context_storage_mcp.server", "--database", ".data/context.db"]
+</code></pre>
+<p>客户端连接后先调用 MCP 的 <code>tools/list</code> 查看当前注册工具及输入 schema。工具按能力覆盖代码事实写入/读取、图查询、业务目录与映射、同步控制、发布、证据、知识生成和评测；具体注册集合以服务运行时返回的 <code>tools/list</code> 为准。</p>
+<h2>Development commands</h2>
+<p>在仓库根目录执行：</p>
+<pre><code class="language-powershell">python -m pytest tests -q
+</code></pre>
+<p>运行黑盒测试：</p>
+<pre><code class="language-powershell">python -m pytest tests\blackbox -q
+</code></pre>
+<p>黑盒测试中需要真实 MCP stdio 服务的场景可配置服务命令：</p>
+<pre><code class="language-powershell">$env:PYTHONPATH = "src"
+$env:KNOWLEDGE_GENERATE_MCP_COMMAND = '["python", "-m", "code_context_storage_mcp.server"]'
+python -m pytest tests\blackbox -q
+</code></pre>
+<p>部分黑盒测试会在缺少该配置时跳过；在 CI 中应显式配置并让测试暴露配置或协议问题。</p>
+<h2>Phase acceptance and evaluation</h2>
+<p>生成 Phase acceptance 报告及其配套的 evaluation request：</p>
+<pre><code class="language-powershell">python scripts\run_phase_acceptance.py --output artifacts\phase-acceptance.json
+</code></pre>
+<p>使用生成的请求和阈值运行离线评测：</p>
+<pre><code class="language-powershell">python scripts\run_evaluation.py `
+  --request artifacts\evaluation-request.json `
+  --thresholds artifacts\thresholds.json `
+  --output artifacts\evaluation-result.json `
+  --database .data\context.db
+</code></pre>
+<p><code>run_evaluation.py</code> 默认使用空的响应集，适合验证评测管线和输入契约；要得到有意义的评测结果，应通过 <code>--responses</code> 提供 MCP client 的黑盒响应。脚本在评测状态不是 <code>passed</code> 时以非零退出码结束。</p>
+<h2>Repository layout</h2>
+<pre><code class="language-text">src/code_context_storage_mcp/
+  server.py                 CLI 入口，创建 Store 并启动 stdio MCP 服务
+  fastmcp_server.py         FastMCP server、tool 注册和 protocol envelope
+  tool_definitions.py       tool 输入 schema
+  router.py                 tool 到 handler/service 的分发
+  handlers/                 代码事实、图查询和业务操作处理器
+  services/                 查询、同步、索引、幂等、追踪等业务服务
+  publication/              发布适配与发布服务
+  store.py                  SQLite 持久化
+  entities.py/contracts.py  数据实体与协议契约
+migrations/                 SQLite schema migrations
+tests/                      单元、契约、集成和黑盒测试
+scripts/                    验收与评测脚本
+docs/design/                设计文档
+</code></pre>
+<p>运行主链路是：<code>server.main -&gt; Store -&gt; create_mcp_server -&gt; ToolRouter -&gt; handlers/services -&gt; SQLite</code>。写入类操作通常先进入 staging，经过冲突/覆盖率等门禁后再发布快照；查询固定在一个快照和 source revision 上，并返回可追溯的执行上下文。</p>
+<h2>Data and migrations</h2>
+<p>默认数据库文件 <code>.data/context.db</code> 是运行时数据，不应提交到版本库。schema 由 <code>migrations/</code> 中的 SQL 文件维护；在使用新代码连接已有数据库前，应确认对应 migration 已应用。测试通常使用临时 SQLite 数据库，因此不会依赖开发机上的默认数据文件。</p>
+<h2>License</h2>
+<p>当前仓库未提供独立许可证文件；如需对外发布，请先补充许可证和贡献说明。</p>

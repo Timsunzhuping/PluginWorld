@@ -42,6 +42,9 @@ export const plugins = pgTable(
     scoreSecurity: numeric("score_security"),
     scoreDocs: numeric("score_docs"),
     trustFlags: jsonb("trust_flags"),
+    // Pre-index security scan result (grade D is never listed)
+    securityGrade: text("security_grade", { enum: ["A+", "A", "B", "C", "D"] }),
+    securityFindings: jsonb("security_findings"),
     readmeHtml: text("readme_html"),
     npmPackage: text("npm_package"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

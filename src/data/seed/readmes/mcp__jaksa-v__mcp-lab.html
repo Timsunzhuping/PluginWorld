@@ -1,0 +1,490 @@
+<h1>mcp-lab</h1>
+<p>A Laravel app that exists to force every part of <a href="https://laravel.com/docs/13.x/mcp" target="_blank" rel="noopener noreferrer">Laravel MCP</a>. Fake helpdesk. Fake company. Throw it away when you are done.</p>
+<p>This is the default reference for how MCP works in Laravel and how this repo uses it.</p>
+<p>This is a gym, not a product. If you catch yourself picking a typeface or inventing a billing page, stop.</p>
+<h2>How Laravel MCP works</h2>
+<p><a href="https://modelcontextprotocol.io/docs/getting-started/intro" target="_blank" rel="noopener noreferrer">Model Context Protocol</a> is JSON-RPC. An AI host lists what your server exposes, then calls it. Cursor and Inspector are the hosts this repo cares about. Laravel MCP, <code>laravel/mcp</code> 0.9.x here, is the wrapper.</p>
+<p>You do not invent a protocol. You write PHP classes and register them.</p>
+<h3>Servers</h3>
+<p>A server is a class that extends <code>Laravel\Mcp\Server</code>. It is a catalog of tools, resources, and prompts.</p>
+<pre><code class="language-php">#[Name('Northwind Tickets')]
+#[Version('0.0.1')]
+#[Instructions('...')]
+class TicketsServer extends Server
+{
+    protected array $tools = [/* ... */];
+    protected array $resources = [/* ... */];
+    protected array $prompts = [/* ... */];
+}
+</code></pre>
+<p><code>#[Name]</code>, <code>#[Version]</code>, <code>#[Instructions]</code>, and <code>#[Icon]</code> are metadata the host shows the model. Instructions are the system prompt for that server. Keep them short and operational.</p>
+<p>Create one with <code>php artisan make:mcp-server</code>. Register it in <code>routes/ai.php</code>. Laravel loads that file on its own. Do not add it to <code>bootstrap/app.php</code>.</p>
+<h3>Local vs web</h3>
+<p>Same server class. Two ways in.</p>
+<pre><code class="language-php">Mcp::local('tickets', TicketsServer::class);
+Mcp::web('/mcp/tickets', TicketsServer::class)-&gt;middleware(['auth:api', 'throttle:mcp']);
+</code></pre>
+<p>Local is stdio. The host runs <code>php artisan mcp:start tickets</code> as a child process. That is the daily Cursor loop. No HTTP session, no cookies, no Passport.</p>
+<p>Web is HTTP JSON-RPC at that path. Inspector and remote hosts use it. Middleware applies, and this is where OAuth lives.</p>
+<p>Do not wrap <code>routes/ai.php</code> in the <code>web</code> middleware group. CSRF will block Inspector.</p>
+<h3>Tools, resources, and prompts</h3>
+<p>A server can expose tools, resources, and prompts. Generate them with <code>make:mcp-tool</code>, <code>make:mcp-resource</code>, and <code>make:mcp-prompt</code>. Then add the class to the server arrays. An unregistered class does nothing.</p>
+<p>Tools are actions. The model calls them with arguments. <code>schema()</code> is the JSON Schema the host advertises. <code>handle(Request $request)</code> does the work. <code>$request-&gt;validate()</code> is ordinary Laravel validation. Write messages a model can act on, like <code>Give me the ticket id, like 12.</code>, not <code>The ticket_id field is required.</code></p>
+<p>Resources are readable documents at a URI. A static URI uses <code>#[Uri('desk://playbook')]</code>. Templates implement <code>HasUriTemplate</code> and read variables with <code>$request-&gt;get('id')</code>. MIME type uses <code>#[MimeType]</code>. The host can list them and read them without calling a tool.</p>
+<p>Prompts are reusable message templates. <code>arguments()</code> declares what the host should collect. <code>handle()</code> returns messages, usually an assistant instruction plus a user message that includes real data. The model then writes from that.</p>
+<p>Constructor-inject repositories. Do not put queries in the tool class. <code>handle()</code> can also type-hint Laravel services.</p>
+<h3>Responses</h3>
+<p><code>handle()</code> returns a <code>Laravel\Mcp\Response</code>, a response factory, an array of responses, or a <code>Generator</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Shape</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Text</td>
+<td><code>Response::text('...')</code></td>
+</tr>
+<tr>
+<td>Error</td>
+<td><code>Response::error('Permission denied.')</code></td>
+</tr>
+<tr>
+<td>Structured JSON</td>
+<td><code>Response::structured($payload)</code> plus <code>outputSchema()</code></td>
+</tr>
+<tr>
+<td>Several text blocks</td>
+<td><code>Response::make([Response::text(...), Response::text(...)])</code></td>
+</tr>
+<tr>
+<td>Resource link</td>
+<td><code>Response::resourceLink(uri:, name:, mimeType:, title:)</code></td>
+</tr>
+<tr>
+<td>Blob from disk</td>
+<td><code>Response::fromStorage('badge.png')</code></td>
+</tr>
+<tr>
+<td>HTML app</td>
+<td><code>Response::view('mcp.queue-app', [...])</code></td>
+</tr>
+<tr>
+<td>Progress</td>
+<td><code>yield Response::notification('processing/progress', [...])</code> from a generator</td>
+</tr>
+</tbody></table>
+<p><code>Response::structured</code> cannot be empty and returns a factory. To mix structured JSON with resource links, build both and attach the payload with <code>withStructuredContent</code>. That is what <code>list_tickets</code> does.</p>
+<p>Class <code>$meta</code> is metadata on the tool itself. <code>-&gt;withMeta([...])</code> is metadata on one response. <code>create_ticket</code> has the first. <code>get_ticket</code> has the second.</p>
+<h3>Annotations</h3>
+<p>Hints for the host. They do not enforce anything in PHP. Policies still do.</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Meaning here</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>#[IsReadOnly]</code></td>
+<td>Does not write</td>
+</tr>
+<tr>
+<td><code>#[IsIdempotent]</code></td>
+<td>Safe to retry</td>
+</tr>
+<tr>
+<td><code>#[IsDestructive]</code></td>
+<td>Deletes or wrecks state</td>
+</tr>
+<tr>
+<td><code>#[IsOpenWorld]</code></td>
+<td>May touch the outside world. <code>who_is_on_call</code> wears this even though the rota is fake</td>
+</tr>
+<tr>
+<td><code>#[Priority]</code>, <code>#[Audience]</code>, <code>#[LastModified]</code></td>
+<td>Resource hints</td>
+</tr>
+<tr>
+<td><code>#[RendersApp]</code></td>
+<td>This tool opens an MCP App</td>
+</tr>
+</tbody></table>
+<p><code>shouldRegister(Request $request): bool</code> hides a tool, resource, or prompt from the list. If the host still tries to call a hidden one, the server returns not-found. Use it for role gates. <code>delete_ticket</code> is admin-only. Still check <code>$request-&gt;user()-&gt;can(...)</code> inside <code>handle()</code>. Listing and executing are different doors.</p>
+<h3>Authorization</h3>
+<p><code>$request-&gt;user()</code> is the signed-in user, same as a controller. Call <code>$user-&gt;can('update', $ticket)</code> and return <code>Response::error('Permission denied.')</code>. Do not invent a second auth system.</p>
+<p>Local servers have no HTTP session. This app's ticket server signs in as Sam in <code>boot()</code> when <code>Auth</code> is empty. Web servers get the user from Passport.</p>
+<h3>The MCP client</h3>
+<p>Laravel can call an MCP server too. Named clients live in a service provider.</p>
+<pre><code class="language-php">Mcp::registerClient('directory', fn () =&gt; Client::local('php', [
+    'artisan', 'mcp:start', 'directory',
+]));
+</code></pre>
+<p>Then ticket code does <code>Mcp::client('directory')-&gt;callTool('get_person', ['id' =&gt; $id])</code> or <code>-&gt;readResource('directory://people/'.$id)</code>.</p>
+<p><code>Client::local</code> spawns a process. <code>Client::web($url)</code> is HTTP. Same-app HTTP against <code>php artisan serve</code> deadlocks because that process is single-threaded. Use local for same-app calls.</p>
+<h3>MCP Apps</h3>
+<p>An <code>AppResource</code> returns a self-contained HTML document at a <code>ui://</code> URI. A tool marked <code>#[RendersApp(resource: QueueApp::class)]</code> tells a capable host to fetch that HTML and put it in a sandboxed iframe.</p>
+<p>The Blade view uses <code>&lt;x-mcp::app&gt;</code>. That component ships the client SDK. Inside the iframe, <code>createMcpApp</code> gives you <code>app.callServerTool(...)</code>. Vite and React do not apply. Tailwind and Alpine come from <code>#[AppMeta(libraries: [Library::Tailwind, Library::Alpine])]</code>.</p>
+<p><code>Visibility::App</code> hides a tool from the model so only the iframe can call it. <code>get_queue_data</code> is that tool.</p>
+<p>Cursor lists these tools. It does not render the iframe. Pest is how you know the classes work.</p>
+<h3>Auth on the web</h3>
+<p>The Laravel docs offer Sanctum and Passport. Sanctum is a bearer token. Passport is OAuth 2.1, which is what the protocol specifies.</p>
+<p>This app uses Passport. <code>Mcp::oauthRoutes()</code> registers discovery and dynamic client registration. Web routes use <code>auth:api</code>. Laravel MCP advertises a single <code>mcp:use</code> scope. Publish <code>mcp-views</code> and point <code>Passport::authorizationView</code> at <code>resources/views/mcp/authorize.blade.php</code>. Leave that Blade alone.</p>
+<h3>Testing</h3>
+<p>Inspector is for poking. Pest is how you know policies hold.</p>
+<pre><code class="language-php">TicketsServer::actingAs($sam)
+    -&gt;tool(ListTicketsTool::class, ['status' =&gt; 'open'])
+    -&gt;assertOk()
+    -&gt;assertSee('...');
+
+TicketsServer::resource(TicketResource::class, ['id' =&gt; $ticket-&gt;id]);
+TicketsServer::prompt(DraftReplyPrompt::class, ['ticket_id' =&gt; $ticket-&gt;id, 'tone' =&gt; 'curt']);
+</code></pre>
+<p>Template resources take the URI variables as the second argument. The helper expands <code>desk://tickets/{id}</code>.</p>
+<p><code>assertSee</code> only reads text and structured data. Resource links and <code>_meta</code> live on the raw JSON-RPC payload. This repo's <code>mcpRpc()</code> and <code>mcpToolContent()</code> in <code>tests/Helpers.php</code> read that. Generator tools use <code>assertSentNotification</code> and <code>assertNotificationCount</code>. The final result still holds the text payloads.</p>
+<p>Web auth is an HTTP test. <code>POST /mcp/tickets</code> with <code>mcpTicketsCall()</code>. Unauthenticated requests must be 401, not a login redirect.</p>
+<h2>What this repo is</h2>
+<p>Northwind Support. One Laravel 13 app, PHP 8.4, SQLite. Inertia and React are the dump page only. The agent is the write path.</p>
+<p>Two MCP servers, each registered twice, local and web.</p>
+<pre><code>routes/ai.php
+
+Mcp::local('directory', DirectoryServer::class);
+Mcp::local('tickets', TicketsServer::class);
+
+Mcp::oauthRoutes();
+
+Mcp::web('/mcp/directory', DirectoryServer::class)
+    -&gt;middleware(['auth:api', 'throttle:mcp']);
+
+Mcp::web('/mcp/tickets', TicketsServer::class)
+    -&gt;middleware(['auth:api', 'throttle:mcp']);
+</code></pre>
+<p>DirectoryServer is read-only people and teams. TicketsServer is the helpdesk. Ticket tools must not query <code>User</code> or <code>Team</code> through Eloquent. They look people up through the named <code>directory</code> client, <code>get_person</code> and <code>directory://people/{id}</code>. That is why there are two servers. If you <code>User::find()</code> from a ticket tool, you skipped the point.</p>
+<p>Queries live in <code>DirectoryRepository</code> and <code>TicketRepository</code>. Tools inject those.</p>
+<h2>Domain</h2>
+<p>Three roles on <code>users.role</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>What they can do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>requester</code></td>
+<td>Open tickets, comment on their own, read public KB</td>
+</tr>
+<tr>
+<td><code>agent</code></td>
+<td>See every ticket, assign, comment, change status, read internal KB</td>
+</tr>
+<tr>
+<td><code>admin</code></td>
+<td>Everything an agent can, plus delete tickets and the weekly-review prompt</td>
+</tr>
+</tbody></table>
+<p>Policies are ordinary Laravel policies. <code>TicketPolicy</code> covers view, update, comment, and delete. <code>ArticlePolicy</code> hides internal articles from requesters. Staff is <code>Role::isStaff()</code>, agent or admin.</p>
+<p>Login users come from <code>LabSeeder</code>. Password for all of them is <code>password</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Email</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ada@northwind.test</code></td>
+<td>requester</td>
+</tr>
+<tr>
+<td><code>sam@northwind.test</code></td>
+<td>agent</td>
+</tr>
+<tr>
+<td><code>root@northwind.test</code></td>
+<td>admin</td>
+</tr>
+</tbody></table>
+<p><code>email_verified_at</code> is set. Fortify has verification enabled. <code>User</code> does not implement <code>MustVerifyEmail</code>, so you will not be blocked.</p>
+<p>Jonah Hale, <code>jonah@northwind.test</code>, is the on-call agent.</p>
+<h3>Tables</h3>
+<p>Keep them small. If a column is not needed by a tool, it is not there.</p>
+<p><strong>users.</strong> Starter-kit columns plus <code>role</code> (<code>requester\|agent\|admin</code>), <code>team_id</code> nullable, <code>title</code>, <code>on_call</code>.</p>
+<p><strong>teams.</strong> <code>name</code>, <code>slug</code>. Support, Billing, Warehouse.</p>
+<p><strong>tickets.</strong> <code>subject</code>, <code>body</code>, <code>status</code> (<code>open\|pending\|closed</code>), <code>priority</code> (<code>low\|normal\|high\|urgent</code>), <code>requester_id</code>, <code>assignee_id</code> nullable, <code>team_id</code> nullable.</p>
+<p><strong>comments.</strong> <code>ticket_id</code>, <code>user_id</code>, <code>body</code>.</p>
+<p><strong>articles.</strong> <code>slug</code>, <code>title</code>, <code>body</code>, <code>visibility</code> (<code>public\|internal</code>). Four rows. Public ones are refunds and shipping. Internal ones are escalation and refund-abuse.</p>
+<p><code>LabSeeder</code> runs from <code>DatabaseSeeder</code>. It is idempotent enough to re-run after <code>migrate:fresh</code>. Twenty tickets, thirty comments, eight people, one PNG at <code>storage/app/badge.png</code>.</p>
+<h2>DirectoryServer</h2>
+<p>Read-only. The instructions say so. Name <code>Northwind Directory</code>, version <code>0.0.1</code>, teal icon.</p>
+<h3>Tools</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search_people</code></td>
+<td>Search by name, email, or title. Optional team slug. Structured <code>{ people }</code> with <code>outputSchema</code>. <code>#[IsReadOnly]</code> and <code>#[IsIdempotent]</code></td>
+</tr>
+<tr>
+<td><code>get_person</code></td>
+<td>Look up one user id. Custom validation messages. Structured <code>{ person }</code></td>
+</tr>
+<tr>
+<td><code>list_teams</code></td>
+<td>No required args. Two text blocks, names then slugs</td>
+</tr>
+<tr>
+<td><code>who_is_on_call</code></td>
+<td>Returns the <code>on_call</code> user. <code>#[IsOpenWorld]</code> on a fake rota so the annotation is used</td>
+</tr>
+</tbody></table>
+<h3>Resources</h3>
+<table>
+<thead>
+<tr>
+<th>URI</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>directory://org</code></td>
+<td>Static markdown. <code>#[MimeType]</code>, <code>#[Priority(0.9)]</code>, <code>#[Audience(Role::Assistant)]</code></td>
+</tr>
+<tr>
+<td><code>directory://people/{id}</code></td>
+<td>Person dossier. <code>HasUriTemplate</code>, <code>$request-&gt;get('id')</code></td>
+</tr>
+<tr>
+<td><code>directory://teams/{slug}</code></td>
+<td>Team dossier. Second template so the first is not a one-off</td>
+</tr>
+<tr>
+<td><code>directory://on-call</code></td>
+<td>Who is on call. <code>#[LastModified]</code></td>
+</tr>
+<tr>
+<td><code>directory://badge</code></td>
+<td>Tiny PNG via <code>Response::fromStorage('badge.png')</code></td>
+</tr>
+</tbody></table>
+<p>No prompts here. They belong on the ticket server, where they have something to say.</p>
+<h2>TicketsServer</h2>
+<p>Name <code>Northwind Tickets</code>, version <code>0.0.1</code>, dark icon.</p>
+<p><code>boot()</code> signs in as <code>sam@northwind.test</code> when nobody is authenticated. Local Cursor has no HTTP session. Without this, every tool would say <code>You must be signed in.</code> Web requests already have a Passport user, so <code>boot()</code> returns early.</p>
+<h3>Tools</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>list_tickets</code></td>
+<td>Lists tickets the user can see. Status and priority filters. Structured output plus <code>desk://tickets/{id}</code> resource links</td>
+</tr>
+<tr>
+<td><code>get_ticket</code></td>
+<td>One ticket. Assignee and requester names come from <code>directory://people/{id}</code>. <code>withMeta(['source' =&gt; 'eloquent'])</code></td>
+</tr>
+<tr>
+<td><code>create_ticket</code></td>
+<td>Opens a ticket. Class <code>$meta</code> has <code>version</code> and <code>author</code></td>
+</tr>
+<tr>
+<td><code>add_comment</code></td>
+<td>Adds a comment after the <code>comment</code> policy check</td>
+</tr>
+<tr>
+<td><code>assign_ticket</code></td>
+<td><code>#[IsIdempotent]</code>. Resolves the person with <code>Mcp::client('directory')-&gt;callTool('get_person', ...)</code></td>
+</tr>
+<tr>
+<td><code>set_status</code></td>
+<td>Sets <code>open</code>, <code>pending</code>, or <code>closed</code>. This is close and reopen too</td>
+</tr>
+<tr>
+<td><code>delete_ticket</code></td>
+<td><code>#[IsDestructive]</code>. <code>shouldRegister</code> is true only for admins</td>
+</tr>
+<tr>
+<td><code>close_stale_tickets</code></td>
+<td>Closes every <code>open</code> ticket older than N days. Yields <code>processing/progress</code> as it goes</td>
+</tr>
+<tr>
+<td><code>search_kb</code></td>
+<td>Searches articles the current user can see. Structured <code>{ articles }</code> with <code>desk://kb/{slug}</code></td>
+</tr>
+<tr>
+<td><code>show_queue</code></td>
+<td>Model-visible. <code>#[RendersApp(resource: QueueApp::class)]</code></td>
+</tr>
+<tr>
+<td><code>get_queue_data</code></td>
+<td>Same app, <code>visibility: [Visibility::App]</code>. The iframe refreshes without handing the model a second list tool</td>
+</tr>
+</tbody></table>
+<p><code>list_tickets</code> cannot use <code>TicketResource::uri()</code> for links. That method returns the template <code>desk://tickets/{id}</code>. Links must be the expanded string.</p>
+<p><code>assign_ticket</code> and <code>get_ticket</code> refuse to touch <code>User</code>. If the directory client is unplugged, assign fails. Pest proves that.</p>
+<h3>Prompts</h3>
+<table>
+<thead>
+<tr>
+<th>Prompt</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>draft_reply</code></td>
+<td>Takes <code>ticket_id</code> and <code>tone</code>. Loads the ticket. Assistant message plus a user message that includes the real subject</td>
+</tr>
+<tr>
+<td><code>triage_ticket</code></td>
+<td>Takes <code>ticket_id</code>. Validates with a useful error string</td>
+</tr>
+<tr>
+<td><code>weekly_review</code></td>
+<td>Recap of open tickets. <code>shouldRegister</code> is false for requesters</td>
+</tr>
+</tbody></table>
+<h3>Resources</h3>
+<table>
+<thead>
+<tr>
+<th>URI</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>desk://playbook</code></td>
+<td>Static markdown, high priority. How to triage</td>
+</tr>
+<tr>
+<td><code>desk://queue</code></td>
+<td>Markdown list of open tickets the current user can see</td>
+</tr>
+<tr>
+<td><code>desk://tickets/{id}</code></td>
+<td>Markdown dossier with comments</td>
+</tr>
+<tr>
+<td><code>desk://kb/{slug}</code></td>
+<td>One article. Missing and forbidden slugs return the same error</td>
+</tr>
+<tr>
+<td><code>desk://kb/escalation</code></td>
+<td>Staff-only listing of the internal escalation article</td>
+</tr>
+<tr>
+<td><code>ui://</code> QueueApp</td>
+<td>Interactive queue iframe</td>
+</tr>
+</tbody></table>
+<p><code>desk://queue</code> is markdown. <code>QueueApp</code> is the iframe. Do not confuse them.</p>
+<h2>QueueApp</h2>
+<p><code>QueueApp</code> extends <code>AppResource</code>. Blade at <code>resources/views/mcp/queue-app.blade.php</code>. Alpine inside <code>&lt;x-mcp::app&gt;</code>. Refresh calls <code>get_queue_data</code> through <code>app.callServerTool</code>.</p>
+<p>This is not an Inertia page. Do not rewrite it in React.</p>
+<p>If the host cannot render MCP Apps, the classes and Pest tests are still the proof.</p>
+<h2>Auth and the web servers</h2>
+<p>Both <code>/mcp/tickets</code> and <code>/mcp/directory</code> use <code>auth:api</code> and <code>throttle:mcp</code>. The <code>mcp</code> limiter is 60 per minute in <code>AppServiceProvider</code>, keyed by user id or IP.</p>
+<p><code>User</code> implements <code>OAuthenticatable</code> and uses Passport <code>HasApiTokens</code>. Missing the interface is the usual Passport setup bug.</p>
+<p>An unauthenticated POST returns 401 with <code>WWW-Authenticate</code> pointing at that path's protected-resource metadata. Discovery covers both <code>/mcp/tickets</code> and <code>/mcp/directory</code>. Dynamic registration is <code>POST /oauth/register</code>. One access token works on both servers.</p>
+<p>The approve and deny screen is <code>resources/views/mcp/authorize.blade.php</code>. Leave it.</p>
+<h2>Dashboard</h2>
+<p>Fortify and Inertia come from the starter kit. Do not replace them.</p>
+<p><code>/dashboard</code> is two tables. Tickets show id, subject, status, priority, requester, and assignee. People show id, name, role, team, and on call. Wayfinder names the route. <code>DashboardController</code> passes Inertia props. No forms that create tickets.</p>
+<p>Proof a write tool worked by refreshing <code>/dashboard</code>. Run <code>composer run dev</code> when you care about the React page.</p>
+<p>Passport authorize and the QueueApp iframe stay Blade. The package owns those.</p>
+<h2>How you talk to it</h2>
+<p><strong>Cursor, local.</strong> <code>.cursor/mcp.json</code> starts both servers from the project root.</p>
+<pre><code class="language-json">{
+    "mcpServers": {
+        "northwind-tickets": {
+            "command": "php",
+            "args": ["artisan", "mcp:start", "tickets"]
+        },
+        "northwind-directory": {
+            "command": "php",
+            "args": ["artisan", "mcp:start", "directory"]
+        }
+    }
+}
+</code></pre>
+<p>Tickets is the daily loop. You do not need directory in Cursor for the client work. The ticket server process spawns it.</p>
+<p>Local tickets run as Sam. To see Ada or Root, use Pest <code>actingAs</code> or the web server with their token.</p>
+<p><strong>Inspector.</strong> <code>php artisan mcp:inspector tickets</code> and <code>php artisan mcp:inspector mcp/tickets</code>. Use this when a tool does nothing and you need the raw result. Web Inspector needs a Passport bearer token. The Inspector UI is on <code>:6274</code>, this app is on <code>:8000</code>. CORS for <code>mcp/*</code>, <code>oauth/*</code>, and <code>.well-known/*</code> lives in <code>config/cors.php</code>. Without those paths the discovery GETs return 200 and the browser still throws them away.</p>
+<p><strong>Dashboard.</strong> Proof the write tools hit Eloquent.</p>
+<p><strong>Pest.</strong> <code>php artisan test --compact tests/Feature/Mcp</code>.</p>
+<p>Do not <code>Client::web('http://127.0.0.1:8000/mcp/directory')</code> from a ticket tool while <code>artisan serve</code> is the only PHP process. It will hang. <code>composer run dev</code> does not change that. A second PHP server on <code>:8001</code> plus <code>Client::web</code> is an optional later experiment, not the default.</p>
+<h2>Testing this repo</h2>
+<p>Feature tests live in <code>tests/Feature/Mcp</code>. <code>TestCase</code> always rebinds the <code>directory</code> client to <code>InProcessDirectoryTransport</code> so SQLite <code>:memory:</code> is visible. One test in <code>DirectoryClientTest</code> uses the real stdio client to list tools. The unplugged-client test points the named client at <code>php -r 'exit(1);'</code>.</p>
+<p>Helpers in <code>tests/Helpers.php</code>:</p>
+<ul>
+<li><code>mcpRpc($response)</code> for the raw JSON-RPC array</li>
+<li><code>mcpToolContent($response)</code> for the result content list</li>
+<li><code>mcpTicketsCall($name, $arguments)</code> for a <code>tools/call</code> HTTP body</li>
+</ul>
+<p>To assert a tool is hidden, <code>TicketsServer::actingAs($user)</code> then <code>(new TicketsServer(new FakeTransporter))-&gt;createContext()-&gt;tools()</code>. Do not call <code>handle()</code> on a hidden tool and expect a policy error. Invoking it is a not-found JSON-RPC error.</p>
+<p>Read annotations from <code>$tool-&gt;annotations()</code>, not <code>toArray()['annotations']</code>. <code>Tool::toArray()</code> types that field as <code>array|object</code>. Resource <code>toArray()</code> omits annotations.</p>
+<p>Freeze time with <code>Carbon::setTestNow</code>. Without <code>pest-plugin-phpstan</code>, <code>$this</code> is <code>TestCall</code> and <code>$this-&gt;travelTo</code> does not typecheck.</p>
+<p>Import <code>Pest\Laravel\postJson</code> and <code>Pest\Laravel\withToken</code>. Do not call them on <code>$this</code>.</p>
+<p>What the suite covers:</p>
+<ul>
+<li>Requester cannot assign or delete</li>
+<li>Agent can assign, cannot delete</li>
+<li>Admin can delete</li>
+<li><code>delete_ticket</code> absent when acting as Sam, present for Root</li>
+<li>Internal escalation resource hidden from Ada</li>
+<li><code>search_kb</code> hides internal articles from requesters</li>
+<li><code>weekly_review</code> staff-only</li>
+<li><code>assign_ticket</code> fails if the directory client cannot find the person</li>
+<li>Validation errors are sentences</li>
+<li><code>close_stale_tickets</code> yields progress notifications</li>
+<li>OAuth discovery, registration, authorize Blade, PKCE, then a tool call on both web servers</li>
+</ul>
+<p>Starter-kit Fortify tests stay. Do not rewrite them to prove MCP.</p>
+<h2>File layout</h2>
+<pre><code>app/
+  Enums/Role.php Status.php Priority.php Visibility.php
+  Models/User.php Team.php Ticket.php Comment.php Article.php
+  Policies/TicketPolicy.php ArticlePolicy.php
+  Repositories/DirectoryRepository.php TicketRepository.php ArticleRepository.php
+  Http/Controllers/DashboardController.php
+  Mcp/
+    Servers/DirectoryServer.php TicketsServer.php
+    Tools/          (15 tools)
+    Resources/      (11 resources, including QueueApp)
+    Prompts/        (3 prompts)
+routes/ai.php
+resources/js/pages/dashboard.tsx
+resources/views/mcp/authorize.blade.php
+resources/views/mcp/queue-app.blade.php
+database/seeders/LabSeeder.php
+tests/Feature/Mcp/
+tests/Helpers.php
+tests/Support/InProcessDirectoryTransport.php
+.ai/rules/          (settled decisions for the next agent)
+</code></pre>
+<h2>Standing traps</h2>
+<p>These are already in <code>.ai/rules</code>. They belong here too because they are easy to re-break.</p>
+<ul>
+<li>Ticket tools talk to DirectoryServer through <code>Client::local</code>. Tests override that with the in-process transport.</li>
+<li>Do not query <code>User</code> or <code>Team</code> from <code>assign_ticket</code> or <code>get_ticket</code>. Do not move that lookup into <code>TicketRepository</code>.</li>
+<li>PHPDoc directory <code>$resources</code> as <code>class-string&lt;Server\Resource&gt;</code>. Pint lowercases <code>class-string&lt;Resource&gt;</code> to PHP's <code>resource</code> type.</li>
+<li><code>ai.php</code> stays out of the web middleware group.</li>
+<li>QueueApp is <code>ui://</code>. <code>desk://queue</code> is markdown.</li>
+<li>KB articles go through <code>ArticleRepository</code>. Missing and forbidden <code>desk://kb/{slug}</code> reads use the same error.</li>
+</ul>
+<h2>Docs</h2>
+<ul>
+<li>Laravel MCP. <a href="https://laravel.com/docs/13.x/mcp" target="_blank" rel="noopener noreferrer">https://laravel.com/docs/13.x/mcp</a></li>
+<li>Package. <a href="https://github.com/laravel/mcp" target="_blank" rel="noopener noreferrer">https://github.com/laravel/mcp</a></li>
+<li>Protocol. <a href="https://modelcontextprotocol.io/docs/getting-started/intro" target="_blank" rel="noopener noreferrer">https://modelcontextprotocol.io/docs/getting-started/intro</a></li>
+<li>MCP Apps. <a href="https://modelcontextprotocol.io/extensions/apps/overview" target="_blank" rel="noopener noreferrer">https://modelcontextprotocol.io/extensions/apps/overview</a></li>
+<li>Inspector. <a href="https://modelcontextprotocol.io/docs/tools/inspector" target="_blank" rel="noopener noreferrer">https://modelcontextprotocol.io/docs/tools/inspector</a></li>
+</ul>

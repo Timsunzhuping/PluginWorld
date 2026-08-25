@@ -1,0 +1,794 @@
+<p>
+  <img src="https://raw.githubusercontent.com/Rianico/dsh-better-edit/HEAD/assets/logo.svg" alt="dsh-better-edit" width="200" />
+</p><h1>dsh-better-edit</h1>
+<p>
+  <strong>A better edit tool for DeepSeek Harness<br />
+  Powered by hash‑anchored positioning — not by line numbers, not by string replacement, fewer tokens, more context space for real work.</strong>
+</p>
+<p>
+  <strong>English</strong> ·
+  <a href="https://github.com/Rianico/dsh-better-edit/blob/HEAD/README.zh.md" target="_blank" rel="noopener noreferrer">简体中文</a>
+</p><p>
+  <a href="#why-you-need-this" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/why-hashline-blue?style=flat" alt="why hashline" /></a>
+  <a href="#quick-start" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/quick_start-30s-brightgreen?style=flat" alt="quick start 30s" /></a>
+  <a href="#comparison" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/correctness-23%2F23-success?style=flat" alt="23/23 battery" /></a>
+</p><p>
+  <a href="#quick-start" target="_blank" rel="noopener noreferrer">Quick Start</a> •
+  <a href="#why-hashline" target="_blank" rel="noopener noreferrer">Why Hashline</a> •
+  <a href="#tools" target="_blank" rel="noopener noreferrer">Tools</a> •
+  <a href="#comparison" target="_blank" rel="noopener noreferrer">Comparison</a> •
+  <a href="#how-anchors-work" target="_blank" rel="noopener noreferrer">How Anchors Work</a> •
+  <a href="#development" target="_blank" rel="noopener noreferrer">Development</a> •
+  <a href="#acknowledgments" target="_blank" rel="noopener noreferrer">Acknowledgments</a>
+</p><p>
+  <img src="https://img.shields.io/badge/version-0.3.1-blue.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" />
+  <img src="https://img.shields.io/badge/DeepSeek_Harness-Plugin-blueviolet.svg" alt="DeepSeek Harness Plugin" />
+  <img src="https://img.shields.io/npm/v/dsh-better-edit" alt="npm version" />
+  <img src="https://img.shields.io/npm/dm/dsh-better-edit" alt="npm downloads" />
+  <img src="https://img.shields.io/github/stars/Rianico/dsh-better-edit?style=social" alt="GitHub Stars" />
+</p><p>
+  <img src="https://raw.githubusercontent.com/Rianico/dsh-better-edit/HEAD/assets/banner.svg" alt="file.ts → read → hashed lines → edit by hash → diff" width="900" />
+</p><hr />
+<blockquote>
+<p><em>"The harness — not the model — is the bottleneck."</em> — Can Bölük, <a href="https://stencil.so/blog/the-harness-problem" target="_blank" rel="noopener noreferrer"><em>The Harness Problem</em></a></p>
+<p><strong>This is the harness fix.</strong> Content hashes replace line numbers — an edit above never shifts the anchor below. Every range is verified against what the agent actually saw. Stale or unseen lines are hard-rejected with fresh anchors to retry — no <code>read</code> needed.</p>
+<p><strong>3 tool calls vs 6 · -55.8% tokens · 23/23 correctness.</strong> Same external-drift refactor, same correct file (single stochastic run vs OMP; <a href="https://github.com/Rianico/pi-better-edit/blob/main/benchmarks/results/2026-08-17-practical-token-benchmark.md" target="_blank" rel="noopener noreferrer">full method</a>). Benchmark envelope numbers are deterministic — see <a href="#benchmark" target="_blank" rel="noopener noreferrer">Benchmark</a>.</p>
+</blockquote>
+<h2>Why you need this</h2>
+<p><strong>If you've watched an agent corrupt a file because <code>line 47</code> became <code>line 74</code> after an insert — this is for you.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Before: <code>str_replace</code> / line numbers</th>
+<th>After: hashline <code>edit</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Model re-types old code (output billed ~5-6× input)</td>
+<td>Sends two 3-char hashes — old text is never echoed</td>
+</tr>
+<tr>
+<td>One insert above shifts every number below → wrong line lands silently</td>
+<td>Anchors are content addresses → edits above don't move anchors below</td>
+</tr>
+<tr>
+<td>No check that the range matches what was shown</td>
+<td>Every line verified against served rows; <code>[E_RANGE_STALE]</code>/<code>[E_RANGE_UNSERVED]</code> reject before any write, then <strong>reject-and-serve</strong> returns fresh <code>HASH│content</code> to retry</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>[!TIP]
+<strong>Shining points — honest and measured:</strong></p>
+<ul>
+<li><strong>Self-healing, not silent.</strong> External edits never get overwritten — stale ranges are rejected and re-served as fresh <code>HASH│content</code> to retry; orphaned serves heal without a full re-read (ADR-0008). Fail-closed, not auto-merge.</li>
+<li><strong>Formatter-tolerant.</strong> ASCII-whitespace-insensitive anchors survive <code>prettier</code>/<code>black</code>/<code>eslint --fix</code> between edits (<code>formatOnSave</code>, watcher, CI). Linter-only assumption — whitespace inside string literals is not distinguished (ADR-0005).</li>
+<li><strong>Chained &amp; batched, no re-read ritual.</strong> Anchors for untouched lines stay valid; diff/echo/reject rows count as serves. <code>edit</code> batches up to 32 same-file edits atomically (<code>[E_BATCH_ABORT]</code>), ~-40% envelope vs <code>str_replace</code> on the pinned 12-edit corpus.</li>
+<li><strong>Read guard enforced.</strong> Never edits what it hasn't seen — <code>[E_RANGE_UNSERVED]</code>/<code>[E_RANGE_UNVERIFIED]</code>/<code>[E_STALE_ANCHOR]</code> reject before any write, then <code>reject-and-serve</code>.</li>
+<li><strong>Fewer round-trips in practice.</strong> Dated run: <strong>3 calls vs 6</strong> for the OMP wrapper on the same external-drift refactor, same correct file; envelope vs <code>str_replace</code> is the durable number — reproducible via the upstream battery (same hashline algorithm, <a href="https://github.com/Rianico/pi-better-edit/blob/main/benchmarks/results/2026-08-17-practical-token-benchmark.md" target="_blank" rel="noopener noreferrer">method</a>). Correctness <code>23/23</code> deterministic.</li>
+</ul>
+</blockquote>
+<p>Not for one-line touch-ups (near parity) or brand-new files (<code>write</code>). It pays off in long sessions and structural edits — anywhere an edit must not land on the wrong line.</p>
+<blockquote>
+<p>Deep dive: <a href="#why-hashline" target="_blank" rel="noopener noreferrer">Why Hashline</a> · <a href="#comparison" target="_blank" rel="noopener noreferrer">Comparison</a> · <a href="https://github.com/Rianico/dsh-better-edit/blob/HEAD/benchmark/README.md" target="_blank" rel="noopener noreferrer">Benchmark</a></p>
+</blockquote>
+<h2>Quick Start — from install to verified edit in 30s</h2>
+<h3>Install (pick one)</h3>
+<pre><code class="language-sh">npx @deepseek-ai/dsh plugin --profile web add github:Rianico/dsh-better-edit   # from github
+npx @deepseek-ai/dsh plugin --profile web add dsh-better-edit   # from npm
+npx @deepseek-ai/dsh plugin --profile web add /path/to/dsh-better-edit   # from a local checkout
+</code></pre>
+<p>No config. The profile's next session runs with the hashline tools installed. To verify the layer is active:</p>
+<pre><code class="language-sh">dsh --profile &lt;name&gt; --dump-config   # shows a "# == dsh-better-edit" layer
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node</td>
+<td><code>^22.19.0 || &gt;=24.0.0</code> (dsh's requirement; the store uses <code>node:sqlite</code>)</td>
+</tr>
+<tr>
+<td>Profile</td>
+<td>a dsh profile (<code>dsh plugin</code> initializes one on first use)</td>
+</tr>
+<tr>
+<td>Backends</td>
+<td>sandboxed / remote filesystems supported (writes go through <code>ctx.fs</code>)</td>
+</tr>
+</tbody></table>
+<h3>See it work</h3>
+<p><code>read</code> returns every line prefixed by its hash — the hash <em>is</em> the line's address:</p>
+<pre><code class="language-text">ve7│function hello() {
+szJ│  console.log("world");
+kQm│}
+</code></pre>
+<p><code>edit</code> targets a range of hashes, so edits always land on the lines you meant:</p>
+<pre><code class="language-json">{ "path": "src/main.ts", "edits": [["szJ", "szJ", "  console.log('hi');"]] }
+</code></pre>
+<p>and returns a diff with fresh anchors, so the next edit verifies cleanly with no re-read:</p>
+<pre><code class="language-text">- szJ │   console.log("world");
++ a3m │   console.log('hi');
+  kQm │ }
+</code></pre>
+<p>Chained edits stay cheap — anchors for untouched lines remain valid, diff/echo rows count as serves, and <code>read</code> becomes on-demand recovery, not a ritual. Try batching — one <code>edit</code> call, same-file, atomic:</p>
+<pre><code class="language-json">{ "path": "src/main.ts", "edits": [["a1b", "a1b", "new line 1\n"], ["c3d", "c3d", "new line 2"]] }
+</code></pre>
+<p>One fails, none write (<code>[E_BATCH_ABORT]</code>).</p>
+<blockquote>
+<p>[!TIP]
+<strong>Want proof before you install?</strong> The upstream <a href="https://github.com/Rianico/pi-better-edit/blob/main/benchmarks/README.md" target="_blank" rel="noopener noreferrer">23/23 tool battery</a> runs with no LLM — stale edits are rejected before they corrupt a file, on every run. Same hashline algorithm, same verification.</p>
+</blockquote>
+<h3>Configuration</h3>
+<p>Tenancy and prompt guidance are both declared once, read at <code>agent/session-start</code>, and need no code changes.</p>
+<h4>Store tenancy — central by default</h4>
+<p>The store lives at <code>$DSH_HOME/plugins/dsh-better-edit/runtime/&lt;name&gt;-&lt;hash8&gt;/</code> by default (<code>central</code>).</p>
+<blockquote>
+<p>[!NOTE]
+DB files are <strong>disposable caches</strong> — they are rebuilt automatically on the next <code>read</code> (hashes are re-derived from file content). Feel free to <code>rm -rf</code> any <code>runtime/&lt;name&gt;-&lt;hash8&gt;/</code> or <code>hash-store.sqlite*</code> to reclaim disk; no user data is lost (only anchor history and undo snapshots).</p>
+</blockquote>
+<p>To opt into legacy co-location or a custom root:</p>
+<pre><code class="language-yaml"># $DSH_HOME/plugins/dsh-better-edit/config.yaml
+storeDir: central              # where the store lives: "central" (default, in $DSH_HOME/.../runtime/&lt;name&gt;-&lt;hash8&gt;/) | "workspace" (legacy &lt;ws&gt;/.dsh_better_edit/) | "/abs/path" (custom root)
+autoGitignore: false           # workspace only: when .git exists but .gitignore lacks .dsh_better_edit/, true = auto-append ".dsh_better_edit/", false = warn once
+undo_ttl_s: 604800             # undo history TTL in seconds; -1 = keep forever (default 604800 = 7 days)
+storeMaxAgeS: 2592000          # central janitor: max idle age in seconds before a runtime/&lt;name&gt;-&lt;hash8&gt;/ dir is evicted (default 2592000 = 30 days)
+storeMaxTotalBytes: 524288000  # central janitor: max total bytes under runtime/ before LRU eviction (default 524288000 = 500 MB)
+</code></pre>
+<blockquote>
+<p>[!TIP]
+If the file does not exist, a default <code>config.yaml</code> with commented defaults is generated on first boot (never overwrites an existing file).</p>
+</blockquote>
+<p>Env overrides yaml (<code>env &gt; yaml &gt; central</code>), malformed falls back to <code>central</code> with a warning:</p>
+<pre><code class="language-sh">DSH_BETTER_EDIT_STORE_DIR=central|workspace|/abs
+DSH_BETTER_EDIT_AUTO_GITIGNORE=true|false  # case-insensitive
+</code></pre>
+<p><code>runtime/&lt;name&gt;-&lt;hash8&gt;/</code> is <code>ls</code>-readable with a <code>.wsPath</code> sidecar. See <code>docs/specs/issue-24-store-tenancy.md</code> for lifecycle (janitor <code>mtime&gt;storeMaxAgeS</code> then LRU, WAL checkpoint, <code>undo</code> TTL).</p>
+<h4>Guidance per preset</h4>
+<p>The <code>tool:read</code> / <code>tool:edit</code> / <code>tool:undo_last_edit</code> prompt sections are plain-markdown files per agent preset, overridable without touching the plugin:</p>
+<pre><code>$DSH_HOME/plugins/dsh-better-edit/&lt;preset&gt;/&lt;section&gt;.md
+</code></pre>
+<p>(default home <code>~/.dsh</code>, so <code>~/.dsh/plugins/dsh-better-edit/</code>). The section table:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Section</th>
+<th>Default order</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>read.md</code></td>
+<td><code>tool:read</code></td>
+<td>130</td>
+</tr>
+<tr>
+<td><code>edit.md</code></td>
+<td><code>tool:edit</code></td>
+<td>131</td>
+</tr>
+<tr>
+<td><code>undo_last_edit.md</code></td>
+<td><code>tool:undo_last_edit</code></td>
+<td>133</td>
+</tr>
+</tbody></table>
+<p>On first boot the plugin seeds the three shipped presets — <code>standard/</code>, <code>code/</code>, <code>minimal/</code>, <code>cordis/</code> — each with the compiled guidance as editable files (plus <code>order</code> front-matter). See <a href="#configuring-guidance-per-preset" target="_blank" rel="noopener noreferrer">Configuration details</a> for reset/restore. Full spec: <code>docs/specs/issue-24-store-tenancy.md</code> and guidance docs.</p>
+<h5>Reset / restore defaults</h5>
+<p>Emptying or deleting an override file restores that section's compiled default guidance and order: the default renders at session-start, and the file re-seeds at next boot.</p>
+<ul>
+<li><strong>Reset = delete the file, or empty it AND remove the front-matter fence.</strong> A whitespace-only file with no fence means "I want the default" — the compiled default renders, and the file re-seeds at next boot for any preset dir, shipped or custom.</li>
+<li><strong>Blank on purpose = keep a valid fence.</strong> Any well-formed <code>---</code> fence — even a keyless <code>---\n---\n</code>, even an empty body — is a deliberate-intent signal: the file is explicit content and is never reset or re-seeded.</li>
+<li><strong>Broken fence = fast fail.</strong> A <code>---</code> fence that does not parse (missing closing <code>---</code>, non-integer <code>order</code>, unknown key) is rejected: the malformed text is never injected into the context, the compiled default renders, a warning names the file and the reason, and the file is left untouched on disk for repair.</li>
+<li><strong>Shipped vs custom.</strong> Shipped preset files (<code>standard</code>, <code>code</code>, <code>minimal</code>, <code>cordis</code>) re-seed at boot; a deleted custom-preset override stays absent — absence is no override. Deleting a whole <code>&lt;preset&gt;/</code> directory re-seeds all three section files at boot (shipped presets).</li>
+<li><strong>Reset restores the current bundle defaults</strong> — a plugin upgrade yields new defaults.</li>
+</ul>
+<p>Re-seeding happens at boot, never mid-session.</p>
+<h2>Why Hashline</h2>
+<p><strong>Correctness, not just brevity.</strong> Every resolved edit range is verified against the
+served rows — what <code>read</code>, a post-edit diff, or a rejection echo actually showed the model.
+A line inside the range that changed on disk since it was served, or was never served, is
+hard-rejected before any file I/O: <code>[E_RANGE_STALE]</code> / <code>[E_RANGE_UNSERVED]</code> /
+<code>[E_RANGE_UNVERIFIED]</code>, and the current range is echoed as fresh <code>HASH│content</code> rows. The
+retry needs no <code>read</code>. Served state is session-scoped, so sub-agent serves never validate the main session's edits and vice versa.</p>
+<p><strong>Content-addressed anchors.</strong> Anchors are derived from line content (ASCII-whitespace
+stripped), not position: edit one part of a file and the hashes of the rest stay put, so
+chained edits need no re-reads. Re-inserting identical text keeps its hash — "edit X with
+X" doesn't rotate the anchor. Anchors are unique by construction — repeated <code>}</code> or
+<code>import</code> lines never share one.</p>
+<p><strong>Chained edits without re-reading.</strong> Post-edit diff rows, auto-read rows, and rejection
+echoes all count as serves. <code>read</code> is on-demand recovery, not a per-edit ritual.</p>
+<p><strong>Stop the loop.</strong> A no-op edit reports <code>No changes made</code> and leaves anchors alone; the
+same no-op re-sent three times is refused (<code>[E_NOOP_LOOP]</code>). <code>edit</code> applies up to 32
+edits atomically — any stale item aborts the whole batch with <code>[E_BATCH_ABORT]</code>.</p>
+<h3>Token economics: envelope savings</h3>
+<p>The compact JSON contract is primarily a <strong>token-saving envelope change</strong>. It removes repeated field names and escaped wrapper syntax while leaving the verified edit semantics unchanged:</p>
+<ul>
+<li><code>edit</code> is one uniform payload: <code>{ "path": path, "edits": [[from, to, replacement], …] }</code> — <code>path</code> hoisted, arity by <code>edits.length</code>;</li>
+<li>replacement text is emitted once, and the old text is never repeated in the call.</li>
+</ul>
+<h4>Theoretical benchmark — serialized envelopes</h4>
+<p>This benchmark counts only the serialized edit payloads, not model reasoning, tool descriptions, reads, retries, or cache traffic. Same hashline algorithm as upstream — numbers reproduced from <a href="https://github.com/Rianico/pi-better-edit/tree/main/benchmarks/results" target="_blank" rel="noopener noreferrer"><code>pi-better-edit/benchmarks/results/</code></a> (pinned 12-edit corpus, <code>cl100k_base</code>):</p>
+<table>
+<thead>
+<tr>
+<th>snapshot</th>
+<th align="right"><code>str_replace</code></th>
+<th align="right">pi/dsh-better-edit: <code>edit</code></th>
+<th align="right">pi/dsh-better-edit: <code>edit</code> (multi-item)</th>
+<th align="right">OMP: per-edit</th>
+<th align="right">OMP: one batch</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>external pinned 12-edit corpus, current-envelope recount</td>
+<td align="right">1,015</td>
+<td align="right">609 (<strong>-40.0%</strong>)</td>
+<td align="right">582 (<strong>-42.7%</strong>)</td>
+<td align="right">590 (<strong>-41.9%</strong>)</td>
+<td align="right">480 (<strong>-52.7%</strong>)</td>
+</tr>
+<tr>
+<td>local 12-edit configuration snapshot</td>
+<td align="right">358</td>
+<td align="right">272 (<strong>-24.0%</strong>)</td>
+<td align="right">241 (<strong>-32.7%</strong>)</td>
+<td align="right">268 (<strong>-25.1%</strong>)</td>
+<td align="right">180 (<strong>-49.7%</strong>)</td>
+</tr>
+</tbody></table>
+<p>All percentages are savings against the <code>str_replace</code> value in the same row. The external row uses the pinned corpus, current object-root tuple envelopes, and current 3-character anchors. The local row is reproducible with <code>npm run benchmark</code> in the upstream repo; correctness is measured separately with the battery.</p>
+<h4>Practical benchmark — coding-agent session</h4>
+<p>This benchmark measures a real coding-agent loop rather than serialized envelopes. The practical advantage is round-trip efficiency: hashline completed the scenario in <strong>3 tool calls</strong>, versus <strong>6 for OMP</strong>. Upstream runs <code>pi</code> with <code>opencode-go/gpt-5.6-luna</code> at <code>high</code> thinking. Same algorithm downstream — we reference the upstream dated artifact:</p>
+<table>
+<thead>
+<tr>
+<th>engine</th>
+<th align="right">tool calls</th>
+<th align="right">total tokens</th>
+<th align="right">saved vs OMP baseline</th>
+<th align="center">final correctness</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>OMP patch wrapper</td>
+<td align="right"><strong>6</strong></td>
+<td align="right">28,467</td>
+<td align="right">0.0%</td>
+<td align="center">✅</td>
+</tr>
+<tr>
+<td>hashline <code>edit</code> (multi-item)</td>
+<td align="right"><strong>3 (fewest)</strong></td>
+<td align="right">12,593</td>
+<td align="right"><strong>-55.8%</strong></td>
+<td align="center">✅</td>
+</tr>
+</tbody></table>
+<p>Both engines preserved the external change and produced the expected final file in this sample. This result is one stochastic model run; it must not be read as a universal performance claim. Latest dated artifact: <a href="https://github.com/Rianico/pi-better-edit/blob/main/benchmarks/results/2026-08-17-practical-token-benchmark.md" target="_blank" rel="noopener noreferrer">2026-08-17 practical token benchmark</a> · <a href="https://github.com/Rianico/pi-better-edit/blob/main/benchmarks/results/2026-08-17-hashline-library.md" target="_blank" rel="noopener noreferrer">hashline library battery</a> · <a href="https://github.com/Rianico/pi-better-edit/blob/main/benchmarks/results/2026-08-17-tool-battery.md" target="_blank" rel="noopener noreferrer">tool battery</a>.</p>
+<blockquote>
+<p><strong>Scope &amp; honesty.</strong> These numbers are <strong>payload + round-trip</strong> measures, not throughput claims. The benchmark payload is deterministic; the practical run is stochastic. Dated results live upstream in <code>benchmarks/results/</code>; we do not re-run locally because the algorithm is identical.</p>
+</blockquote>
+<h2>Tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>read</code></td>
+<td>Returns a text file with every line as <code>HASH│content</code>. <code>offset</code> (1-based), <code>limit</code>. Paged output ends with <code>[Showing lines N-M of T. Use offset=… to continue.]</code>. Lines &gt;200KB shown as a marker with a <code>sed</code> hint — hash anchors need full lines.</td>
+</tr>
+<tr>
+<td><code>read_skill</code></td>
+<td>Same file read as plain text — no <code>HASH│</code> prefixes, no served rows. For skill content (SKILL.md or any file); records no serves, so editing a file read this way starts with a <code>[E_RANGE_UNSERVED]</code> serve on the first edit.</td>
+</tr>
+<tr>
+<td><code>edit</code></td>
+<td>An object-root payload <code>{ "path": path, "edits": [[remove_from, remove_to, replacement_text], …] }</code>; the path may be <code>null</code> for anchor-based inference. A single item edits one range; several items batch same-file edits atomically (up to 32). Verifies every line of each inclusive range and reject-and-serve returns fresh anchors.</td>
+</tr>
+<tr>
+<td><code>undo_last_edit</code></td>
+<td><code>{ path }</code> restores the most recent successful edit with its original content, BOM, line endings, and anchors; persisted across restarts.</td>
+</tr>
+</tbody></table>
+<p><code>edit</code> accepts <code>{ "path": path, "edits": [[remove_from, remove_to, replacement_text], …] }</code>. The path
+position is a non-empty string or <code>null</code> for unique anchor-based inference. Each range is inclusive,
+and an empty replacement deletes the range. All items are checked before file I/O and applied
+atomically to that one file — one item per call is the norm, several same-file items batch in one call.</p>
+<h3>Error codes</h3>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>[E_BAD_SHAPE]</code></td>
+<td>The payload is not the fixed tuple shape, or a tuple member has an unknown, missing, or wrongly-typed value.</td>
+</tr>
+<tr>
+<td><code>[E_BAD_REF]</code></td>
+<td>An anchor in the inclusive range is not a bare 3-char hash.</td>
+</tr>
+<tr>
+<td><code>[E_STALE_ANCHOR]</code></td>
+<td>An anchor does not match any line in the current file; call <code>read</code> for fresh anchors.</td>
+</tr>
+<tr>
+<td><code>[E_AMBIGUOUS_ANCHOR]</code></td>
+<td>An anchor matches multiple lines; call <code>read</code> for fresh anchors.</td>
+</tr>
+<tr>
+<td><code>[E_INVALID_PATCH]</code></td>
+<td>A <code>replacement_text</code> line is a diff-preview row (<code>+HASH│</code>, <code>-HASH│</code>, <code>-   │</code>). The marker is stripped automatically with a warning.</td>
+</tr>
+<tr>
+<td><code>[E_BARE_HASH_PREFIX]</code></td>
+<td>A <code>replacement_text</code> line starts with a hash-like <code>HASH│</code> prefix. The prefix is stripped automatically with a warning.</td>
+</tr>
+<tr>
+<td><code>[E_BAD_OP]</code></td>
+<td>Range start line is after range end line. The pair is swapped automatically with a warning.</td>
+</tr>
+<tr>
+<td><code>[E_WOULD_EMPTY]</code></td>
+<td>An edit would empty a non-empty file; use <code>write</code> instead.</td>
+</tr>
+<tr>
+<td><code>[E_NOT_FOUND]</code></td>
+<td>The path does not exist.</td>
+</tr>
+<tr>
+<td><code>[E_ACCESS]</code></td>
+<td>The path is not readable or writable.</td>
+</tr>
+<tr>
+<td><code>[E_NOT_TEXT]</code></td>
+<td>The path is a directory, binary file, image, or UTF-16/UTF-32 encoded text; hashline editing only supports text files.</td>
+</tr>
+<tr>
+<td><code>[E_NOT_OBSERVED]</code></td>
+<td>The file has not been observed in this session (read-before-write); call <code>read</code> first.</td>
+</tr>
+<tr>
+<td><code>[E_UNDO_STALE]</code></td>
+<td><code>undo_last_edit</code> refused: the file was modified or deleted after the last edit.</td>
+</tr>
+<tr>
+<td><code>[E_UNDO_UNAVAILABLE]</code></td>
+<td>Undo history could not be persisted to the hash store; the <code>edit</code> was refused and the file was left unchanged.</td>
+</tr>
+<tr>
+<td><code>[E_FILE_TOO_LARGE]</code></td>
+<td>The file exceeds the 238,328-line hashline limit.</td>
+</tr>
+<tr>
+<td><code>[E_RANGE_STALE]</code></td>
+<td>A line inside the resolved edit range changed on disk since it was served (read output, diff, or rejection feedback). The edit is refused and the current range is echoed as fresh <code>HASH│content</code> rows; retry with those rows (no <code>read</code> needed).</td>
+</tr>
+<tr>
+<td><code>[E_RANGE_UNSERVED]</code></td>
+<td>A line inside the resolved edit range was never served to the model (paged reads, truncated output). The edit is refused and the current range is echoed as fresh <code>HASH│content</code> rows.</td>
+</tr>
+<tr>
+<td><code>[E_RANGE_UNVERIFIED]</code></td>
+<td>A boundary anchor (<code>remove_from</code>/<code>remove_to</code>) has no served position or was served at multiple positions, so the range cannot be verified against served state. The edit is refused and the current range is echoed as fresh <code>HASH│content</code> rows.</td>
+</tr>
+<tr>
+<td><code>[E_NOOP_LOOP]</code></td>
+<td>The exact same edit (same path, anchors, and replacement) was re-sent and produced no changes 3 consecutive times — the range already contains the replacement. The edit is refused and the current range is echoed as fresh <code>HASH│content</code> rows.</td>
+</tr>
+<tr>
+<td><code>[E_BATCH_ABORT]</code></td>
+<td>A multi-item <code>edit</code> call was rejected as a whole: an item failed validation or served-state verification. Nothing was written; the failing item's current range is echoed as fresh <code>HASH│content</code> rows.</td>
+</tr>
+</tbody></table>
+<h2>Comparison</h2>
+<h3>Capability comparison</h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><strong>dsh-better-edit</strong> (this)</th>
+<th>@oh-my-pi/hashline</th>
+<th><code>str_replace</code> (Claude Code / Codex)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Layer</td>
+<td>dsh tools: <code>read</code> / <code>read_skill</code> / <code>edit</code> / <code>undo_last_edit</code></td>
+<td>patch-engine library: <code>Patcher</code> / <code>Patch</code> / <code>Filesystem</code> / <code>SnapshotStore</code></td>
+<td>built-in <code>str_replace</code></td>
+</tr>
+<tr>
+<td>Address format</td>
+<td><code>HASH│</code> — 3-char content hash, no line number</td>
+<td><code>[path#tag]</code> — full-file content tag + line numbers</td>
+<td>text match</td>
+</tr>
+<tr>
+<td>Whitespace-insensitive anchors</td>
+<td>✅ all ASCII whitespace stripped — survives <code>prettier</code>/<code>black</code>/<code>eslint --fix</code></td>
+<td>~ n/a (anchors are line numbers)</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Duplicate lines</td>
+<td>✅ unique per line (collision-resolved); ambiguity → <code>[E_AMBIGUOUS_ANCHOR]</code></td>
+<td>~ position-based — repeats fine, position unverified</td>
+<td>❌ first occurrence</td>
+</tr>
+<tr>
+<td>Verified against what the model saw</td>
+<td>✅ every resolved line, per session — <code>[E_RANGE_STALE]</code>/<code>[E_RANGE_UNSERVED]</code> reject before write</td>
+<td>~ seen-lines provenance + file-version tag (H7)</td>
+<td>❌ first match wins</td>
+</tr>
+<tr>
+<td>Stale interior</td>
+<td>✅ reject + fresh anchors (<code>[E_RANGE_STALE]</code>)</td>
+<td>~ recovery-with-warning, else <code>MismatchError</code></td>
+<td>❌ may overwrite</td>
+</tr>
+<tr>
+<td>Blind edit — lines never shown</td>
+<td>✅ hard reject (<code>[E_RANGE_UNVERIFIED]</code> / <code>[E_RANGE_UNSERVED]</code>)</td>
+<td>~ reject when seen-lines recorded (H7)</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Batch atomicity</td>
+<td>✅ <code>edit</code> multi-item — all-or-nothing, <code>[E_BATCH_ABORT]</code></td>
+<td>✅ multi-section preflight (H8)</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Undo (persisted)</td>
+<td>✅ survives restarts</td>
+<td>❌ none</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Sub-agent session isolation</td>
+<td>✅ session-keyed served state</td>
+<td>~</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Deterministic battery</td>
+<td>✅ 23/23</td>
+<td>✅ 10/10 library (own seam)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Runtime</td>
+<td>dsh (Node)</td>
+<td>Bun ≥ 1.3.14 (TS source)</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p><code>~</code> = occasionally / inconsistently. <code>—</code> = not specified / not applicable.</p>
+</blockquote>
+<h3>Different jobs, same lineage</h3>
+<p>Both this plugin and <code>@oh-my-pi/hashline</code> descend from the harness-problem insight that
+the model should never re-type old code, but they are different layers.</p>
+<p><code>@oh-my-pi/hashline</code> is a <strong>patch-language library</strong>: <code>[path#tag]</code> headers bind every hunk
+to a full-file content hash, <code>PUT N.=M:</code> addresses lines by number, and it ships multi-hunk
+documents, a pluggable filesystem for any backend (disk, in-memory, network), and
+session-aware 3-way-merge recovery on stale tags. Its payload per edit is lighter and it cannot
+be confused by repeated text — the line number is unambiguous.
+This plugin is a <strong>dsh tool pair</strong>: <code>read</code> hands the model 3-char content hashes, <code>edit</code>
+takes two of them, and every resolved line is verified against the served state — no line
+numbers to renumber, no tag to refetch, a wrong anchor can never land on the wrong line,
+and <code>undo_last_edit</code> survives restarts. Its trade-offs: a JSON envelope per edit costs a
+little payload, and it lives inside dsh (Node) rather than as a standalone patcher (Bun). Pick
+hashline-the-library for a cross-backend patch format; pick hashline-the-tool for verified,
+content-addressed edits in your agent. Syntax-aware structural edits and file-lifecycle operations
+remain outside this verified line-range contract.</p>
+<h3>What you get</h3>
+<ul>
+<li><strong>Verified before it writes</strong> — every line of the resolved range is checked against served rows; stale or never-served interiors are hard-rejected (<code>[E_RANGE_STALE]</code>/<code>[E_RANGE_UNSERVED]</code>/<code>[E_RANGE_UNVERIFIED]</code>) and re-served as fresh anchors.</li>
+<li><strong>Session-keyed</strong> — sub-agent serves never validate the main session's edits and vice versa.</li>
+<li><strong>Drift notices</strong> — served territory outside the range that changed on disk is reported once per episode, not as a warning.</li>
+<li><strong>Chained without re-reads</strong> — diff, auto-read, and rejection rows all count as serves.</li>
+<li><strong>Atomic batch</strong> — up to 32 same-file edits in one <code>edit</code> call, all-or-nothing with <code>[E_BATCH_ABORT]</code>.</li>
+<li><strong>Formatter-tolerant</strong> — ASCII-whitespace-insensitive anchors survive re-indents; unique by construction (bitset probing).</li>
+</ul>
+<h3>Correctness in edge cases</h3>
+<p>The battery below measures <em>behavior</em>, where the two hashline implementations actually
+diverge. These are the real failure modes from the harness-problem literature, and what
+each tool does when they hit:</p>
+<table>
+<thead>
+<tr>
+<th>Edge case</th>
+<th>hashline <code>edit</code> (this)</th>
+<th>@oh-my-pi/hashline patch</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Wrong address (off-by-one anchor / line number)</td>
+<td><strong>Impossible</strong> — anchors resolve to specific lines; every resolved line is verified against served state, rejected before anything is written</td>
+<td><strong>Possible</strong> — a wrong line number against a current tag applies silently at the wrong place; the tag proves the file version, never the lines</td>
+</tr>
+<tr>
+<td>File changed on disk after the model's view</td>
+<td>Hard reject + fresh anchors echoed (reject-and-serve); retry needs no <code>read</code></td>
+<td>Tag mismatch → refuse <strong>or</strong> best-effort 3-way merge onto unknown current content, with an explicit recovery banner</td>
+</tr>
+<tr>
+<td>An edit above shifts the file</td>
+<td>Nothing shifts — anchors are content addresses; the diff serves fresh anchors</td>
+<td><strong>Every edit renumbers</strong> — the format's own #1 rule is "re-ground after every edit"; the model carries the bookkeeping</td>
+</tr>
+<tr>
+<td>Repeated / identical text</td>
+<td>Per-line hashes are unique (collision-resolved); ambiguity → <code>[E_AMBIGUOUS_ANCHOR]</code></td>
+<td>Position-based, so repeats don't confuse it — but the position itself is unverified</td>
+</tr>
+<tr>
+<td>Lines never shown to the model</td>
+<td><code>[E_RANGE_UNSERVED]</code> — hard reject with fresh anchors</td>
+<td>Undisplayed hunks rejected when seen-lines are recorded — same reliance on the model knowing what it saw</td>
+</tr>
+<tr>
+<td>Multi-edit batch fails mid-way</td>
+<td><code>edit</code> multi-item — atomic, all-or-nothing; the failing item is echoed as fresh serves</td>
+<td>Multi-section patches preflighted up front — also atomic</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>The oh-my-pi payload saving is a lighter wire format; the table above is what that format
+asks the model to hold in its head instead — renumbering, tag-chasing — the
+exact component that fails most with replace-style edits. This plugin's contract is:
+a wrong edit cannot land, and any rejection needs no re-read. Both engines gate the same guarantee — <strong>stale edits are detected, never silently applied</strong> — with different policies when drift is found (recover-with-warning vs fail-closed rejection).</p>
+</blockquote>
+<h3>Reproducible benchmark</h3>
+<p>The claims above are measured, not asserted. Two deterministic batteries — no LLM in the
+loop, no sampling: a run either reproduces or it doesn't.</p>
+<p><strong>Tool battery — 23 scenarios (2026-08-17):</strong></p>
+<table>
+<thead>
+<tr>
+<th>vs expected verdict</th>
+<th align="right">correct</th>
+<th align="right">silent data-loss cases</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>dsh-better-edit</strong> (same algorithm as pi-better-edit 1.1.4)</td>
+<td align="right"><strong>23/23</strong></td>
+<td align="right">0</td>
+</tr>
+</tbody></table>
+<p>Reproduce via upstream: <code>npm run eval</code> in <code>pi-better-edit</code> (this plugin shares the hashline algorithm byte-for-byte). Library battery for <code>@oh-my-pi/hashline</code> is 10/10 separately.</p>
+<p>Full method, per-scenario tables, and limitations: upstream <a href="https://github.com/Rianico/pi-better-edit/blob/main/benchmarks/README.md" target="_blank" rel="noopener noreferrer">benchmarks/README.md</a>
+and <a href="https://github.com/Rianico/pi-better-edit/tree/main/benchmarks/results" target="_blank" rel="noopener noreferrer">benchmarks/results/</a>.</p>
+<blockquote>
+<p>See <a href="#configuration" target="_blank" rel="noopener noreferrer">Configuration</a> under <a href="#quick-start" target="_blank" rel="noopener noreferrer">Quick Start</a> for guidance overrides and store tenancy.</p>
+</blockquote>
+<h2>How Anchors Work</h2>
+<p>Each line is canonicalized (all ASCII whitespace — spaces, tabs, carriage returns, and
+line feeds — stripped) and hashed with <a href="https://github.com/jungomi/xxhash-wasm" target="_blank" rel="noopener noreferrer">xxhash-wasm</a>
+(xxHash32), then mapped to a 3-character string over <code>A-Za-z0-9</code> — 62³ = 238,328 possible
+anchors. Canonicalization keeps anchors stable across formatting passes and editor-save
+cycles: a line that changes only in ASCII whitespace keeps its anchor, so external linting
+between edits does not invalidate it. Everything that is not ASCII whitespace stays
+significant — string contents, regex classes, comments, quotes, semicolons, and Unicode
+whitespace (NBSP) all rotate the anchor. One caveat: ASCII whitespace <em>inside</em> string
+literals and regexes is stripped too, so a whitespace-only change within a string is
+invisible to verification — benign in practice because formatters never alter string
+contents. Token-level edits (quote style, semicolons, brace placement) therefore still
+reject as stale.</p>
+<p>The alphabet is sized for an LLM consumer — the model tokenizes rather than squinting at
+glyphs, so case and digits are all included. The URL-safe specials <code>-</code> and <code>_</code> are
+deliberately excluded: a hash starting with <code>-</code> is shape-identical to a diff-preview
+deletion row, and <code>-</code>/<code>_</code> at a line start are markdown-active, inviting mis-copying.</p>
+<p>Anchors are unique by construction. If a line's base hash collides with an already-assigned
+hash, the next free hash is allocated from a bitset by probing with a stride coprime to the
+hash space (O(1) amortized; the stride is 62² + 62 + 1, so runs of blank lines or repeated
+<code>}</code> land on anchors that differ in all three characters). Every line therefore gets a
+unique anchor; two byte-identical lines never share one. The same guarantee sets the file
+size cap: at most 238,328 lines per file, beyond which <code>read</code> and <code>edit</code> reject with
+<code>[E_FILE_TOO_LARGE]</code> (use <code>write</code> for very large files).</p>
+<p>Hashes live in a persistent per-file store
+(<code>&lt;workspace&gt;/.dsh_better_edit/hash-store.sqlite</code>, honoring <code>XDG_CONFIG_HOME</code> on
+non-Windows) that keeps the hashes of unchanged lines across edits.</p>
+<h2>How It Replaces the Built-in Tools</h2>
+<p>dsh's tool registry resolves per scope: an agent sees <code>agent → preset → global</code>, and its <strong>own</strong>
+layer always wins. The built-in <code>read</code>/<code>edit</code> live on the agent-preset layer, so a plain global
+registration cannot replace them. This plugin:</p>
+<ol>
+<li>Mounts as a host-plane Cordis plugin via its <code>cordis.patch.yml</code> bundle patch.</li>
+<li>On <code>agent/session-start</code>, registers the hashline tools <strong>and</strong> the <code>tool:read</code> / <code>tool:edit</code>
+prompt sections on the agent's own scope layer — they shadow the preset's built-ins for that
+agent and unwind automatically when the agent is disposed.</li>
+<li>Leaves the built-in <code>write</code> in place, but a scoped <code>tools/post-execute</code> listener appends the
+hashline auto-read to write results.</li>
+</ol>
+<h2>Store</h2>
+<p>Hash snapshots, served-state rows, and undo history live in one SQLite store — <strong>central by default</strong> (<code>$DSH_HOME/plugins/dsh-better-edit/runtime/&lt;name&gt;-&lt;hash8&gt;/hash-store.sqlite</code>, <code>ls</code>-readable with <code>.wsPath</code> sidecar). Legacy co-located <code>&lt;workspace&gt;/.dsh_better_edit/</code> is still supported via <code>storeDir: workspace</code> in <code>config.yaml</code> and is copied once on first central open. Parallel sessions in different workspaces keep separate stores (the session cwd is carried through each tool call), so one project's anchors and undo history never leak into another's. Outside a tool call (tests, previews) the store falls back to the shared DeepSeek Harness home (<code>$DSH_HOME/plugins/dsh-better-edit/hash-store.sqlite</code>).</p>
+<p>A 7-day TTL prunes served rows; <code>undo_ttl_s</code> (default 7d, <code>-1</code> forever) prunes undo clones; missing-file snapshots are pruned on throttled <code>openStore</code>; corrupt stores are quarantined and rebuilt automatically. The central janitor (<code>apply</code> + <code>agent/session-start</code> throttled &gt;24h) evicts <code>mtime&gt;storeMaxAgeS</code> (default 2592000 s = 30 days) then LRU to <code>count&lt;100 &amp;&amp; sum&lt;500MB</code>, never deleting live <code>hash(workspaceCwd)</code>, with <code>wal_checkpoint(TRUNCATE)</code> on close. DB files are disposable caches — safe to delete, rebuilt on next <code>read</code>.</p>
+<h2>Project Structure</h2>
+<pre><code>dsh-better-edit/
+├── src/
+│   ├── hashline/        # hash + served-state core (ported from pi-better-edit)
+│   ├── tool-read.ts     # read  — HASH│content, offset/limit paging
+│   ├── tool-edit.ts     # edit  — {path, edits:[[hash,hash,text]]}, reject-and-serve
+│   ├── tool-undo.ts     # undo_last_edit
+│   ├── sandbox.ts       # FsSandboxController mirror (sandbox_permissions/justification)
+│   ├── write-hook.ts    # auto-read appended to write results
+│   ├── served-store.ts  # per-workspace SQLite store (node:sqlite)
+│   └── workspace.ts     # session-cwd AsyncLocalStorage carrier
+├── benchmark/           # frozen 103-line fixture (reference upstream for reproducible numbers)
+│   └── corpus/          # frozen 103-line fixture
+├── test/                # ported + regression tests
+├── assets/              # logo + banner
+├── cordis.patch.yml     # bundle patch
+└── package.json         # dsh.bundle manifest
+</code></pre>
+<h2>Development</h2>
+<pre><code class="language-sh">npm install
+npm run typecheck   # tsc --noEmit
+npm test            # vitest run
+npm run build       # tsc → lib/
+</code></pre>
+<h3>Releasing (tag-first)</h3>
+<pre><code class="language-sh">npm run release -- 0.3.1                 # bump + CHANGELOG move + commit + tag + push → GitHub release
+npm publish --registry https://registry.npmjs.org   # blocked until the version is tagged
+</code></pre>
+<p><code>npm run release</code> bumps <code>package.json</code>/lockfile, moves the CHANGELOG <code>[Unreleased]</code> section to the
+version, commits, tags <code>vX.Y.Z</code>, and pushes — the tag push creates the GitHub release from the
+changelog. <code>npm publish</code> refuses to run until that tag exists (prepublishOnly gate), so every npm
+version is always already tagged and released.</p>
+<h2>Benchmark</h2>
+<p>Measured on the same 103-line file with the same 12 replacements (8 single-line, 4 multi-line of
+3/6/10/15 lines), tokenized with the pinned <code>js-tiktoken</code> <code>cl100k_base</code>. Three arms emit the same
+replacements: this plugin's <code>edit</code> (two 3-char anchors via <code>edits</code> tuple), a <code>str_replace</code> tool (old text echoed
+verbatim), and <a href="https://www.npmjs.com/package/@oh-my-pi/hashline" target="_blank" rel="noopener noreferrer"><code>@oh-my-pi/hashline</code></a> in both of
+its modes — one <code>[path#tag]</code> section per edit (<code>seq</code>) and one multi-hunk batch document (<code>batch</code>). Same hashline algorithm, so we reference the upstream reproducible results:</p>
+<table>
+<thead>
+<tr>
+<th>Criterion</th>
+<th align="center">hashline</th>
+<th align="center">str_replace</th>
+<th align="center">oh-my-pi seq / batch</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Replaced text sent over the wire</td>
+<td align="center">✅ never</td>
+<td align="center">❌ every edit</td>
+<td align="center">✅ never</td>
+</tr>
+<tr>
+<td>Output tokens saved (12-edit session)</td>
+<td align="center">✅ <strong>31%</strong></td>
+<td align="center">❌ 0%</td>
+<td align="center">✅ <strong>42% / 53%</strong></td>
+</tr>
+<tr>
+<td>Multi-line range savings (3–15 lines)</td>
+<td align="center">✅ <strong>29–47%</strong></td>
+<td align="center">❌ 0%</td>
+<td align="center">✅ <strong>40–53%</strong></td>
+</tr>
+<tr>
+<td>Effective cost at 5× output pricing</td>
+<td align="center">✅ <strong>~1.4× less</strong></td>
+<td align="center">❌ 1×</td>
+<td align="center">✅ <strong>~1.7× / ~2.1× less</strong></td>
+</tr>
+<tr>
+<td>Ranges verified against served state</td>
+<td align="center">✅ 100%</td>
+<td align="center">❌ none</td>
+<td align="center">~ file version only</td>
+</tr>
+<tr>
+<td>Line numbers the model must track</td>
+<td align="center">✅ none — content anchors</td>
+<td align="center">✅ none — text match</td>
+<td align="center">❌ renumber every edit</td>
+</tr>
+<tr>
+<td>Deterministic, reproducible locally</td>
+<td align="center">✅ via upstream <code>npm run benchmark</code></td>
+<td align="center">—</td>
+<td align="center">—</td>
+</tr>
+</tbody></table>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th align="center">Lines</th>
+<th align="center">hashline</th>
+<th align="center">str_replace</th>
+<th align="center">oh-my-pi seq</th>
+<th align="center">oh-my-pi batch</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>single-line ×8</td>
+<td align="center">1</td>
+<td align="center">309</td>
+<td align="center">324</td>
+<td align="center">241</td>
+<td align="center">—</td>
+</tr>
+<tr>
+<td>multi-line ×4</td>
+<td align="center">3–15</td>
+<td align="center">393</td>
+<td align="center">691</td>
+<td align="center">349</td>
+<td align="center">—</td>
+</tr>
+<tr>
+<td><strong>TOTAL ×12</strong></td>
+<td align="center"></td>
+<td align="center"><strong>702</strong></td>
+<td align="center"><strong>1015</strong></td>
+<td align="center"><strong>590</strong></td>
+<td align="center"><strong>480</strong></td>
+</tr>
+</tbody></table>
+<p>Saved vs <code>str_replace</code>: hashline <strong>313 (31%)</strong> · oh-my-pi per-edit <strong>425 (42%)</strong> · oh-my-pi batch <strong>535 (53%)</strong>.</p>
+<p>Upstream is the source of truth for reproducibility: <a href="https://github.com/Rianico/pi-better-edit/blob/main/benchmarks/README.md" target="_blank" rel="noopener noreferrer"><code>pi-better-edit/benchmark/README.md</code></a> and <a href="https://github.com/Rianico/pi-better-edit/tree/main/benchmarks/results" target="_blank" rel="noopener noreferrer"><code>benchmarks/results/</code></a>. This plugin shares the hashline algorithm byte-for-byte, so we do not re-run locally.</p>
+<blockquote>
+<p><strong>Scope &amp; honesty.</strong> The benchmark measures <strong>request-payload tokens</strong> — what the model emits per
+edit call — with identical read traffic excluded (it cancels) and identical replacement text.
+It does <strong>not</strong> model transcription failure and retries, which is where the real-world gap is
+largest. The correctness gap behind those numbers is spelled out above in <a href="#correctness-in-edge-cases" target="_blank" rel="noopener noreferrer">Correctness in edge cases</a>.</p>
+</blockquote>
+<h2>Roadmap</h2>
+<p><strong>Current state (0.3.1):</strong> hashline <code>edit</code> with merged payload <code>{path, edits:[[hash,hash,text]]}</code>, whitespace-insensitive anchors, orphan healing, per-workspace store, 674 tests.</p>
+<details><summary>Next</summary><ul>
+<li>Verify 0.3.1 live in a dsh session after the orphan-healing + canon changes.</li>
+<li>Keep benchmark reference in sync with upstream releases (algorithm is shared).</li>
+<li>Re-check plugin wiring against the next dsh release (pinned to <code>0.1.0-rc.6</code>; dsh is in developer preview and promises breaking changes).</li>
+</ul>
+</details><h2>Contributing</h2>
+<p>See <a href="https://github.com/Rianico/dsh-better-edit/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a> (or just open an <a href="https://github.com/Rianico/dsh-better-edit/issues" target="_blank" rel="noopener noreferrer">issue</a>).
+The most valuable contributions right now are more edge-case tests for the
+served-state verification.</p>
+<h2>License</h2>
+<p>MIT License — see <a href="https://github.com/Rianico/dsh-better-edit/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a> for details. Ported from pi-better-edit.</p>
+<h2>Acknowledgments</h2>
+<p>Hash-anchored editing descends from Can Bölük's
+<a href="https://stencil.so/blog/the-harness-problem" target="_blank" rel="noopener noreferrer"><em>The Harness Problem</em></a> — the post that showed the
+harness, not the model, is the bottleneck, and that anchored edits beat search-and-replace. This
+project stands on the shoulders of:</p>
+<ul>
+<li><a href="https://github.com/RimuruW/pi-hashline-edit" target="_blank" rel="noopener noreferrer"><strong>pi-hashline-edit</strong></a> by RimuruW — the original
+pi-coding-agent extension that introduced hash anchors and the strict-semantics
+policy.</li>
+<li><a href="https://github.com/YuGiMob/pi-hashline-edit-pro" target="_blank" rel="noopener noreferrer"><strong>pi-hashline-edit-pro</strong></a> by YuGiMob —
+the hardened fork this project is self-maintained from (3-char hashes, collision
+resolution, served-state verification, persisted undo).</li>
+<li><a href="https://github.com/Rianico/pi-better-edit" target="_blank" rel="noopener noreferrer"><strong>pi-better-edit</strong></a> — the upstream this project tracks. The hashline core is ported; the tool layer is rewritten on dsh's plugin API.</li>
+<li><a href="https://www.npmjs.com/package/@oh-my-pi/hashline" target="_blank" rel="noopener noreferrer"><strong>@oh-my-pi/hashline</strong></a>
+by can1357 — the original oh-my-pi implementation and the hashline patch-language concept.</li>
+</ul>
+<p>Related reading: <a href="https://dirac.run/posts/hash-anchors-myers-diff-single-token" target="_blank" rel="noopener noreferrer">Hash anchors + Myers diff + single-token anchors
+(dirac.run)</a> (a design review of the
+O(S+R) → O(R) edit-call saving) and an independent
+<a href="https://nwyin.com/blogs/hashline-vs-replace-edit-bench.html" target="_blank" rel="noopener noreferrer">hashline-vs-replace benchmark</a>.</p>
+<hr />
+<h2>Star History</h2>
+<p><a href="https://star-history.com/#Rianico/dsh-better-edit&amp;Date" target="_blank" rel="noopener noreferrer"><img src="https://api.star-history.com/svg?repos=Rianico/dsh-better-edit&amp;type=Date" alt="Star History Chart" /></a></p>
+<hr />
+<p>
+  <strong>⭐ If hashline editing made your agent edit better, give it a star!</strong>
+</p>

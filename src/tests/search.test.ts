@@ -25,6 +25,8 @@ function fixture(overrides: Partial<Plugin>): Plugin {
     qualityScore: 0,
     scoreBreakdown: { maintenance: 0, popularity: 0, compliance: 0, security: 0, docs: 0 },
     trustFlags: {},
+    securityGrade: "A",
+    securityFindings: [],
     npmPackage: null,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",

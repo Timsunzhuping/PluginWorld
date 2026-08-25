@@ -1,0 +1,483 @@
+<h1>Super Productivity MCP</h1>
+<p><strong>Give your AI assistant real access to your tasks — without giving up local-first.</strong></p>
+<p>An <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">MCP</a> server that reads and writes your
+<a href="https://super-productivity.com" target="_blank" rel="noopener noreferrer">Super Productivity</a> tasks through the sync file
+already sitting in your Nextcloud. No plugin, no fork, no second app to keep in
+step.</p>
+<pre><code>┌─────────────────┐         ┌──────────────────┐         ┌─────────────────┐
+│  Super          │  sync   │    Nextcloud     │  sync   │  This MCP       │
+│  Productivity   │ ──────► │  sync-data.json  │ ◄────── │  server         │
+│  desktop/mobile │ ◄────── │                  │ ──────► │                 │
+└─────────────────┘         └──────────────────┘         └────────┬────────┘
+                                                                  │ MCP
+                                                         ┌────────▼────────┐
+                                                         │  OpenClaw,      │
+                                                         │  Claude, …      │
+                                                         └─────────────────┘
+</code></pre>
+<hr />
+<h2>Why this exists</h2>
+<p>Super Productivity is deliberately local-first. There is no remote API, no
+outgoing webhook, and the desktop app's local REST API binds to <code>127.0.0.1</code> —
+unreachable from anywhere else by design. The CalDAV plugin exports only tasks
+that already have a date, and exports them as calendar <em>events</em>, not tasks.</p>
+<p>The sync file is different. It holds <strong>everything</strong>: every project, every tag,
+the whole undated backlog, subtasks, estimates, time tracking. It is already on
+your server. It is the complete picture, and nothing else is.</p>
+<p>So this server talks to that.</p>
+<h2>What makes it safe</h2>
+<p>The naive version of this idea — download the JSON, edit it, upload it — will
+eventually destroy your task history. Super Productivity is not a file with
+tasks in it; it is an <strong>operation log with vector clocks</strong>, and your devices
+merge changes by replaying operations, not by comparing files.</p>
+<p>This server participates in that protocol properly. It behaves as one more
+device on your account:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Naive file editor</th>
+<th>This server</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Concurrent edit on your phone</strong></td>
+<td>Silently overwritten</td>
+<td>Detected, re-applied on top</td>
+</tr>
+<tr>
+<td><strong>Other devices see the change</strong></td>
+<td>As a mysterious whole-file replacement</td>
+<td>As a normal operation, like any device</td>
+</tr>
+<tr>
+<td><strong>Identity in the sync protocol</strong></td>
+<td>None — masquerades as your desktop</td>
+<td>Its own client id, its own vector clock entry</td>
+</tr>
+<tr>
+<td><strong>A field it doesn't understand</strong></td>
+<td>Dropped</td>
+<td>Preserved byte-for-byte</td>
+</tr>
+<tr>
+<td><strong>Interrupted write</strong></td>
+<td>Corrupt file</td>
+<td>Previous version still in <code>.bak</code></td>
+</tr>
+<tr>
+<td><strong>Sync file format changed</strong></td>
+<td>Breaks</td>
+<td>Detected and handled</td>
+</tr>
+</tbody></table>
+<p>Concretely, every write:</p>
+<ol>
+<li><strong>Reads with a strong ETag.</strong> Nextcloud's <code>OC-ETag</code>, which survives reverse
+proxies rewriting the plain <code>ETag</code>.</li>
+<li><strong>Applies the change through a faithful port of Super Productivity's own
+reducers</strong> — so <code>TODAY</code> stays a virtual tag, <code>dueDay</code> and <code>dueWithTime</code> stay
+mutually exclusive, and completing a task never invents a due date.</li>
+<li><strong>Emits the matching operation</strong> with this server's client id and an
+incremented vector clock, so your other devices accept it as causally newer
+rather than flagging it as a conflict.</li>
+<li><strong>Refreshes the <code>.bak</code></strong> before touching the primary file.</li>
+<li><strong>Writes conditionally, on the revision it read.</strong> Never unconditionally.
+If another device wrote first, the whole mutation re-runs against the fresh
+state — their change survives, yours applies on top.</li>
+</ol>
+<blockquote>
+<p>Verified against a live Nextcloud: <code>If-Match</code> is genuinely enforced, and after
+a full create/schedule/complete/delete cycle the remote is still a valid
+schema-4 envelope with archives and untouched state byte-identical.</p>
+</blockquote>
+<hr />
+<h2>Quick start</h2>
+<p><strong>Requirements:</strong> Node 20.11+, a Nextcloud with Super Productivity already
+syncing to it.</p>
+<pre><code class="language-bash">git clone &lt;this-repo&gt; superproductivity-mcp
+cd superproductivity-mcp
+npm install
+cp .env.example .env
+</code></pre>
+<p>Fill in <code>.env</code>:</p>
+<pre><code class="language-ini">SP_NEXTCLOUD_URL=https://cloud.example.com
+SP_NEXTCLOUD_USER=yourname
+SP_NEXTCLOUD_PASSWORD=xxxxx-xxxxx-xxxxx-xxxxx-xxxxx
+SP_SYNC_FOLDER=super-productivity
+</code></pre>
+<blockquote>
+<p><strong>Use an app password</strong>, not your login password: Settings → Security →
+Devices &amp; sessions → Create new app password. It is scoped, revocable, and it
+is the only thing that works when two-factor authentication is on.</p>
+</blockquote>
+<p>Check everything before wiring it up to anything:</p>
+<pre><code class="language-bash">npm run doctor
+</code></pre>
+<pre><code>Super Productivity MCP — doctor (v1.0.0)
+
+  ok   configuration                https://cloud.example.com as yourname
+  ok   sync folder                  super-productivity
+  ok   mode                         read-write
+  ok   client id                    M_TSrPmbHAoq
+  ok   encryption                   not configured (the sync file must be plaintext)
+  ok   reachable                    Nextcloud answered and the credentials were accepted
+  ok   sync file                    SINGLE_FILE (sync-data.json)
+  ok   decoded                      syncVersion 114, schema 4
+  ok   conditional writes           the server returns a strong ETag, so concurrent writes are safe
+  ok   devices                      B_UjDTUW, A_rmkezu
+  ok   operation log                354 of 2000 retained
+  ok   contents                     12 open tasks, 3 projects, 4 tags
+
+All checks passed. The MCP server should work.
+</code></pre>
+<p>The doctor never writes. If a step fails, it says which one and why — which is
+the whole point of having it, because every failure mode here otherwise shows up
+inside your AI client as an unhelpful "the tool didn't work".</p>
+<p>Then build:</p>
+<pre><code class="language-bash">npm run build
+</code></pre>
+<h2>Connecting it</h2>
+<details>
+<summary>OpenClaw</summary><p>Add to your MCP server configuration:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "superproductivity": {
+      "command": "node",
+      "args": ["/absolute/path/to/superproductivity-mcp/dist/main.js"],
+      "env": {
+        "SP_NEXTCLOUD_URL": "https://cloud.example.com",
+        "SP_NEXTCLOUD_USER": "yourname",
+        "SP_NEXTCLOUD_PASSWORD": "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx",
+        "SP_SYNC_FOLDER": "super-productivity"
+      }
+    }
+  }
+}
+</code></pre>
+<p>You can leave <code>env</code> out entirely and let it read the <code>.env</code> file instead — set
+<code>SP_ENV_FILE</code> to an absolute path if the working directory won't be the project
+root.</p>
+</details><details>
+<summary>Claude Desktop</summary><p>Same shape, in <code>claude_desktop_config.json</code>
+(<code>~/Library/Application Support/Claude/</code> on macOS,
+<code>%APPDATA%\Claude\</code> on Windows).</p>
+</details><details>
+<summary>Claude Code</summary><pre><code class="language-bash">claude mcp add superproductivity -- node /absolute/path/to/dist/main.js
+</code></pre>
+</details><details>
+<summary>Any other MCP host</summary><p>It is a standard stdio MCP server. Run <code>node dist/main.js</code>; it speaks JSON-RPC
+on stdout and logs to stderr only.</p>
+</details><hr />
+<h2>Tools</h2>
+<h3>Reading</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it answers</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sp_overview</code></td>
+<td><em>"Where do things stand?"</em> Counts, today's tasks, overdue work, all projects and tags with their ids. <strong>Start here.</strong></td>
+</tr>
+<tr>
+<td><code>sp_list_tasks</code></td>
+<td>Filter by project, tag, status, schedule or text. Ordered the way you'd work through them: overdue → today → by date → backlog → done.</td>
+</tr>
+<tr>
+<td><code>sp_get_task</code></td>
+<td>One task in full, with notes and subtasks.</td>
+</tr>
+<tr>
+<td><code>sp_list_projects</code></td>
+<td>Projects with task counts.</td>
+</tr>
+<tr>
+<td><code>sp_list_tags</code></td>
+<td>Tags with ids.</td>
+</tr>
+</tbody></table>
+<h3>Writing</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sp_create_task</code></td>
+<td>Title is the only requirement. Pass <code>parentId</code> to create a subtask.</td>
+</tr>
+<tr>
+<td><code>sp_update_task</code></td>
+<td>Patches only the fields you send, so concurrent edits survive.</td>
+</tr>
+<tr>
+<td><code>sp_complete_task</code></td>
+<td>Complete, or reopen with <code>isDone: false</code>.</td>
+</tr>
+<tr>
+<td><code>sp_delete_task</code></td>
+<td>Deletes the task and its subtasks. Marked <strong>destructive</strong> so your host can confirm first.</td>
+</tr>
+<tr>
+<td><code>sp_schedule_task</code></td>
+<td><code>dueDay</code> for all-day, <code>dueAt</code> for a specific time, <code>clear: true</code> to unschedule.</td>
+</tr>
+<tr>
+<td><code>sp_plan_for_today</code> / <code>sp_remove_from_today</code></td>
+<td>The right tools for "do this today".</td>
+</tr>
+<tr>
+<td><code>sp_create_project</code> / <code>sp_update_project</code></td>
+<td>Create, rename, archive, toggle backlog.</td>
+</tr>
+<tr>
+<td><code>sp_create_tag</code> / <code>sp_update_tag</code></td>
+<td>Duplicate names are refused.</td>
+</tr>
+</tbody></table>
+<h3>Diagnostics</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sp_sync_status</code></td>
+<td>Layout, sync version, which devices have been writing, and any warnings.</td>
+</tr>
+<tr>
+<td><code>sp_recent_activity</code></td>
+<td>The operation log in plain language — <em>"did that actually save?"</em></td>
+</tr>
+</tbody></table>
+<p>In <code>SP_MODE=read-only</code> the write tools are not advertised at all, rather than
+advertised and refused. A tool a model can see is a tool it will try.</p>
+<h3>Two things worth knowing</h3>
+<p><strong>"Today" is not a tag you apply.</strong> A task is in Today because its due date is
+today. <code>sp_plan_for_today</code> is the way to put it there; the <code>TODAY</code> tag's task
+list only stores ordering.</p>
+<p><strong>Durations are in minutes.</strong> Super Productivity stores milliseconds; this
+server converts at the boundary so nothing is ever off by a factor of sixty.</p>
+<hr />
+<h2>Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SP_NEXTCLOUD_URL</code></td>
+<td><em>required</em></td>
+<td>Base URL, no path. <code>http://</code> is upgraded if your server redirects.</td>
+</tr>
+<tr>
+<td><code>SP_NEXTCLOUD_USER</code></td>
+<td><em>required</em></td>
+<td>The username your files live under.</td>
+</tr>
+<tr>
+<td><code>SP_NEXTCLOUD_PASSWORD</code></td>
+<td><em>required</em></td>
+<td>App password strongly preferred.</td>
+</tr>
+<tr>
+<td><code>SP_NEXTCLOUD_LOGIN_NAME</code></td>
+<td>—</td>
+<td>Only if your instance logs in by email but stores files under a different username.</td>
+</tr>
+<tr>
+<td><code>SP_SYNC_FOLDER</code></td>
+<td><code>super-productivity</code></td>
+<td>Folder inside your Nextcloud.</td>
+</tr>
+<tr>
+<td><code>SP_ENCRYPTION_PASSWORD</code></td>
+<td>—</td>
+<td><strong>Only</strong> if you enabled encryption in Super Productivity's sync settings. Must match exactly.</td>
+</tr>
+<tr>
+<td><code>SP_MODE</code></td>
+<td><code>read-write</code></td>
+<td><code>read-only</code> hides every write tool.</td>
+</tr>
+<tr>
+<td><code>SP_CLIENT_ID</code></td>
+<td>derived</td>
+<td>This server's identity in the vector clock. Derived stably from machine + target; set it only if you need to pin it.</td>
+</tr>
+<tr>
+<td><code>SP_CACHE_TTL_SECONDS</code></td>
+<td><code>20</code></td>
+<td>How long a read may be served from cache. Writes always refetch.</td>
+</tr>
+<tr>
+<td><code>SP_LOG_LEVEL</code></td>
+<td><code>info</code></td>
+<td><code>silent</code> | <code>error</code> | <code>warn</code> | <code>info</code> | <code>debug</code>. Always stderr.</td>
+</tr>
+<tr>
+<td><code>SP_REQUEST_TIMEOUT_MS</code></td>
+<td><code>30000</code></td>
+<td>Per-request timeout.</td>
+</tr>
+<tr>
+<td><code>SP_ENV_FILE</code></td>
+<td><code>./.env</code></td>
+<td>Where to read the env file from.</td>
+</tr>
+</tbody></table>
+<p>Legacy <code>nextcloud_user</code> / <code>nextcloud_password</code> names are also accepted, so an
+existing <code>.env</code> needs no renaming.</p>
+<blockquote>
+<p><strong>Why the <code>.env</code> file is parsed rather than sourced:</strong> app passwords routinely
+begin with <code>$</code>, and <code>source .env</code> in a shell expands <code>$Nyd0…</code> to the empty
+string. The resulting failure looks exactly like a wrong password. This server
+reads the file literally and sidesteps the whole class of confusion.</p>
+</blockquote>
+<hr />
+<h2>How it works</h2>
+<pre><code>src/
+├── domain/          Pure. No I/O, no framework, no network.
+│   ├── model/         Super Productivity's state, as we read it
+│   ├── reducers/      Faithful ports of upstream's own reducers
+│   ├── sync/          Vector clocks, the compact operation format
+│   ├── errors.ts      One taxonomy, split by what the caller should do
+│   └── ports.ts       The boundary: FileStore, Clock, IdGenerator, Logger
+├── application/     Use cases and projections
+│   ├── workspace.ts   Read-modify-write with optimistic concurrency
+│   ├── read-models.ts Raw state → something a model can act on
+│   └── services/      Task, organiser and diagnostics use cases
+├── infrastructure/  Everything that touches the outside world
+│   ├── codec/         The pf_ prefix, gzip, Argon2id + AES-GCM
+│   ├── webdav/        Conditional writes, strong validators
+│   ├── sync/          Layout detection, operation replay
+│   └── config/        Env loading and validation
+├── presentation/    The MCP tool surface
+└── composition-root.ts  The only place a concrete dependency is chosen
+</code></pre>
+<p>The dependency rule points inward: <code>domain</code> knows nothing about WebDAV or MCP.
+That is not decoration — it is why the integration suite can run the <strong>entire</strong>
+stack, including the conditional-write retry logic, against an in-memory store
+with a frozen clock, offline, in under two seconds.</p>
+<h3>Both sync layouts, detected automatically</h3>
+<p>Super Productivity has shipped two remote layouts, and can migrate a folder at
+any time:</p>
+<ul>
+<li><strong>Single file</strong> — <code>sync-data.json</code> holds the snapshot, archives and log
+together. The default.</li>
+<li><strong>Split</strong> — <code>sync-ops.json</code> is the commit point, <code>sync-state.json</code> the
+snapshot. Opt-in ("Surgical sync").</li>
+</ul>
+<p>The layout is detected on every read, never configured. In the split layout the
+snapshot is rewritten only on compaction, so it can lag by up to 2000
+operations; this server replays the pending log to close the gap, and <strong>reports
+anything it could not replay</strong> instead of quietly showing you an incomplete
+picture.</p>
+<h3>Encryption</h3>
+<p>If you enabled encryption in Super Productivity, set <code>SP_ENCRYPTION_PASSWORD</code>
+to the same password. The pipeline — JSON → gzip → Argon2id-derived AES-256-GCM
+— matches upstream exactly, including the legacy PBKDF2 format for files written
+by older clients.</p>
+<p>A plaintext file is <strong>refused</strong> when encryption is configured. The encryption
+flag lives outside the authenticated envelope, so anyone who can write to your
+remote could strip it and serve you their own data; local intent wins over the
+remote's self-declaration.</p>
+<hr />
+<h2>Development</h2>
+<pre><code class="language-bash">npm test              # unit + integration, no network, ~2s
+npm run test:unit
+npm run test:integration
+npm run test:coverage
+npm run test:e2e      # real Nextcloud — see below
+npm run verify        # format + lint + typecheck + test
+npm run dev           # run from source
+</code></pre>
+<p><strong>284 tests.</strong> The integration suite runs the whole stack against an in-memory
+store that evaluates <code>If-Match</code> for real, covering the situations that are
+otherwise near-impossible to stage: a rival device committing inside the
+read-write gap, a server with no usable ETags, a failed backup write, a
+tombstoned folder, a corrupt remote.</p>
+<p>The test fixture is a real sync file — same envelope, same 344-operation log,
+same schema version — with every title and note replaced by synthetic text.</p>
+<h3>End-to-end</h3>
+<p><code>npm run test:e2e</code> runs against a real Nextcloud, in a <strong>separate sandbox
+folder</strong> seeded from a copy of your sync file and deleted afterwards. Your real
+sync folder is never written to by the suite. It skips itself when no
+credentials are configured.</p>
+<p>Set <code>SP_E2E_FOLDER</code> in <code>.env</code> (default <code>super-productivity-mcp-e2e</code>). It must
+differ from <code>SP_SYNC_FOLDER</code>; the suite creates, overwrites and deletes files
+inside it.</p>
+<hr />
+<h2>Limitations</h2>
+<p>Stated plainly, because the alternative is discovering them later:</p>
+<ul>
+<li><strong>Sync is not instant.</strong> Changes land in the sync file immediately; your
+desktop and phone pick them up on their next sync.</li>
+<li><strong>Archived tasks are read-only.</strong> This server reads your archives but never
+writes to them. Complete tasks instead of archiving them.</li>
+<li><strong>The split layout is append-only.</strong> When its operation log fills up, the
+server refuses further writes and tells you to open Super Productivity once
+so it can compact. Compacting would mean publishing a partially-replayed
+snapshot as authoritative, which could silently discard whatever it failed to
+replay.</li>
+<li><strong>No time tracking or Pomodoro.</strong> Those are local, live features; there is
+nothing sensible to write from here.</li>
+<li><strong>Notes and repeating tasks are read-through, not writable.</strong></li>
+<li><strong>One level of subtask nesting</strong>, matching Super Productivity itself.</li>
+</ul>
+<h2>Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Nextcloud rejected the credentials</code></td>
+<td>Login password with 2FA enabled — use an app password. Or a password starting with <code>$</code> that a shell ate; this server parses <code>.env</code> literally, but your process manager may not.</td>
+</tr>
+<tr>
+<td><code>Remote file not found: sync-data.json</code></td>
+<td>Wrong <code>SP_SYNC_FOLDER</code>. Check the folder name in Nextcloud's file browser.</td>
+</tr>
+<tr>
+<td><code>Not a Super Productivity sync file</code></td>
+<td>Pointed at the wrong file, or encryption is on and <code>SP_ENCRYPTION_PASSWORD</code> is unset.</td>
+</tr>
+<tr>
+<td><code>The remote sync file is plaintext but…</code></td>
+<td><code>SP_ENCRYPTION_PASSWORD</code> is set but encryption is off in the app. Clear it.</td>
+</tr>
+<tr>
+<td><code>no usable ETag</code> in the doctor</td>
+<td>A proxy is stripping ETag headers. Writes will refuse rather than risk overwriting another device. Fix the proxy.</td>
+</tr>
+<tr>
+<td>Changes not visible on your phone</td>
+<td>Open the app and let it sync. Check <code>sp_sync_status</code> for which devices have been writing.</td>
+</tr>
+<tr>
+<td><code>another device kept writing first</code></td>
+<td>Something is syncing in a tight loop. Try again in a moment. Nothing was changed.</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Credits</h2>
+<p>Built against <a href="https://github.com/johannesjo/super-productivity" target="_blank" rel="noopener noreferrer">Super Productivity</a>
+by Johannes Millan. The operation-log format, vector-clock algorithms and
+reducer semantics here are ports of that project's own implementation — see
+<a href="https://github.com/johannesjo/super-productivity/tree/master/docs/sync-and-op-log" target="_blank" rel="noopener noreferrer"><code>docs/sync-and-op-log/</code></a>
+for the architecture this server had to learn to speak.</p>
+<h2>License</h2>
+<p>MIT</p>

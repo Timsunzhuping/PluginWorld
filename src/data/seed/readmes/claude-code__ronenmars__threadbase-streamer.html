@@ -1,0 +1,120 @@
+<h1>@threadbase-sh/streamer</h1>
+<p>Runs and manages Claude Code sessions on a server: spawns them in a PTY, streams terminal output over WebSocket, and exposes a REST API for conversation history, search, and session control.</p>
+<h2>Quick Start</h2>
+<h3>npm (recommended)</h3>
+<pre><code class="language-bash">npm install -g @threadbase-sh/streamer
+tb-streamer set-key &lt;YOUR_API_KEY&gt;   # one-time setup
+tb-streamer serve
+</code></pre>
+<p>Only <code>node-pty</code> compiles on install; everything else ships prebuilt.</p>
+<h3>Homebrew (macOS + Linux)</h3>
+<pre><code class="language-bash">brew tap RonenMars/threadbase
+brew install tb-streamer
+tb-streamer set-key &lt;YOUR_API_KEY&gt;   # one-time setup
+brew services start tb-streamer      # also starts on login
+</code></pre>
+<p>Stop/restart with <code>brew services stop|restart tb-streamer</code>. Mutually exclusive with the manual <code>scripts/deploy.sh</code> install — if switching from that, run <code>launchctl bootout gui/$UID/com.threadbase.streamer</code> first.</p>
+<h3>Build locally</h3>
+<pre><code class="language-bash">npm install
+npm run build
+node dist/cli.cjs serve --verbose --local-no-auth
+</code></pre>
+<h4>Server address</h4>
+<p>By default, the server listens on port <code>8766</code> on all interfaces (WebSocket path: <code>/ws</code>).</p>
+<h4>Automatic updates</h4>
+<p>npm and Homebrew installs can auto-update: <a href="https://github.com/RonenMars/threadbase-streamer/blob/HEAD/docs/guides/auto-update.md" target="_blank" rel="noopener noreferrer">docs/guides/auto-update.md</a>.</p>
+<h2>Remote Access</h2>
+<p>The server listens on port 8766 on all interfaces by default, so devices on the same LAN can already reach it. To restrict it to this machine, start it with <code>tb-streamer serve --host 127.0.0.1</code>. To let the mobile app reach it from <em>outside</em> your LAN, expose it via a tunnel — the fastest is a Cloudflare quick-tunnel (no account needed):</p>
+<blockquote>
+<p><strong>Before you do this, read <a href="#security--read-this-before-exposing-the-server" target="_blank" rel="noopener noreferrer">Security</a>.</strong> A tunnel makes the server reachable from the public internet, and the API key is the only thing between a stranger and a shell on this machine.</p>
+</blockquote>
+<pre><code class="language-bash">bash scripts/remote-access/cloudflare.sh      # macOS/Linux/WSL/Git Bash
+pwsh scripts/remote-access/cloudflare.ps1     # anywhere pwsh is installed
+</code></pre>
+<p>Other providers and full setup: <a href="https://github.com/RonenMars/threadbase-streamer/blob/HEAD/docs/guides/remote-access/README.md" target="_blank" rel="noopener noreferrer">docs/guides/remote-access</a>.</p>
+<h2>Development</h2>
+<pre><code class="language-bash">npm test                  # run tests
+npm run lint              # type-check + lint
+npm run format            # auto-format
+npm run build             # build ESM/CJS + copy migrations
+npm run dev               # watch mode
+npm run migrate           # apply SQLite migrations
+npm run db:validate       # check for missing/duplicate/orphaned project_id data
+</code></pre>
+<h2>Security — read this before exposing the server</h2>
+<p><strong>The API key is equivalent to a shell on this machine.</strong> The streamer exists to start Claude Code sessions and type into them, so anyone holding the key can run commands as your user, in any project the server can reach. Treat it like an SSH private key, not like a web session token.</p>
+<p>The key lives at <code>~/.threadbase/server.yaml</code> as plaintext (<code>chmod 0600</code>), which is the same posture as <code>~/.aws/credentials</code> or <code>~/.npmrc</code>. Rotate it with <code>POST /api/auth/rotate</code> if it leaks; re-pair your devices afterwards.</p>
+<p><strong>The server listens on all network interfaces by default</strong>, not just loopback. So every device on your LAN can already reach port 8766, and the API key is the only thing stopping them. On a home network that is usually fine; on café Wi-Fi, a co-working space, or a corporate VLAN it is not. To bind only to loopback, run:</p>
+<pre><code class="language-bash">tb-streamer serve --host 127.0.0.1
+</code></pre>
+<p><strong>A tunnel extends that to the entire internet.</strong> From that moment the key is the only thing between a stranger and your filesystem.</p>
+<p>For stricter network policies, also use your firewall or a network namespace.</p>
+<h3>There is no spend limit</h3>
+<p>Nothing in this server caps what a session costs. There is no per-session, per-day, or total ceiling, and no way to configure one — a runaway agent bills your provider account until you stop it. (<code>--max-budget-usd</code> is not a workaround: it only applies to <code>claude --print</code>, which this server never uses, so it was silently inert and has been removed.)</p>
+<p>The practical bound is that a session waits for input between turns. Auto-resume and bypass modes both weaken that bound — see below.</p>
+<h3>Permission modes decide how much a session can do unattended</h3>
+<p>Sessions spawn with <code>--permission-mode</code>, default <code>acceptEdits</code>: file edits are auto-approved, shell commands still prompt. The first-run prompt offers only <code>acceptEdits</code> and <code>manual</code>, so the unattended modes are never something you pick by accident.</p>
+<p><code>bypassPermissions</code> and <code>dontAsk</code> are available through <code>--default-permission-mode</code> and <code>PUT /api/config/claude-flags</code>, and they remove the confirmation step entirely. <strong>A session in either mode is unattended arbitrary code execution</strong>: a leaked key no longer stops at a human-in-the-loop prompt. <code>--add-dir</code> compounds this by widening filesystem scope beyond the project.</p>
+<p>If you enable one, you are accepting that the auth boundary is the <em>only</em> remaining control. Two guardrails exist and neither is a substitute for that judgement: <code>PUT /api/config/claude-flags</code> is refused with 403 while <code>--local-no-auth</code> is active, and every flag change is logged with its old and new value.</p>
+<h3>Auto-resume starts agents without you</h3>
+<p><code>auto_resume_on_boot</code> in <code>server.yaml</code> re-starts sessions that a previous run was interrupted mid-flight. It defaults to <code>false</code> and is never enabled implicitly — it is the one setting that lets the streamer start an agent nobody asked for in that moment, and combined with a bypass permission mode that is unattended code execution after a reboot.</p>
+<p>Leave it off unless you have a reason, and do not combine it with a bypass mode unless you fully trust everything that can reach the API.</p>
+<h3>Reporting a vulnerability</h3>
+<p>See <a href="https://github.com/RonenMars/threadbase/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a> in the umbrella repo.</p>
+<h2>Persistence</h2>
+<p>Conversation metadata is cached in SQLite at <code>~/.threadbase/cache/cache.db</code>, created and migrated automatically — no setup needed.</p>
+<p>Live PTYs do not survive a restart, but sessions are not lost: the managed-session registry (<code>~/.threadbase/runtime.db</code>) brings interrupted sessions back in <code>GET /api/sessions</code> as resumable stubs, and any conversation can be resumed with <code>POST /api/sessions/resume</code>. History itself is always on disk, written by the provider.</p>
+<p>PostgreSQL is optional and only stores upload records today. Enable it by setting <code>THREADBASE_DATABASE_URL</code>; migrations run automatically.</p>
+<h2>Architecture</h2>
+<pre><code class="language-mermaid">graph LR
+    subgraph Mobile["tb-mobile"]
+        Client[Mobile / CLI client]
+    end
+
+    subgraph Streamer["tb-streamer"]
+        API[API layer&lt;br/&gt;src/api]
+        Core[Core engine&lt;br/&gt;server.ts]
+        WSHub[WS hub]
+        PTY[PTY sessions&lt;br/&gt;node-pty]
+        Watcher[Conversation watcher&lt;br/&gt;chokidar]
+        Cache[(SQLite cache&lt;br/&gt;cache.db)]
+    end
+
+    subgraph ScannerPkg["tb-scanner (npm dep)"]
+        Scanner[ConversationScanner]
+        SCache[(SQLite index&lt;br/&gt;index.db)]
+    end
+
+    Client -- HTTP --&gt; API
+    Client -- WebSocket --&gt; WSHub
+    API --&gt; Core
+    Core --&gt; WSHub
+    Core --&gt; PTY
+    Core --&gt; Watcher
+    Core --&gt; Scanner
+    Watcher --&gt; Cache
+    Watcher --&gt; WSHub
+    PTY -- JSONL --&gt; Watcher
+    PTY -- terminal_output --&gt; WSHub
+    Scanner --&gt; SCache
+    Scanner --&gt; Cache
+</code></pre>
+<p>Three layers: <strong>core engine</strong> (<code>src/*.ts</code>) → <strong>API layer</strong> (<code>src/api/</code> + <code>src/index.ts</code>) → <strong>CLI</strong> (<code>cli/</code>).</p>
+<ul>
+<li><code>POST /api/sessions/start</code> / <code>resume</code> spawns <code>claude</code> in a PTY; output streams to WebSocket clients as <code>terminal_output</code>, with a <code>terminal_replay</code> snapshot on subscribe.</li>
+<li><code>SessionStore</code> tracks both PTY-managed sessions and externally-running <code>claude</code> processes discovered on disk.</li>
+<li>A chokidar-backed watcher tails conversation JSONL files into the SQLite cache, so list/search endpoints don't scan the filesystem.</li>
+<li>A WebSocket subscriber disconnecting never stops the agent — sessions outlive a sleeping phone or a dropped connection. A PTY is put on hold (history intact, resumable anytime) only on an explicit <code>hold_session</code> message, or by the idle reaper after 6 h of agent silence.</li>
+</ul>
+<p>More detail: <a href="https://github.com/RonenMars/threadbase-streamer/blob/HEAD/docs/how-it-works.md" target="_blank" rel="noopener noreferrer">docs/how-it-works.md</a> and <a href="https://github.com/RonenMars/threadbase-streamer/blob/HEAD/docs/architecture/README.md" target="_blank" rel="noopener noreferrer">docs/architecture/</a>.</p>
+<h2>Feature flags</h2>
+<p>Streamer experiments are the <code>FEATURE_FLAGS</code> object in <code>src/feature-flags.ts</code>, keyed by name (<code>ptyHost</code>, <code>liveActivityPush</code>, …). <code>--feature &lt;id=bool&gt;</code> and <code>feature_flags:</code> in <code>server.yaml</code> use <strong>those same camelCase keys</strong>. Env vars are a different spelling (<code>THREADBASE_FEATURE_PTY_HOST</code>) and outrank both.</p>
+<p>Unknown yaml keys (typos, snake_case, the env name) are dropped with a warning; they do not stop the boot. Flags resolve once at boot — a change needs a restart. List and provenance: <code>GET /api/config/feature-flags</code>.</p>
+<p>Operator detail: <a href="https://github.com/RonenMars/threadbase-streamer/blob/HEAD/docs/guides/feature-flags.md" target="_blank" rel="noopener noreferrer">docs/guides/feature-flags.md</a>. Implementation: <code>CLAUDE.md</code> § Feature flags.</p>
+<h2>REST API</h2>
+<p>Full endpoint reference: <a href="https://github.com/RonenMars/threadbase-streamer/blob/HEAD/docs/api-reference.md" target="_blank" rel="noopener noreferrer">docs/api-reference.md</a>.</p>
+<h2>Mobile Pairing (QR)</h2>
+<p>A pairing QR is printed on server start (skip with <code>--no-pair-qr</code>), or reprint one anytime with <code>tb-streamer pair</code>. Scanning it trades a single-use token for a sealed API key — the key itself never appears in the QR.</p>
+<p>If the phone can't reach <code>localhost</code>, give it a reachable address via (in order of precedence) <code>--public-url</code>, <code>THREADBASE_PUBLIC_URL</code>, or <code>public_url:</code> in <code>server.yaml</code>. HTTPS is required except for <code>localhost</code>.</p>
+<h2>Global CLI Commands</h2>
+<p>Deploying installs two equivalent global commands wrapping <code>~/.threadbase/cli.js</code>: <code>tb-streamer</code> and <code>threadbase-streamer</code>. Details: <a href="https://github.com/RonenMars/threadbase-streamer/blob/HEAD/docs/guides/deploy-internals.md" target="_blank" rel="noopener noreferrer">docs/guides/deploy-internals.md</a>.</p>

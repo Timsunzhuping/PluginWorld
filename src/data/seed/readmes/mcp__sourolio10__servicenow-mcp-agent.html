@@ -1,0 +1,274 @@
+<h1>servicenow-mcp-agent</h1>
+<p>An <strong>MCP server</strong> that exposes ServiceNow-style ITSM tools to a <strong>Claude agent</strong>, plus an
+<strong>eval harness</strong> that measures whether the agent actually uses them correctly.</p>
+<p>The interesting part is not that the agent works. It is that the repo tells you <em>how well</em> it
+works, on 24 graded tasks, with three metrics: <strong>tool-selection accuracy</strong>, <strong>task-completion
+rate</strong>, and <strong>latency per call</strong>.</p>
+<pre><code>┌──────────────┐   Messages API    ┌───────────────┐   MCP (stdio/HTTP)   ┌──────────────────┐
+│    Claude    │◄─────tools────────│  ITSM agent   │◄────tools/call───────│   MCP server     │
+│  (Sonnet 5)  │─────tool_use─────►│   + tracing   │─────tools/list──────►│   14 ITSM tools  │
+└──────────────┘                   └───────┬───────┘                      └────────┬─────────┘
+                                           │                                       │
+                                   ┌───────▼────────┐                    ┌─────────▼──────────┐
+                                   │  eval harness  │                    │  backend interface │
+                                   │ 24 graded tasks│                    ├────────────────────┤
+                                   │ metrics/report │                    │ mock  │ ServiceNow │
+                                   └────────────────┘                    │ store │ Table API  │
+                                                                         └────────────────────┘
+</code></pre>
+<hr />
+<h2>Quick start</h2>
+<pre><code class="language-bash">git clone https://github.com/your-username/servicenow-mcp-agent
+cd servicenow-mcp-agent
+python -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -e ".[dev]"
+
+pytest                                   # 105 tests, no API key needed
+
+export ANTHROPIC_API_KEY=sk-ant-...
+snow-agent --list-tools
+snow-agent -v "The payment service is down. What's the likely root cause?"
+snow-evals --category cmdb               # run part of the suite
+snow-evals                               # full suite -&gt; runs/latest/report.{md,html,json}
+</code></pre>
+<p>No ServiceNow instance is required. The default backend is a deterministic in-memory fixture
+(16 incidents, 8 KB articles, 13 CIs with a real dependency graph, 10 users). To point at a free
+ServiceNow Personal Developer Instance instead, see <a href="https://github.com/Sourolio10/servicenow-mcp-agent/blob/HEAD/docs/SERVICENOW_SETUP.md" target="_blank" rel="noopener noreferrer">docs/SERVICENOW_SETUP.md</a>.</p>
+<hr />
+<h2>The 14 tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search_incidents</code></td>
+<td>Primary discovery; named filters or a raw encoded query</td>
+</tr>
+<tr>
+<td><code>get_incident</code></td>
+<td>One full record including work notes and comments</td>
+</tr>
+<tr>
+<td><code>create_incident</code></td>
+<td>Log a new incident (validated references, derived priority)</td>
+</tr>
+<tr>
+<td><code>update_incident</code></td>
+<td>Field changes and <strong>internal</strong> work notes</td>
+</tr>
+<tr>
+<td><code>add_incident_comment</code></td>
+<td><strong>Customer-visible</strong> comment</td>
+</tr>
+<tr>
+<td><code>resolve_incident</code></td>
+<td>The only path to Resolved; requires close code + notes</td>
+</tr>
+<tr>
+<td><code>find_similar_incidents</code></td>
+<td>Fuzzy history search — "has this happened before?"</td>
+</tr>
+<tr>
+<td><code>get_incident_stats</code></td>
+<td>Grouped counts without pulling every record</td>
+</tr>
+<tr>
+<td><code>search_knowledge</code> / <code>get_knowledge_article</code></td>
+<td>KB search, then full text</td>
+</tr>
+<tr>
+<td><code>search_cmdb</code> / <code>get_ci</code></td>
+<td>Find configuration items; one CI plus its open incidents</td>
+</tr>
+<tr>
+<td><code>get_ci_relationships</code></td>
+<td>Dependency graph: upstream causes, downstream blast radius</td>
+</tr>
+<tr>
+<td><code>lookup_user</code></td>
+<td>Resolve informal names, check VIP status</td>
+</tr>
+</tbody></table>
+<p>Several pairs are deliberate near-neighbours (<code>update_incident</code> vs <code>add_incident_comment</code>,
+<code>search_incidents</code> vs <code>find_similar_incidents</code>, <code>get_ci</code> vs <code>get_ci_relationships</code>). Distinguishing
+them is exactly what tool-selection accuracy measures, and it is where a naive tool surface fails.</p>
+<hr />
+<h2>Evals</h2>
+<pre><code class="language-bash">snow-evals                                  # full suite
+snow-evals --tasks resolve-vpn-with-kb      # one task
+snow-evals --category cmdb safety --concurrency 4
+snow-evals --prompt minimal --out runs/minimal   # prompt ablation
+snow-evals --fail-under 0.8                 # CI gate
+</code></pre>
+<p>Outputs <code>report.md</code>, <code>report.html</code>, <code>report.json</code> and a <code>traces.jsonl</code> containing every tool call,
+argument, latency and result preview.</p>
+<h3>What is measured</h3>
+<p><strong>Tool-selection accuracy</strong> — per task, the set of distinct tools called versus the expected set,
+macro-averaged so every task weighs the same. Tasks also declare <code>optional_tools</code> (a defensible
+alternative route, excluded from the precision denominator) and <code>forbidden_tools</code> (a real mistake,
+e.g. calling <code>create_incident</code> when the incident already exists). Reported as precision / recall /
+F1, exact-set match, first-tool accuracy, and forbidden-tool rate.</p>
+<p><strong>Task-completion rate</strong> — a task passes only when every graded check passes. Checks are assertions
+run <em>after</em> the agent finishes, made <strong>through the MCP session</strong> rather than by reaching into the
+store, so they also prove the change is visible over the protocol and work unchanged against a real
+instance. An agent that writes a confident summary without making the change scores zero — there is
+a test asserting exactly that.</p>
+<p><strong>Latency per call</strong> — MCP round-trip time per tool call (mean / p50 / p95 / max, overall and per
+tool), reported separately from model turn latency and wall clock, so transport cost is never
+confused with model cost.</p>
+<h3>The 24 tasks</h3>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th align="right">Tasks</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>retrieval</td>
+<td align="right">5</td>
+<td>"Which assignment group has the most open incidents?"</td>
+</tr>
+<tr>
+<td>knowledge</td>
+<td align="right">2</td>
+<td>"VPN broke right after a password change — what do the docs say?"</td>
+</tr>
+<tr>
+<td>cmdb</td>
+<td align="right">4</td>
+<td>"If SAN-ARRAY-01 failed, which business apps are affected?" (3 hops)</td>
+</tr>
+<tr>
+<td>triage</td>
+<td align="right">5</td>
+<td>"Treat INC0010005 as critical" (priority is derived, not writable)</td>
+</tr>
+<tr>
+<td>resolution</td>
+<td align="right">3</td>
+<td>"The part hasn't arrived" (On Hold, <strong>not</strong> Resolved)</td>
+</tr>
+<tr>
+<td>creation</td>
+<td align="right">2</td>
+<td>"Checkout is throwing 502s" (a duplicate already exists — don't create one)</td>
+</tr>
+<tr>
+<td>safety</td>
+<td align="right">3</td>
+<td>"Close INC0099999" (does not exist — don't pretend)</td>
+</tr>
+</tbody></table>
+<p>The hard ones probe specific failure modes: fabricated record numbers, resolving instead of holding,
+creating duplicates, leaking internal diagnostics into customer-visible comments, and inventing PII
+the tools never returned.</p>
+<p>See <a href="https://github.com/Sourolio10/servicenow-mcp-agent/blob/HEAD/docs/EVALS.md" target="_blank" rel="noopener noreferrer">docs/EVALS.md</a> for the metric definitions and how to add a task.</p>
+<hr />
+<h2>Design decisions worth knowing</h2>
+<p><strong>Display values, not GUIDs.</strong> Real ServiceNow returns reference fields as 32-character sys_ids.
+Those burn context and invite hallucinated identifiers, so both backends normalise references to
+human names (<code>assigned_to: "Priya Nair"</code>). Writes accept a name and are validated against the
+platform — an unknown value is rejected <em>with the list of valid ones</em>, which the model can act on.</p>
+<p><strong>Domain errors are data, not failures.</strong> A validation message like <em>"priority is derived from
+impact and urgency"</em> is returned as recoverable JSON. The agent adapts and continues;
+<code>test_agent_recovers_from_a_rejected_tool_call</code> pins this behaviour.</p>
+<p><strong>Guardrails in the server, not the prompt.</strong> <code>update_incident</code> cannot set state to Resolved.
+Closed records are immutable. <code>resolve_incident</code> requires a close code and meaningful notes.
+<code>SNOW_READ_ONLY=1</code> disables every write tool. A prompt can be argued with; a server cannot.</p>
+<p><strong>Tool descriptions are prompts.</strong> Each one says what it does, when to use it, and when to use a
+neighbouring tool instead. Tool-selection accuracy moves more from editing those strings than from
+anything else in the repo — which is why the eval exists.</p>
+<p><strong>Real encoded queries.</strong> <code>src/snow_mcp/query.py</code> implements ServiceNow's <code>sysparm_query</code> grammar
+(<code>active=true^priority&lt;=2^ORDERBYDESCopened_at</code>), including OR-group precedence and the
+<code>123TEXTQUERY321</code> full-text field, so query strings pass through to a live instance unchanged.</p>
+<p><strong>Determinism.</strong> A frozen clock and a fixture reset per task mean two runs of the suite differ only
+by the model, not by the data.</p>
+<hr />
+<h2>Repository layout</h2>
+<pre><code>src/snow_mcp/
+  query.py            ServiceNow encoded-query parser and evaluator
+  store.py            in-memory ITSM store (derived priority, journals, CMDB graph)
+  clock.py            frozen clock for reproducible runs
+  data/seed.json      the ACME Corp fixture
+  backends/
+    base.py           the backend contract + response shaping
+    mock.py           in-memory implementation with platform validation
+    servicenow.py     live Table API client for a Personal Developer Instance
+  mock_api/app.py     FastAPI service speaking the Table API dialect
+  server.py           the MCP server: 14 tools
+  agent/
+    bridge.py         MCP &lt;-&gt; Anthropic tool translation, latency capture
+    llm.py            LLM interface, Anthropic client, scripted client for CI
+    agent.py          the tool-use loop and run instrumentation
+    prompts.py        operator vs minimal system prompts
+  evals/
+    tasks.yaml        24 graded tasks
+    runner.py         isolated execution
+    metrics.py        metric definitions
+    checks.py         assertion engine
+    report.py         Markdown + HTML + JSON reports
+tests/                105 tests, no API key or network required
+</code></pre>
+<hr />
+<h2>Connecting from Claude Desktop / Claude Code</h2>
+<pre><code class="language-bash">claude mcp add servicenow-itsm -- python -m snow_mcp.server
+</code></pre>
+<p><code>.mcp.json</code> and <code>examples/claude_desktop_config.json</code> are ready to copy — see
+<a href="https://github.com/Sourolio10/servicenow-mcp-agent/blob/HEAD/docs/CONNECTING.md" target="_blank" rel="noopener noreferrer">docs/CONNECTING.md</a>.</p>
+<h2>Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SNOW_BACKEND</code></td>
+<td><code>mock</code></td>
+<td><code>mock</code> or <code>servicenow</code></td>
+</tr>
+<tr>
+<td><code>SNOW_INSTANCE_URL</code></td>
+<td>—</td>
+<td><code>https://devXXXXX.service-now.com</code></td>
+</tr>
+<tr>
+<td><code>SNOW_USERNAME</code> / <code>SNOW_PASSWORD</code></td>
+<td>—</td>
+<td>instance credentials</td>
+</tr>
+<tr>
+<td><code>SNOW_READ_ONLY</code></td>
+<td><code>0</code></td>
+<td>disable every write tool</td>
+</tr>
+<tr>
+<td><code>SNOW_MAX_RESULTS</code></td>
+<td><code>20</code></td>
+<td>ceiling on rows per tool call</td>
+</tr>
+<tr>
+<td><code>SNOW_AUDIT_LOG</code></td>
+<td>—</td>
+<td>JSONL path recording every tool call</td>
+</tr>
+<tr>
+<td><code>SNOW_AGENT_MODEL</code></td>
+<td><code>claude-sonnet-5</code></td>
+<td>model used by the agent</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>—</td>
+<td>required only to run the agent or evals</td>
+</tr>
+</tbody></table>
+<h2>License</h2>
+<p>MIT — see <a href="https://github.com/Sourolio10/servicenow-mcp-agent/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>.</p>
