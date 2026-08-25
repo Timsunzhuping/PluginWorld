@@ -1,0 +1,1184 @@
+<h1>sd0x-dev-flow</h1>
+<p><img src="https://raw.githubusercontent.com/sd0xdev/sd0x-harness/main/banner.jpg" alt="sd0x-dev-flow banner" /></p>
+<p><strong>Language</strong>: English | <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/README.zh-TW.md" target="_blank" rel="noopener noreferrer">繁體中文</a> | <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a> | <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/README.ja.md" target="_blank" rel="noopener noreferrer">日本語</a> | <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/README.ko.md" target="_blank" rel="noopener noreferrer">한국어</a> | <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/README.es.md" target="_blank" rel="noopener noreferrer">Español</a></p>
+<blockquote>
+<p>The harness layer for Claude Code.</p>
+</blockquote>
+<p><strong>Let the model choose the path. Keep "done" verifiable.</strong></p>
+<p>v4 gives Claude discretion inside a closed, test-pinned anchor set; hooks are digest-bound reminders that survive compaction, and Codex reviews independently.</p>
+<p>Full control plane on Claude Code. Skills-only distribution for Codex CLI and other compatible agents.</p>
+
+<p>99 bundled · 99 public skills · 16 agents — ~4% of Claude's context window</p>
+<p><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a> <a href="https://www.npmjs.com/package/skills" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/npx-skills%20add-blue" alt="npm" /></a></p>
+<h2>Quick Start</h2>
+<pre><code class="language-bash"># Claude Code — full control plane
+/plugin marketplace add sd0xdev/sd0x-harness
+/plugin install sd0x-dev-flow@sd0xdev-marketplace
+
+# Configure your project
+/project-setup
+</code></pre>
+<p>One command auto-detects framework, package manager, database, entrypoints, and scripts. Installs a subset of rules and hooks; the full plugin bundles 16 rules + 6 hooks. Use <code>--lite</code> to only configure CLAUDE.md (skip rules/hooks).</p>
+<pre><code class="language-bash"># Codex CLI / Cursor / Windsurf / Aider — skills only
+npx skills add sd0xdev/sd0x-harness
+</code></pre>
+<p>Then, inside Codex CLI, generate the AGENTS.md kernel and install the <code>commit-msg</code> hook. The <code>pre-push</code> gate is opt-in — add <code>--with-push-gate</code> to install it too:</p>
+<pre><code class="language-text">$codex-setup init
+</code></pre>
+
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Tools</th>
+<th>Coverage</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Plugin install</td>
+<td>Claude Code</td>
+<td>Full (99 bundled skills, hooks, rules, auto-loop)</td>
+</tr>
+<tr>
+<td><code>npx skills add</code></td>
+<td>Codex CLI, Cursor, Windsurf, Aider</td>
+<td>Skills only (99 public skills)</td>
+</tr>
+<tr>
+<td><code>$codex-setup init</code></td>
+<td>Codex CLI</td>
+<td>AGENTS.md kernel + commit-msg hook (pre-push gate opt-in)</td>
+</tr>
+</tbody></table>
+<p><strong>Requirements</strong>: Claude Code 2.1+ | Node.js 18+ | <code>jq</code> (<code>pre-edit-guard</code> and <code>post-edit-format</code> parse their hook payload with it — without <code>jq</code> both exit 0, so the sensitive-path guard and auto-formatting are silently off) | <a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer">Codex MCP</a> (optional to install the plugin; the default reviewer for the <code>/codex-*</code> review gates — when Codex is unavailable the gate is carried by a contract-aware fallback reviewer under the same mechanism, fail-closed per family contract with <code>[REVIEWER_FALLBACK]</code> recorded, and only when every carrier is exhausted does the review surface <code>⚠️ Need Human</code> instead of a verdict)</p>
+<h3>Codex MCP registration</h3>
+<pre><code class="language-bash">claude mcp add codex -- codex mcp-server -c 'model_reasoning_effort="high"'
+</code></pre>
+<p><code>-c 'model_reasoning_effort="high"'</code> is the default here because reviewing is the workload that
+pays for depth (<code>rules/auto-loop.md</code> § Review Dispatch applies the same principle to <code>agents/</code>
+frontmatter). It is a default, not a requirement — adjust or drop the value for your own
+effort/latency tradeoff. <code>-c</code> itself works whether it precedes or follows the <code>mcp-server</code>
+subcommand (both are documented, identically, by <code>codex --help</code> and <code>codex mcp-server --help</code>);
+after the subcommand is shown above only because that is the form <code>codex mcp-server --help</code> lists.</p>
+<p><code>--profile</code> <strong>cannot</strong> be used with <code>codex mcp-server</code> at all — <code>codex --profile &lt;name&gt; mcp-server</code>
+fails outright (<code>codex-cli 0.146.0</code>, verbatim):</p>
+<pre><code class="language-text">Error: --profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex
+review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex
+mcp`, `codex sandbox`, and `codex debug prompt-input`.
+</code></pre>
+<p><code>mcp-server</code> is not in that list, so a config profile cannot reach the review MCP server this way —
+set <code>-c</code> overrides directly on the registration command instead.</p>
+<h2>Why v4</h2>
+<p>Frontier models can plan, batch, and recover from structured state — they no longer need the harness to dictate every next command. v4 moves from <strong>choreography to contracts</strong>: the harness stopped scripting the model's moves and started defining what must be true when the work is declared done, without relaxing a single safety or review anchor.</p>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>v3 (choreography)</th>
+<th>v4 (contracts)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Hook role</td>
+<td>Emit the next command to run</td>
+<td>Print reminders + <code>[AUTO_LOOP_STATE]</code> facts — change class, per-plane verdict state</td>
+</tr>
+<tr>
+<td>Completion</td>
+<td>Scripted step sequence ("fix → immediately re-review")</td>
+<td>Terminal completion invariant: every gate the change class requires has passed after the last edit</td>
+</tr>
+<tr>
+<td>Rule force</td>
+<td>Uniform — every rule reads as mandatory</td>
+<td>Three tiers: <strong>Anchor</strong> (never), <strong>Default</strong> (deviate with a stated signal), <strong>Guidance</strong> (advisory)</td>
+</tr>
+<tr>
+<td>Review depth</td>
+<td>Maximum by default</td>
+<td>Risk-scaled tiers (<code>fast</code> / <code>standard</code> / <code>thorough</code>); security and data integrity always escalate</td>
+</tr>
+<tr>
+<td>Stall detected / round cap hit</td>
+<td>Hand off to the human</td>
+<td>First hit: structured self-diagnosis + one bounded adjustment, then resume — unless a human exit applies (security/data-integrity, architecture-level change, requirement ambiguity); the same change hitting the cap again after its diagnosis: always human</td>
+</tr>
+</tbody></table>
+<p>The non-negotiable core lives in a <strong>closed Anchor Register</strong> (<code>rules/discretion.md</code>) that no project override can downgrade — resolution is Anchor-first, and a test suite fails by design if a Register entry is removed. Inside that boundary, ownership is explicit:</p>
+<table>
+<thead>
+<tr>
+<th>Owner</th>
+<th>Owns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Model</strong></td>
+<td>Batching, timing, review depth escalation, Default-tier deviations (stated, then keep working)</td>
+</tr>
+<tr>
+<td><strong>Harness</strong></td>
+<td>Digest-bound reminder state, git-level guards (<code>commit-msg</code> by default, <code>pre-push</code> opt-in), the closed anchor set</td>
+</tr>
+<tr>
+<td><strong>Human</strong></td>
+<td>Irreversible approvals (push, commit, merge) and the enumerated exit points</td>
+</tr>
+</tbody></table>
+<p>The model owns the path. The harness owns the evidence and non-negotiable boundaries. The human retains irreversible authority.</p>
+<h2>What This Harness Does</h2>
+<blockquote>
+<p><a href="https://martinfowler.com/articles/exploring-gen-ai/harness-engineering.html" target="_blank" rel="noopener noreferrer">Harness engineering</a> is the discipline of engineering everything around the LLM — tool loops, context management, hooks, state machines, safety layers — as opposed to training the model itself. Mitchell Hashimoto coined the term in Feb 2026; <a href="https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents" target="_blank" rel="noopener noreferrer">Anthropic engineering</a> and <a href="https://martinfowler.com/articles/exploring-gen-ai/harness-engineering.html" target="_blank" rel="noopener noreferrer">Martin Fowler</a> have published on it; <a href="https://arxiv.org/html/2603.05344v1" target="_blank" rel="noopener noreferrer">arXiv 2603.05344</a> formalizes it.</p>
+</blockquote>
+<p>sd0x-dev-flow is a reference implementation. Each row below maps a canonical harness sub-problem to concrete code you can study:</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Harness sub-problem</th>
+<th>sd0x-dev-flow implementation</th>
+<th>Code evidence</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><strong>Tool loop control</strong></td>
+<td>Terminal completion invariant — every gate a change class requires must pass after the last edit; the model chooses when and how to run them</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/rules/auto-loop.md" target="_blank" rel="noopener noreferrer"><code>rules/auto-loop.md</code></a> + <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/scripts/review-state.js" target="_blank" rel="noopener noreferrer"><code>scripts/review-state.js</code></a></td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>Digest-bound reminder state</strong></td>
+<td>Verdicts are noted by the model (<code>node scripts/review-state.js note &lt;plane&gt; &lt;pass|fail&gt;</code>) and bound to the tree digest — an edit re-opens its plane's reminder because the digest changed; gate sentinels (<code>✅ Ready</code> / <code>## Overall: ✅ PASS</code>) stay behaviour-layer signals</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/scripts/review-state.js" target="_blank" rel="noopener noreferrer"><code>scripts/review-state.js</code></a> + <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/rules/auto-loop.md" target="_blank" rel="noopener noreferrer"><code>rules/auto-loop.md</code></a> (§ Gate Sentinels, § Enforcement)</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>Context recovery across compaction</strong></td>
+<td>Git baseline (branch + uncommitted files) and owed-gate reminders re-injected after SessionStart(compact)</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/hooks/post-compact-auto-loop.sh" target="_blank" rel="noopener noreferrer"><code>hooks/post-compact-auto-loop.sh</code></a></td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>Lifecycle interceptors</strong></td>
+<td>5 hook event types dispatched to 6 scripts — 4 advisory reminder hooks, an auto-formatter, and one blocking security guard (SessionStart additionally runs <code>scripts/namespace-hint.sh</code>): PreToolUse / PostToolUse / Stop / SessionStart / UserPromptSubmit</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/hooks/" target="_blank" rel="noopener noreferrer"><code>hooks/</code></a> (6 scripts) + <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/.claude/settings.json" target="_blank" rel="noopener noreferrer"><code>.claude/settings.json</code></a></td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>Capability-based tool gating</strong></td>
+<td>Skill frontmatter <code>allowed-tools</code> — e.g., <code>/ask</code> has no Edit/Write</td>
+<td>90 of 99 public skills declare <code>allowed-tools</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>Defense-in-depth safety</strong></td>
+<td>Git-level guards stay hard where they are installed — commit-msg-guard always, pre-push-gate over <code>/dev/tty</code> when opted in; edit-time pre-edit-guard still blocks sensitive-path edits (a security guard, not workflow enforcement — it needs <code>jq</code>, and without it the guard does not fire); the Stop hook reminds — the layers that gate irreversible actions and secrets kept their teeth, the review layer became advisory by design</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/scripts/pre-push-gate.sh" target="_blank" rel="noopener noreferrer"><code>scripts/pre-push-gate.sh</code></a> + <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/scripts/commit-msg-guard.sh" target="_blank" rel="noopener noreferrer"><code>scripts/commit-msg-guard.sh</code></a> + <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/hooks/stop-guard.sh" target="_blank" rel="noopener noreferrer"><code>hooks/stop-guard.sh</code></a></td>
+</tr>
+<tr>
+<td>7</td>
+<td><strong>Generator-evaluator split</strong></td>
+<td>Codex reviews what Claude wrote, researching the repo independently — never handed a conclusion to confirm</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/rules/codex-invocation.md" target="_blank" rel="noopener noreferrer"><code>rules/codex-invocation.md</code></a> + <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/rules/auto-loop.md" target="_blank" rel="noopener noreferrer"><code>rules/auto-loop.md</code></a> (Review Dispatch)</td>
+</tr>
+<tr>
+<td>8</td>
+<td><strong>Incremental progress tracking</strong></td>
+<td>Evidence-based stall discipline: three review rounds that close no findings — counted by the model from the review reports — trigger a structured classification plus one bounded adjustment. The per-tier round budget (default 6 / 15 / 30, overridable 3–50) is the runaway backstop and runs the same diagnosis on its first hit, with enumerated human exits</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/rules/auto-loop.md" target="_blank" rel="noopener noreferrer"><code>rules/auto-loop.md</code></a> (§ Stall Detection + § Cap Diagnostic Protocol)</td>
+</tr>
+<tr>
+<td>9</td>
+<td><strong>Human-in-the-loop safety gates</strong></td>
+<td><code>AskUserQuestion</code> approval before every <code>/push-ci</code> push — always required, and the authorization itself where the opt-in <code>pre-push</code> hook is absent; with the hook installed, <code>/dev/tty</code> confirmation is the terminal credential for protected-branch pushes (plus non-fast-forward detection)</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/scripts/pre-push-gate.sh" target="_blank" rel="noopener noreferrer"><code>scripts/pre-push-gate.sh</code></a> + <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/skills/push-ci/SKILL.md" target="_blank" rel="noopener noreferrer"><code>skills/push-ci/SKILL.md</code></a></td>
+</tr>
+<tr>
+<td>10</td>
+<td><strong>Self-improvement loop</strong></td>
+<td>Correction → record lesson → promote to rule after 3+ recurrences</td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/rules/self-improvement.md" target="_blank" rel="noopener noreferrer"><code>rules/self-improvement.md</code></a></td>
+</tr>
+</tbody></table>
+<p>Most harness projects cover 2–4 of these. sd0x-dev-flow covers all 10 — which makes the code useful as a study target, not just a tool.</p>
+<h2>How It Works</h2>
+<pre><code class="language-mermaid">flowchart LR
+    P["🎯 Plan"] --&gt; B["🔨 Build"]
+    B --&gt; G["🛡️ Gate"]
+    G --&gt; S["🚀 Ship"]
+
+    P -.- P1["/codex-brainstorm&lt;br/&gt;/feasibility-study&lt;br/&gt;/tech-spec"]
+    B -.- B1["/feature-dev&lt;br/&gt;/bug-fix&lt;br/&gt;/codex-implement"]
+    G -.- G1["/codex-review-fast&lt;br/&gt;/precommit&lt;br/&gt;/codex-test-review"]
+    S -.- S1["/smart-commit&lt;br/&gt;/push-ci&lt;br/&gt;/create-pr&lt;br/&gt;/pr-review"]
+</code></pre>
+<p>Everything orbits one rule — the <strong>terminal completion invariant</strong>: work on a change may be declared complete only when every gate its change class requires has passed <em>after the last edit in that class</em>. Code edits require an independent review — Codex by default, or a validated contract-aware fallback reviewer when Codex is unavailable — then <code>/precommit</code>; <code>.md</code> docs require <code>/codex-review-doc</code>. When to run them, how to batch edits, and how deep to review are the model's calls — the invariant constrains the end state, not the choreography.</p>
+<p>Hooks report <strong>facts, not orders</strong>: they print reminders and an <code>[AUTO_LOOP_STATE]</code> fact line (change class, per-plane verdict state) and the model owns the decision. What blocks comes from the tier (<code>fast</code> P0 · <code>standard</code> P0/P1 · <code>thorough</code> P0/P1/P2); findings below that line are logged and the loop proceeds rather than opening another round. A stall — three review rounds that close nothing, counted by the model — or, as a backstop, hitting the round cap triggers a structured self-diagnosis (architecture problem? doc too long? attention diffusion?) and one bounded adjustment before the loop resumes, rather than an automatic hand-off; the human exits stay in force whichever trigger fired (security and data-integrity changes skip the diagnosis entirely; a stall diagnosed as architecture-level or requirement ambiguity goes to the human).</p>
+<p>There is no enforcement mode (hook-lightweighting, 2026-08-13): every review-layer hook is a reminder that exits 0. The reviewer's report is what establishes the verdict; the model then records it (<code>node scripts/review-state.js note &lt;plane&gt; &lt;pass|fail&gt;</code>, digest-bound — an edit re-opens its plane) to retire the reminder. A verdict never noted still stands — it just keeps its reminder alive — and the honest way to silence a reminder is to run the gate and note the outcome. The guards outside the review layer keep their teeth: pre-edit-guard still blocks sensitive-path edits (when <code>jq</code> is available; without it the guard does not fire), and the git-level guards remain hard where installed (commit-msg-guard by default, pre-push-gate opt-in).</p>
+<p>A second reviewer is available via <code>/codex-review-branch --dual</code> and is off by default. See <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/hooks.md" target="_blank" rel="noopener noreferrer">docs/hooks.md</a> for hook and dependency details.</p>
+<details>
+<summary>Detailed: Review Loop Sequence Diagram</summary><pre><code class="language-mermaid">sequenceDiagram
+    participant D as Developer
+    participant C as Claude
+    participant X as Codex MCP
+    participant H as Hooks
+
+    D-&gt;&gt;C: Edit code
+    H-&gt;&gt;H: Reminder state re-opens (digest changed)
+    C-&gt;&gt;X: Codex review (sandbox, researches repo itself)
+    X--&gt;&gt;C: Findings + gate sentinel
+    C-&gt;&gt;C: note the verdict (review-state.js)
+    C-&gt;&gt;C: Gate on the tier's blocking severity
+
+    alt Blocking findings
+        C-&gt;&gt;C: Fix them (sub-threshold: log and move on)
+        alt R-a threshold (3 replies; override 2–6) or R-b context overrun
+            C-&gt;&gt;X: Fresh first dispatch on a new thread (frozen baseline rides along)
+            X--&gt;&gt;C: Fresh report
+            C-&gt;&gt;C: Reconcile old findings onto the fresh report, re-derive the gate
+            C-&gt;&gt;C: Record [THREAD_ROTATED] (old → new threadId)
+        else Under threshold
+            C-&gt;&gt;X: --continue threadId
+            X--&gt;&gt;C: Re-verify
+        end
+        Note over C,X: Rotation keeps the frozen scope baseline; stall streaks and round caps continue unreset
+    end
+
+    C-&gt;&gt;C: /precommit (auto)
+    C--&gt;&gt;D: ✅ All gates passed
+
+    Note over H: Stop: owed gates re-reminded — never blocked
+</code></pre>
+</details><h2>Feature Spotlight: Tiered Review</h2>
+<p>One reviewer — Codex — runs everywhere by default. The <strong>tier</strong> decides how much rigour a change gets, and what a reviewer finding has to be before it re-opens the loop:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Use for</th>
+<th>Blocks on</th>
+<th>Round cap</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>fast</code></td>
+<td>Docs, config, small low-risk edits</td>
+<td>P0</td>
+<td>6</td>
+</tr>
+<tr>
+<td><code>standard</code> <strong>(default)</strong></td>
+<td>Ordinary features and bug fixes</td>
+<td>P0, P1</td>
+<td>15</td>
+</tr>
+<tr>
+<td><code>thorough</code></td>
+<td>Security, data integrity, releases, public API</td>
+<td>P0, P1, P2</td>
+<td>30</td>
+</tr>
+</tbody></table>
+<p>The configured tier is a baseline, not a ceiling — the model escalates when the change warrants it, and security or data-integrity changes are always reviewed at <code>thorough</code> whatever is configured.</p>
+<p><strong>80 is a passing grade.</strong> Findings below the tier's blocking severity are logged (<code>[NIT_DEFERRED]</code> — a reporting convention in the review report; nothing persists it) and the loop proceeds to <code>/precommit</code> — no extra fix pass, no extra review round. <code>/codex-review-branch</code> picks them up when the change is next reviewed at depth.</p>
+<p>The round caps above are deliberately loose, because <strong>a cap cannot tell a converging loop from a churning one</strong> — it stops both at the same number. What tells them apart is the evidence: three consecutive review rounds that close no findings — counted by the model from the review reports, normally many rounds before the cap — trigger the diagnosis below. The cap is left as the runaway backstop.</p>
+<p>The round caps above are the tier defaults — a project <code>## Max Rounds</code> override (3–50) takes precedence. Hitting the cap is a diagnosis point, not an automatic hand-off: the model classifies the stall (architecture, doc too long, attention diffusion, unverified claims, tier mismatch, requirement ambiguity), makes one bounded adjustment, and resumes. The human exits stay binding whichever trigger fired: security/data-integrity changes skip the diagnosis and go straight to the human, a stall classified as architecture-level or requirement ambiguity exits to the human, and the same change hitting the cap a second time after its diagnosis always does. (Architecture-level changes, feature removal, or a user request to stop exit to the human at any point — cap or no cap.)</p>
+<p>A second reviewer is available via <code>/codex-review-branch --dual</code> and is <strong>off unless the flag is passed</strong> — worth its doubled token and wall-clock cost on a release or a security review, not on a typical fix. Under <code>--dual</code>, findings are severity-normalized, deduplicated (file + issue key, ±5 line tolerance) and source-attributed.</p>
+<p>Gate: <code>✅ Ready</code> or <code>⛔ Blocked</code> — behaviour-layer signals the model acts on; the verdict is noted into the reminder state.</p>
+<h2>When to Use</h2>
+<table>
+<thead>
+<tr>
+<th>Good Fit</th>
+<th>Not Ideal</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Solo or small-team projects with Claude Code</td>
+<td>Teams not using Claude Code</td>
+</tr>
+<tr>
+<td>Projects needing automated review gates</td>
+<td>One-off scripts with no CI</td>
+</tr>
+<tr>
+<td>Codex CLI / Cursor / Windsurf users (skills subset)</td>
+<td>Projects requiring custom LLM providers</td>
+</tr>
+<tr>
+<td>Repos where quality gates prevent regressions</td>
+<td>Repos with no test infrastructure</td>
+</tr>
+</tbody></table>
+<h2>Workflow Tracks</h2>
+<table>
+<thead>
+<tr>
+<th>Workflow</th>
+<th>Commands</th>
+<th>Gate</th>
+<th>State</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Feature</td>
+<td><code>/feature-dev</code> → <code>/verify</code> → <code>/codex-review-fast</code> → <code>/precommit</code></td>
+<td>✅/⛔</td>
+<td>Digest-bound reminder (noted verdicts)</td>
+</tr>
+<tr>
+<td>Bug Fix</td>
+<td><code>/issue-analyze</code> → <code>/bug-fix</code> → <code>/verify</code> → <code>/precommit</code></td>
+<td>✅/⛔</td>
+<td>Digest-bound reminder (noted verdicts)</td>
+</tr>
+<tr>
+<td>Auto-Loop</td>
+<td>Code edit → <code>/codex-review-fast</code> → <code>/precommit</code></td>
+<td>✅/⛔</td>
+<td>Digest-bound reminder (noted verdicts)</td>
+</tr>
+<tr>
+<td>Doc Review</td>
+<td><code>.md</code> edit → <code>/codex-review-doc</code></td>
+<td>✅/⛔</td>
+<td>Digest-bound reminder (noted verdicts)</td>
+</tr>
+<tr>
+<td>Planning</td>
+<td><code>/codex-brainstorm</code> → <code>/feasibility-study</code> → <code>/tech-spec</code></td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Onboarding</td>
+<td><code>/project-setup</code> → <code>/repo-intake</code></td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<details>
+<summary>Visual: Workflow Flowcharts</summary><pre><code class="language-mermaid">flowchart TD
+    subgraph feat ["🔨 Feature Development"]
+        F1["/feature-dev"] --&gt; F2["Code + Tests"]
+        F2 --&gt; F3["/verify"]
+        F3 --&gt; F4["/codex-review-fast"]
+        F4 --&gt; F5["/precommit"]
+        F5 --&gt; F6["/update-docs"]
+    end
+
+    subgraph fix ["🐛 Bug Fix"]
+        B1["/issue-analyze"] --&gt; B2["/bug-fix"]
+        B2 --&gt; B3["Fix + Regression test"]
+        B3 --&gt; B4["/verify"]
+        B4 --&gt; B5["/codex-review-fast"]
+        B5 --&gt; B6["/precommit"]
+    end
+
+    subgraph docs ["📝 Docs Only"]
+        D1["Edit .md"] --&gt; D2["/codex-review-doc"]
+        D2 --&gt; D3["Done"]
+    end
+
+    subgraph plan ["🎯 Planning"]
+        P1["/codex-brainstorm"] --&gt; P2["/feasibility-study"]
+        P2 --&gt; P3["/tech-spec"]
+        P3 --&gt; P4["/codex-architect"]
+        P4 --&gt; P5["Implementation ready"]
+    end
+
+    subgraph ops ["⚙️ Operations"]
+        O1["/project-setup"] --&gt; O2["/repo-intake"]
+        O2 --&gt; O3["Develop"]
+        O3 --&gt; O4["/project-audit"]
+        O3 --&gt; O7["/best-practices"]
+        O3 --&gt; O5["/risk-assess"]
+        O4 --&gt; O6["/next-step --go"]
+        O5 --&gt; O6
+        O7 --&gt; O6
+    end
+</code></pre>
+</details><h2>Cookbook</h2>
+<p>Real-world scenarios showing which skills to combine and in what order.</p>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Flow</th>
+<th>Docs</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>First day in a repo</td>
+<td><code>/project-setup</code> → <code>/repo-intake</code> → <code>/next-step</code></td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/cookbook/first-day.md" target="_blank" rel="noopener noreferrer">→</a></td>
+</tr>
+<tr>
+<td>Implement a new feature</td>
+<td><code>/feature-dev</code> → <code>/verify</code> → <code>/codex-test-review</code> → <code>/codex-review-fast</code> → <code>/precommit</code></td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/cookbook/new-feature.md" target="_blank" rel="noopener noreferrer">→</a></td>
+</tr>
+<tr>
+<td>Resolve PR review comments</td>
+<td><code>/load-pr-review</code> → fix → <code>/codex-review-fast</code> → <code>/push-ci</code></td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/cookbook/pr-review-comments.md" target="_blank" rel="noopener noreferrer">→</a></td>
+</tr>
+<tr>
+<td>Security pre-merge pass</td>
+<td><code>/codex-security</code> → <code>/dep-audit</code> → <code>/risk-assess</code> → <code>/pre-pr-audit</code></td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/cookbook/security-pre-merge.md" target="_blank" rel="noopener noreferrer">→</a></td>
+</tr>
+<tr>
+<td><strong>Showcase:</strong> Validate direction</td>
+<td><code>/deep-research</code> → <code>/best-practices</code> → <code>/feasibility-study</code> → <code>/codex-brainstorm</code></td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/cookbook/validate-direction.md" target="_blank" rel="noopener noreferrer">→</a></td>
+</tr>
+<tr>
+<td><strong>Showcase:</strong> Adversarial design</td>
+<td><code>/codex-brainstorm</code> (Nash equilibrium debate) → <code>/codex-architect</code></td>
+<td><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/cookbook/adversarial-design.md" target="_blank" rel="noopener noreferrer">→</a></td>
+</tr>
+</tbody></table>
+<p><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/cookbook/" target="_blank" rel="noopener noreferrer">All 10 scenarios →</a></p>
+<h2>What's Included</h2>
+
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Count</th>
+<th>Examples</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Skills</td>
+<td>99 public (99 bundled)</td>
+<td><code>/project-setup</code>, <code>/codex-review-fast</code>, <code>/verify</code>, <code>/smart-commit</code>, <code>/deep-research</code></td>
+</tr>
+<tr>
+<td>Agents</td>
+<td>16</td>
+<td>strict-reviewer, verify-app, coverage-analyst, architecture-designer</td>
+</tr>
+<tr>
+<td>Hooks</td>
+<td>6</td>
+<td>pre-edit-guard, auto-format, stop reminder, post-compact-auto-loop, post-skill-auto-loop, user-prompt-review-guard</td>
+</tr>
+<tr>
+<td>Rules</td>
+<td>16</td>
+<td>auto-loop, auto-loop-project, codex-invocation, scope-discipline, security, testing, git-workflow, self-improvement, context-management</td>
+</tr>
+<tr>
+<td>Scripts</td>
+<td>22</td>
+<td>precommit runner, verify runner, review-state CLI, dep audit, namespace hint, skill runner, commit-msg guard, pre-push gate, build-codex-artifacts, resolve-feature (node entrypoint + shell shim + CLI), classify-docs, detect-scope, migration-audit, migrate-hook-lightweighting, security-redact, readme-catalog, check-doc-links, resolve-review-profile</td>
+</tr>
+</tbody></table>
+<h3>Minimal Context Footprint</h3>
+<p>~4% of Claude's 200k context window — 96% remains for your code.</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Tokens</th>
+<th>% of 200k</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Rules (always loaded)</td>
+<td>5.1k</td>
+<td>2.6%</td>
+</tr>
+<tr>
+<td>Skills (on-demand)</td>
+<td>1.9k</td>
+<td>1.0%</td>
+</tr>
+<tr>
+<td>Agents</td>
+<td>791</td>
+<td>0.4%</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td><strong>~8k</strong></td>
+<td><strong>~4%</strong></td>
+</tr>
+</tbody></table>
+<p>Skills load on-demand. Idle skills cost zero tokens.</p>
+<h2>Skill Reference</h2>
+
+<table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Use when</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/project-setup</code></td>
+<td>First-time project configuration</td>
+</tr>
+<tr>
+<td><code>/bug-fix</code></td>
+<td>Fixing bugs and resolving issues</td>
+</tr>
+<tr>
+<td><code>/feature-dev</code></td>
+<td>Implementing new features end-to-end</td>
+</tr>
+<tr>
+<td><code>/smart-commit</code></td>
+<td>Committing changes with smart grouping</td>
+</tr>
+<tr>
+<td><code>/push-ci</code></td>
+<td>Pushing code and monitoring CI</td>
+</tr>
+<tr>
+<td><code>/create-pr</code></td>
+<td>Creating GitHub pull requests, including stacked PR chains (--stack)</td>
+</tr>
+<tr>
+<td><code>/codex-review-fast</code></td>
+<td>Quick code review (diff only)</td>
+</tr>
+<tr>
+<td><code>/codex-review-doc</code></td>
+<td>Reviewing documentation changes</td>
+</tr>
+<tr>
+<td><code>/codex-security</code></td>
+<td>OWASP Top 10 security audit</td>
+</tr>
+<tr>
+<td><code>/verify</code></td>
+<td>Running full test verification chain</td>
+</tr>
+<tr>
+<td><code>/precommit</code></td>
+<td>Pre-commit quality gate (lint + build + test)</td>
+</tr>
+<tr>
+<td><code>/precommit-fast</code></td>
+<td>Quick pre-commit (lint + test, no build)</td>
+</tr>
+<tr>
+<td><code>/codex-brainstorm</code></td>
+<td>Adversarial brainstorming (Nash equilibrium)</td>
+</tr>
+<tr>
+<td><code>/tech-spec</code></td>
+<td>Writing technical specifications</td>
+</tr>
+<tr>
+<td><code>/pr-review</code></td>
+<td>PR self-review before merge</td>
+</tr>
+</tbody></table>
+
+<details>
+<summary>All 99 public skills</summary><h3>Development (33)</h3>
+<table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/ask</code></td>
+<td>Context-aware Q&amp;A with auto context gathering.</td>
+</tr>
+<tr>
+<td><code>/bug-fix</code></td>
+<td>Bug fix workflow.</td>
+</tr>
+<tr>
+<td><code>/bump-version</code></td>
+<td>Bump package and plugin version in sync.</td>
+</tr>
+<tr>
+<td><code>/code-explore</code></td>
+<td>Pure Claude code investigation.</td>
+</tr>
+<tr>
+<td><code>/code-investigate</code></td>
+<td>Dual-perspective code investigation.</td>
+</tr>
+<tr>
+<td><code>/codex-architect</code></td>
+<td>Codex architecture consulting.</td>
+</tr>
+<tr>
+<td><code>/codex-implement</code></td>
+<td>Implement features via Codex MCP.</td>
+</tr>
+<tr>
+<td><code>/codex-setup</code></td>
+<td>Initialize sd0x-dev-flow infrastructure for Codex CLI and other non-Claude agents.</td>
+</tr>
+<tr>
+<td><code>/create-pr</code></td>
+<td>Create or update GitHub PR with gh CLI.</td>
+</tr>
+<tr>
+<td><code>/debug</code></td>
+<td>Interactive debugging workflow with hypothesis-driven probe loop.</td>
+</tr>
+<tr>
+<td><code>/deep-explore</code></td>
+<td>Multi-wave parallel code exploration orchestrator.</td>
+</tr>
+<tr>
+<td><code>/epic-merge</code></td>
+<td>Sequential squash-merge of stacked PR chains into an epic branch.</td>
+</tr>
+<tr>
+<td><code>/feature-dev</code></td>
+<td>Feature development workflow.</td>
+</tr>
+<tr>
+<td><code>/feature-verify</code></td>
+<td>Feature verification (READ-ONLY, P0-P5).</td>
+</tr>
+<tr>
+<td><code>/git-investigate</code></td>
+<td>Git history investigation.</td>
+</tr>
+<tr>
+<td><code>/git-profile</code></td>
+<td>Git identity and GPG signing profile manager.</td>
+</tr>
+<tr>
+<td><code>/install-hooks</code></td>
+<td>Install plugin hooks into project .claude/ for persistent use without plugin loaded</td>
+</tr>
+<tr>
+<td><code>/install-rules</code></td>
+<td>Install plugin rules into project .claude/rules/ for persistent use without plugin loaded</td>
+</tr>
+<tr>
+<td><code>/install-scripts</code></td>
+<td>Install plugin runner scripts into project .claude/scripts/ for persistent use without plugin loaded</td>
+</tr>
+<tr>
+<td><code>/issue-analyze</code></td>
+<td>GitHub Issue and PR review thread deep analysis with Codex blind verdict.</td>
+</tr>
+<tr>
+<td><code>/jira</code></td>
+<td>Jira integration — view issues, generate branches, create tickets, transition status.</td>
+</tr>
+<tr>
+<td><code>/load-pr-review</code></td>
+<td>Load GitHub PR review comments into AI session — analyze, triage, plan.</td>
+</tr>
+<tr>
+<td><code>/merge-prep</code></td>
+<td>Pre-merge analysis and preparation.</td>
+</tr>
+<tr>
+<td><code>/next-step</code></td>
+<td>Change-aware next step advisor.</td>
+</tr>
+<tr>
+<td><code>/post-dev-test</code></td>
+<td>Post-development test completion.</td>
+</tr>
+<tr>
+<td><code>/pr-comment</code></td>
+<td>Post friendly review comments to a GitHub PR — prepare locally, preview, then submit as atomic review.</td>
+</tr>
+<tr>
+<td><code>/project-setup</code></td>
+<td>Project configuration initialization.</td>
+</tr>
+<tr>
+<td><code>/push-ci</code></td>
+<td>Push to remote and monitor CI.</td>
+</tr>
+<tr>
+<td><code>/remind</code></td>
+<td>Lightweight model correction with context-aware rule loading.</td>
+</tr>
+<tr>
+<td><code>/repo-intake</code></td>
+<td>Project initialization inventory (one-time).</td>
+</tr>
+<tr>
+<td><code>/smart-commit</code></td>
+<td>Smart batch commit.</td>
+</tr>
+<tr>
+<td><code>/smart-rebase</code></td>
+<td>Smart partial rebase for squash-merge repositories.</td>
+</tr>
+<tr>
+<td><code>/watch-ci</code></td>
+<td>Monitor GitHub Actions CI runs until completion.</td>
+</tr>
+</tbody></table>
+<h3>Review (Codex MCP) (15)</h3>
+<table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Description</th>
+<th>Loop Support</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/codex-cli-review</code></td>
+<td>Code review via Codex CLI with full disk access.</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/codex-code-review</code></td>
+<td>Code review using Codex MCP.</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/codex-explain</code></td>
+<td>Explain complex code via Codex MCP.</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/codex-review</code></td>
+<td>Full second-opinion using Codex MCP (with lint:fix + build).</td>
+<td><code>--continue &lt;threadId&gt;</code></td>
+</tr>
+<tr>
+<td><code>/codex-review-branch</code></td>
+<td>Fully automated review of an entire feature branch using Codex MCP</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/codex-review-doc</code></td>
+<td>Review documents using Codex MCP.</td>
+<td><code>--continue &lt;threadId&gt;</code></td>
+</tr>
+<tr>
+<td><code>/codex-review-fast</code></td>
+<td>Quick second-opinion using Codex MCP (diff only, no tests).</td>
+<td><code>--continue &lt;threadId&gt;</code></td>
+</tr>
+<tr>
+<td><code>/codex-security</code></td>
+<td>OWASP Top 10 security review using Codex MCP.</td>
+<td><code>--continue &lt;threadId&gt;</code></td>
+</tr>
+<tr>
+<td><code>/codex-test-gen</code></td>
+<td>Generate unit tests for specified functions using Codex MCP</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/codex-test-review</code></td>
+<td>Review test case sufficiency using Codex MCP, suggest additional edge cases.</td>
+<td><code>--continue &lt;threadId&gt;</code></td>
+</tr>
+<tr>
+<td><code>/doc-review</code></td>
+<td>Document review via Codex MCP.</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/plan-review</code></td>
+<td>Pre-ExitPlanMode adversarial plan review loop via Codex MCP.</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/security-review</code></td>
+<td>Security review via Codex MCP.</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/seek-verdict</code></td>
+<td>Independent second-opinion verification for any finding.</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>/test-review</code></td>
+<td>Test coverage review via Codex MCP.</td>
+<td>-</td>
+</tr>
+</tbody></table>
+<h3>Verification (13)</h3>
+<table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/best-practices</code></td>
+<td>Industry best practices conformance audit with mandatory adversarial debate.</td>
+</tr>
+<tr>
+<td><code>/check-coverage</code></td>
+<td>Comprehensive assessment of Unit / Integration / E2E three-layer test coverage, identify gaps and provide actionable ...</td>
+</tr>
+<tr>
+<td><code>/dep-audit</code></td>
+<td>Audit dependency security risks</td>
+</tr>
+<tr>
+<td><code>/dev-security-audit</code></td>
+<td>Comprehensive developer workstation security audit — scans for exposed credentials, compromised application data, per...</td>
+</tr>
+<tr>
+<td><code>/necessity-audit</code></td>
+<td>Necessity audit for over-designed spec elements.</td>
+</tr>
+<tr>
+<td><code>/pre-pr-audit</code></td>
+<td>Pre-PR confidence audit with 5-dimension scoring.</td>
+</tr>
+<tr>
+<td><code>/precommit</code></td>
+<td>Pre-commit checks — lint:fix -&gt; build -&gt; test</td>
+</tr>
+<tr>
+<td><code>/precommit-fast</code></td>
+<td>Quick pre-commit checks — lint:fix -&gt; test</td>
+</tr>
+<tr>
+<td><code>/project-audit</code></td>
+<td>Project health audit with deterministic scoring.</td>
+</tr>
+<tr>
+<td><code>/risk-assess</code></td>
+<td>Uncommitted code risk assessment with breaking change detection, blast radius analysis, and scope metrics.</td>
+</tr>
+<tr>
+<td><code>/test-deep</code></td>
+<td>Context-aware test orchestration.</td>
+</tr>
+<tr>
+<td><code>/test-health</code></td>
+<td>Holistic test coverage measurement.</td>
+</tr>
+<tr>
+<td><code>/verify</code></td>
+<td>Verification loop — lint -&gt; typecheck -&gt; unit -&gt; integration -&gt; e2e</td>
+</tr>
+</tbody></table>
+<h3>Planning (17)</h3>
+<table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/architecture</code></td>
+<td>Architecture design and documentation.</td>
+</tr>
+<tr>
+<td><code>/codex-brainstorm</code></td>
+<td>Adversarial brainstorming via Claude+Codex debate.</td>
+</tr>
+<tr>
+<td><code>/deep-analyze</code></td>
+<td>Deep-dive analysis of an initial proposal — research code implementation, produce an actionable roadmap and alternatives</td>
+</tr>
+<tr>
+<td><code>/deep-research</code></td>
+<td>Universal multi-source research orchestration.</td>
+</tr>
+<tr>
+<td><code>/feasibility-study</code></td>
+<td>Feasibility analysis from first principles.</td>
+</tr>
+<tr>
+<td><code>/fp-brief</code></td>
+<td>First-principles briefing from technical documents.</td>
+</tr>
+<tr>
+<td><code>/orchestrate</code></td>
+<td>Agent-driven workflow orchestration (v1 report-only).</td>
+</tr>
+<tr>
+<td><code>/post-dev-recap</code></td>
+<td>Post-development recap wrapper.</td>
+</tr>
+<tr>
+<td><code>/project-brief</code></td>
+<td>Convert a technical spec into a PM/CTO-readable executive summary.</td>
+</tr>
+<tr>
+<td><code>/recap-ask</code></td>
+<td>Interactive Q&amp;A over an existing recap document.</td>
+</tr>
+<tr>
+<td><code>/recap-doc</code></td>
+<td>Post-development recap document generator.</td>
+</tr>
+<tr>
+<td><code>/req-analyze</code></td>
+<td>Requirements analysis — problem decomposition, stakeholder scan, requirement structuring.</td>
+</tr>
+<tr>
+<td><code>/request-tracking</code></td>
+<td>Request tracking knowledge base.</td>
+</tr>
+<tr>
+<td><code>/review-spec</code></td>
+<td>Review technical spec documents from completeness, feasibility, risk, and code consistency perspectives.</td>
+</tr>
+<tr>
+<td><code>/tech-brief</code></td>
+<td>Technical briefing for developer sharing.</td>
+</tr>
+<tr>
+<td><code>/tech-spec</code></td>
+<td>Tech spec generation and review.</td>
+</tr>
+<tr>
+<td><code>/ui-first-principles</code></td>
+<td>First-principles UI/IA reasoning: turns a <code>&lt;scenario&gt;</code> + API field set into JTBD analysis, principle-anchored field-p...</td>
+</tr>
+</tbody></table>
+<h3>Documentation &amp; Tooling (21)</h3>
+<table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/adr</code></td>
+<td>Write an Architecture Decision Record (ADR) for a feature — Context / Decision / Status / Consequences / Alternatives...</td>
+</tr>
+<tr>
+<td><code>/claude-health</code></td>
+<td>Claude Code config health check + plugin sync.</td>
+</tr>
+<tr>
+<td><code>/contract-decode</code></td>
+<td>EVM contract error and calldata decoder.</td>
+</tr>
+<tr>
+<td><code>/create-request</code></td>
+<td>Create, update, or scan per-task request tickets for progress tracking.</td>
+</tr>
+<tr>
+<td><code>/de-ai-flavor</code></td>
+<td>Remove AI artifacts from documents.</td>
+</tr>
+<tr>
+<td><code>/doc-refactor</code></td>
+<td>Refactor documents — simplify without losing information, visualize flows with sequenceDiagram.</td>
+</tr>
+<tr>
+<td><code>/generate-runner</code></td>
+<td>Generate a customized precommit runner for any ecosystem.</td>
+</tr>
+<tr>
+<td><code>/obsidian-cli</code></td>
+<td>Obsidian vault integration via official CLI.</td>
+</tr>
+<tr>
+<td><code>/op-session</code></td>
+<td>Initialize 1Password CLI session for Claude Code.</td>
+</tr>
+<tr>
+<td><code>/portfolio</code></td>
+<td>Portfolio system knowledge base.</td>
+</tr>
+<tr>
+<td><code>/pr-review</code></td>
+<td>PR self-review — review changes, produce checklist, update rules</td>
+</tr>
+<tr>
+<td><code>/pr-summary</code></td>
+<td>List open PRs, filter automation PRs, group by ticket ID, format as Markdown.</td>
+</tr>
+<tr>
+<td><code>/refactor</code></td>
+<td>Multi-target refactoring orchestrator.</td>
+</tr>
+<tr>
+<td><code>/runbook</code></td>
+<td>Generate/update feature release runbook</td>
+</tr>
+<tr>
+<td><code>/safe-remove</code></td>
+<td>Safely remove plugin assets (skill/agent/rule/script/hook) with dependency detection and reference cleanup.</td>
+</tr>
+<tr>
+<td><code>/sharingan</code></td>
+<td>Replicate knowledge from any source as sd0x-dev-flow skill definition.</td>
+</tr>
+<tr>
+<td><code>/simplify</code></td>
+<td>Wrap-up refactoring — simplify code, eliminate duplication, preserve behavior</td>
+</tr>
+<tr>
+<td><code>/skill-health-check</code></td>
+<td>Validate skill quality against routing, progressive loading, and verification criteria.</td>
+</tr>
+<tr>
+<td><code>/statusline-config</code></td>
+<td>Customize Claude Code statusline.</td>
+</tr>
+<tr>
+<td><code>/update-docs</code></td>
+<td>Research current code state then update corresponding docs, ensuring docs stay in sync with code.</td>
+</tr>
+<tr>
+<td><code>/zh-tw</code></td>
+<td>Rewrite the previous reply in Traditional Chinese</td>
+</tr>
+</tbody></table>
+</details>
+<h2>Rules &amp; Hooks</h2>
+<p>16 rules + 6 hooks. The rules are tiered contracts: <code>discretion.md</code> resolves every instruction in the 13 plugin-managed rule files to exactly one of Anchor / Default / Guidance, and the 2 user-owned override files resolve Anchor-first under their parent rules. The hook set is 4 advisory reminder hooks plus an auto-formatter and a blocking security guard. The reminder roles differ per hook: the Stop and post-compact hooks render owed-gate reminders from the digest-bound state (<code>review-state.js</code>), the prompt hook prints the <code>[AUTO_LOOP_STATE]</code> fact line, the post-skill hook prints a static gate-order line, and the post-compact hook also re-injects the git baseline; the review layer never blocks — pre-edit-guard still blocks sensitive-path edits (a security guard; it needs <code>jq</code> and does not fire without it), and the hard gates live at the git level (commit-msg-guard, installed by default; pre-push-gate, opt-in).</p>
+<blockquote>
+<p><strong>Customization</strong>: Edit <code>auto-loop-project.md</code> to override auto-loop behavior per project. Plugin updates won't conflict — see <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/features/rule-override-pattern/2-tech-spec.md" target="_blank" rel="noopener noreferrer">Rule Override Pattern</a>.</p>
+</blockquote>
+<p>For full rules, hooks, and environment variable reference, see <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/rules.md" target="_blank" rel="noopener noreferrer">docs/rules.md</a> and <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/hooks.md" target="_blank" rel="noopener noreferrer">docs/hooks.md</a>.</p>
+<h2>Customization</h2>
+<p>Run <code>/project-setup</code> to auto-detect and configure all placeholders, or manually edit <code>.claude/CLAUDE.md</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Placeholder</th>
+<th>Description</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>{PROJECT_NAME}</code></td>
+<td>Your project name</td>
+<td>my-app</td>
+</tr>
+<tr>
+<td><code>{FRAMEWORK}</code></td>
+<td>Your framework</td>
+<td>MidwayJS 3.x, NestJS, Express</td>
+</tr>
+<tr>
+<td><code>{CONFIG_FILE}</code></td>
+<td>Main config file</td>
+<td>src/configuration.ts</td>
+</tr>
+<tr>
+<td><code>{BOOTSTRAP_FILE}</code></td>
+<td>Bootstrap entry</td>
+<td>bootstrap.js, main.ts</td>
+</tr>
+<tr>
+<td><code>{DATABASE}</code></td>
+<td>Database</td>
+<td>MongoDB, PostgreSQL</td>
+</tr>
+<tr>
+<td><code>{TEST_COMMAND}</code></td>
+<td>Test command</td>
+<td>yarn test:unit</td>
+</tr>
+<tr>
+<td><code>{LINT_FIX_COMMAND}</code></td>
+<td>Lint auto-fix</td>
+<td>yarn lint:fix</td>
+</tr>
+<tr>
+<td><code>{BUILD_COMMAND}</code></td>
+<td>Build command</td>
+<td>yarn build</td>
+</tr>
+<tr>
+<td><code>{TYPECHECK_COMMAND}</code></td>
+<td>Type checking</td>
+<td>yarn typecheck</td>
+</tr>
+</tbody></table>
+<p>Overrides resolve <strong>Anchor-first</strong>: user-owned override files (<code>auto-loop-project.md</code>, <code>testing-project.md</code>) customize Default- and Guidance-tier behavior only — no project override can downgrade an entry in the Anchor Register, and an attempt is reported as a conflict rather than honoured.</p>
+<h2>Showcase: Multi-Agent Research</h2>
+<p>Run <code>/deep-research</code> to orchestrate 2-3 parallel researcher agents across web sources, codebase, and community knowledge — with claim registry synthesis and conditional adversarial debate.</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Details</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Agents</td>
+<td>2-3 parallel (web + code + community)</td>
+</tr>
+<tr>
+<td>Synthesis</td>
+<td>Claim registry with consensus detection</td>
+</tr>
+<tr>
+<td>Validation</td>
+<td>Conditional /codex-brainstorm debate</td>
+</tr>
+<tr>
+<td>Scoring</td>
+<td>4-signal completeness model</td>
+</tr>
+</tbody></table>
+<p><a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/features/deep-research/" target="_blank" rel="noopener noreferrer">Full documentation</a></p>
+<h2>Architecture</h2>
+<p>Six layers, each owning one concern:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Owns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Skills</strong></td>
+<td>Capabilities loaded on demand — the verbs (<code>/feature-dev</code>, <code>/codex-review-fast</code>, …)</td>
+</tr>
+<tr>
+<td><strong>Model</strong></td>
+<td>The route: batching, timing, review depth escalation, Default-tier deviations</td>
+</tr>
+<tr>
+<td><strong>Rules</strong></td>
+<td>Tiered contracts (Anchor / Default / Guidance) loaded every session</td>
+</tr>
+<tr>
+<td><strong>Hooks + state</strong></td>
+<td>Reminders + <code>[AUTO_LOOP_STATE]</code> facts, digest-bound verdict notes, recovery across compaction</td>
+</tr>
+<tr>
+<td><strong>Codex</strong></td>
+<td>Independent review — researches the repo itself, never handed a conclusion</td>
+</tr>
+<tr>
+<td><strong>Scripts + agents</strong></td>
+<td>Deterministic checks (precommit, guards) and isolated subagents</td>
+</tr>
+</tbody></table>
+<p>For advanced architecture details (agentic control stack, control loop theory, sandbox rules), see <a href="https://github.com/sd0xdev/sd0x-harness/blob/HEAD/docs/architecture.md" target="_blank" rel="noopener noreferrer">docs/architecture.md</a> — note that parts of it predate v4 and still describe the v3 choreography; <code>rules/auto-loop.md</code> and <code>rules/discretion.md</code> are the current source of truth.</p>
+<h2>Contributing</h2>
+<p>PRs welcome. Please:</p>
+<ol>
+<li>Follow existing naming conventions (kebab-case)</li>
+<li>Include <code>When to Use</code> / <code>When NOT to Use</code> in skills</li>
+<li>Add <code>disable-model-invocation: true</code> for dangerous operations</li>
+<li>Test with Claude Code before submitting</li>
+</ol>
+<h2>License</h2>
+<p>MIT</p>
+<h2>Star History</h2>
+<a href="https://www.star-history.com/?repos=sd0xdev%2Fsd0x-harness&amp;type=date&amp;legend=top-left" target="_blank" rel="noopener noreferrer">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=sd0xdev/sd0x-harness&amp;type=date&amp;theme=dark&amp;legend=top-left"></source>
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=sd0xdev/sd0x-harness&amp;type=date&amp;legend=top-left"></source>
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=sd0xdev/sd0x-harness&amp;type=date&amp;legend=top-left" />
+ </picture>
+</a>

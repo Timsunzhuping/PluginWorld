@@ -1,0 +1,411 @@
+<h1>AnySearch MCP Server</h1>
+<blockquote>
+<p>English | <a href="https://github.com/anysearch-ai/anysearch-mcp-server/blob/HEAD/README_zh.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+</blockquote>
+<p>Unified real-time search MCP server supporting general web search, vertical domain search, parallel batch search, and full-page URL content extraction.</p>
+<h2>Features</h2>
+<ul>
+<li><strong>General Web Search</strong> — open-ended natural language queries</li>
+<li><strong>Vertical Domain Search</strong> — structured queries across finance, academic, security, legal, code, and more</li>
+<li><strong>Parallel Batch Search</strong> — execute multiple independent queries in one call</li>
+<li><strong>URL Content Extraction</strong> — fetch and extract full page content as Markdown</li>
+<li><strong>Anonymous Access</strong> — works without an API key (with lower rate limits)</li>
+</ul>
+<h2>API Key Configuration</h2>
+<p>An API key is <strong>optional but recommended</strong>. Without a key, all features still work via anonymous access with lower rate limits.</p>
+<h3>Register for an API Key (Recommended)</h3>
+<p>The agent can register the user and obtain an API key in a <strong>single call</strong> — no verification code, no manual signup. Ask the user for a <strong>real email address</strong>: it becomes the account username.</p>
+<pre><code class="language-bash">curl -s -X POST "https://api.anysearch.com/v1/auth/email/register" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com"}'
+</code></pre>
+<p>Success response (<code>code: 0</code>) returns the account info and a one-time plaintext API key:</p>
+<pre><code class="language-json">{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "username": "you@example.com",
+    "email": "you@example.com",
+    "login_url": "https://www.anysearch.com/login",
+    "api_key": {
+      "id": "key_xxxxxxxx",
+      "key": "as_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "key_prefix": "as_sk_xxxxxx...",
+      "name": "default",
+      "rate_limit": 100,
+      "quota_limit": 0,
+      "expires_at": null,
+      "created_at": "2026-06-23T10:23:00Z"
+    }
+  }
+}
+</code></pre>
+<p>On success the agent MUST:</p>
+<ol>
+<li>Put <code>data.api_key.key</code> into the MCP server config as the <code>Authorization: Bearer &lt;key&gt;</code> value (and/or set <code>ANYSEARCH_API_KEY</code>) — it is shown only once (it can also be retrieved later from the dashboard).</li>
+<li>Tell the user their username (= email) and the <code>login_url</code>.</li>
+</ol>
+<p>Error handling (always <code>code: -1</code> on error; branch on the <code>message</code> string):</p>
+<table>
+<thead>
+<tr>
+<th>message</th>
+<th>what to do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Invalid email address.</code></td>
+<td>ask the user to re-enter the email</td>
+</tr>
+<tr>
+<td><code>email_already_registered</code></td>
+<td>email is taken — tell the user to sign in at <code>login_url</code>; do <strong>not</strong> retry</td>
+</tr>
+<tr>
+<td>contains <code>Rate limited</code></td>
+<td>read retry seconds from message (e.g. <code>"Rate limited, retry after 300 seconds."</code>), wait, then retry</td>
+</tr>
+<tr>
+<td>starts with <code>Key creation failed.</code></td>
+<td>account created but key failed — extract the email and URL from the message (<code>"Key creation failed. Your account &lt;email&gt; was created; sign in at &lt;url&gt;."</code>) and tell the user to sign in there to create a key manually</td>
+</tr>
+<tr>
+<td><code>Internal server error.</code></td>
+<td>retry later or fall back to anonymous</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>The email <strong>must be real and reachable</strong>.</p>
+</blockquote>
+<h3>Get an API Key</h3>
+<p>Alternatively, visit <a href="https://anysearch.com/console/api-keys" target="_blank" rel="noopener noreferrer">https://anysearch.com/console/api-keys</a> to create a free API key.</p>
+<h3>Key Priority</h3>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1 (highest)</td>
+<td><code>--api_key</code> CLI flag / <code>Authorization</code> header</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Environment variable <code>ANYSEARCH_API_KEY</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>.env</code> file (<code>ANYSEARCH_API_KEY=&lt;key&gt;</code>)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Anonymous access (lower rate limits)</td>
+</tr>
+</tbody></table>
+<h3>Key Behavior</h3>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>No key</td>
+<td>Proceed with anonymous access (lower rate limits)</td>
+</tr>
+<tr>
+<td>Has key</td>
+<td>Sent via <code>Authorization: Bearer &lt;key&gt;</code> header, higher rate limits</td>
+</tr>
+<tr>
+<td>Key exhausted, auto-registered key returned</td>
+<td>Agent should ask user for confirmation, then persist the new key</td>
+</tr>
+<tr>
+<td>Key exhausted, no new key</td>
+<td>Inform user and suggest configuring a new API key</td>
+</tr>
+</tbody></table>
+<h2>MCP Transport</h2>
+<p>The production endpoint is:</p>
+<pre><code class="language-text">https://api.anysearch.com/mcp
+</code></pre>
+<p>It natively uses <strong>Streamable HTTP</strong>. Current OpenCode, Claude Code, Cursor, VS Code, Windsurf, and Cline releases can connect to it directly; no SSE or stdio proxy is needed. The configurations below follow each client's current official documentation.</p>
+<h2>Installation</h2>
+<p>The API key is optional. In clients that support custom headers, the examples use the recommended authenticated setup. To use anonymous access, remove only the <code>Authorization</code> entry and keep <code>X-Anysearch-Client</code>.</p>
+<h3>OpenCode</h3>
+<p>Official docs: <a href="https://opencode.ai/docs/mcp-servers/" target="_blank" rel="noopener noreferrer">MCP servers</a> and <a href="https://opencode.ai/docs/config/" target="_blank" rel="noopener noreferrer">configuration locations</a>.</p>
+<p>Use <code>~/.config/opencode/opencode.json</code> for a global configuration or <code>opencode.json</code> in the project root. On Windows, the global path is <code>%USERPROFILE%\.config\opencode\opencode.json</code>.</p>
+<pre><code class="language-json">{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "anysearch": {
+      "type": "remote",
+      "url": "https://api.anysearch.com/mcp",
+      "enabled": true,
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer {env:ANYSEARCH_API_KEY}",
+        "X-Anysearch-Client": "mcp/1.0.0"
+      }
+    }
+  }
+}
+</code></pre>
+<p>OpenCode uses <code>{env:NAME}</code> for environment-variable substitution. <code>"oauth": false</code> prevents an unnecessary OAuth discovery flow for this API-key-authenticated server.</p>
+<h3>Claude Code</h3>
+<p>Official docs: <a href="https://code.claude.com/docs/en/mcp" target="_blank" rel="noopener noreferrer">Connect Claude Code to tools via MCP</a>.</p>
+<p>For a private, user-wide installation, run:</p>
+<pre><code class="language-bash">claude mcp add --transport http anysearch https://api.anysearch.com/mcp --scope user --header "Authorization: Bearer &lt;your_api_key&gt;" --header "X-Anysearch-Client: mcp/1.0.0"
+</code></pre>
+<p>The <code>user</code> scope stores the server in <code>~/.claude.json</code> and makes it available across all projects on the machine. For anonymous access, omit the <code>Authorization</code> <code>--header</code> option.</p>
+<p>For a shareable project configuration, create <code>.mcp.json</code> in the project root:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "anysearch": {
+      "type": "http",
+      "url": "https://api.anysearch.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ANYSEARCH_API_KEY}",
+        "X-Anysearch-Client": "mcp/1.0.0"
+      }
+    }
+  }
+}
+</code></pre>
+<p>Claude Code expands <code>${VAR}</code> and <code>${VAR:-default}</code> in <code>.mcp.json</code>, including inside <code>url</code> and <code>headers</code>. Set <code>ANYSEARCH_API_KEY</code> before starting Claude Code. Project-scoped servers require approval when first opened interactively.</p>
+<p>Verify the connection with:</p>
+<pre><code class="language-bash">claude mcp get anysearch
+claude mcp list
+</code></pre>
+<p>Inside Claude Code, <code>/mcp</code> shows the server status and available tools.</p>
+<h3>Cursor</h3>
+<p>Official docs: <a href="https://cursor.com/docs/mcp" target="_blank" rel="noopener noreferrer">Model Context Protocol</a>.</p>
+<p>Use <code>.cursor/mcp.json</code> for a project or <code>~/.cursor/mcp.json</code> globally:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "anysearch": {
+      "url": "https://api.anysearch.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:ANYSEARCH_API_KEY}",
+        "X-Anysearch-Client": "mcp/1.0.0"
+      }
+    }
+  }
+}
+</code></pre>
+<p>Cursor automatically recognizes the remote HTTP endpoint and supports <code>${env:NAME}</code> interpolation in <code>url</code> and <code>headers</code>.</p>
+<h3>VS Code</h3>
+<p>Official docs: <a href="https://code.visualstudio.com/docs/agents/reference/mcp-configuration" target="_blank" rel="noopener noreferrer">MCP configuration reference</a>.</p>
+<p>Run <strong>MCP: Open User Configuration</strong> for a user-wide server, or create <code>.vscode/mcp.json</code> in a workspace. This example uses a password input so the key is prompted for and stored securely instead of being committed:</p>
+<pre><code class="language-json">{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "anysearch-api-key",
+      "description": "AnySearch API key",
+      "password": true
+    }
+  ],
+  "servers": {
+    "anysearch": {
+      "type": "http",
+      "url": "https://api.anysearch.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:anysearch-api-key}",
+        "X-Anysearch-Client": "mcp/1.0.0"
+      }
+    }
+  }
+}
+</code></pre>
+<p>For anonymous access, remove the <code>Authorization</code> entry and the entire <code>inputs</code> array.</p>
+<h3>Windsurf</h3>
+<p>Official docs: <a href="https://docs.devin.ai/windsurf/plugins/cascade/mcp" target="_blank" rel="noopener noreferrer">Cascade MCP integration</a>.</p>
+<p>Open <strong>Settings &gt; Tools &gt; Windsurf Settings &gt; Add Server</strong>, or edit <code>~/.codeium/mcp_config.json</code> via <strong>View Raw Config</strong>:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "anysearch": {
+      "serverUrl": "https://api.anysearch.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:ANYSEARCH_API_KEY}",
+        "X-Anysearch-Client": "mcp/1.0.0"
+      }
+    }
+  }
+}
+</code></pre>
+<p>Windsurf supports environment-variable interpolation in <code>serverUrl</code>, <code>url</code>, and <code>headers</code>. Refresh the MCP server list after saving.</p>
+<h3>Cline</h3>
+<p>Official docs: <a href="https://docs.cline.bot/mcp/mcp-overview" target="_blank" rel="noopener noreferrer">MCP</a>.</p>
+<p>In the Cline panel, open <strong>MCP Servers &gt; Configure &gt; Configure MCP Servers</strong>, or add a hosted endpoint from the <strong>Remote Servers</strong> tab. Use the explicit <code>streamableHttp</code> type; omitting it falls back to legacy SSE behavior.</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "anysearch": {
+      "type": "streamableHttp",
+      "url": "https://api.anysearch.com/mcp",
+      "headers": {
+        "Authorization": "Bearer &lt;your_api_key&gt;",
+        "X-Anysearch-Client": "mcp/1.0.0"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+</code></pre>
+<p>For Cline CLI, the config file is <code>~/.cline/mcp.json</code>; <code>cline mcp</code> opens the interactive MCP wizard.</p>
+<h2>Client Quick Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Client</th>
+<th>Official connection</th>
+<th>Configuration location</th>
+<th>Direct Streamable HTTP?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>OpenCode</td>
+<td>Remote MCP config</td>
+<td><code>~/.config/opencode/opencode.json</code> or project <code>opencode.json</code></td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Claude Code</td>
+<td>Remote HTTP MCP</td>
+<td>User <code>~/.claude.json</code> or project <code>.mcp.json</code></td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Cursor</td>
+<td>Remote MCP config</td>
+<td><code>.cursor/mcp.json</code> or <code>~/.cursor/mcp.json</code></td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>VS Code</td>
+<td>HTTP MCP config</td>
+<td>User MCP config or <code>.vscode/mcp.json</code></td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Windsurf</td>
+<td>Remote HTTP MCP</td>
+<td><code>~/.codeium/mcp_config.json</code></td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Cline</td>
+<td>Remote Streamable HTTP</td>
+<td>Cline MCP settings or <code>~/.cline/mcp.json</code></td>
+<td>Yes</td>
+</tr>
+</tbody></table>
+<h2>Available Tools</h2>
+<h3><code>search</code></h3>
+<p>Execute a search query — general or vertical domain.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>query</code></td>
+<td>string</td>
+<td>Yes</td>
+<td>Natural language search query. ONE intent per call</td>
+</tr>
+<tr>
+<td><code>domain</code></td>
+<td>string</td>
+<td>No</td>
+<td>Vertical domain (e.g. <code>finance</code>, <code>academic</code>, <code>security</code>). Must come from <code>get_sub_domains</code> enum</td>
+</tr>
+<tr>
+<td><code>sub_domain</code></td>
+<td>string</td>
+<td>No</td>
+<td>Sub-domain routing key (e.g. <code>finance.us_stock</code>). Must come from <code>get_sub_domains</code> output</td>
+</tr>
+<tr>
+<td><code>sub_domain_params</code></td>
+<td>object</td>
+<td>No</td>
+<td>Structured params from <code>get_sub_domains</code> params column. NEVER invent values</td>
+</tr>
+<tr>
+<td><code>max_results</code></td>
+<td>integer</td>
+<td>No</td>
+<td>1–10, default 10</td>
+</tr>
+</tbody></table>
+<h3><code>get_sub_domains</code></h3>
+<p>Query the vertical domain directory. <strong>Required before any search that uses a domain</strong> — returns valid sub_domains and their parameter schemas.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>domain</code></td>
+<td>string</td>
+<td>One of</td>
+<td>Single domain to query</td>
+</tr>
+<tr>
+<td><code>domains</code></td>
+<td>string[]</td>
+<td>One of</td>
+<td>Batch up to 5 domains (preferred — covers more ground)</td>
+</tr>
+</tbody></table>
+<p>Returns a Markdown table: <code>sub_domain | description | params</code></p>
+<h3><code>batch_search</code></h3>
+<p>Execute 1–5 independent search queries in parallel. Single failure does not block others.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>queries</code></td>
+<td>object[]</td>
+<td>Yes</td>
+<td>1–5 query objects, each with same fields as <code>search</code></td>
+</tr>
+</tbody></table>
+<h3><code>extract</code></h3>
+<p>Fetch full page content from a URL and return as Markdown. Truncated at 50,000 characters. HTML pages only.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>url</code></td>
+<td>string</td>
+<td>Yes</td>
+<td>Target URL (<code>http://</code> or <code>https://</code>)</td>
+</tr>
+</tbody></table>

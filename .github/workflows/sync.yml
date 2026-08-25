@@ -1,0 +1,63 @@
+# 收录管道（方案 §6）：每 6 小时抓取 GitHub topics + 官方 MCP Registry，
+# 校验、评分后 upsert 到 Postgres，并触发 ISR revalidate。
+name: sync-plugins
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run sync pipeline
+        env:
+          # GITHUB_TOKEN 提高 API 限额（方案 §6）
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx scripts/sync/run-all.ts --pages 2 --db
+
+      - name: Commit snapshot (demo 模式数据也保持新鲜)
+        run: |
+          git config user.name "pluginworld-bot"
+          git config user.email "bot@pluginworld.ai"
+          git add src/data/seed
+          git diff --cached --quiet || git commit -m "chore(sync): refresh plugin snapshot [skip ci]"
+          git push
+
+      - name: Trigger ISR revalidation
+        if: ${{ vars.SITE_URL != '' }}
+        env:
+          REVALIDATE_SECRET: ${{ secrets.REVALIDATE_SECRET }}
+        run: |
+          curl -sf -X POST "${{ vars.SITE_URL }}/api/revalidate" \
+            -H "Authorization: Bearer $REVALIDATE_SECRET" || true
+
+  test:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test

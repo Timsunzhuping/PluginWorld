@@ -1,0 +1,775 @@
+<h1>claude-council</h1>
+<p>A Claude Code plugin that consults multiple AI coding agents in parallel and shows you their answers side-by-side. Useful when one model's bias could mislead you and the right call depends on cross-checking — architecture decisions, debugging dead ends, security reviews, framework picks.</p>
+<p><img src="https://raw.githubusercontent.com/hex/claude-council/HEAD/docs/images/council-pane.png" alt="Five providers answering in the streaming tmux pane, with the synthesis alongside" /></p>
+<p>Five providers answering the same question. Each banner names the provider, the
+model that answered and how long it took. The synthesis separates what they all
+agreed on from where they diverged — here, whether trapping <code>EXIT INT TERM</code> on
+one handler is correct, or whether signals should be converted into exits
+first — and when they agree instead, it names the assumption the answer rests
+on.</p>
+<p><a href="#quick-start" target="_blank" rel="noopener noreferrer">Quick start</a> · <a href="#usage" target="_blank" rel="noopener noreferrer">Usage</a> · <a href="#configuration" target="_blank" rel="noopener noreferrer">Configuration</a> · <a href="#reference" target="_blank" rel="noopener noreferrer">Reference</a> · <a href="#development" target="_blank" rel="noopener noreferrer">Development</a></p>
+<h2>Quick start</h2>
+<pre><code class="language-bash"># 1. Install via Claude Code plugin marketplace
+/plugin marketplace add hex/claude-marketplace
+/plugin install claude-council
+
+# 2. Configure at least one provider — any of these works:
+export OPENAI_API_KEY="..."         # or GEMINI_API_KEY, XAI_API_KEY, PERPLEXITY_API_KEY, KIMI_API_KEY
+                                    # OR install the codex / antigravity (agy) / grok / kimi CLIs (uses your
+                                    # existing subscription — no API key needed)
+
+# 3. Ask anything
+/claude-council:ask "Should I use UUID or BIGINT primary keys for a SaaS users table?"
+</code></pre>
+<p>You get side-by-side responses from each configured provider:</p>
+<pre><code>🔳 Codex - default
+   Use UUID primary keys — they avoid enumeration, work across distributed
+   services, and survive imports/exports cleanly.
+
+🟦 Antigravity - default
+   UUIDv7 specifically: security of non-guessable IDs plus the index
+   locality of time-ordered sequences.
+
+🟥 Grok - grok-4.5
+   BIGINT autoincrement — smaller index, faster joins. Handle public-
+   exposure concerns with a separate UUID slug column.
+
+🟩 Perplexity - sonar-reasoning-pro
+   BIGINT: 25% smaller than UUID, better cache locality, with citations
+   to Postgres benchmarks.
+
+## Synthesis
+Two providers prefer UUID(v7), two prefer BIGINT. Choice depends on
+whether you need distributed ID generation.
+</code></pre>
+<p>When they all agree instead, the synthesis says what that agreement rests on,
+because agreement is where it is easiest to stop asking:</p>
+<pre><code>## Synthesis
+All five recommend SQLite. Read that as agreement about the reasoning, not
+as verification: every provider was given the same description of a system
+none of them can inspect. The answer assumes this stays single-node — the
+one premise that would flip it, and the one nobody here could check.
+</code></pre>
+<p>Inside tmux, results stream into a side pane in real time with vendor-colored banners. Run <code>/claude-council:status</code> to confirm what's configured and connected.</p>
+<h2>Features</h2>
+<ul>
+<li>Query Gemini, OpenAI (GPT/Codex), Grok, Perplexity, and Kimi (Moonshot AI) simultaneously</li>
+<li>Use the <code>codex</code>, <code>agy</code> (Antigravity), <code>grok</code>, and <code>kimi</code> (Kimi Code) CLIs (subscription auth) when installed — preferred over their API siblings</li>
+<li>Run a local <code>ollama</code> model as a council member — no key, no subscription, no network</li>
+<li>Side-by-side comparison of responses with vendor-colored headers</li>
+<li>Streaming tmux pane that renders responses as they land</li>
+<li>Specialized roles, debate mode, and agent-enhanced deep analysis for high-stakes decisions</li>
+<li>Background jobs (<code>--async</code>) for long-running queries, with <code>/claude-council:result</code> to fetch, list, and cancel</li>
+<li>Opt-in stop-gate: a second model reviews your uncommitted diff before Claude ends its turn</li>
+<li>Extensible provider system — add new AI agents easily</li>
+<li>Proactive agent that suggests consulting the council on architecture / debugging dead ends</li>
+</ul>
+<h2>Installation</h2>
+<h3>From Marketplace (Recommended)</h3>
+<pre><code class="language-bash"># Add the hex-plugins marketplace
+/plugin marketplace add hex/claude-marketplace
+
+# Install claude-council
+/plugin install claude-council
+</code></pre>
+<h3>Manual (run from a local clone)</h3>
+<p>For normal use, prefer the marketplace or GitHub install above — both persist
+across sessions. A manual clone is for running from a local working copy
+(development, or offline). Clone the repo <strong>anywhere</strong>, then point Claude Code
+at the repo root for the current session:</p>
+<pre><code class="language-bash">git clone https://github.com/hex/claude-council.git
+claude --plugin-dir /path/to/claude-council    # repo root; loaded for this session only
+</code></pre>
+<blockquote>
+<p><strong>Cloned it and nothing loads?</strong> Two traps to avoid:</p>
+<ol>
+<li><strong>Don't clone into <code>~/.claude/plugins/</code></strong> (Windows:
+<code>%USERPROFILE%\.claude\plugins\</code>). That's Claude Code's managed install
+<em>cache</em> — it is never scanned for manually-added plugins, so the plugin
+won't appear in the Installed tab or respond to its slash commands.</li>
+<li><strong><code>pluginDirectories</code> in <code>settings.json</code> does nothing</strong> — it isn't a real
+setting, so it's silently ignored (no error shown). Use <code>--plugin-dir</code>
+above for a local clone, or install via the marketplace / GitHub for a
+persistent setup.</li>
+</ol>
+</blockquote>
+<h2>Usage</h2>
+<h3>Slash Commands</h3>
+<pre><code class="language-bash"># Query all configured providers
+/claude-council:ask "How should I structure authentication in this Express app?"
+
+# Query specific providers
+/claude-council:ask --providers=gemini,openai "What's the best approach for caching here?"
+
+# Include a specific file for review
+/claude-council:ask --file=src/auth.ts "What's wrong with this implementation?"
+
+# Attach a screenshot for visual critique
+/claude-council:ask --image=shot.png "Why does this dialog render off-center?"
+
+# Export response to markdown file
+/claude-council:ask --output=docs/auth-decision.md "How should we implement authentication?"
+
+# Quiet mode - show only synthesis
+/claude-council:ask --quiet "What's the best caching strategy?"
+
+# Check connectivity and configured models for each provider
+/claude-council:status
+
+# Run a long query in the background, fetch it later
+/claude-council:ask --async "Deep-dive the tradeoffs of event sourcing here"
+/claude-council:result &lt;job-id&gt;
+</code></pre>
+<h3>Quick Reference</h3>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--providers=list</code></td>
+<td>Query specific providers (e.g., <code>gemini,openai,codex</code>)</td>
+</tr>
+<tr>
+<td><code>--roles=list</code></td>
+<td>Assign roles (e.g., <code>security,performance</code> or preset like <code>balanced</code>)</td>
+</tr>
+<tr>
+<td><code>--debate</code></td>
+<td>Enable two-round debate mode</td>
+</tr>
+<tr>
+<td><code>--file=path</code></td>
+<td>Include specific file in context</td>
+</tr>
+<tr>
+<td><code>--image=path</code></td>
+<td>Attach one image (e.g. a screenshot) for vision-capable providers</td>
+</tr>
+<tr>
+<td><code>--output=path</code></td>
+<td>Export response to markdown file</td>
+</tr>
+<tr>
+<td><code>--quiet</code></td>
+<td>Show only synthesis, hide individual responses</td>
+</tr>
+<tr>
+<td><code>--agents</code></td>
+<td>Agent-enhanced analysis with subagents (slower, deeper)</td>
+</tr>
+<tr>
+<td><code>--local</code></td>
+<td>Local Claude-only council when you have no provider keys (see below)</td>
+</tr>
+<tr>
+<td><code>--async</code></td>
+<td>Detach the query as a background job; fetch with <code>/claude-council:result</code></td>
+</tr>
+<tr>
+<td><code>--no-cache</code></td>
+<td>Force fresh queries, skip cache</td>
+</tr>
+<tr>
+<td><code>--no-auto-context</code></td>
+<td>Disable automatic file detection</td>
+</tr>
+<tr>
+<td><code>--no-pane</code></td>
+<td>Disable streaming tmux pane (default: on inside tmux)</td>
+</tr>
+<tr>
+<td><code>--verbosity=LEVEL</code></td>
+<td>Response style: <code>brief</code> / <code>standard</code> / <code>detailed</code></td>
+</tr>
+</tbody></table>
+<h3>Specialized Roles</h3>
+<p>Assign different perspectives to each provider for more comprehensive reviews:</p>
+<pre><code class="language-bash"># Use specific roles
+/claude-council:ask --roles=security,performance,maintainability "Review this auth code"
+
+# Use a preset
+/claude-council:ask --roles=balanced "Review this implementation"
+</code></pre>
+<p><strong>Available roles:</strong></p>
+<ul>
+<li><code>security</code> - Security Auditor (vulnerabilities, OWASP Top 10)</li>
+<li><code>performance</code> - Performance Optimizer (efficiency, bottlenecks)</li>
+<li><code>maintainability</code> - Maintainability Advocate (clarity, future changes)</li>
+<li><code>devil</code> - Devil's Advocate (challenges assumptions)</li>
+<li><code>simplicity</code> - Simplicity Champion (identifies over-engineering)</li>
+<li><code>scalability</code> - Scalability Architect (growth, scaling)</li>
+<li><code>dx</code> - Developer Experience (API ergonomics)</li>
+<li><code>compliance</code> - Compliance Officer (GDPR, regulations)</li>
+</ul>
+<p><strong>Presets:</strong></p>
+<ul>
+<li><code>balanced</code> - security, performance, maintainability</li>
+<li><code>security-focused</code> - security, devil, compliance</li>
+<li><code>architecture</code> - scalability, maintainability, simplicity</li>
+<li><code>review</code> - security, maintainability, dx</li>
+</ul>
+<p>Roles are assigned to providers in order, ensuring each provider approaches the question from a different angle.</p>
+<h3>Debate Mode</h3>
+<p>Enable multi-round discussions where providers critique each other:</p>
+<pre><code class="language-bash">/claude-council:ask --debate "How should I structure the database schema?"
+</code></pre>
+<p><strong>How it works:</strong></p>
+<ol>
+<li><strong>Round 1</strong>: All providers answer the question normally</li>
+<li><strong>Round 2</strong>: Each provider sees the others' responses and provides rebuttals</li>
+<li><strong>Synthesis</strong>: Incorporates debate insights, consensus shifts, and unresolved tensions</li>
+</ol>
+<p>Debate mode surfaces blind spots and stress-tests recommendations. The synthesis includes:</p>
+<ul>
+<li>Strongest criticisms raised</li>
+<li>Where providers changed positions after seeing alternatives</li>
+<li>Genuine disagreements that remain</li>
+</ul>
+<p>Combine with roles for focused debates:</p>
+<pre><code class="language-bash">/claude-council:ask --debate --roles=security,performance,simplicity "Review this architecture"
+</code></pre>
+<h3>Agent-Enhanced Analysis (--agents)</h3>
+<p>For complex decisions where deeper analysis justifies the extra time and cost, <code>--agents</code> spawns
+parallel Claude subagents that each independently query, evaluate, and analyze their provider's
+response before the orchestrator synthesizes everything.</p>
+<pre><code class="language-bash"># Explicit flag
+/claude-council:ask --agents "Should we migrate from REST to GraphQL? What are the tradeoffs?"
+
+# Combine with other flags
+/claude-council:ask --agents --roles=security,scalability --providers=gemini,openai "Review this auth architecture"
+</code></pre>
+<p><strong>What each subagent does (beyond a simple API call):</strong></p>
+<ol>
+<li>Queries the provider</li>
+<li>Evaluates response quality - did it actually address the question?</li>
+<li>If the response is vague or off-topic, reformulates and retries</li>
+<li>Asks follow-up questions to surface deeper insights</li>
+<li>Extracts structured analysis: key recommendations, confidence level, blind spots</li>
+</ol>
+<p><strong>Enhanced synthesis includes:</strong></p>
+<ul>
+<li>Confidence-weighted consensus (high-confidence agreement weighted more)</li>
+<li>Cross-provider blind spot analysis</li>
+<li>Divergence with context (why providers disagree)</li>
+</ul>
+<p><strong>Natural language triggers</strong>: The command also detects complex questions automatically.
+If your question contains architecture, security review, tradeoff analysis, or similar
+signals, you'll be asked whether to enable agent mode.</p>
+<p><strong>Cost and performance implications</strong>: Agent mode spawns one Claude subagent per provider.
+This means ~4x more Claude API usage and ~15-25 seconds additional latency compared to
+standard mode. Use it for high-stakes decisions, not quick questions.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Standard (default)</th>
+<th>Agent-enhanced (--agents)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Speed</td>
+<td>~3-5s</td>
+<td>~15-25s</td>
+</tr>
+<tr>
+<td>Claude API cost</td>
+<td>1 context</td>
+<td>1 + N providers</td>
+</tr>
+<tr>
+<td>Provider API cost</td>
+<td>Same</td>
+<td>Same</td>
+</tr>
+<tr>
+<td>Analysis depth</td>
+<td>Raw responses + synthesis</td>
+<td>Pre-analyzed + enhanced synthesis</td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>Quick questions, factual queries</td>
+<td>Architecture decisions, security reviews, complex tradeoffs</td>
+</tr>
+</tbody></table>
+<h3>Local Council (--local)</h3>
+<p>If you have no provider keys and no <code>codex</code> / <code>agy</code> / <code>grok</code> / <code>kimi</code> CLI and no
+<code>ollama</code> installed, you can still convene a council, locally, using Claude alone:</p>
+<pre><code class="language-bash"># Explicit
+/claude-council:ask --local "Is event sourcing worth it for this order service?"
+
+# Pick the exact lenses yourself (skips the size prompt)
+/claude-council:ask --local --roles=architecture "How should we shard this database?"
+</code></pre>
+<p>It spawns several Claude subagents in parallel, each pinned to a different role
+and <strong>blind to the others</strong>, then synthesizes their perspectives. When you don't
+pass <code>--roles</code>, it asks <strong>how many members</strong> to convene (default 4, up to 8) and
+fills them from a diverse ordering led by the sharpest lenses (devil's-advocate,
+simplicity, security, …). You don't need to pass <code>--local</code> explicitly: when a
+query finds no configured providers, the command offers a local council instead
+of erroring.</p>
+<blockquote>
+<p><strong>Honest caveat:</strong> every member is Claude, so they share priors and training.
+Agreement between them is a <em>shared starting point to pressure-test</em>, not
+cross-vendor corroboration. The value is independent angles and blind-spot
+coverage — for genuinely independent models, configure a provider key or a CLI
+(<code>/claude-council:status</code> shows what's available). The synthesis is framed
+around angles and tensions, not "consensus", to keep this distinction clear.</p>
+</blockquote>
+<h3>Quiet Mode</h3>
+<p>Get just the bottom line without individual provider responses:</p>
+<pre><code class="language-bash">/claude-council:ask --quiet "Should I use Redis or Memcached?"
+</code></pre>
+<p>Quiet mode still queries all providers and analyzes their responses, but only shows the synthesis with consensus/divergence analysis. Use when you want a quick answer without scrolling through multiple perspectives.</p>
+<h3>Stated vs Assumed</h3>
+<p>Providers are given a description of your problem and never the system itself,
+so they cannot test a premise your question asserts — they will reason from it
+correctly, and agree with each other while doing it. A wrong assumption
+therefore produces confident unanimity, which is the hardest failure to spot.</p>
+<p>Before the question goes out, the council checks the claims it can check here
+and labels the rest:</p>
+<pre><code>OBSERVED: four sessions logged this failure, confirmed in .cs/memory/
+NOT VERIFIED: that the error text carries the tokens those notes are keyed on
+</code></pre>
+<p>A provider told "I have not checked whether X holds" can answer "then check X
+first". One told "X holds" never will. If the answer turns mainly on facts
+living on your disk, establish those first — a single agent that can read the
+filesystem beats five that cannot.</p>
+<h3>Auto-Context Injection</h3>
+<p>The council automatically detects and includes relevant files based on your question:</p>
+<pre><code class="language-bash">/claude-council:ask "How should I refactor the authentication flow?"
+# Auto-detects and includes: src/auth/*.ts, middleware/auth.ts, etc.
+</code></pre>
+<p>Before querying, you'll see which files were auto-included:</p>
+<pre><code>Auto-included context (3 files):
+  - src/auth/handler.ts (keyword: "auth")
+  - middleware/session.ts (keyword: "session")
+  - types/user.ts (keyword: "user")
+</code></pre>
+<p>To disable auto-context (for general questions not about your code):</p>
+<pre><code class="language-bash">/claude-council:ask --no-auto-context "What are best practices for API design?"
+</code></pre>
+<p>Auto-context limits:</p>
+<ul>
+<li>Maximum 5 files included</li>
+<li>Maximum ~10,000 tokens of context</li>
+<li>Skipped if you provide <code>--file=</code> explicitly</li>
+</ul>
+<h3>Image Input</h3>
+<p>Attach one image (e.g. a UI screenshot) so vision-capable providers can critique it:</p>
+<pre><code class="language-bash">/claude-council:ask --image=shot.png "Why does this dialog render off-center?"
+</code></pre>
+<ul>
+<li>Single image per query, raw size up to 10 MB, extensions: png / jpg / jpeg / webp / gif.</li>
+<li><code>gemini</code>, <code>openai</code>, <code>grok</code>, and <code>perplexity</code> receive the image alongside the prompt.</li>
+<li>CLI providers answer through their vision sibling: <code>codex</code> via <code>openai</code>, <code>antigravity</code> via <code>gemini</code>, <code>grok-cli</code> via <code>grok</code> (the slot is marked as a fallback). <code>kimi-cli</code>'s sibling <code>kimi</code> is text-only, so an image is never routed there. If the sibling is unusable (no API key), not vision-capable, or already answering in its own slot, the CLI provider answers text-only instead and its answer is prefixed with <code>(answered without the image)</code>. Selecting <code>kimi</code> or <code>ollama</code> directly is likewise text-only.</li>
+</ul>
+<p>Privacy: the image is sent to the providers that can see it, but its bytes are <strong>not</strong> written to cache entries or the saved <code>council-*.md</code> transcripts — only a hash of the image keys the cache.</p>
+<h3>Response Caching</h3>
+<p>Responses are automatically cached to speed up repeated queries and save API costs:</p>
+<pre><code class="language-bash"># Uses cache if available (default)
+/claude-council:ask "What's the best testing framework?"
+
+# Force fresh queries, skip cache
+/claude-council:ask --no-cache "What's the best testing framework?"
+</code></pre>
+<p>Cache configuration:</p>
+<pre><code class="language-bash">export COUNCIL_CACHE_DIR=".claude/council-cache"  # Cache location (default)
+export COUNCIL_CACHE_TTL=3600                      # Cache lifetime in seconds (default: 1 hour)
+</code></pre>
+<p>Cached responses show <code>cached</code> instead of <code>success</code> in the status output. Cache is keyed by prompt + provider + model + role, so:</p>
+<ul>
+<li>Changing models invalidates the cache</li>
+<li>Using <code>--roles</code> creates separate cache entries (same prompt with different role = cache miss)</li>
+<li>Debate mode round 2 rebuttals are not cached (they depend on round 1 content) — with one exception: if a CLI provider fails in round 2 and falls back to its API sibling, that fallback rebuttal is cached, keyed on the full debate prompt (which already includes the round 1 answers)</li>
+</ul>
+<p>Privacy: cache entries and the saved <code>council-*.md</code> transcripts store the <strong>full prompt in cleartext</strong> — including any files you pass with <code>--file</code> and the auto-included context. Council drops a <code>.gitignore</code> (<code>*</code>) into the cache dir so these never get committed, but the plaintext still lives on local disk under <code>COUNCIL_CACHE_DIR</code> until it ages out or you clear it.</p>
+<h3>Export to File</h3>
+<p>Save council responses as clean markdown files for documentation or sharing:</p>
+<pre><code class="language-bash">/claude-council:ask --output=docs/decision.md "Should we use REST or GraphQL?"
+</code></pre>
+<p>The exported file includes:</p>
+<ul>
+<li>Metadata header (query, date, providers)</li>
+<li>Each provider's full response</li>
+<li>Synthesis with consensus/divergence analysis</li>
+</ul>
+<p>Great for:</p>
+<ul>
+<li>Documenting architectural decisions</li>
+<li>Sharing with team members who aren't using Claude</li>
+<li>Creating an audit trail of AI-assisted decisions</li>
+</ul>
+<h3>Background Jobs (--async)</h3>
+<p>Reasoning and deep-research models can take minutes. <code>--async</code> detaches the
+query as a tracked background job instead of blocking the conversation:</p>
+<pre><code class="language-bash">/claude-council:ask --async "Compare migration strategies for this schema"
+# → job id, returned immediately
+
+/claude-council:result              # list jobs
+/claude-council:result &lt;job-id&gt;     # fetch a finished result (synthesis included)
+/claude-council:result cancel &lt;id&gt;  # terminate a running job
+</code></pre>
+<p>Each job persists as a JSON record plus log under a per-workspace state
+directory (<code>$CLAUDE_PLUGIN_DATA</code>, falling back to tmp). A crashed worker is
+marked <code>failed</code> automatically; finished jobs are pruned beyond
+<code>COUNCIL_MAX_JOBS</code> (default 20).</p>
+<h3>Proactive Agent</h3>
+<p>The <code>council-advisor</code> agent will suggest consulting the council when:</p>
+<ul>
+<li>Discussing architecture or design decisions</li>
+<li>Stuck debugging after multiple failed attempts</li>
+</ul>
+<h2>Configuration</h2>
+<h3>API Keys</h3>
+<p>Set environment variables (recommended):</p>
+<pre><code class="language-bash">export GEMINI_API_KEY="your-key"
+export OPENAI_API_KEY="your-key"
+export XAI_API_KEY="your-key"          # GROK_API_KEY also accepted
+export PERPLEXITY_API_KEY="your-key"
+export KIMI_API_KEY="your-key"         # MOONSHOT_API_KEY is read as a fallback,
+                                       # but only KIMI_API_KEY makes kimi discoverable
+</code></pre>
+<p><code>ollama</code> needs no key at all: install it, pull a model, and it joins the council
+as a local provider.</p>
+<h3>CLI Providers (subscription auth, no API key)</h3>
+<p>If the <code>codex</code>, <code>agy</code>, <code>grok</code>, or <code>kimi</code> CLIs are installed and on <code>PATH</code>, they're discovered automatically and <strong>preferred over their API siblings</strong> by default:</p>
+<ul>
+<li><code>codex</code> (OpenAI Codex CLI) shadows the <code>openai</code> API provider — uses your <code>~/.codex/config.toml</code> model unless <code>CODEX_MODEL</code> is set</li>
+<li><code>antigravity</code> (Antigravity CLI, <code>agy</code>) shadows the <code>gemini</code> API provider — uses the model selected in the Antigravity app unless <code>ANTIGRAVITY_MODEL</code> is set</li>
+<li><code>grok-cli</code> (xAI Grok CLI, <code>grok</code>) shadows the <code>grok</code> API provider — uses the grok CLI's own default model unless <code>GROK_CLI_MODEL</code> is set</li>
+<li><code>kimi-cli</code> (Kimi Code CLI, <code>kimi</code>) shadows the <code>kimi</code> API provider, using the kimi CLI's own configured model unless <code>KIMI_CLI_MODEL</code> is set</li>
+</ul>
+<p><code>ollama</code> is also discovered from <code>PATH</code>, but it is local and keyless rather than subscription-backed, so it shadows nothing and has no API sibling.</p>
+<p>CLI providers use your existing CLI subscription: no API key, no per-call cost. To opt back into the API variant for a single call, pass it explicitly: <code>--providers=openai</code>, <code>--providers=gemini</code>, <code>--providers=grok</code>, or <code>--providers=kimi</code>. Listing both API and CLI together (e.g., <code>--providers=grok,grok-cli</code>) runs them side-by-side for comparison.</p>
+<p>If a CLI provider fails at query time and its API sibling's key is set, the council automatically retries through that API sibling and marks the slot as a fallback (the answer is shown under the CLI slot with the API model's name and a "fell back to … API" note). The fallback is skipped when the sibling is already in your selected providers, so you never get the same vendor's answer twice.</p>
+<p>Override CLI model selection. Left unset, the council reads what each CLI has
+selected — <code>~/.codex/config.toml</code> (or <code>$CODEX_HOME</code>), <code>~/.grok/config.toml</code>,
+<code>~/.kimi-code/config.toml</code>, and agy's own settings — and names that model in
+the response banner, so you can see which model answered without pinning one:</p>
+<pre><code class="language-bash">export CODEX_MODEL="gpt-5-codex"                # default: the codex CLI's own configured model
+export ANTIGRAVITY_MODEL="Gemini 3.1 Pro (High)"  # default: the model selected in the Antigravity app
+export GROK_CLI_MODEL="grok-4.3"                # default: the grok CLI's own default model
+export KIMI_CLI_MODEL="kimi-k3"                 # default: the kimi CLI's own configured model
+</code></pre>
+<p>The Antigravity CLI cannot take its prompt on stdin — <code>--print</code> with no value
+prints the help — so the prompt is the value of <code>-p</code> and rides the command line.
+Windows caps that at 32k, which a <code>--file</code>-sized prompt would exceed
+(CreateProcess fails with error 206), so past <code>COUNCIL_ARGV_LIMIT</code> (default
+24000 chars) the prompt is written to a file and agy is told to read it. The
+file gets a directory of its own, which is the only thing <code>--add-dir</code> opens to
+the sandboxed agent, and it is removed when the run ends.</p>
+<h3>Pinning a standing provider roster</h3>
+<p>Discovery enlists everything it finds, which is rarely what you want once more
+than a couple of agents are installed. <code>COUNCIL_PROVIDERS</code> pins the default set;
+an explicit <code>--providers</code> still overrides it per call.</p>
+<pre><code class="language-bash">export COUNCIL_PROVIDERS="codex,antigravity"  # queried by default, nothing else
+</code></pre>
+<p><code>--list-default</code> and <code>--list-available</code> both report the pinned roster, so neither
+tooling nor the human-readable view disagrees with what a query would actually
+run. Spaces around the commas are fine, in the variable and in <code>--providers</code>
+alike.</p>
+<p>The Kimi CLI runs every prompt under an agent definition that grants it no tools
+(<code>prompts/kimi-cli-agent.md</code>). Its print mode auto-approves tool calls, so the
+council denies them outright rather than letting a prompt drive file writes or
+shell commands.</p>
+<h3>Verbosity</h3>
+<p>Shape how providers respond by prepending a directive to their system prompts. Affects style and depth, not just length:</p>
+<pre><code class="language-bash">export COUNCIL_VERBOSITY=brief     # ~3-5 sentences, bullets, no code
+export COUNCIL_VERBOSITY=standard  # default — balanced thoroughness
+export COUNCIL_VERBOSITY=detailed  # thorough analysis with code + edge cases
+</code></pre>
+<p>Or per-call: <code>--verbosity=brief|standard|detailed</code>. The slash command also asks via the provider-selection prompt.</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Typical output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>brief</code></td>
+<td>3-5 sentences max, bullets where possible, skips code blocks unless asked</td>
+</tr>
+<tr>
+<td><code>standard</code></td>
+<td>Balanced — current default behavior, no directive prepended</td>
+</tr>
+<tr>
+<td><code>detailed</code></td>
+<td>Thorough — includes code examples, edge cases, trade-offs, and rationale</td>
+</tr>
+</tbody></table>
+<h3>Stop-Gate Review (opt-in, off by default)</h3>
+<p>A Stop hook can ask one council provider to review your uncommitted <code>git diff</code>
+before Claude ends its turn, blocking only on a first-line <code>BLOCK:</code> verdict.
+Enable it per project:</p>
+<pre><code class="language-bash">cat &gt; .claude/council-stop-gate.json &lt;&lt;'EOF'
+{"enabled": true, "provider": "codex", "max_iterations": 1}
+EOF
+</code></pre>
+<p>Safety properties: it never blocks on a clean tree, never re-gates a
+continuation already triggered by a stop hook, caps blocks per session at
+<code>max_iterations</code>, and any reviewer failure allows the stop. Delete the file
+(or set <code>"enabled": false</code>) to turn it off.</p>
+<p>Privacy: the review sends your full uncommitted <code>git diff</code> to the configured
+provider, named by its provider id. With <code>ollama</code> it never leaves the machine.
+With a CLI provider (<code>codex</code>, <code>antigravity</code>, <code>grok-cli</code>, <code>kimi-cli</code>) it stays
+within that tool's own subscription auth; with an API provider (<code>gemini</code>,
+<code>openai</code>, <code>grok</code>, <code>perplexity</code>, <code>kimi</code>) the diff is transmitted to that
+third-party API — <code>kimi</code> sends it to Moonshot. Keep the reviewer on <code>ollama</code>,
+or on a CLI provider, if your working tree may contain secrets.</p>
+<h2>Reference</h2>
+<p>Detail-heavy knobs you'll only need occasionally. The defaults are sensible for most workflows.</p>
+<h3>Model Selection</h3>
+<p>Override default models via environment variables:</p>
+<pre><code class="language-bash">export GEMINI_MODEL="gemini-3.1-pro-preview"       # default
+export OPENAI_MODEL="gpt-5.6-sol"                   # default
+export GROK_MODEL="grok-4.5"                        # default
+export PERPLEXITY_MODEL="sonar-reasoning-pro"       # default (reasoning + search)
+export KIMI_MODEL="kimi-k3"                         # default
+export OLLAMA_MODEL="llama3.2"                      # default: whichever model `ollama list` shows first
+export OLLAMA_HOST="http://localhost:11434"         # default
+</code></pre>
+<p>Response length cap (default: 2048; <code>ollama</code> uses 4096, since local reasoning
+models spend much of the budget on thinking that never reaches the answer):</p>
+<pre><code class="language-bash">export COUNCIL_MAX_TOKENS=4096  # longer responses
+export COUNCIL_MAX_TOKENS=1024  # shorter, faster responses
+</code></pre>
+<h3>Model fallback</h3>
+<p>If a provider's default model is unavailable for your API key or region, the
+council answers with a verified fallback model instead of failing, and says so
+in the response header:</p>
+<pre><code>## 🟥 Grok - grok-4.20-reasoning (grok-4.5 unavailable)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Default</th>
+<th>Fallback</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>openai</td>
+<td><code>gpt-5.6-sol</code></td>
+<td><code>gpt-5.5-pro</code></td>
+</tr>
+<tr>
+<td>grok</td>
+<td><code>grok-4.5</code></td>
+<td><code>grok-4.20-reasoning</code></td>
+</tr>
+<tr>
+<td>gemini</td>
+<td><code>gemini-3.1-pro-preview</code></td>
+<td><code>gemini-pro-latest</code></td>
+</tr>
+<tr>
+<td>perplexity</td>
+<td><code>sonar-reasoning-pro</code></td>
+<td><code>sonar-pro</code></td>
+</tr>
+<tr>
+<td>kimi</td>
+<td><code>kimi-k3</code></td>
+<td><code>kimi-k2.6</code></td>
+</tr>
+<tr>
+<td>ollama</td>
+<td>first local model (<code>OLLAMA_MODEL</code> to pin)</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<p>The same substitution is also noted on stderr and folded into the synthesis,
+so it's visible even in quiet mode or a headless run. Setting <code>&lt;PROVIDER&gt;_MODEL</code>
+explicitly disables the fallback for that provider — an explicit choice is
+respected verbatim.</p>
+<p>The verdict — "this model is unavailable for this key" — is cached for a day
+so it isn't retried on every query, and the council returns to the default
+automatically once it becomes available. This is a separate cache from the
+response cache above (<code>COUNCIL_CACHE_DIR</code> / <code>COUNCIL_CACHE_TTL</code>): it tracks
+per-model availability, not full answers. Tune it with <code>COUNCIL_AVAILABILITY_TTL</code>
+(seconds, default <code>86400</code>); set it to <code>0</code> to re-check on every query. It is
+independent of <code>--no-cache</code>, which only forces fresh <em>answers</em>.</p>
+<h3>Reasoning Models</h3>
+<p>For reasoning models from any provider, the token limit is automatically increased to 8x the base value (minimum 32768). This is because reasoning models combine internal thinking tokens and visible output tokens into a single <code>max_output_tokens</code> limit — without the bump, the model can run out mid-response.</p>
+<p>The bump applies to:</p>
+<ul>
+<li><strong>OpenAI</strong>: <code>codex-*</code>, <code>*-codex</code>, <code>o3-*</code>, <code>o4-*</code>, <code>gpt-5.[4-9]*</code></li>
+<li><strong>Gemini</strong>: <code>gemini-3*</code>, <code>*thinking*</code></li>
+<li><strong>Grok</strong>: <code>*reasoning*</code>, <code>grok-4*</code>, <code>grok-3-mini-*</code>, <code>grok-build-*</code></li>
+<li><strong>Perplexity</strong>: <code>sonar-reasoning*</code>, <code>*deep-research*</code></li>
+<li><strong>Kimi</strong>: <code>kimi-k*</code> (so the default model always triggers the bump)</li>
+<li><strong>Ollama</strong>: <code>*r1*</code>, <code>*reason*</code>, <code>*gpt-oss*</code>, <code>qwen*</code>, <code>gemma*</code>, <code>deepseek*</code></li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Model Type</th>
+<th>COUNCIL_MAX_TOKENS</th>
+<th>Actual Limit</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Standard (gpt-5.1)</td>
+<td>2048 (default)</td>
+<td>2048</td>
+</tr>
+<tr>
+<td>Reasoning (gpt-5.6-sol)</td>
+<td>2048 (default)</td>
+<td>32768</td>
+</tr>
+<tr>
+<td>Reasoning (gpt-5.6-sol)</td>
+<td>4096</td>
+<td>32768</td>
+</tr>
+</tbody></table>
+<p>Control reasoning effort to balance speed vs thoroughness:</p>
+<pre><code class="language-bash">export OPENAI_REASONING_EFFORT="low"     # faster, less reasoning overhead
+export OPENAI_REASONING_EFFORT="medium"  # default - balanced
+export OPENAI_REASONING_EFFORT="high"    # thorough reasoning, slower
+</code></pre>
+<p>Grok's token accounting depends on the model: <code>grok-build</code> counts thinking tokens separately, so <code>max_tokens</code> caps only its visible output; the other reasoning models (<code>grok-4*</code>, <code>*-reasoning</code>, <code>grok-3-mini-*</code>) share one budget between thinking and output. Either way, council bumps the cap for these models so a long answer isn't cut off mid-response.</p>
+<h3>Perplexity Search Features</h3>
+<p>Perplexity's sonar models are search-augmented, providing web-grounded responses with citations:</p>
+<pre><code class="language-bash"># Filter search results by recency: day, week, month, year
+export PERPLEXITY_RECENCY="week"
+</code></pre>
+<p>Available models:</p>
+<ul>
+<li><code>sonar</code> - Fast, search-enabled</li>
+<li><code>sonar-pro</code> - More capable, search-enabled</li>
+<li><code>sonar-reasoning</code> - Chain-of-thought reasoning + search</li>
+<li><code>sonar-reasoning-pro</code> - Best reasoning + search (default)</li>
+</ul>
+<p>Perplexity is useful when you need current information (latest framework versions, recent best practices) rather than just training-data knowledge.</p>
+<h3>Retry &amp; Timeout</h3>
+<p>Automatic retry on transient failures (429 rate limits, 5xx server errors):</p>
+<pre><code class="language-bash">export COUNCIL_MAX_RETRIES=3    # default: 3 retries
+export COUNCIL_RETRY_DELAY=1    # default: 1 second initial delay (doubles each retry)
+export COUNCIL_TIMEOUT=300      # default: 300 seconds per API request
+export COUNCIL_CLI_TIMEOUT=1200 # default: 1200 seconds per CLI-provider run
+</code></pre>
+<p>Timeouts fail fast (no retry) to prevent blocking on hung providers.</p>
+<p>Retries apply to the API providers, whose requests go through <code>curl</code>; a
+transient 429 or 5xx is worth another attempt. The CLI providers get a single
+attempt, because a CLI that is merely slow is not a transient failure and
+retrying it multiplies the wait. That is why their default bound is higher: an
+API provider may spend up to <code>(COUNCIL_MAX_RETRIES + 1) × COUNCIL_TIMEOUT</code>,
+so one shared number would give a CLI a deadline four times stricter. Setting
+<code>COUNCIL_TIMEOUT</code> explicitly overrides both.</p>
+<p>CLI providers reading a large <code>--file</code> are the ones that hit this — a 64KB
+payload has taken kimi past fifteen minutes.</p>
+<h3>Display &amp; Terminal Integration</h3>
+<p>When run inside tmux, council opens a streaming side pane that shows live provider status (<code>querying</code>, <code>complete</code>, <code>cached</code>, <code>error</code> with timing) and renders each response as it lands. Rendering prefers <a href="https://github.com/Textualize/rich" target="_blank" rel="noopener noreferrer">Rich</a> when a Rich-capable Python is available (<code>python3</code> with a modern <code>rich</code> installed, or <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener noreferrer"><code>uv</code></a>, which fetches it on demand): word-wrapped prose, tables fitted to the pane width, syntax-highlighted code, clickable links — styled with your terminal's own palette (cyan headings, yellow code, vendor-colored banners). Without one, a built-in dependency-free perl markdown renderer takes over with the same visual language, so nothing needs to be installed. Press <strong>Esc</strong> or <strong>Ctrl-D</strong> to close the pane.</p>
+<p>Resizing the window reflows the pane. Wrap width is chosen when a response is rendered, so answers that landed at different widths would otherwise sit side by side at different widths; once the new width has held still for about half a second, every answer so far is re-rendered to it, at the close prompt as well as mid-run. The wait is deliberate: dragging a pane border reports a stream of intermediate widths, and re-rendering each one would cost a second of work and your scrollback every time. The redraw clears the pane's scrollback along with the screen, which resets copy-mode position.</p>
+<p>Colors adapt to your terminal theme: the pane detects the background
+(OSC 11 query, <code>COLORFGBG</code> fallback). The Rich renderer flips its
+code-highlighting theme to match; the perl renderer renders bold/italic
+emphasis bright on dark themes, dark on light themes, and attribute-only when
+undetectable, with muted text (link URLs, table grid lines, <code>---</code> rules,
+sub-headings, the "waiting on" label) following suit — faint/bright-black on
+dark, a readable dark gray on light.
+Force it with <code>COUNCIL_THEME=light</code> or <code>COUNCIL_THEME=dark</code>.</p>
+<p>When the outer terminal is iTerm2, council also drives:</p>
+<ul>
+<li><strong>Tab color</strong> — yellow while querying, green on success, red if any provider errored. Set via <code>it2setcolor</code>; ambient state signal without looking at the terminal.</li>
+<li><strong>Dock attention</strong> — bounces the iTerm2 dock icon when council finishes if the run took longer than <code>COUNCIL_ATTENTION_THRESHOLD</code> (default 2000ms). Useful for slow <code>--debate</code> queries when you've switched apps.</li>
+<li><strong><code>SetMark</code> navigation</strong> — emits OSC 1337 SetMark before each provider response inside the pane. Cmd+Shift+↑/↓ in iTerm2 jumps between provider sections.</li>
+</ul>
+<pre><code class="language-bash">export COUNCIL_NO_PANE=1                # disable the streaming pane globally
+export COUNCIL_RENDERER=perl             # force the built-in perl renderer
+export COUNCIL_ATTENTION_THRESHOLD=5000  # only bounce dock if run &gt; 5s
+</code></pre>
+<p>Per-call opt-out via <code>--no-pane</code>. iTerm2 features no-op silently outside iTerm2; pane no-ops outside tmux.</p>
+<h2>Adding New Providers</h2>
+<p>See the <code>provider-integration</code> skill for guidance on adding new AI providers.</p>
+<h2>Direct Script Usage</h2>
+<p>Use the scripts directly without Claude Code (for automation, CI, or debugging):</p>
+<pre><code class="language-bash"># Basic query - returns JSON
+bash scripts/query-council.sh -- "What is dependency injection?"
+
+# With flags
+bash scripts/query-council.sh --providers=gemini,openai --roles=balanced -- "Review this pattern"
+
+# Pipe to formatter for terminal display
+bash scripts/query-council.sh --providers=gemini -- "Question" 2&gt;/dev/null | bash scripts/format-output.sh
+
+# Check provider status (the Perplexity check makes one minimal billable request,
+# since Perplexity has no free /models endpoint to probe)
+bash scripts/check-status.sh
+
+# List configured providers (human-readable, with policy info)
+bash scripts/query-council.sh --list-available
+
+# List the providers that would be queried by default (machine-readable)
+bash scripts/query-council.sh --list-default
+</code></pre>
+<p><strong>JSON output structure:</strong></p>
+<pre><code class="language-json">{
+  "metadata": {
+    "prompt": "...",
+    "roles_used": ["security", "performance"],
+    "debate_mode": false,
+    "quiet_mode": false,
+    "timestamp": "2025-12-18T12:00:00Z"
+  },
+  "round1": {
+    "gemini": { "status": "success", "response": "...", "model": "...", "role": "security" },
+    "openai": { "status": "success", "response": "...", "model": "...", "role": "performance" }
+  },
+  "round2": { ... }  // Only present if --debate
+}
+</code></pre>
+<h2>Requirements</h2>
+<ul>
+<li><code>curl</code> and <code>jq</code> for API calls</li>
+<li>Valid API keys for at least one provider, OR <code>codex</code> / <code>agy</code> (Antigravity) / <code>grok</code> / <code>kimi</code> CLI installed, OR <code>ollama</code> running locally</li>
+<li>Optional: a Rich-capable Python (<code>python3</code> with a modern <code>rich</code>, or <code>uv</code>) upgrades the tmux pane's markdown rendering; without it the built-in perl renderer is used</li>
+</ul>
+<h2>Development</h2>
+<h3>Architecture</h3>
+<p>See <a href="https://github.com/hex/claude-council/blob/HEAD/docs/ARCHITECTURE.md" target="_blank" rel="noopener noreferrer">docs/ARCHITECTURE.md</a> for system design, data flow diagrams, and component details.</p>
+<h3>Versioning</h3>
+<p>Bump version in <code>.claude-plugin/plugin.json</code> on every release:</p>
+<pre><code class="language-json">{
+  "version": "YYYY.M.PATCH"
+}
+</code></pre>
+<p>Format: <code>YYYY.M.PATCH</code> where PATCH increments with each release. Examples: <code>2026.1.1</code>, <code>2026.1.2</code>, <code>2026.2.1</code>.</p>
+<p><strong>Always bump version when:</strong></p>
+<ul>
+<li>Changing command behavior</li>
+<li>Fixing bugs</li>
+<li>Updating formatting/output</li>
+<li>Any change users should pull</li>
+</ul>
+<h3>Testing</h3>
+<pre><code class="language-bash"># Run automated tests (requires bats-core)
+./tests/run_tests.sh
+
+# Run specific test suite
+bats tests/cache.bats
+bats tests/cli-providers.bats
+bats tests/roles.bats
+</code></pre>
+<p>CLI-provider paths are tested hermetically: <code>tests/fixtures/fake-clis.bash</code>
+installs fake <code>codex</code>/<code>agy</code>/<code>grok</code>/<code>kimi</code>/<code>ollama</code> executables onto <code>PATH</code> whose behavior is
+switched via <code>COUNCIL_FAKE_BEHAVIOR</code> and which record every invocation, so
+provider scripts, async jobs, and the stop gate run end-to-end with no
+network and no real CLIs.</p>
+<p>See <code>TESTING.md</code> for complete test documentation including manual test procedures.</p>
+<h3>Release Checklist</h3>
+<ol>
+<li>Make changes</li>
+<li>Test locally</li>
+<li>Bump version in <code>.claude-plugin/plugin.json</code></li>
+<li>Commit and push</li>
+<li>Users update via <code>/plugin update claude-council</code></li>
+</ol>

@@ -1,0 +1,869 @@
+<p>
+  <img src="https://raw.githubusercontent.com/openma-ai/open-managed-agents/HEAD/logo.svg" alt="openma" height="80" />
+</p><p>
+  <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&amp;logoColor=white" alt="Cloudflare Workers" />
+  <img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&amp;logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License" />
+  <img src="https://img.shields.io/badge/Tests-passing-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
+</p><h1>Open Managed Agents</h1>
+<p><strong>Open-source alternative to Claude Managed Agents</strong> — and a foundation for open-source, self-hosted Claude Tag-style agents.</p>
+<p>🌐 <strong><a href="https://openma.dev" target="_blank" rel="noopener noreferrer">openma.dev</a></strong> · 📖 <strong><a href="https://docs.openma.dev" target="_blank" rel="noopener noreferrer">docs.openma.dev</a></strong> · 💬 <strong><a href="https://github.com/openma-ai/open-managed-agents" target="_blank" rel="noopener noreferrer">github.com/openma-ai/open-managed-agents</a></strong></p>
+<p>Write a harness. Deploy. The platform runs it — with sessions, sandboxes, tools, memory, vaults, Slack/GitHub/Linear integrations, and crash recovery out of the box. Drop-in compatible with the Claude Managed Agents API; runs on Cloudflare Workers + Durable Objects, or <code>docker compose up</code> on your own box.</p>
+<p>Use Open Managed Agents when you want:</p>
+<ul>
+<li>A self-hosted Claude Managed Agents API implementation.</li>
+<li>An open-source, self-hosted Claude Tag-style workflow with BYOK model credentials.</li>
+<li>MCP, private tools, encrypted vaults, and durable sessions under your own deployment boundary.</li>
+</ul>
+<p>Compare: <a href="https://openma.dev/claude-tag-alternative/" target="_blank" rel="noopener noreferrer">Claude Tag alternative</a> · <a href="https://openma.dev/claude-tag-open-source/" target="_blank" rel="noopener noreferrer">Open-source Claude Tag</a> · <a href="https://openma.dev/self-hosted-claude-tag/" target="_blank" rel="noopener noreferrer">Self-hosted Claude Tag</a></p>
+<hr />
+<h2>Two ways to run OMA</h2>
+<p>The same harness, business logic, and event-log model run on both. Pick the
+one that matches your hosting story:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><strong>Self-host (Node)</strong></th>
+<th><strong>Cloudflare</strong></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Where it lives</td>
+<td>Your VPS / Mac / Docker host / fly.io / your k8s</td>
+<td>Cloudflare Workers + DO + Containers</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>SQLite or Postgres + local FS</td>
+<td>D1 + KV + R2</td>
+</tr>
+<tr>
+<td>Sandbox</td>
+<td>LocalSubprocess / LiteBox / Daytona / E2B / BoxRun</td>
+<td>Cloudflare Sandbox (Containers)</td>
+</tr>
+<tr>
+<td>Time to running</td>
+<td><code>docker compose up</code> (~2 min)</td>
+<td>wrangler deploy (~10 min once configured)</td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>OSS users, on-prem, no CF account, data-resident deploys</td>
+<td>Edge scale, no host management, already on CF</td>
+</tr>
+</tbody></table>
+<p><strong>Same SDK.</strong> Same <code>/v1/agents</code> / <code>/v1/sessions</code> API. Same Console UI. Same
+crash-recovery semantics. Switch between them by changing env vars, not code.</p>
+<hr />
+<h2>Quick start: self-host (Docker)</h2>
+<pre><code class="language-bash">git clone https://github.com/openma-ai/open-managed-agents.git
+cd open-managed-agents
+cp .env.example .env
+
+# Two secrets are required before first boot — both generated locally:
+#   BETTER_AUTH_SECRET   — signs Console sessions
+#   PLATFORM_ROOT_SECRET — encrypts credentials, model-card API keys, integration tokens at rest
+#                          (lose it and every encrypted row is unreadable — back it up)
+$EDITOR .env
+# BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+# PLATFORM_ROOT_SECRET=$(openssl rand -base64 32)
+#
+# Optional: ANTHROPIC_API_KEY lets the first agent run without a Model Card.
+# In production, add a Model Card per tenant from the Console instead.
+
+# SQLite + LocalSubprocess sandbox (default — fastest path)
+docker compose up -d
+
+# Or Postgres backend
+# docker compose -f docker-compose.postgres.yml up -d
+
+curl localhost:8787/health
+# → {"status":"ok","backends":{"db":"sqlite ..."}, ...}
+
+open http://localhost:8787   # Console UI on the same port
+</code></pre>
+<p>Smoke test the harness end-to-end:</p>
+<pre><code class="language-bash">AID=$(curl -s -X POST localhost:8787/v1/agents -H 'content-type: application/json' \
+  -d '{"name":"hello","model":"claude-sonnet-4-6","tools":[{"type":"agent_toolset_20260401"}]}' | jq -r .id)
+
+SID=$(curl -s -X POST localhost:8787/v1/sessions -H 'content-type: application/json' \
+  -d "{\"agent\":\"$AID\"}" | jq -r .id)
+
+curl -s -X POST localhost:8787/v1/sessions/$SID/events -H 'content-type: application/json' \
+  -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"Run: uname -a"}]}]}'
+</code></pre>
+<p>Full self-host guide (sandbox modes, Postgres, BoxRun, vault sidecar,
+Console UI, operator gotchas): <strong><a href="https://docs.openma.dev/self-host/overview/" target="_blank" rel="noopener noreferrer">docs.openma.dev/self-host/overview</a></strong></p>
+<hr />
+<h2>Quick start: Cloudflare deploy</h2>
+<p>Requires <a href="https://developers.cloudflare.com/workers/platform/pricing/" target="_blank" rel="noopener noreferrer">Workers Paid plan</a> (for Durable Objects + Containers).</p>
+<pre><code class="language-bash">git clone https://github.com/openma-ai/open-managed-agents.git
+cd open-managed-agents
+pnpm install
+
+# Local dev (no CF account needed) — wrangler dev with simulators
+cp .dev.vars.example .dev.vars &amp;&amp; $EDITOR .dev.vars
+# Same two-secret setup as Docker — PLATFORM_ROOT_SECRET is required to start
+pnpm dev
+# API   → http://localhost:8787
+# Console → http://localhost:5173
+
+# Deploy
+npx wrangler login
+npx wrangler kv namespace create CONFIG_KV   # paste id into wrangler.jsonc
+
+# Required secrets (paste each when prompted)
+npx wrangler secret put BETTER_AUTH_SECRET    # openssl rand -hex 32
+npx wrangler secret put PLATFORM_ROOT_SECRET  # openssl rand -base64 32 — back this up
+npx wrangler secret put API_KEY               # initial bootstrap key for the REST API
+
+# Optional — only if you want a tenant-less default LLM (otherwise add a Model Card in the Console)
+# npx wrangler secret put ANTHROPIC_API_KEY
+
+npm run deploy
+# → https://openma.dev (or https://managed-agents.&lt;your-subdomain&gt;.workers.dev for a personal deploy)
+</code></pre>
+<p>What gets deployed:</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Main Worker</strong></td>
+<td>API routes — agents, sessions, environments, vaults, memory, files</td>
+</tr>
+<tr>
+<td><strong>Agent Worker</strong></td>
+<td>SessionDO + harness + sandbox per environment</td>
+</tr>
+<tr>
+<td><strong>KV Namespace</strong></td>
+<td>Config storage for agents, environments, credentials</td>
+</tr>
+<tr>
+<td><strong>R2 Bucket</strong></td>
+<td>Workspace file persistence across container restarts</td>
+</tr>
+</tbody></table>
+<h3>Create your first agent</h3>
+<p>The smoke test above works against any deployment. For the Console-driven flow (Model Cards, vaults, integrations) see <strong><a href="https://docs.openma.dev/quickstart" target="_blank" rel="noopener noreferrer">docs.openma.dev/quickstart</a></strong>. The minimal API equivalent:</p>
+<pre><code class="language-bash">BASE=http://localhost:8787   # or your deployed URL
+KEY=dev-test-key             # whatever you set as API_KEY
+
+AGENT=$(curl -s $BASE/v1/agents \
+  -H "x-api-key: $KEY" -H "content-type: application/json" \
+  -d '{
+    "name": "Coder",
+    "model": "claude-sonnet-4-6",
+    "system": "You are a helpful coding assistant.",
+    "tools": [{ "type": "agent_toolset_20260401" }]
+  }' | jq -r .id)
+
+SESSION=$(curl -s $BASE/v1/sessions \
+  -H "x-api-key: $KEY" -H "content-type: application/json" \
+  -d "{\"agent\":\"$AGENT\"}" | jq -r .id)
+
+# Send a turn AND stream the reply token-by-token in one shot
+curl -N -X POST $BASE/v1/sessions/$SESSION/messages \
+  -H "x-api-key: $KEY" -H "content-type: application/json" \
+  -d '{"content":"Write a Python script that fetches HN top stories"}'
+</code></pre>
+<p>For long-lived sessions use <code>GET /v1/sessions/$SESSION/events/stream</code> — replays history on connect, never closes.</p>
+<hr />
+<h2>Architecture</h2>
+<p>A <strong>meta-harness</strong> is not an agent — it's the platform that runs agents. It defines stable interfaces for everything an agent needs, and stays out of the way of the agent loop:</p>
+<pre><code>┌─────────────────────────────────────────────────────────┐
+│  Harness (the brain — your code)                        │
+│  - Reads events, builds context, calls the model        │
+│  - Decides HOW: caching, compaction, tool delivery      │
+│  - Stateless: crash → rebuild from event log → resume   │
+├─────────────────────────────────────────────────────────┤
+│  Meta-Harness (the platform — SessionDO)                │
+│  - Prepares WHAT is available: tools, skills, history   │
+│  - Manages lifecycle: sandbox, events, WebSocket        │
+│  - Crash recovery, credential isolation, usage tracking │
+├─────────────────────────────────────────────────────────┤
+│  Infrastructure (Cloudflare or Node self-host)          │
+│  - Event log: Durable-Object SQLite (CF) or SQLite/Pg   │
+│  - Sandbox: CF Containers / subprocess / LiteBox / E2B  │
+│  - Storage: KV + R2 (CF) or local FS (self-host)        │
+└─────────────────────────────────────────────────────────┘
+</code></pre>
+<p><strong>The platform prepares <em>what</em> is available. The harness decides <em>how</em> to deliver it to the model.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Platform manages</th>
+<th>Harness decides</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Event log persistence (SQLite)</td>
+<td>Context engineering (filtering, ordering)</td>
+</tr>
+<tr>
+<td>Sandbox lifecycle (containers)</td>
+<td>Caching strategy (cache breakpoints)</td>
+</tr>
+<tr>
+<td>Tool registration (built-in + MCP)</td>
+<td>Compaction strategy (when to compress)</td>
+</tr>
+<tr>
+<td>WebSocket broadcast</td>
+<td>Retry strategy (backoff, transient detection)</td>
+</tr>
+<tr>
+<td>Crash recovery</td>
+<td>Stop conditions (max steps, completion signals)</td>
+</tr>
+<tr>
+<td>Credential isolation (vaults)</td>
+<td>System prompt construction</td>
+</tr>
+<tr>
+<td>Memory (vector search)</td>
+<td>Tool delivery (all at once vs. progressive)</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Write a Harness</h2>
+<p>The default harness works out of the box. When you need custom behavior — different caching, compaction, context engineering — write your own:</p>
+<pre><code class="language-typescript">// my-harness.ts
+import { defineHarness, generateText, stepCountIs } from "@open-managed-agents/sdk";
+
+export default defineHarness({
+  name: "research",
+
+  async run(ctx) {
+    let messages = ctx.runtime.history.getMessages();
+
+    // Your context engineering
+    messages = keepOnly(messages, ["web_search", "web_fetch"]);
+
+    // Your caching strategy
+    markLastN(messages, 3, { cacheControl: "ephemeral" });
+
+    // Your loop — tools, sandbox, broadcast are platform-provided
+    const result = await generateText({
+      model: ctx.model,
+      system: ctx.systemPrompt,
+      messages,
+      tools: ctx.tools,
+      stopWhen: stepCountIs(50),
+      onStepFinish: async ({ text }) =&gt; {
+        if (text) ctx.runtime.broadcast({
+          type: "agent.message",
+          content: [{ type: "text", text }],
+        });
+      },
+    });
+
+    await ctx.runtime.reportUsage?.(result.usage.inputTokens, result.usage.outputTokens);
+  },
+});
+</code></pre>
+<p>Deploy it:</p>
+<pre><code class="language-bash">oma deploy --harness my-harness.ts --agent agent_abc123
+</code></pre>
+<p>The harness is bundled into the agent worker at build time. Your code runs in the same isolate as SessionDO — direct access to the event log, sandbox, and WebSocket broadcast. No RPC, no serialization boundary.</p>
+<hr />
+<h2>API</h2>
+<p>Compatible with the <a href="https://docs.anthropic.com/en/docs/agents/managed-agents" target="_blank" rel="noopener noreferrer">Claude Managed Agents API</a>. Same endpoints, same event types, works with existing SDKs.</p>
+<details>
+<summary><strong>Agents</strong> — Create and manage agent configurations</summary><pre><code class="language-http">POST   /v1/agents                          # Create agent
+GET    /v1/agents                          # List agents
+GET    /v1/agents/:id                      # Get agent
+PUT    /v1/agents/:id                      # Update agent
+DELETE /v1/agents/:id                      # Delete agent
+POST   /v1/agents/:id/archive             # Archive agent
+GET    /v1/agents/:id/versions            # Version history
+GET    /v1/agents/:id/versions/:version   # Get specific version
+</code></pre>
+</details><details>
+<summary><strong>Environments</strong> — Sandbox execution environments</summary><pre><code class="language-http">POST   /v1/environments                   # Create environment
+GET    /v1/environments                   # List environments
+GET    /v1/environments/:id               # Get environment
+PUT    /v1/environments/:id               # Update environment
+DELETE /v1/environments/:id               # Delete environment
+</code></pre>
+</details><details>
+<summary><strong>Sessions</strong> — Run agent conversations</summary><pre><code class="language-http">POST   /v1/sessions                        # Create session
+GET    /v1/sessions                        # List sessions
+GET    /v1/sessions/:id                    # Get session
+POST   /v1/sessions/:id                    # Update session
+DELETE /v1/sessions/:id                    # Delete session
+POST   /v1/sessions/:id/archive           # Archive session
+
+POST   /v1/sessions/:id/events            # Send events (user messages)
+GET    /v1/sessions/:id/events             # Get events (JSON or SSE)
+GET    /v1/sessions/:id/events/stream      # SSE stream
+
+POST   /v1/sessions/:id/resources          # Attach resource
+GET    /v1/sessions/:id/resources          # List resources
+DELETE /v1/sessions/:id/resources/:resId   # Remove resource
+</code></pre>
+</details><details>
+<summary><strong>Vaults</strong> — Secure credential storage</summary><pre><code class="language-http">POST   /v1/vaults                          # Create vault
+POST   /v1/vaults/:id/credentials          # Add credential
+GET    /v1/vaults/:id/credentials          # List (secrets stripped)
+</code></pre>
+</details><details>
+<summary><strong>Memory Stores</strong> — persistent storage; Claude Managed Agents Memory contract</summary><p>When attached to a session, each store is mounted into the sandbox at
+<code>/mnt/memory/&lt;store_name&gt;/</code>. The agent reads and writes it with the
+<strong>standard file tools</strong> (bash/read/write/edit/glob/grep) — there are no
+bespoke <code>memory_*</code> tools.</p>
+<p>R2 holds the bytes-of-truth (key <code>&lt;store_id&gt;/&lt;memory_path&gt;</code>); D1 holds the
+index + audit, kept eventually consistent via R2 Event Notifications →
+Cloudflare Queue → Consumer.</p>
+<pre><code class="language-http">POST   /v1/memory_stores                                        # Create store
+GET    /v1/memory_stores                                        # List stores
+GET    /v1/memory_stores/:id                                    # Retrieve store
+POST   /v1/memory_stores/:id/archive                            # Archive (one-way)
+DELETE /v1/memory_stores/:id                                    # Delete store + memories + versions
+
+POST   /v1/memory_stores/:id/memories                           # Create/upsert memory {path, content, precondition?}
+GET    /v1/memory_stores/:id/memories?path_prefix=&amp;depth=N      # List memories (metadata)
+GET    /v1/memory_stores/:id/memories/:mid                      # Retrieve memory (with content)
+POST   /v1/memory_stores/:id/memories/:mid                      # Update memory {path?, content?, precondition?}
+DELETE /v1/memory_stores/:id/memories/:mid                      # Delete memory
+
+GET    /v1/memory_stores/:id/memory_versions?memory_id=         # Audit history (newest first)
+GET    /v1/memory_stores/:id/memory_versions/:ver_id            # Single version (with snapshot content)
+POST   /v1/memory_stores/:id/memory_versions/:ver_id/redact     # Redact prior version (refuses live head)
+</code></pre>
+<p>CAS via <code>precondition: { type: "content_sha256", content_sha256 }</code>. 100KB
+cap per memory. 30-day version retention with the most-recent version per
+memory always preserved. Rollback = retrieve a version and write its
+content as a new memory revision (no special endpoint).</p>
+<p>CLI:</p>
+<pre><code class="language-bash">oma memory stores create "User Preferences"
+oma memory write &lt;store-id&gt; /preferences/formatting.md --content "Always use tabs."
+oma memory ls &lt;store-id&gt; --prefix /preferences/
+oma memory versions &lt;store-id&gt; --memory-id &lt;mem-id&gt;
+</code></pre>
+</details><details>
+<summary><strong>Files &amp; Skills</strong></summary><pre><code class="language-http">POST   /v1/files                           # Upload file
+GET    /v1/files/:id/content               # Download file
+POST   /v1/skills                          # Create skill
+GET    /v1/skills                          # List skills
+</code></pre>
+</details><hr />
+<h2>Built-in Tools</h2>
+<p>The <code>agent_toolset_20260401</code> provides:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>bash</code></td>
+<td>Execute commands in the sandbox</td>
+</tr>
+<tr>
+<td><code>read</code></td>
+<td>Read files from sandbox filesystem</td>
+</tr>
+<tr>
+<td><code>write</code></td>
+<td>Write/create files (auto-creates directories)</td>
+</tr>
+<tr>
+<td><code>edit</code></td>
+<td>Surgical string replacement in files</td>
+</tr>
+<tr>
+<td><code>glob</code></td>
+<td>Find files matching a pattern</td>
+</tr>
+<tr>
+<td><code>grep</code></td>
+<td>Search file contents with regex</td>
+</tr>
+<tr>
+<td><code>web_fetch</code></td>
+<td>URL → markdown via Workers AI; auto-summarized when <code>agent.aux_model</code> is set, raw saved to <code>/workspace/.web/</code></td>
+</tr>
+<tr>
+<td><code>web_search</code></td>
+<td>Web search via Tavily API (requires <code>TAVILY_API_KEY</code>)</td>
+</tr>
+<tr>
+<td><code>schedule</code> / <code>cancel_schedule</code> / <code>list_schedules</code></td>
+<td>Cron-style self-wakeup for long-running agents</td>
+</tr>
+<tr>
+<td><code>browser</code> (opt-in)</td>
+<td>Headless browser session — navigate, click, screenshot. Opt-in via <code>tools: [{ name: "browser", enabled: true }]</code> so the default-tool list nudges agents toward cheaper <code>web_fetch</code></td>
+</tr>
+</tbody></table>
+<p>Derived tools are auto-generated based on session config:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>call_agent_*</code></td>
+<td>Callable Agents (multi-agent delegation)</td>
+</tr>
+<tr>
+<td><code>mcp__&lt;server&gt;__&lt;tool&gt;</code></td>
+<td>MCP Servers (double underscore is the actual separator)</td>
+</tr>
+</tbody></table>
+<p>(Memory Stores do <strong>not</strong> add bespoke tools — agents access them as filesystem
+mounts at <code>/mnt/memory/&lt;store_name&gt;/</code> via the standard file tools above.)</p>
+<hr />
+<h2>MCP servers</h2>
+<p>OMA registers any <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">Model Context Protocol</a> server attached to an agent. Each upstream tool surfaces to the model as <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> (double underscore — copy the name exactly). Up to 20 servers per agent.</p>
+<table>
+<thead>
+<tr>
+<th>Transport</th>
+<th>When to use</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>HTTP / SSE</td>
+<td>Hosted MCP servers (Linear, GitHub Copilot, Notion, …)</td>
+<td><code>{"type":"url","url":"https://mcp.linear.app/mcp"}</code></td>
+</tr>
+<tr>
+<td>stdio</td>
+<td>npm / PyPI MCP packages with no hosted endpoint</td>
+<td><code>{"type":"stdio","command":"uvx","args":[...],"port":8765}</code> — OMA spawns inside the sandbox container, talks to <code>127.0.0.1:port/sse</code></td>
+</tr>
+</tbody></table>
+<p>Credentials never enter the sandbox; the outbound resolver matches by host and injects at forward time.</p>
+<table>
+<thead>
+<tr>
+<th>Auth mode</th>
+<th>Configured as</th>
+<th>Refresh</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>none</td>
+<td>no <code>authorization_token</code>, no matching vault credential</td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>inline bearer</td>
+<td><code>"authorization_token": "..."</code> on the server entry</td>
+<td>no</td>
+</tr>
+<tr>
+<td>vault static bearer</td>
+<td>session vault has a <code>static_bearer</code> credential whose <code>mcp_server_url</code> matches</td>
+<td>no</td>
+</tr>
+<tr>
+<td>vault OAuth</td>
+<td>session vault has an <code>mcp_oauth</code> credential (with <code>refresh_token</code> + <code>token_endpoint</code>)</td>
+<td>yes — on 401 <strong>and 403</strong> (Airtable/Asana/Sentry use 403 for expired tokens), CAS-writes new token to D1, retries once</td>
+</tr>
+</tbody></table>
+<pre><code class="language-bash"># Servers attach to the agent (not the session)
+curl -X PUT $BASE/v1/agents/$AGENT -H "x-api-key: $KEY" -H "content-type: application/json" \
+  -d '{"mcp_servers":[{"name":"linear","type":"url","url":"https://mcp.linear.app/mcp"}]}'
+
+# Bind an OAuth credential via Vault
+oma connect linear --vault $VAULT_ID
+</code></pre>
+<p>Tool discovery is bounded at 15 s per server; one bad server logs and skips, the rest stay live. Full design: <a href="https://docs.openma.dev/build/vault-and-mcp/" target="_blank" rel="noopener noreferrer">docs.openma.dev/build/vault-and-mcp</a>.</p>
+<hr />
+<h2>Skills</h2>
+<p>A skill is a <code>SKILL.md</code> plus reference files (templates, schemas, examples). At session start the platform mounts everything under <code>/home/user/.skills/{name}/</code> in the sandbox <strong>and inlines the SKILL.md body directly into the system prompt</strong> — no lazy read, no follow-up <code>read</code> tool call. Format is compatible with Anthropic's <a href="https://github.com/anthropics/skills" target="_blank" rel="noopener noreferrer">Claude Code skills</a>.</p>
+<p>Create a skill (JSON; files inlined):</p>
+<pre><code class="language-http">POST /v1/skills
+{
+  "files": [
+    { "filename": "SKILL.md", "content": "---\nname: invoice-parser\ndescription: Parse supplier invoices.\n---\n\n# Steps\n1. ..." },
+    { "filename": "schema.json", "content": "{...}" }
+  ]
+}
+</code></pre>
+<p>For large skills with binaries: <code>POST /v1/skills/upload</code> multipart with <code>file=&lt;my-skill.zip&gt;</code>.</p>
+<p>Attach to an agent with the <strong>object form</strong> — a bare string array silently does not bind:</p>
+<pre><code class="language-json">{ "skills": [{ "skill_id": "skill_abc123", "type": "custom" }] }
+</code></pre>
+<p>The agent's system prompt then receives, at session start:</p>
+<pre><code class="language-text">&lt;source name="skill:skill_abc123"&gt;
+&lt;skill name="invoice-parser"&gt;
+{full SKILL.md body}
+&lt;/skill&gt;
+&lt;/source&gt;
+</code></pre>
+<p>and the files appear at <code>/home/user/.skills/invoice-parser/SKILL.md</code> etc.</p>
+<p>Four built-in skills ship ready to attach (no upload): <code>xlsx</code>, <code>pdf</code>, <code>docx</code>, <code>pptx</code>. Reference them with <code>{"skill_id":"builtin_pdf","type":"anthropic"}</code>.</p>
+<hr />
+<h2>Vaults &amp; outbound credentials</h2>
+<p><strong>Tools never see your tokens.</strong> When a sandbox makes an HTTP request, an outbound resolver — <code>oma-vault</code> sidecar on self-host (mockttp HTTPS proxy with a trusted self-signed CA), the agent worker's <code>outboundByHost</code> interceptor on Cloudflare — matches the request hostname against the session's vaults, <strong>strips any inbound <code>Authorization</code>/<code>x-api-key</code>/<code>x-goog-api-key</code></strong>, injects the real credential, and forwards. A prompt-injected agent has nothing to leak; <code>env | grep TOKEN</code> returns nothing inside the sandbox.</p>
+<pre><code class="language-bash"># Create a vault and add a static bearer bound to api.github.com
+VID=$(curl -sX POST $BASE/v1/vaults -H "x-api-key: $KEY" \
+  -d '{"name":"github-prod"}' | jq -r .id)
+
+curl -sX POST $BASE/v1/vaults/$VID/credentials -H "x-api-key: $KEY" -d '{
+  "display_name": "gh-pat",
+  "auth": {
+    "type": "static_bearer",
+    "token": "ghp_xxx",
+    "mcp_server_url": "https://api.github.com"
+  }
+}'
+
+# Bind on session create
+curl -sX POST $BASE/v1/sessions -H "x-api-key: $KEY" \
+  -d "{\"agent\":\"$AGENT\",\"vault_ids\":[\"$VID\"]}"
+
+# Inside the sandbox: curl https://api.github.com/user → 200, Authorization injected at the network layer
+</code></pre>
+<p>Three credential types share one resolver:</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Match by</th>
+<th>Refresh</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>static_bearer</code></td>
+<td>request host matches <code>mcp_server_url</code></td>
+<td>never</td>
+</tr>
+<tr>
+<td><code>mcp_oauth</code></td>
+<td>request host matches <code>mcp_server_url</code></td>
+<td>on 401 / 403 via <code>token_endpoint</code>, CAS-writes new token to D1</td>
+</tr>
+<tr>
+<td><code>cap_cli</code></td>
+<td>sandbox CLI invocations match <code>cli_id</code> in the cap registry (<code>gh</code>, <code>glab</code>, <code>aws</code>, …)</td>
+<td>per-CLI</td>
+</tr>
+</tbody></table>
+<p>Max 20 credentials per vault. Each forward emits a structured <code>op:"mcp_proxy.forward"</code> log. Full design: <a href="https://github.com/openma-ai/open-managed-agents/blob/HEAD/docs/mcp-credential-architecture.md" target="_blank" rel="noopener noreferrer"><code>docs/mcp-credential-architecture.md</code></a>, <a href="https://docs.openma.dev/build/vault-and-mcp/" target="_blank" rel="noopener noreferrer">docs.openma.dev/build/vault-and-mcp</a>.</p>
+<hr />
+<h2>Integrations</h2>
+<p>Publish an agent into a third-party tool and have it act as a real teammate there — assigned, mentioned, replied to like any other user.</p>
+<h3>Linear</h3>
+<p>Make an agent a member of your Linear workspace with its own identity, avatar, and <code>@autocomplete</code> slot. The agent appears in the assignee dropdown, gets pinged on <code>@mentions</code>, replies in the Agent panel, and pushes status back to issues it's working on.</p>
+<p>Two install kinds:</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>When to pick</th>
+<th>Setup</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong><code>personal_token</code></strong> (PAT)</td>
+<td>Single workspace, fastest path, no OAuth App</td>
+<td><code>oma linear install-pat --workspace &lt;slug&gt; --pat &lt;linear-pat&gt;</code></td>
+</tr>
+<tr>
+<td><strong><code>dedicated</code></strong> (OAuth App)</td>
+<td>Multi-workspace, proper bot identity, OAuth refresh</td>
+<td>Console <strong>Integrations → Linear → Publish agent</strong> (wizard issues per-publication callback + webhook URLs to paste into your own Linear OAuth App at <code>linear.app/settings/api</code>)</td>
+</tr>
+</tbody></table>
+<p>The full agent-side playbook (when to ask the human, how to offer browser automation, exactly what to paste into Linear's form) lives at <a href="https://github.com/openma-ai/open-managed-agents/blob/HEAD/skills/openma/integrations-linear.md" target="_blank" rel="noopener noreferrer"><code>skills/openma/integrations-linear.md</code></a>.</p>
+<p>PAT-mode autopilot — let the bot pick up unassigned issues by label/state/project:</p>
+<pre><code class="language-bash">oma linear rules create &lt;pub-id&gt; --label triage --state Backlog --project "Inbox"
+oma linear rules list &lt;pub-id&gt;
+oma linear rules delete &lt;rule-id&gt;
+</code></pre>
+<p>Inspect / manage:</p>
+<pre><code class="language-bash">oma linear list                                       # workspaces
+oma linear pubs &lt;installation-id&gt;                     # publications (status=live, persona, caps)
+oma linear get &lt;pub-id&gt;                               # single publication
+oma linear update &lt;pub-id&gt; --caps issue.read,comment.write,issue.update,…
+oma linear unpublish &lt;pub-id&gt;
+</code></pre>
+<p>How it works:</p>
+<table>
+<thead>
+<tr>
+<th>Piece</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Per-publication identity</strong></td>
+<td><code>dedicated</code> registers a per-agent Linear OAuth App; <code>personal_token</code> shares the human's PAT (no App registered)</td>
+</tr>
+<tr>
+<td><strong>Inbound webhook</strong></td>
+<td>Linear events become user messages on a session — assigned, <code>@mention</code>, comment-mention, new comment in an active thread, <strong>Agent panel</strong> (<code>agentSessionCreated</code> / <code>agentSessionPrompted</code>, <code>commentReply</code> for threaded continuation)</td>
+</tr>
+<tr>
+<td><strong>Outbound MCP</strong></td>
+<td>The agent talks back through <code>mcp.linear.app/mcp</code> with its own bearer (PAT or OAuth-refreshed), so writes are attributed to the persona</td>
+</tr>
+<tr>
+<td><strong>Capability gate</strong></td>
+<td>Per-publication allowlist (issues / comments / labels / assignment / triage) limits what the agent can do</td>
+</tr>
+</tbody></table>
+<p>The Linear integration ships in <code>packages/linear/</code> (provider logic, webhook signing, MCP wiring) with thin CF wrappers in <code>apps/integrations/src/routes/linear/publications.ts</code>.</p>
+<h3>GitHub</h3>
+<p>Give an agent its own GitHub App with a real bot identity — assignable on issues, requestable as a reviewer on PRs, posts comments under its own <code>@&lt;slug&gt;[bot]</code> handle. Each agent is a separate App on github.com (per-publication, not a shared marketplace bot), so credentials and audit trails stay isolated.</p>
+<pre><code class="language-bash"># (1) Console — humans clicking through a wizard
+Integrations → GitHub → Publish agent
+
+# (2) CLI — agents driving openma on a user's behalf
+oma github bind &lt;agent-id&gt; --env &lt;env-id&gt;       # → opens one-click GitHub App Manifest flow
+oma github handoff &lt;form-token&gt;                 # alt: 7-day URL for an org admin to complete
+oma github list
+oma github pubs &lt;installation-id&gt;
+oma github update &lt;pub-id&gt; --caps pr.read,pr.review.write,issue.comment.write,…
+oma github unpublish &lt;pub-id&gt;
+</code></pre>
+<p><code>bind</code> returns a <code>manifestStartUrl</code>; opening it auto-POSTs an App manifest to <code>github.com/settings/apps/new</code> with redirect URL + webhook URL + recommended permissions baked in. After confirming, GitHub redirects through to "Install on org" and the publication flips to <code>live</code>. Manual fallback: <code>oma github submit &lt;form-token&gt; --app-id … --private-key-file … --webhook-secret …</code> if you registered the App by hand.</p>
+<p><strong>Engagement is label-based.</strong> On install OMA auto-creates a label (default: lowercased persona name) in every selected repo. Add the label to any issue/PR to engage the bot for every subsequent activity on that thread; remove the label to mute. <code>@&lt;slug&gt;[bot]</code> mention in body or comment is the fallback path (GitHub's <code>@</code> autocomplete excludes Bot accounts, so it's plain-text).</p>
+<p>How it works:</p>
+<table>
+<thead>
+<tr>
+<th>Piece</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Per-publication App</strong></td>
+<td>Each agent registers its own GitHub App via Manifest flow; credentials stored encrypted per-publication</td>
+</tr>
+<tr>
+<td><strong>Inbound webhook</strong></td>
+<td><code>issues</code>, <code>issue_comment</code>, <code>pull_request</code>, <code>pull_request_review</code>, <code>pull_request_review_comment</code> become user messages on a session (one per <code>&lt;repo&gt;#&lt;num&gt;</code>)</td>
+</tr>
+<tr>
+<td><strong>Outbound MCP</strong></td>
+<td>Agent talks to GitHub's hosted MCP at <code>api.githubcopilot.com/mcp/</code> with the installation token; same token also injected as <code>GITHUB_TOKEN</code> for sandbox <code>gh</code> / <code>git</code></td>
+</tr>
+<tr>
+<td><strong>Token rotation</strong></td>
+<td>1-hour installation token auto-refreshed via App JWT on every webhook dispatch</td>
+</tr>
+<tr>
+<td><strong>Capability gate</strong></td>
+<td>Per-publication allowlist; destructive ops (<code>pr.merge</code>, <code>repo.branch.delete</code>, <code>workflow.dispatch</code>, <code>release.create</code>, <code>*.delete</code>) require explicit opt-in</td>
+</tr>
+</tbody></table>
+<p>The GitHub integration ships in <code>packages/github/</code> with thin CF wrappers in <code>apps/integrations/src/routes/github/</code>.</p>
+<h3>Slack</h3>
+<p>Publish an agent into a Slack workspace as a dedicated bot — <code>@mention</code>able in channels, replies in threads, joins DMs, hosts the AI assistant pane. Per-channel sessions: one running session per <code>(publication, channel)</code>, with all events in that channel converging on the same session id.</p>
+<pre><code class="language-bash"># (1) Console — humans clicking through a wizard
+Integrations → Slack → Publish agent   # ↑ opens api.slack.com with a pre-filled manifest
+
+# (2) CLI — agents driving openma on a user's behalf
+oma slack publish &lt;agent-id&gt; --env &lt;env-id&gt;    # → returns manifestLaunchUrl + formToken (60 min TTL)
+oma slack submit &lt;form-token&gt; --client-id … --client-secret … --signing-secret …
+oma slack handoff &lt;form-token&gt;                 # alt: 7-day shareable URL for a workspace admin
+oma slack list
+oma slack pubs &lt;installation-id&gt;
+oma slack update &lt;pub-id&gt; --caps message.write,thread.reply,reaction.add,…
+oma slack unpublish &lt;pub-id&gt;
+</code></pre>
+<p>The full agent-side playbook (manifest-flow caveats, <code>GATEWAY_ORIGIN</code> HTTPS requirement, what to paste where, MCP toggle probe) lives at <a href="https://github.com/openma-ai/open-managed-agents/blob/HEAD/skills/openma/integrations-slack.md" target="_blank" rel="noopener noreferrer"><code>skills/openma/integrations-slack.md</code></a>.</p>
+<p>How it works:</p>
+<table>
+<thead>
+<tr>
+<th>Piece</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Per-publication App</strong></td>
+<td>Each agent registers as its own dedicated Slack App via the "Create from manifest" URL flow — own client id, signing secret, bot user; no shared marketplace App</td>
+</tr>
+<tr>
+<td><strong>Inbound webhook</strong></td>
+<td><code>app_mention</code> / DM / thread reply → <code>direct_invocation</code> signal; top-level channel post → debounced <code>channel_scan_armed</code> (90 s window); reactions on bot-authored messages → <code>reaction_on_bot_message</code>; <code>member_joined</code>/<code>member_left_channel</code> for the bot → <code>joined_channel</code> / <code>session_closed</code>; <code>channel_archive</code> / <code>channel_unarchive</code> → close / reopen</td>
+</tr>
+<tr>
+<td><strong>Dual-token outbound</strong></td>
+<td>OAuth v2 yields both bot (<code>xoxb-</code>) and user (<code>xoxp-</code>) tokens. The <code>xoxp-</code> vault binds to <code>mcp.slack.com/mcp</code> for typed <code>mcp__slack__*</code> tools (search, history, canvases); the <code>xoxb-</code> vault binds to <code>slack.com/api</code> for <code>chat.postMessage</code>, reactions, etc. Bot replies default to in-thread</td>
+</tr>
+<tr>
+<td><strong>Capability gate</strong></td>
+<td>Per-publication allowlist (<code>message.read/write/update/delete</code>, <code>thread.reply</code>, <code>reaction.add/remove</code>, <code>user.read</code>, <code>search.read</code>, <code>canvas.write</code>)</td>
+</tr>
+<tr>
+<td><strong>Resumable install</strong></td>
+<td>Publication-first — the row exists from minute one with callback + webhook URLs baked into the manifest. Mid-flow failures stay resumable from Console (<code>pending_setup</code> → <code>credentials_filled</code> → <code>awaiting_install</code> → <code>live</code>)</td>
+</tr>
+</tbody></table>
+<p>The Slack integration ships in <code>packages/slack/</code> with thin CF wrappers in <code>apps/integrations/src/routes/slack/</code>.</p>
+<p><strong>Operator setup:</strong> the integrations gateway needs <code>GATEWAY_ORIGIN</code> pointing at a publicly-reachable HTTPS host — Slack verifies both the OAuth redirect URL and the Events Request URL before letting an install complete.</p>
+<hr />
+<h2>Project Structure</h2>
+<pre><code>open-managed-agents/
+├── apps/
+│   ├── main/              # API worker (Cloudflare) — Hono routes, auth, rate limiting
+│   ├── main-node/         # API worker (Node self-host) — same routes on Hono/Node
+│   ├── agent/             # Agent worker — SessionDO + harness + sandbox
+│   ├── integrations/      # Integrations gateway — Linear / GitHub / Slack OAuth + webhooks
+│   ├── oma-vault/         # Vault sidecar — outbound auth-header injection (per-host secrets)
+│   ├── console/           # Web dashboard — React + Vite + Tailwind v4
+│   ├── docs/              # Docs site (Astro Starlight) — published to docs.openma.dev
+│   └── web/               # Marketing site (Astro) — published to openma.dev
+├── packages/
+│   ├── cli/                       # `oma` CLI — agent / session / integration commands
+│   ├── sdk/                       # Harness SDK — defineHarness, generateText helpers
+│   ├── api-types/                 # Shared TypeScript types (config schemas, events)
+│   ├── http-routes/               # Public REST route definitions (shared by main + main-node)
+│   ├── session-runtime/           # Harness runtime — event log, broadcast, recovery
+│   ├── sandbox/                   # Sandbox adapters (subprocess / litebox / daytona / e2b / boxrun)
+│   ├── credentials-store/         # Encrypted credentials (AES-GCM under PLATFORM_ROOT_SECRET)
+│   ├── model-cards-store/         # Encrypted model-card API keys
+│   ├── vaults-store/              # Vault definitions + outbound auth wiring
+│   ├── linear/  github/  slack/   # Provider logic (OAuth, webhook signing, MCP wiring)
+│   ├── integrations-core/         # Provider-neutral persistence interfaces
+│   └── integrations-adapters-{cf,node}/  # D1 / KV / Workers + Postgres / FS implementations
+├── docs/                  # Internal design RFCs (not the user-facing site)
+├── test/                  # Unit + integration tests
+└── scripts/               # Deployment + maintenance scripts
+</code></pre>
+<hr />
+<h2>Configuration</h2>
+<p>The variables that gate boot and at-rest safety:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>PLATFORM_ROOT_SECRET</code></td>
+<td><strong>Yes</strong></td>
+<td>AES-GCM key for <code>credentials.auth</code>, <code>model_cards.api_key_cipher</code>, and integration tokens. Workers refuse to start without it. <strong>Back this up</strong> — losing it makes every encrypted row unreadable. Generate with <code>openssl rand -base64 32</code>.</td>
+</tr>
+<tr>
+<td><code>BETTER_AUTH_SECRET</code></td>
+<td><strong>Yes</strong> (prod)</td>
+<td>better-auth session signing key. Sessions don't survive restart if missing. Generate with <code>openssl rand -hex 32</code>.</td>
+</tr>
+<tr>
+<td><code>API_KEY</code></td>
+<td>Yes</td>
+<td>Bootstrap key for the REST API in dev / first-run. Once the Console is up, prefer per-tenant API keys minted from there.</td>
+</tr>
+<tr>
+<td><code>INTEGRATIONS_INTERNAL_SECRET</code></td>
+<td>Yes (if <code>apps/integrations</code> runs)</td>
+<td>Shared secret between <code>apps/main</code> and <code>apps/integrations</code>.</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>No</td>
+<td>Fallback LLM credential used when a tenant has not added a Model Card. <strong>In production, add a Model Card per tenant from the Console</strong> — the key is encrypted at rest under <code>PLATFORM_ROOT_SECRET</code>, scoped to the tenant, and rotatable without redeploy.</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_BASE_URL</code></td>
+<td>No</td>
+<td>Override for Anthropic-compatible proxies.</td>
+</tr>
+<tr>
+<td><code>PUBLIC_BASE_URL</code></td>
+<td>No (dev) / Yes (prod)</td>
+<td>Cookie domain + OAuth redirect base. Defaults to <code>*</code> trusted-origins — only safe for local dev.</td>
+</tr>
+<tr>
+<td><code>SANDBOX_PROVIDER</code></td>
+<td>No</td>
+<td><code>subprocess</code> (default, no isolation), <code>litebox</code> (Firecracker), <code>daytona</code>, <code>e2b</code>, or <code>boxrun</code>. Use an isolated backend for untrusted agents.</td>
+</tr>
+<tr>
+<td><code>TAVILY_API_KEY</code></td>
+<td>No</td>
+<td>Backend for the <code>web_search</code> built-in tool.</td>
+</tr>
+</tbody></table>
+<p>Full list (integrations OAuth credentials, Postgres URL, sandbox tunables, memory-bucket config, Google sign-in, etc.) — see <strong><a href="https://docs.openma.dev/reference/configuration/" target="_blank" rel="noopener noreferrer">docs.openma.dev/reference/configuration</a></strong> and <code>.env.example</code> / <code>.dev.vars.example</code>.</p>
+<hr />
+<h2>Model Cards</h2>
+<p>Per-tenant LLM credentials. An agent references one by setting <code>agent.model = "&lt;model_id&gt;"</code> — the worker looks up the card and signs the outbound request with its api_key, base_url, and headers. This is the canonical replacement for the global <code>ANTHROPIC_API_KEY</code> env var.</p>
+<p>Providers (wire tag → request shape):</p>
+<table>
+<thead>
+<tr>
+<th>tag</th>
+<th>shape</th>
+<th>typical use</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ant</code></td>
+<td>Anthropic <code>/v1/messages</code></td>
+<td>Claude on <code>api.anthropic.com</code></td>
+</tr>
+<tr>
+<td><code>ant-compatible</code></td>
+<td>Anthropic shape, custom <code>base_url</code></td>
+<td>Bedrock proxy, self-hosted Anthropic-compatible</td>
+</tr>
+<tr>
+<td><code>oai</code></td>
+<td>OpenAI <code>/v1/chat/completions</code></td>
+<td>OpenAI, Azure OpenAI</td>
+</tr>
+<tr>
+<td><code>oai-compatible</code></td>
+<td>OpenAI shape, custom <code>base_url</code></td>
+<td>vLLM, OpenRouter, Groq, etc.</td>
+</tr>
+</tbody></table>
+<p>Add one from <strong>Console → Model Cards</strong>, or via CLI:</p>
+<pre><code class="language-bash">oma models create \
+  --model-id claude-prod \
+  --provider ant \
+  --model claude-sonnet-4-6 \
+  --api-key sk-ant-...
+oma models list
+</code></pre>
+<p>REST: <code>POST /v1/model_cards</code>, <code>GET /v1/model_cards</code>, <code>POST /v1/model_cards/:id</code> (rotate), <code>DELETE /v1/model_cards/:id</code>. Create runs a 6-second probe so a bad key fails loudly, not at first turn.</p>
+<p>Keys are AES-256-GCM-encrypted at rest under <code>PLATFORM_ROOT_SECRET</code> (label <code>model.cards.keys</code>); list responses surface only the last-4 preview. Rotate by POSTing a new <code>api_key</code> — no redeploy, no key versioning (re-run the backfill script if you rotate <code>PLATFORM_ROOT_SECRET</code> itself).</p>
+<hr />
+<h2>Testing</h2>
+<pre><code class="language-bash">npm test          # unit + integration suite
+npm run typecheck # zero errors
+</code></pre>
+<hr />
+<h2>Documentation</h2>
+<p>The user-facing docs site lives at <a href="https://github.com/openma-ai/open-managed-agents/blob/HEAD/apps/docs/" target="_blank" rel="noopener noreferrer"><code>apps/docs</code></a> (Astro Starlight) and is published to <strong><a href="https://docs.openma.dev" target="_blank" rel="noopener noreferrer">docs.openma.dev</a></strong>.</p>
+<pre><code class="language-bash">pnpm dev:docs       # local preview at http://localhost:4321
+pnpm build:docs     # static build into apps/docs/dist/
+pnpm deploy:docs    # build + wrangler deploy (Cloudflare Worker static assets)
+</code></pre>
+<p>The <code>docs/</code> folder at the repo root contains <strong>internal design RFCs</strong> — not the user-facing site.</p>
+<hr />
+<h2>Contributing</h2>
+<ol>
+<li>Fork the repository</li>
+<li>Create your feature branch (<code>git checkout -b feat/amazing-feature</code>)</li>
+<li>Run tests (<code>npm test &amp;&amp; npm run typecheck</code>)</li>
+<li>Commit your changes</li>
+<li>Open a Pull Request</li>
+</ol>
+<hr />
+<h2>License</h2>
+<p><a href="https://github.com/openma-ai/open-managed-agents/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">Apache 2.0</a></p>

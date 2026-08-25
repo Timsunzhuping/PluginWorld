@@ -1,0 +1,757 @@
+<h1>cc-tree</h1>
+<p><a href="https://github.com/skymanbp/cc-tree/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/skymanbp/cc-tree/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://github.com/skymanbp/cc-tree/releases" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/v/release/skymanbp/cc-tree?color=6aa84f&amp;label=release" alt="Latest release" /></a>
+<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+<img src="https://img.shields.io/badge/Claude%20Code-plugin-8e7cc3" alt="Claude Code plugin" />
+<a href="https://github.com/skymanbp/cc-tree/stargazers" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/stars/skymanbp/cc-tree?style=social" alt="Star on GitHub" /></a></p>
+<blockquote>
+<p>Language: English (canonical). Chinese: <a href="https://github.com/skymanbp/cc-tree/blob/HEAD/README.zh.md" target="_blank" rel="noopener noreferrer"><code>README.zh.md</code></a>.</p>
+</blockquote>
+<p><strong>cc-tree is a Claude Code plugin that turns open-ended thinking into a
+tree you can audit.</strong> One universal radial-tree exploration engine, four
+swappable presets: divergent brainstorming, adversarial critique,
+design-space exploration, and code audit — same engine, different
+vocabulary. It is a disciplined, disk-persisted take on tree-of-thoughts
+search: every node is derived in full with <code>file:line</code> or URL evidence,
+<code>defer / future-work / TODO / NEEDS-MORE-INFO</code> leaves are hard-banned,
+and the run stops on substantive convergence rather than on a node budget.</p>
+<pre><code class="language-bash">claude plugin marketplace add skymanbp/cc-tree
+claude plugin install cc-tree@cc-tree
+</code></pre>
+<blockquote>
+<p>Refactor of <a href="https://github.com/skymanbp/sci-paper" target="_blank" rel="noopener noreferrer"><code>sci-paper</code></a>'s
+<code>brainstorm</code> + <code>paper-attack-tree</code> skills, stripped of paper-specific
+anchors and parameterized via presets.</p>
+</blockquote>
+<h2>What it is</h2>
+<p>cc-tree treats <em>any</em> open-ended thinking task as a <strong>phylogenetic tree
+growing outward from one root</strong>. The root is your input — a topic, a
+document, a code path, a design prompt. Every node is expanded by the
+<strong>same 12 framing passes</strong>, each child is fully derived and scored, and
+only the high-value (<code>advances</code>) leaves get re-expanded, until the tree
+reaches <strong>substantive convergence</strong> rather than an arbitrary count.</p>
+<p><img src="https://raw.githubusercontent.com/skymanbp/cc-tree/HEAD/docs/assets/cc-tree-radial-tree.svg" alt="cc-tree as a radial phylogenetic tree of thoughts: one ROOT at the
+centre, depth as concentric rings growing outward, four coloured clades
+for the four presets (brainstorm / attack / design / code-audit). There
+is no single winner — a branch can succeed (advances), hit a dead end
+(pruned / blocked), or keep branching and be judged again, so several
+wins appear at different depths and the branches reach uneven length.
+Each tip carries a verdict marker, and the width is the number of
+terminal leaves — blocked tips are excluded until they are driven to
+completion, so this snapshot is a run still in
+flight." /></p>
+<p><sub>Inspired by the radial <em>tree of life</em>. The vocabulary the rest
+of this README uses is all in this one picture: <strong>root</strong> (the
+input at the centre — topic · artifact · code · design), <strong>node</strong>
+(one idea / critique / option / finding, each with the same 12-field
+derivation), <strong>depth</strong> (the concentric framing-recursion rings;
+branches stop at different rings because only <code>advances</code> leaves
+re-expand), <strong>width</strong> (the terminal leaves, wherever they
+land — set by convergence, not a hand-picked cap, and never counting a
+<code>blocked</code> tip until it is completed, per §0.1), and
+<strong>n</strong> (total nodes in the tree). Diagram source:
+<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/tools/gen_radial_tree.py" target="_blank" rel="noopener noreferrer"><code>tools/gen_radial_tree.py</code></a>.</sub></p>
+<pre><code>  the tree grows OUTWARD from one root. a branch can WIN, hit a DEAD END, or
+  keep BRANCHING and be judged again — no single winner, wins at any depth:
+
+    ROOT ──┬── pruned                      (dead end at depth 1)
+           ├── advances                    (a win at depth 1)
+           └── advances ──┬── pruned        (this branch keeps going…)
+                          └── advances ──┬── advances   (…a deeper win)
+                                         └── blocked
+
+  each node → 12 framings (§3.A–§3.L) → 12-field derivation → score → verdict;
+  branches that keep advancing grow deeper; pruned / blocked ones stop.
+</code></pre>
+<h2>How it works</h2>
+<p>Five irreducible steps, all specified in <a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/ENGINE.md" target="_blank" rel="noopener noreferrer"><code>docs/ENGINE.md</code></a>
+and binding on every preset.</p>
+<pre><code class="language-mermaid">flowchart LR
+    R([root&lt;br/&gt;topic · artifact · code · design]) --&gt; F{{12 framing passes&lt;br/&gt;§3.A–§3.L}}
+    F --&gt; D[per-node 12-field derivation&lt;br/&gt;evidence · no hedging · no defer]
+    D --&gt; S[score 5 dims → verdict]
+    S --&gt;|advances| RE((re-expand&lt;br/&gt;this leaf))
+    RE --&gt; F
+    S --&gt;|kept / pruned| K[keep in tree,&lt;br/&gt;don't re-expand]
+    S --&gt;|blocked| B[INCOMPLETE_FORBIDDEN&lt;br/&gt;drive to completion]
+    B --&gt; D
+    S --&gt; C{§6 convergence?&lt;br/&gt;6 conditions all true}
+    C --&gt;|no| RE
+    C --&gt;|yes| OUT[/final report +&lt;br/&gt;tree.md · tree.json/]
+</code></pre>
+<h3>1 · Ground the root (§2)</h3>
+<p>The preset supplies the recipe; the engine enforces that every root field
+carries a <code>file:line</code>, URL, or command-output citation. An optional
+glossary-grill prelude (§2.0) locks the root's technical noun-phrases to
+your project's term sheet before a single branch is generated, so the tree
+does not spend a hundred leaves solving the wrong problem.</p>
+<h3>2 · Expand every node through 12 framings (§3)</h3>
+<p>Each node — root first, then every <code>advances</code> leaf — is put through all 12
+framing passes, each of which must yield at least one child. The set is
+fixed so that the model cannot quietly skip the uncomfortable angles.</p>
+<table>
+<thead>
+<tr>
+<th>Pass</th>
+<th>What it forces</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>§3.A First-principles</td>
+<td>Strip a load-bearing assumption; see what survives</td>
+</tr>
+<tr>
+<td>§3.B Inversion</td>
+<td>Try the negation, the dual, the boundary where it fails</td>
+</tr>
+<tr>
+<td>§3.C Cross-disciplinary</td>
+<td>Transplant tooling from ≥ 3 other fields</td>
+</tr>
+<tr>
+<td>§3.D Adversarial / red team</td>
+<td>The 3 most damaging counter-arguments</td>
+</tr>
+<tr>
+<td>§3.E Constraint variation</td>
+<td>Relax one constraint; tighten another</td>
+</tr>
+<tr>
+<td>§3.F Scale extrapolation</td>
+<td>1000× / 0.001× / domain boundary</td>
+</tr>
+<tr>
+<td>§3.G Substitution</td>
+<td>Swap a component and observe the change</td>
+</tr>
+<tr>
+<td>§3.H Office-hours 6Q</td>
+<td>YC-style demand-reality interrogation</td>
+</tr>
+<tr>
+<td>§3.I Contrarian</td>
+<td>Which mainstream consensus might be wrong here?</td>
+</tr>
+<tr>
+<td>§3.J Failure-driven</td>
+<td>Turn a concrete present failure into the next question</td>
+</tr>
+<tr>
+<td>§3.K High-risk asymmetric</td>
+<td>Force ≥ 1 low-probability, paradigm-level branch</td>
+</tr>
+<tr>
+<td>§3.L Meta self-audit</td>
+<td>7-question audit of the model's own blind spots</td>
+</tr>
+</tbody></table>
+<p>A thirteenth pass, §3.X, runs one external cross-check per node
+(<code>WebSearch</code> then <code>WebFetch</code> of the actual page) unless <code>--no-online</code> is
+set. Full prompts and per-preset examples:
+<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/framings.md" target="_blank" rel="noopener noreferrer"><code>docs/framings.md</code></a>.</p>
+<h3>3 · Derive every child in 12 fields (§4)</h3>
+<p>Each child is filled into the preset's 12-field node schema — statement,
+parent framing, position, derivation, assumptions, predictions, defense,
+alternatives, fix/cost, external check, branch potential, provisional
+verdict. Blank, hedged, or deferred fields do not produce a weaker node;
+they produce an <code>INCOMPLETE_FORBIDDEN</code> node that <strong>blocks termination</strong>
+until it is driven to completion.</p>
+<h3>4 · Score, then decide whether to recurse (§5)</h3>
+<p>Five preset-declared dimensions, each an integer 0–3, summed to a maximum
+of 15. <code>score ≥ 11</code> (plus any preset-specific gate) → <code>advances</code> and the
+leaf is re-expanded; <code>8–10</code> → <code>kept</code>; <code>≤ 7</code> → <code>pruned</code>; anything dominated
+by an unverified claim → <code>blocked</code>. Near-duplicate siblings are merged at
+cosine similarity ≥ 0.85 (§5.4) so width means coverage, not repetition.</p>
+<h3>5 · Stop only on substantive convergence (§6)</h3>
+<p>Six conditions must hold <strong>simultaneously</strong>: no incomplete node remains;
+the <code>advances</code> ratio over the last two rounds has fallen below
+<code>--min-novelty-ratio</code>; all 12 framings have fired; every <code>advances</code> leaf
+has been re-expanded and yielded nothing further; at least one fully
+derived §3.K high-risk branch exists; and no user cap has tripped. If a
+cap trips first, the engine reports <code>WIDTH_CAP_REACHED</code> /
+<code>DEPTH_CAP_REACHED</code> / <code>ROUNDS_EXHAUSTED</code> — truthfully, never as
+<code>CONVERGED</code> — and still completes every in-flight leaf first.</p>
+<h2>Why it's different</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>ad-hoc "brainstorm with me"</th>
+<th>cc-tree</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Coverage</strong></td>
+<td>the 3 obvious angles</td>
+<td>12 fixed framings per node, including contrarian / inversion / high-risk</td>
+</tr>
+<tr>
+<td><strong>Completeness</strong></td>
+<td>"we could look at X later"</td>
+<td>hard ban on <code>defer / TODO / future-work</code> leaves — every leaf derived with <code>file:line</code> / URL evidence</td>
+</tr>
+<tr>
+<td><strong>When it stops</strong></td>
+<td>when the chat trails off</td>
+<td>substantive convergence (6 conditions), not a node count</td>
+</tr>
+<tr>
+<td><strong>Output</strong></td>
+<td>a chat log</td>
+<td><code>tree.md</code> + <code>tree.json</code> + a structured per-preset report on disk</td>
+</tr>
+<tr>
+<td><strong>Crash safety</strong></td>
+<td>scroll back and hope</td>
+<td>incremental write per node; re-invoke to resume</td>
+</tr>
+<tr>
+<td><strong>Reuse</strong></td>
+<td>re-prompt from scratch each time</td>
+<td>one engine, 4 presets, chainable (<code>brainstorm → design → attack</code>)</td>
+</tr>
+</tbody></table>
+<p>Two reasons, in prose.</p>
+<p><strong>Reason 1: the structure repeats.</strong> Brainstorming, adversarial review,
+design exploration, and code audit all share the same skeleton —
+<em>generate candidates from N framings → derive each one completely →
+score → recurse on the high-value branches → terminate on stable
+convergence, not on running out of patience</em>. Coding that skeleton once
+and parameterizing the rest beats writing four near-duplicate skills.</p>
+<p><strong>Reason 2: the failure modes repeat too.</strong> Every divergent task LLMs do
+has the same lazy-equilibrium attractors: defer to future-work, generate
+near-duplicate branches with synonym swapping, skip the
+high-risk/contrarian framings, declare convergence at the first slow
+round. The engine encodes hard bans on all of these (§0.5 forbidden
+patterns, §F1–§F8), and they apply equally well to brainstorming a
+research direction and to auditing a Python file.</p>
+<p>The full design rationale — including why 12 framings and not 7 or 20,
+and how cc-tree differs from academic Tree-of-Thoughts and from agent
+loops — is in <a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/EVALUATION.md" target="_blank" rel="noopener noreferrer"><code>docs/EVALUATION.md</code></a>.</p>
+<h2>Feature reference</h2>
+<h3>Exploration engine</h3>
+<ul>
+<li><strong>12 framing passes</strong> per node per round (§3.A–§3.L), plus the §3.X
+external cross-check; <code>--min-frameworks</code> has a hard floor of 12.</li>
+<li><strong>12-field derivation</strong> per node (§4), every field non-empty,
+non-hedged, and citation-bearing.</li>
+<li><strong>5-dimension scoring</strong> (§5.1), integer 0–3 each, max 15, mapped to a
+four-role verdict (§5.2).</li>
+<li><strong>Sibling merging</strong> at cosine similarity ≥ 0.85 (§5.4), with the merged
+node kept visible and tagged <code>MERGED_INTO=&lt;id&gt;</code>.</li>
+<li><strong>Six-condition convergence test</strong> (§6.1) with an explicit termination
+decision table (§6.2); caps are escape valves, never success.</li>
+<li><strong>Mandatory sub-agent parallelism</strong> at fan-out ≥ 5 (§8.1), with a
+re-verification contract: the main agent re-checks every citation a
+sub-agent returns before the child counts.</li>
+</ul>
+<h3>Presets — 4 shipped, unlimited custom</h3>
+<p>Each preset (<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/presets/" target="_blank" rel="noopener noreferrer"><code>presets/</code></a>) supplies the vocabulary; none of them
+may weaken a universal rule (§10).</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Use when</th>
+<th>Root</th>
+<th>Verdicts (advances / kept / pruned / blocked)</th>
+<th>Primary deliverable</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>brainstorm</code></td>
+<td>Divergent ideation; surface unexplored research directions or exhaustive problem-solving paths</td>
+<td>topic</td>
+<td><code>PROMISING / MARGINAL / DEAD-END / NEEDS-MORE-INFO</code></td>
+<td><code>shortlist.md</code></td>
+</tr>
+<tr>
+<td><code>attack</code></td>
+<td>Adversarial critique of a finished artifact (document, argument, proposal)</td>
+<td>artifact</td>
+<td><code>CONFIRMED / MARGINAL / REFUTED / INCOMPLETE_FORBIDDEN</code></td>
+<td><code>confirmed.md</code></td>
+</tr>
+<tr>
+<td><code>design</code></td>
+<td>Design-space exploration; want an option × trade-off × reversibility table</td>
+<td>design-prompt</td>
+<td><code>RECOMMENDED / VIABLE / NOT-RECOMMENDED / NEEDS-MORE-INFO</code></td>
+<td><code>options.md</code></td>
+</tr>
+<tr>
+<td><code>code-audit</code></td>
+<td>Code-flavored adversarial review (security / perf / correctness / contract)</td>
+<td>code</td>
+<td><code>CONFIRMED / MARGINAL / REFUTED / INCOMPLETE_FORBIDDEN</code></td>
+<td><code>findings.md</code></td>
+</tr>
+</tbody></table>
+<p>Authoring your own is one <code>.md</code> file with the documented frontmatter
+schema — see <a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/presets.md" target="_blank" rel="noopener noreferrer"><code>docs/presets.md</code></a>. The schema is
+CI-enforced, so a malformed preset fails before it ever runs.</p>
+<h3>Commands</h3>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Equivalent to</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/cc-tree:tree &lt;root&gt; --preset &lt;name|path&gt;</code></td>
+<td>the engine itself; the only command that accepts a custom preset path</td>
+</tr>
+<tr>
+<td><code>/cc-tree:brainstorm &lt;topic&gt;</code></td>
+<td><code>/cc-tree:tree &lt;topic&gt; --preset brainstorm</code></td>
+</tr>
+<tr>
+<td><code>/cc-tree:attack &lt;file&gt;</code></td>
+<td><code>/cc-tree:tree &lt;file&gt; --preset attack</code></td>
+</tr>
+<tr>
+<td><code>/cc-tree:design &lt;prompt|file&gt;</code></td>
+<td><code>/cc-tree:tree &lt;prompt&gt; --preset design</code></td>
+</tr>
+<tr>
+<td><code>/cc-tree:code-audit &lt;path&gt;</code></td>
+<td><code>/cc-tree:tree &lt;path&gt; --preset code-audit</code></td>
+</tr>
+<tr>
+<td><code>/cc-tree:tree-chain &lt;root&gt; --stages …</code></td>
+<td>several presets in sequence, top-K piped between stages</td>
+</tr>
+</tbody></table>
+<p>The wrappers also change the default output directory (<code>brainstorm-out/</code>,
+<code>attack-out/</code>, …) and carry preset-specific flags such as <code>attack</code>'s
+<code>--focus &lt;section|claim|equation&gt;</code>.</p>
+<h3>Quality gates — the 8 forbidden patterns</h3>
+<p>Violating any of these invalidates the round (§0.5). They are enforced
+semantically in every output language, not as an English phrase blocklist.</p>
+<table>
+<thead>
+<tr>
+<th>Gate</th>
+<th>Bans</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>§F1</td>
+<td>Memory-cited claims — every external assertion is verified in the same turn</td>
+</tr>
+<tr>
+<td>§F2</td>
+<td>Pseudo-divergence — synonym-swapped siblings are one branch, and get merged</td>
+</tr>
+<tr>
+<td>§F3</td>
+<td>Derivation skipping — no "obvious", no "details omitted"; numbers get a <code>python</code> sanity check</td>
+</tr>
+<tr>
+<td>§F4</td>
+<td>Risk aversion — each pass must fully derive one high-risk branch, whatever its verdict</td>
+</tr>
+<tr>
+<td>§F5</td>
+<td>Pseudo-convergence — "I'm out of ideas" is not §6 convergence</td>
+</tr>
+<tr>
+<td>§F6</td>
+<td>Mid-run prompting — full-auto once the root and preset are loaded</td>
+</tr>
+<tr>
+<td>§F7</td>
+<td>Self-narrowed caps — the engine may not shrink <code>--width</code> / <code>--depth</code> / <code>--rounds</code> on its own</td>
+</tr>
+<tr>
+<td>§F8</td>
+<td>Deferred leaves — <code>defer / future work / TODO / 待定 / NEEDS-MORE-INFO</code> force <code>INCOMPLETE_FORBIDDEN</code></td>
+</tr>
+</tbody></table>
+<h3>Domain weighting — field profiles</h3>
+<p><code>--field &lt;name|path&gt;</code> loads a <strong>field profile</strong>
+(<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/field-profiles/" target="_blank" rel="noopener noreferrer"><code>field-profiles/</code></a>): four short lists — reviewer
+concerns, field consensuses, common failure modes, evidence bar — that
+re-prioritize which branches the 12 framings explore first and raise the
+citation bar (§2.2). Profiles are preset-agnostic: the same profile
+sharpens an <code>attack</code> on a paper, a <code>brainstorm</code> on research directions,
+and a <code>code-audit</code> on a simulation. A physics profile
+(<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/field-profiles/physics.md" target="_blank" rel="noopener noreferrer"><code>field-profiles/physics.md</code></a>) ships built-in;
+author others from
+<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/field-profiles/_template.md" target="_blank" rel="noopener noreferrer"><code>field-profiles/_template.md</code></a>. A missing
+profile warns and continues — weighting is an enhancement, never a
+blocker.</p>
+<h3>Cross-preset chaining</h3>
+<p>A natural workflow pipes one preset's best output into the next:
+<strong>brainstorm</strong> → pick top-K → <strong>design</strong> each → <strong>attack</strong> the winner.</p>
+<pre><code class="language-bash">/cc-tree:tree-chain "ways to cut our API p99 latency" \
+    --stages brainstorm,design,attack --top-k 3
+</code></pre>
+<p>Each stage converges independently; the top-K handoff between stages is
+always logged, never silently truncated. The substrate is the universal
+<code>--seed-from &lt;primary.md&gt;</code> flag (alias <code>--from-prior</code>), which seeds a run
+from a prior run's deliverable, so you can also chain by hand. Contract:
+<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/chaining.md" target="_blank" rel="noopener noreferrer"><code>docs/chaining.md</code></a>.</p>
+<h3>Output, resume, and crash-safety</h3>
+<p>Every node lands on disk the moment its 12 fields are filled (§7.1) —
+not batched at the end. If the process is killed, the context window
+fills, or you interrupt the run, the on-disk tree is consistent up to the
+last completed node. Re-invoke with the same <code>--out &lt;dir&gt;</code> and the engine
+resumes from the highest-id leaf. <code>tree.json</code> is the machine source of
+truth; <code>tree.md</code> is the human view; <code>REPORT.md</code> is the §7.4 final report.</p>
+<h3>Bilingual output and documentation</h3>
+<p><code>--lang &lt;tag|auto&gt;</code> selects the run's human-readable output language
+(<code>en</code>, <code>zh</code>, <code>zh-Hans</code>, <code>zh-Hant</code>, <code>fr-CA</code>, …); <code>auto</code> detects the
+dominant natural language of the root and falls back to <code>en</code> for mixed,
+unrecognized, path-only, and code-only input. The <strong>machine skeleton
+stays English</strong> in every language: flags, frontmatter and JSON keys,
+<code>root_kind</code> values, verdict labels, score keys, <code>node_schema</code> fields,
+framing IDs, status tokens, filenames, and paths. Root text, artifacts,
+glossaries, custom-preset prose, citations, and quoted evidence may use
+any language, and quotations stay verbatim with a localized explanation
+added rather than substituted. One run keeps one language from start
+through resume and chaining (§1.0).</p>
+<p>The documentation itself follows the same rule: unsuffixed <code>X.md</code> files
+are canonical English, <code>X.zh.md</code> files are maintained Chinese parallels
+tracked in <a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/languages.json" target="_blank" rel="noopener noreferrer"><code>docs/languages.json</code></a>, and each
+translation records a SHA-256 digest of its English source so a stale
+translation fails CI.</p>
+<h3>Extensibility</h3>
+<table>
+<thead>
+<tr>
+<th>You want to add</th>
+<th>Write</th>
+<th>Validated by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>A new exploration mode</td>
+<td>one preset <code>.md</code> with the frontmatter schema</td>
+<td>preset schema check + wrapper-parity check</td>
+</tr>
+<tr>
+<td>A new domain lens</td>
+<td>one field profile <code>.md</code> with four <code>##</code> sections</td>
+<td>field-profile schema check</td>
+</tr>
+<tr>
+<td>A shorter way to type it</td>
+<td>one command <code>.md</code> wrapper</td>
+<td>command frontmatter + flag-documentation check</td>
+</tr>
+<tr>
+<td>A new documentation language</td>
+<td>a <code>pairs</code> entry in <code>docs/languages.json</code></td>
+<td>digest, heading, fence, and machine-token parity</td>
+</tr>
+</tbody></table>
+<h3>Engineering guarantees</h3>
+<p><code>tools/validate_plugin.py</code> runs seven check groups on every pull request and
+every push to <code>main</code>, across Python 3.11 and 3.13:</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>What it fails on</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>manifests</td>
+<td>plugin/marketplace version or identity drift</td>
+</tr>
+<tr>
+<td>skills</td>
+<td>a <code>SKILL.md</code> without frontmatter, or whose <code>name</code> ≠ its directory</td>
+</tr>
+<tr>
+<td>presets</td>
+<td>any of the preset schema rules (§10–§11)</td>
+</tr>
+<tr>
+<td>commands</td>
+<td>a command without a description, or a preset shipped without its wrapper</td>
+</tr>
+<tr>
+<td>tools</td>
+<td>a Python file that does not parse</td>
+</tr>
+<tr>
+<td>cross-refs</td>
+<td>dead <code>#anchor</code>s, unresolvable relative links, out-of-bounds example citations, undocumented command flags, malformed field profiles, dead <code>§N</code> references</td>
+</tr>
+<tr>
+<td>i18n</td>
+<td>an unregistered document, a stale digest, diverged headings or fences, a thin or English-copy translation, a dropped machine token</td>
+</tr>
+</tbody></table>
+<p>The point is that everything this README claims is either executable or
+CI-checked. Drift between the docs, the runtime prompt, and the schema is
+the defect class this repository takes most seriously.</p>
+<h2>Install</h2>
+<p>cc-tree is a self-contained directory marketplace. Install it with the
+Claude Code plugin CLI:</p>
+<pre><code class="language-bash"># 1. Register this repo as a marketplace (directory or GitHub source)
+claude plugin marketplace add skymanbp/cc-tree
+
+# 2. Install the plugin from it
+claude plugin install cc-tree@cc-tree
+
+# (optional) sanity-check the manifests before/after
+claude plugin validate &lt;path-to-this-repo&gt;
+claude plugin list
+</code></pre>
+<p>Restart your Claude Code session to load the plugin (new plugins are
+loaded at session start). Skills then appear namespaced: <code>/cc-tree:tree</code>,
+<code>/cc-tree:brainstorm</code>, etc. To pick up later edits, run
+<code>claude plugin update cc-tree</code> and restart.</p>
+<h2>Quick start</h2>
+<pre><code class="language-bash"># Divergent ideation
+/cc-tree:brainstorm "ways to detect dark-matter substructure with weak lensing"
+
+# Adversarial critique of a finished doc
+/cc-tree:attack ./paper.tex
+
+# Design-space exploration
+/cc-tree:design "auth flow for our internal admin tool"
+
+# Code audit
+/cc-tree:code-audit ./src/api/upload.py
+
+# Use the engine directly with an explicit preset
+/cc-tree:tree &lt;root&gt; --preset brainstorm
+/cc-tree:tree &lt;file&gt; --preset ./my-custom-preset.md
+
+# Domain-aware reviewer weighting (physics ships built-in; author other
+# fields from field-profiles/_template.md)
+/cc-tree:attack ./paper.tex --field physics
+
+# Explicit Chinese human-readable output; machine keys/statuses stay English
+/cc-tree:attack ./paper.tex --lang zh
+
+# Detect the dominant natural language of the root; ambiguous inputs fall back to en
+/cc-tree:brainstorm "如何验证弱引力透镜中的暗物质子结构" --lang auto
+
+# Quick capped run when you want a taste rather than convergence
+/cc-tree:brainstorm "topic" --width 20 --depth 2 --no-online
+</code></pre>
+<p>A worked, end-to-end example with input and expected output lives in
+<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/examples/attack/README.md" target="_blank" rel="noopener noreferrer"><code>examples/attack/</code></a>.</p>
+<h2>Flag reference</h2>
+<p>Common flags apply to every preset. The authoritative table, with the
+per-flag semantics, is in <a href="https://github.com/skymanbp/cc-tree/blob/HEAD/skills/tree/SKILL.md" target="_blank" rel="noopener noreferrer"><code>skills/tree/SKILL.md</code></a>.</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--preset &lt;name|path&gt;</code></td>
+<td><em>required</em></td>
+<td><code>brainstorm</code> / <code>attack</code> / <code>design</code> / <code>code-audit</code>, or a path to your own</td>
+</tr>
+<tr>
+<td><code>--lang &lt;tag|auto&gt;</code></td>
+<td><code>en</code></td>
+<td>Output language for localized prose; machine tokens stay English</td>
+</tr>
+<tr>
+<td><code>--width N</code></td>
+<td>∞</td>
+<td>Cap on final leaf count</td>
+</tr>
+<tr>
+<td><code>--depth N</code></td>
+<td>∞</td>
+<td>Cap on tree depth from root</td>
+</tr>
+<tr>
+<td><code>--rounds N</code></td>
+<td><code>conv</code></td>
+<td>Cap on expansion rounds; <code>conv</code> = terminate by §6 convergence</td>
+</tr>
+<tr>
+<td><code>--max-branches N</code></td>
+<td>∞</td>
+<td>Cap on new branches per node per round; floor is 12</td>
+</tr>
+<tr>
+<td><code>--out &lt;dir&gt;</code></td>
+<td>per-command</td>
+<td>Output directory</td>
+</tr>
+<tr>
+<td><code>--glossary &lt;path&gt;</code></td>
+<td>preset-determined</td>
+<td>Term sheet for the §2.0 glossary grill</td>
+</tr>
+<tr>
+<td><code>--field &lt;name|path&gt;</code></td>
+<td>none</td>
+<td>Field profile for domain-aware weighting</td>
+</tr>
+<tr>
+<td><code>--seed-from &lt;primary.md&gt;</code></td>
+<td>none</td>
+<td>Seed depth-1 from a prior run's deliverable (alias <code>--from-prior</code>)</td>
+</tr>
+<tr>
+<td><code>--no-grill</code></td>
+<td>off</td>
+<td>Skip the §2.0 glossary prelude</td>
+</tr>
+<tr>
+<td><code>--no-online</code></td>
+<td>off</td>
+<td>Disable <code>WebSearch</code> / <code>WebFetch</code></td>
+</tr>
+<tr>
+<td><code>--min-frameworks N</code></td>
+<td>12</td>
+<td>Minimum framings per node; the floor is 12</td>
+</tr>
+<tr>
+<td><code>--min-novelty-ratio R</code></td>
+<td>0.15</td>
+<td>§6.1 convergence threshold on the <code>advances</code> ratio</td>
+</tr>
+</tbody></table>
+<p><code>tree-chain</code> adds <code>--stages &lt;a,b,c&gt;</code> (default <code>brainstorm,design,attack</code>)
+and <code>--top-k N</code> (default 3). Presets may document their own flags, such as
+<code>attack</code>'s <code>--focus &lt;section|claim|equation&gt;</code>.</p>
+<h2>Output layout</h2>
+<p>Each run writes incrementally to its <code>--out</code> directory, which <strong>is</strong> the run
+directory — nothing further is appended to a path you pass. The dated segment
+is part of the <em>default</em> value only: <code>tree-out/&lt;UTCdate&gt;__&lt;slug&gt;/</code> for the
+engine, and <code>brainstorm-out/&lt;UTCdate&gt;__&lt;slug&gt;/</code>, <code>attack-out/…</code>,
+<code>design-out/…</code>, <code>code-audit-out/…</code> for the per-preset commands,
+<code>chain-out/…</code> for <code>tree-chain</code>.</p>
+<pre><code>&lt;out&gt;/
+├── tree.md              # outline of every node; primary human view
+├── tree.json            # full data for every node; machine source of truth
+├── glossary-anchors.md  # §2.0 prelude output (unless --no-grill)
+├── &lt;primary&gt;.md         # shortlist.md / confirmed.md / options.md / findings.md
+├── &lt;secondary&gt;.md*      # marginal.md / refuted.md / pending.md / …
+├── REPORT.md            # §7.4 final report (also echoed to the terminal)
+└── nodes/
+    └── &lt;id&gt;.md          # spilled when a node's evidence exceeds 100 lines
+</code></pre>
+<p>All of these directories are <code>.gitignore</code>-d by default — they are your
+content, not the plugin's.</p>
+<h2>Repository map</h2>
+<pre><code>cc-tree/
+├── .claude-plugin/        Plugin + marketplace manifests (fixed location)
+├── commands/              Slash-command wrappers, one per preset + tree-chain
+├── skills/tree/           The engine skill (SKILL.md) Claude Code loads
+├── presets/               The 4 shipped presets — resolved by --preset &lt;name&gt;
+├── field-profiles/        Domain lenses — resolved by --field &lt;name&gt;
+├── docs/                  Engine spec, framings, authoring guides, rationale
+│   ├── assets/            Generated diagrams
+│   └── languages.json     Bilingual document manifest + machine-token registry
+├── examples/attack/       A worked example: input, expected output, how to rerun
+├── tools/                 Repo validators and generators (no runtime dependency)
+│   └── tests/             Self-tests: preset schema, frontmatter parser,
+│                          i18n contract, and every check group
+└── .github/workflows/     CI: validator + self-tests on Python 3.11 and 3.13
+</code></pre>
+<p>Runtime code and content live in <code>commands/</code>, <code>skills/</code>, <code>presets/</code>, and
+<code>field-profiles/</code>; everything under <code>docs/</code>, <code>examples/</code>, <code>tools/</code>, and
+<code>.github/</code> exists to specify, demonstrate, or verify them.</p>
+<h2>Documentation index</h2>
+<p>Start at <a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/README.md" target="_blank" rel="noopener noreferrer"><code>docs/README.md</code></a> for the annotated index. In
+short:</p>
+<table>
+<thead>
+<tr>
+<th>Document</th>
+<th>Read it when</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/ENGINE.md" target="_blank" rel="noopener noreferrer"><code>docs/ENGINE.md</code></a></td>
+<td>You want the binding contract — §0 through §11</td>
+</tr>
+<tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/framings.md" target="_blank" rel="noopener noreferrer"><code>docs/framings.md</code></a></td>
+<td>You want the 12 framing prompts with per-preset examples</td>
+</tr>
+<tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/presets.md" target="_blank" rel="noopener noreferrer"><code>docs/presets.md</code></a></td>
+<td>You are authoring a preset</td>
+</tr>
+<tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/chaining.md" target="_blank" rel="noopener noreferrer"><code>docs/chaining.md</code></a></td>
+<td>You are wiring several presets together</td>
+</tr>
+<tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/field-profiles/README.md" target="_blank" rel="noopener noreferrer"><code>field-profiles/README.md</code></a></td>
+<td>You are authoring a domain lens</td>
+</tr>
+<tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/examples/attack/README.md" target="_blank" rel="noopener noreferrer"><code>examples/attack/README.md</code></a></td>
+<td>You want to see real input and output</td>
+</tr>
+<tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/EVALUATION.md" target="_blank" rel="noopener noreferrer"><code>docs/EVALUATION.md</code></a></td>
+<td>You want the design rationale and the alternatives that were rejected</td>
+</tr>
+<tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer"><code>CONTRIBUTING.md</code></a></td>
+<td>You are about to open a pull request</td>
+</tr>
+<tr>
+<td><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer"><code>CHANGELOG.md</code></a></td>
+<td>You want the per-version history</td>
+</tr>
+</tbody></table>
+<p>Every document above has a maintained Chinese parallel at <code>X.zh.md</code>,
+except <code>docs/EVALUATION.md</code>, <code>CONTRIBUTING.md</code>, and <code>CHANGELOG.md</code>, which
+are canonical-English by declaration in
+<a href="https://github.com/skymanbp/cc-tree/blob/HEAD/docs/languages.json" target="_blank" rel="noopener noreferrer"><code>docs/languages.json</code></a>.</p>
+<h2>What cc-tree is not</h2>
+<ul>
+<li><strong>Not a one-shot brainstorm tool.</strong> The engine is recursive and
+convergence-terminated; a real run takes minutes to hours.</li>
+<li><strong>Not a chat interface.</strong> Once invoked it runs to convergence without
+further prompting (§F6). You steer with flags on the next invocation.</li>
+<li><strong>Not a substitute for a domain expert.</strong> It produces a cited,
+structured exploration; a human still decides which leaves to act on.</li>
+<li><strong>Not bundled with a model.</strong> It is pure prompt engineering on top of
+your existing Claude Code model setting.</li>
+<li><strong>Not a linter.</strong> <code>code-audit</code> looks for what a static analyzer cannot:
+threat-model-dependent, contract-level, and cross-file reasoning bugs.</li>
+</ul>
+<h2>Related terms</h2>
+<p>If you arrived searching for one of these, cc-tree is probably what you
+want: tree of thoughts (ToT) for Claude Code · structured LLM reasoning ·
+recursive exploration agent · AI brainstorming tool · adversarial review /
+red-team prompt · reviewer-style paper critique · rebuttal preparation ·
+LLM code audit and security review · design-space exploration and
+trade-off analysis · architecture decision support · research ideation ·
+divergent thinking framework · multi-agent fan-out · convergence criteria
+for LLM search · Claude Code plugin, skill, and slash commands ·
+bilingual English/Chinese prompt engineering.</p>
+<h2>Relationship to sci-paper</h2>
+<p><a href="https://github.com/skymanbp/sci-paper" target="_blank" rel="noopener noreferrer"><code>skymanbp/sci-paper</code></a> was the
+original home of this engine, scoped to scientific paper writing and
+review. cc-tree is the domain-agnostic extraction; sci-paper keeps its
+paper-specific versions independent (no coupling). If you write papers,
+use sci-paper. If you want the engine for anything else, use cc-tree.</p>
+<h2>Contributing</h2>
+<p>Issues and pull requests are welcome. <a href="https://github.com/skymanbp/cc-tree/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer"><code>CONTRIBUTING.md</code></a>
+covers the repository layout, the commands that reproduce CI locally, and
+the invariants that trip up first-time contributors — among them: presets
+are schema-validated, every preset needs its command wrapper, every new
+Markdown file must be registered in <code>docs/languages.json</code>, and editing an
+English document requires refreshing its Chinese parallel's source digest.
+(No counts here on purpose: a number in one file and a list in another is
+exactly the drift this repository keeps finding in itself.)</p>
+<h2>License</h2>
+<p><a href="https://github.com/skymanbp/cc-tree/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a>. The code, skills, presets, commands, and docs in this
+repository are MIT-licensed. Run-output directories (<code>tree-out/</code>,
+<code>brainstorm-out/</code>, <code>attack-out/</code>, <code>design-out/</code>, <code>code-audit-out/</code>,
+<code>chain-out/</code>) are user-generated and <code>.gitignore</code>-d by default.</p>

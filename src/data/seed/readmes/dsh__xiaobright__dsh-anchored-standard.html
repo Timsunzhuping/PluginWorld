@@ -1,0 +1,811 @@
+<h1>dsh-anchored-standard</h1>
+<p><a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">中文说明</a></p>
+<p>Experimental DeepSeek Harness agent presets — a base mode, two live-anchor
+variants, and one seeded prefab mode — that anchor a session's model trajectory
+on the Minimal condition
+(real Minimal tool schema, no auto-injected context), then promote to a small
+resident catalog once the session is durable, unlocking heavier Standard tools
+on demand.</p>
+<p>This is a community project. It is not an official DeepSeek preset and is not
+affiliated with or endorsed by DeepSeek.</p>
+<p>Feel free to submit feedback on the plugin in the form of Issues or PRs. For ideas for new plugins or useful findings, please submit them under the <a href="https://github.com/0liveiraaa/DeepseekCotexplorations" target="_blank" rel="noopener noreferrer">repository</a>.</p>
+<h2>Project status (2026-08-17)</h2>
+<p>Following the price increases on both the DeepSeek official API and the opencode go
+subscription, active development of this project has effectively stopped: the evaluation
+loops these presets depend on (Project2-class runs and multi-trial roll/probe experiments)
+are no longer affordable. The repository stays available as-is and receives <strong>maintenance
+only</strong> (bug fixes and harness-compatibility updates when feasible). The mechanism findings,
+the dose-response data, and the tooling (context-gate, the prefab pipeline, the probe
+suite) remain valid and are largely model-agnostic. A personal note from the maintainer:
+<a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/FAREWELL.md" target="_blank" rel="noopener noreferrer">FAREWELL.md</a> (Chinese). Contributors and collaborators are
+listed in <a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/ACKNOWLEDGEMENTS.md" target="_blank" rel="noopener noreferrer">ACKNOWLEDGEMENTS.md</a>.</p>
+<p>Community projects that users report perform better in some scenarios:</p>
+<ul>
+<li><a href="https://github.com/yjh051108/dsh-routing-suite" target="_blank" rel="noopener noreferrer">dsh-routing-suite</a> — a runtime injector
+plus task-aware thinking-mode routing presets (the router-standard family).</li>
+<li><a href="https://github.com/Tiger3807861189/J-Space-Cognition-Suite-V3.6" target="_blank" rel="noopener noreferrer">J-Space Cognition Suite</a>
+— a model-agnostic inference-time cognitive control layer packaged as a Skill.</li>
+</ul>
+<h2>Modes at a glance</h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Directory</th>
+<th>First model request</th>
+<th>Anchor mechanism</th>
+<th>Promotion signal</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Anchored Standard</td>
+<td><code>preset/</code></td>
+<td>2 tools (the Minimal pair)</td>
+<td>Minimal tool schema</td>
+<td>first durable <code>tool/call</code> <strong>or</strong> <code>assistant/message</code> (<code>promoteOn: either</code>)</td>
+<td>none</td>
+</tr>
+<tr>
+<td>Zero-Anchored Standard</td>
+<td><code>zero-anchored-standard/</code></td>
+<td>0 tools</td>
+<td>one fixed anchor turn</td>
+<td>the anchor reply (<code>assistant/message</code>)</td>
+<td>+1 model call</td>
+</tr>
+<tr>
+<td>Whoami Standard</td>
+<td><code>whoami-standard/</code></td>
+<td>0 tools</td>
+<td>one "你是谁" self-introduction turn</td>
+<td>the self-introduction reply (<code>assistant/message</code>)</td>
+<td>+1 model call</td>
+</tr>
+<tr>
+<td>Prefab Anchored Standard</td>
+<td><code>prefab/</code></td>
+<td>seeded rolled history</td>
+<td>bundled successful trajectory</td>
+<td>already promoted in the seed</td>
+<td>no model call to instantiate</td>
+</tr>
+<tr>
+<td>Eternal Minimal</td>
+<td><code>eternal-minimal/</code></td>
+<td>2 tools, forever</td>
+<td>the visible catalog never grows; heavier tools run via the <code>dshx</code> bash gateway</td>
+<td>none (no phases)</td>
+<td>none</td>
+</tr>
+<tr>
+<td>Wire Think-Execute Standard</td>
+<td><code>wire-think-standard/</code></td>
+<td>tools present, <code>tool_choice: none</code> on the wire</td>
+<td>sibling provider route per think step</td>
+<td>per-turn: the steer itself</td>
+<td>+1 model call/turn, prefix-cache churn</td>
+</tr>
+<tr>
+<td>Combo Anchored</td>
+<td><code>combo-anchored/</code></td>
+<td>0 tools, on every user turn</td>
+<td>think/execute split + depth gate + deliberation drip as three independent rows</td>
+<td>per-mechanism</td>
+<td>+1 model call/turn</td>
+</tr>
+</tbody></table>
+<p>Every mode directory is self-contained and installs alone under whatever id
+you copy it to (see <a href="#install" target="_blank" rel="noopener noreferrer">Install</a>). The prefab hydrates the blank session
+in place when its preset is selected; no per-workspace import is required.</p>
+<h2>Terminology</h2>
+<ul>
+<li><strong>trajectory</strong> — the style of the model's first reasoning chain. The
+Minimal condition produces "We need…" first lines; the Standard condition
+produces "Let me…" ("standard-like") first lines.</li>
+<li><strong>anchor</strong> — the first-request conditions that select the trajectory. Issue
+#11 isolated three levers: the tool schema, the output budget, and the
+injected reminders.</li>
+<li><strong>bootstrap phase</strong> — request #1 of a session: the bootstrap tool pair, no
+auto-injected context, optional output cap.</li>
+<li><strong>promotion</strong> — the durable session event that ends the bootstrap phase.
+Base mode: first <code>tool/call</code> or <code>assistant/message</code>, whichever comes first.
+Variants: the anchor reply.</li>
+<li><strong>durable</strong> — recorded in the session event log. Phase state is derived
+from durable events, so resume and reload preserve it.</li>
+<li><strong>resident catalog</strong> — the promoted tool set: the bootstrap pair plus the
+discovery tools plus every tool the model explicitly unlocked.</li>
+<li><strong>discovery tools</strong> — <code>dev_tool_search</code>, <code>skill_search</code>, <code>skill_load</code>: the
+on-demand unlock surface for heavier Standard tools.</li>
+<li><strong>materialized copy</strong> — the committed copy of a <code>shared/</code> plugin inside a
+mode directory, generated by <code>npm run sync</code>.</li>
+</ul>
+<h2>How it works</h2>
+<p>The base mode in one request lifecycle (the variants change only the first
+turn — see their sections):</p>
+<pre><code>user's first message
+        │
+        ▼
+┌ request #1 ─ bootstrap phase ──────────────────────────────┐
+│ tools    : bash + str_replace_editor (Minimal's real pair) │
+│ context  : no AGENTS.md digest, no skill-catalog reminder  │
+│ budget   : adapter default (`bootstrapMaxTokens` optional) │
+└─────────────────────────────────────────────────────────────┘
+        │ first durable tool/call OR assistant/message
+        ▼ PROMOTION — derived from durable events, resume-safe
+┌ request #2+ ─ resident phase ──────────────────────────────┐
+│ tools    : bootstrap pair + discovery tools + unlocked     │
+│ context  : standard injections restored                    │
+│ budget   : adapter default (a cap is stripped on promote)  │
+└─────────────────────────────────────────────────────────────┘
+</code></pre>
+<p>Three first-request levers decide the trajectory (issue #11):</p>
+<ol>
+<li><strong>Tool schema</strong> — the decisive variable at the adapter-default maxTokens
+(256000). The real Minimal pair anchored 5/5; every standard-family schema
+fell standard-like 11/11.</li>
+<li><strong>Output budget</strong> — a 1024 first-request cap also anchored the trajectory
+(26/32), independent of the tool descriptions. The base mode leaves this
+lever unset (<code>bootstrapMaxTokens</code> is opt-in).</li>
+<li><strong>Injected reminders</strong> — the AGENTS.md/CLAUDE.md digest and the
+available-skills reminder. With the skill catalog present, the anchor did
+not reproduce at all (0/9). The base mode now suppresses EVERY automatic
+injection during bootstrap at the harness's two unified injection paths
+(the <code>context-gate</code> plugin), not just the two measured ones.</li>
+</ol>
+<h2>Why</h2>
+<p>DeepSeek V4 Pro conditions strongly on the API-visible tool catalog. In the
+Project2 evaluation, Standard and PTC produced scores of 91 and 92, while the
+official Minimal preset produced 99 and 96. Permanently staying on Minimal,
+however, gives up the Standard preset's broader tool set.</p>
+<p>Anchored Standard separates initial trajectory selection from later tool use:</p>
+<ol>
+<li>Keep the complete Minimal system prompt.</li>
+<li>Expose the Minimal preset's REAL tool schemas — persistent <code>bash</code> +
+<code>str_replace_editor</code>, byte-identical to the official Minimal composition —
+on the first model request (lever 1 above).</li>
+<li>Suppress EVERY auto-injected context on that first request — at the
+harness's unified injection paths, not per source name (the <code>context-gate</code>
+row, mounted FIRST; lever 3). While the session is unpromoted the
+assembly's dynamic runtime-context contributions are blanked (the whole
+<code>SystemPrompt.context()</code> family: sandbox/approval policy snapshots and any
+third-party context provider), and the pre-step waterfall keeps only the
+CLAIMED message batch plus a small kind allowlist (a user-initiated skill
+gesture survives; skill catalog, AGENTS.md digest, time/tmux context,
+hooks, and unknown third-party injections are stripped by default). After
+promotion the gate opens and the loop's own snapshot projection diffs
+exactly ONE fresh runtime-context message into the next request — minimal
+first round, injections on the second round. A <code>compaction/end</code> boundary
+re-closes the gate the same way.</li>
+<li>After the session records its first durable promotion signal — a <code>tool/call</code>
+or the first <code>assistant/message</code>, whichever comes first — promote to the
+RESIDENT catalog: the bootstrap pair plus the discovery tools plus whatever
+the model has explicitly unlocked via <code>dev_tool_search</code>. Dumping the full
+Standard catalog at promotion pulled the trajectory back to standard-like
+behavior (the post-promotion regression), so heavier tools — <code>web_search</code>,
+<code>subagent</code>, <code>workflow</code>, … — stay one <code>dev_tool_search</code> call away. Request
+#1 always sees the bootstrap catalog; request #2 always sees the resident
+catalog, so a text-only first reply can no longer trap the session in
+bootstrap. (<code>promoteOn</code> in the <code>tool-bootstrap</code> row selects the trigger:
+<code>either</code> default, <code>tool-call</code>, or <code>assistant-message</code>.)</li>
+<li>Derive the phase from durable session events so resume and reload preserve it.</li>
+</ol>
+<p>The bootstrap catalog is the same on every platform: the Minimal pair
+(<code>bash</code>/<code>str_replace_editor</code>). The preset's shell is the persistent PTY bash
+(the sandboxed Standard <code>bash</code> row is disabled — both register the <code>bash</code> name
+into the same layer, and the tools registry rejects duplicates; Windows never
+had the sandboxed bash anyway). <code>pwsh</code> remains available in the promoted
+catalog on Windows.</p>
+<h2>Results</h2>
+<p>The anchored family was validated on Project2 with three V4 Pro scores of
+98, 99, and 99. Provenance note (issue #60): those three runs predate the
+current composition — they used the Minimal system prompt with a first-request
+<code>pwsh</code> + <code>read</code> surface and promoted to the full 25-tool Standard catalog;
+the exact Minimal pair (persistent <code>bash</code> + <code>str_replace_editor</code>) with the
+small resident catalog was introduced afterward. The bundled generic prefab
+removes Project2-specific warm-up facts and was not re-benchmarked before the
+API price change, so those scores must not be attributed to the generic
+template.</p>
+<p>Independent replications: the trajectory anchoring reproduces strongly, but
+the ability gap is unresolved at small n — see
+<a href="https://github.com/xiaobright/dsh-anchored-standard/issues/65" target="_blank" rel="noopener noreferrer">#65</a>
+(anchoring 9/9 separated by preset; anchored−standard +3.3, 95% CI
+[−2.6, +9.3]) and
+<a href="https://github.com/xiaobright/dsh-anchored-standard/issues/51" target="_blank" rel="noopener noreferrer">#51</a>
+(multi-env, Ability 85–90, 98/99 not reproduced). Treat the scores above as
+our original observations, not a settled effect size.</p>
+<p>Research write-ups live in the companion exploration repository
+<a href="https://github.com/0liveiraaa/DeepseekCotexplorations" target="_blank" rel="noopener noreferrer">DeepseekCotexplorations</a>
+(data and methodology; this repository keeps the code):</p>
+<ul>
+<li><a href="https://github.com/0liveiraaa/DeepseekCotexplorations/tree/main/contributions/xiaobright-v4-tool-surface-dose-response/" target="_blank" rel="noopener noreferrer">Tool-surface dose-response + Project2 replication</a> —
+methodology, per-run scope, tool-surface experiments, and limitations.</li>
+<li><a href="https://github.com/0liveiraaa/DeepseekCotexplorations/tree/main/contributions/xiaobright-v4-anchor-mass-probe/" target="_blank" rel="noopener noreferrer">Anchor-mass quantification + single-request probe methodology</a> —
+the prefab template quality model and the post-price-hike low-cost
+evaluation loop.</li>
+</ul>
+<p>Development-process records (what was done, why, and the pitfall lists) are
+kept in this repository as <a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/HANDOFF.md" target="_blank" rel="noopener noreferrer"><code>HANDOFF.md</code></a> and
+<a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/HANDOFF-2.md" target="_blank" rel="noopener noreferrer"><code>HANDOFF-2.md</code></a>.</p>
+<h2>Configuration reference</h2>
+<p>All knobs are rows in each mode's <code>agent.cordis.yml</code>. Unknown keys fail at
+preset mount.</p>
+<p><code>context-gate</code> (mounted FIRST in <code>preset/</code>, <code>zero-anchored-standard/</code>, and
+<code>whoami-standard/</code> — waterfall registration order makes the gate the outermost
+transform; the plugin lives in <code>shared/context-gate.mjs</code> and is reusable by
+any other composition that wants unified injection control alone):</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>promoteOn</code></td>
+<td><code>either</code></td>
+<td>Promotion trigger: <code>either</code>, <code>tool-call</code>, or <code>assistant-message</code> (the variants use <code>assistant-message</code>).</td>
+</tr>
+<tr>
+<td><code>includeSubagents</code></td>
+<td><code>false</code></td>
+<td>Gate subagents too (<code>true</code> in the base mode and whoami; keep in sync with the bootstrap row).</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td><code>true</code></td>
+<td><code>false</code> disables both interception paths (A/B testing without touching the row set).</td>
+</tr>
+<tr>
+<td><code>allowKinds</code></td>
+<td><code>[skill-invocation]</code></td>
+<td><code>source.kind</code> values allowed beyond the claimed batch; <code>[]</code> keeps ONLY the claimed batch.</td>
+</tr>
+</tbody></table>
+<p>Injection control division of labor: session-phase suppression (everything
+keyed on a promotion boundary) belongs to <code>context-gate</code>. Two documented
+exceptions keep their own enumerated <code>suppressedContextSources</code> strip because
+the gate's phase machine does not map onto their scope: the think-step strip
+in <code>think-phase</code>/<code>wire-think</code> (per-step, not per-session-phase) and the
+permanent every-request strip in <code>eternal-minimal</code> (no promotion boundary;
+frozen to the configuration its recorded measurements were taken under).</p>
+<p><code>tool-bootstrap</code> (in <code>preset/agent.cordis.yml</code>; mount right after
+<code>context-gate</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>bootstrapTools</code></td>
+<td><code>[bash, str_replace_editor]</code></td>
+<td>Tools visible on request #1.</td>
+</tr>
+<tr>
+<td><code>promoteOn</code></td>
+<td><code>either</code></td>
+<td>Promotion trigger: <code>either</code>, <code>tool-call</code>, or <code>assistant-message</code>.</td>
+</tr>
+<tr>
+<td><code>bootstrapMaxTokens</code></td>
+<td>unset</td>
+<td>Optional output cap for request #1; stripped after promotion.</td>
+</tr>
+<tr>
+<td><code>includeSubagents</code></td>
+<td><code>false</code></td>
+<td>Subagents take the bootstrap phase too (<code>true</code> in the base mode).</td>
+</tr>
+<tr>
+<td><code>compactionTools</code></td>
+<td><code>[]</code></td>
+<td>Extra tools available between a compaction boundary and re-promotion.</td>
+</tr>
+</tbody></table>
+<p><code>zero-tool-bootstrap</code> (in <code>zero-anchored-standard/</code> and <code>whoami-standard/</code>):
+<code>compactionTools</code> has the same semantics (promotion is always the first
+<code>assistant/message</code>), plus <code>includeSubagents</code>, whether subagents also take the
+anchor phase (set <code>true</code> in <code>whoami-standard</code>, <code>false</code> in
+<code>zero-anchored-standard</code>). Context suppression is NOT here — both variants
+mount the <code>context-gate</code> row (above) with <code>promoteOn: assistant-message</code>;
+the bootstrap's former <code>suppressedContextSources</code> key now fails at mount.</p>
+<p><code>anchor-turn</code> (in both variants): <code>text</code> — the synthetic first user message
+(default "This round is a test. Tools are not open yet; all tools will open
+next round." in zero-anchored, "你是谁" in whoami); <code>includeSubagents</code> —
+whether subagents also take the anchor turn.</p>
+<p><code>eternal-minimal</code> (in <code>eternal-minimal/</code>; the row must stay FIRST):</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>guide</code></td>
+<td><code>true</code></td>
+<td>Append the short <code>dshx</code> capability guide to the system prompt; <code>false</code> keeps the persona byte-pure.</td>
+</tr>
+<tr>
+<td><code>gateway</code></td>
+<td><code>true</code></td>
+<td>Intercept <code>dshx</code> shell commands and execute the real tools; <code>false</code> leaves the bare Minimal pair.</td>
+</tr>
+<tr>
+<td><code>gatewayCommand</code></td>
+<td><code>dshx</code></td>
+<td>The interception word.</td>
+</tr>
+<tr>
+<td><code>maxGatewayChars</code></td>
+<td><code>12000</code></td>
+<td>Cap on one gateway result payload.</td>
+</tr>
+<tr>
+<td><code>suppressedContextSources</code></td>
+<td><code>[agent-instructions, skill-catalog]</code></td>
+<td>Stripped on every request (no promotion boundary; the enum intentionally stays — see the division-of-labor note above).</td>
+</tr>
+</tbody></table>
+<p><code>cot-drip</code> (in <code>combo-anchored/</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>every</code></td>
+<td><code>4</code></td>
+<td>Attach one deliberation beat after every Nth tool result; <code>0</code> disables the drip.</td>
+</tr>
+<tr>
+<td><code>maxPerTurn</code></td>
+<td><code>1</code></td>
+<td>Beats per turn.</td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td>built-in beat</td>
+<td>The reminder text (one "We …" sentence restating the remaining goal).</td>
+</tr>
+<tr>
+<td><code>includeSubagents</code></td>
+<td><code>false</code></td>
+<td>Whether subagent calls are dripped too.</td>
+</tr>
+</tbody></table>
+<p><code>toolchoice-adapter</code> (in <code>wire-think-standard/</code>; the row must stay the first LOCAL row):</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>provider</code></td>
+<td><code>deepseek-wire-think</code></td>
+<td>The sibling route id the adapter owns; registering an id twice throws DUPLICATE_ADAPTER (caught, degraded).</td>
+</tr>
+<tr>
+<td><code>toolChoice</code></td>
+<td><code>none</code></td>
+<td>The wire <code>tool_choice</code> sent whenever tool definitions are present.</td>
+</tr>
+<tr>
+<td><code>baseURL</code> / <code>apiKeyEnv</code></td>
+<td>settings/env</td>
+<td>Row config first, then the <code>llm-deepseek</code> settings section, then <code>DEEPSEEK_BASE_URL</code> / <code>DEEPSEEK_API_KEY</code>.</td>
+</tr>
+<tr>
+<td><code>logprobs</code></td>
+<td><code>false</code></td>
+<td>Opt-in research hook: request token logprobs and log a per-request mean summary (no StreamChunk surface exists).</td>
+</tr>
+</tbody></table>
+<p><code>wire-think</code> (in <code>wire-think-standard/</code>): same <code>mode</code> / <code>suppressedContextSources</code> /
+<code>includeSubagents</code> / <code>steerText</code> semantics as <code>think-phase</code>, plus
+<code>provider</code> (must match the <code>toolchoice-adapter</code> row's id) and <code>defaultProvider</code>
+(the route execute steps restore onto, default <code>deepseek-official</code>).</p>
+<p><code>instruction-hint</code> (all modes): <code>promoteOn</code> matching the mode's promotion
+semantics (<code>either</code> in the base mode, <code>assistant-message</code> in the variants) —
+the one-shot "instruction files exist, read them before acting" hint waits
+for promotion.</p>
+<h2>Repository layout</h2>
+<pre><code>preset/                  Anchored Standard — the base mode
+zero-anchored-standard/  variant: fixed zero-tool anchor turn
+whoami-standard/         variant: "你是谁" anchor turn, subagents inherit
+eternal-minimal/         variant: Minimal pair forever + dshx bash gateway
+wire-think-standard/     variant: wire-level condition (tools + tool_choice=none)
+combo-anchored/          combination package: think split + gate + drip rows
+shared/                  single source of truth for plugins used by 2+ modes
+scripts/sync-modes.mjs   materializes shared/ plugins into every mode dir
+test/                    zero-dependency test suite (npm test)
+verify/                  one-shot headless verification runner
+prefab/                  Prefab Anchored Standard + bundled session template
+</code></pre>
+<p><code>prefab/</code> ships a generic template by default and a Project2-specific template
+as an explicit opt-in. Both contain real model reasoning; read the mode's
+<a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/prefab/README.md" target="_blank" rel="noopener noreferrer">installation notes</a> before use.</p>
+<p>Invariants, enforced by <code>npm run check</code>:</p>
+<ul>
+<li>Every mode directory is self-contained: installable by copying it alone;
+<code>agent.cordis.yml</code> rows may reference only <code>./local.mjs</code> files, never <code>../</code>.</li>
+<li>Plugins shared by several modes live once in <code>shared/</code>; the copies in mode
+directories are generated. Edit <code>shared/</code>, run <code>npm run sync</code>, commit both —
+never edit a materialized copy.</li>
+<li>The <code>context-gate</code> row stays the FIRST row of <code>preset/agent.cordis.yml</code>
+(the gate must register before every injecting plugin), with
+<code>tool-bootstrap</code> right after it. The same first-row rule holds for the
+<code>context-gate</code> row in <code>zero-anchored-standard/</code> and <code>whoami-standard/</code>.</li>
+</ul>
+<p>This repository deliberately ships no AGENTS.md/CLAUDE.md: the presets' whole
+mechanism is a clean request #1, stripping exactly those instruction-file
+digests from it (issue #6: 0/9 anchored with the injection present). Shipping
+one would only feed later rounds and contradict the mechanism being
+documented. Everything an assistant needs is in this README.</p>
+<h2>Compatibility</h2>
+<p>Developed and tested against:</p>
+<ul>
+<li>DeepSeek Harness <code>0.1.0-rc.5</code></li>
+<li>repository commit <a href="https://github.com/deepseek-ai/deepseek-harness/tree/47f943859bef60e4160492346772ded9b24f765a" target="_blank" rel="noopener noreferrer"><code>47f9438</code></a></li>
+<li>Node.js 24 on Windows</li>
+</ul>
+<p>The persistent shell resolves <code>shellPath</code> adaptively: it keeps the
+terminal-bash plugin default <code>/bin/bash</code> on hosts where that absolute path
+exists, and falls back to <code>bash</code> (PATH lookup) otherwise — e.g. NixOS, where
+bash lives under the Nix store. Hosts that ship <code>/bin/bash</code> keep the previous
+behavior exactly; the fallback only activates where the default would make
+every bash call fail with "PTY shell exited during startup".</p>
+<p>On the <code>0.1.0-rc.5</code> source checkout, <code>bootstrapMaxTokens</code> reaches the actual
+first request (the first <code>request/header</code> records the cap, <code>adapterDefaults</code>
+stays empty), because <code>llm.prepareCall</code> only materializes a default maxTokens
+when the proposed config has none. One prebuilt profile package observed in
+issue #11 (CLI launcher reporting <code>0.1.0-rc.6</code>) overwrote the proposed cap
+with <code>adapterDefaults.maxTokens</code>; there the cap is a no-op. The default
+composition therefore relies on the Minimal tool schema alone (which anchors
+at the adapter default with no cap) and leaves <code>bootstrapMaxTokens</code> as an
+opt-in for standard-schema bootstraps.</p>
+<p>DeepSeek Harness is currently a developer preview and explicitly permits
+breaking changes. This preset is a full snapshot of the Standard composition,
+so review upstream changes before using it with a newer release.</p>
+<h2>Install</h2>
+<p>For the prefab mode, the recommended path is AI-assisted one-command setup.
+Give your coding agent this repository and ask it to follow the
+<a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/prefab/AGENT_INSTALL.md" target="_blank" rel="noopener noreferrer">installation-agent contract</a>. When it reports
+<code>INSTALL READY</code>, start DSH, select <strong>Prefab Anchored Standard</strong>, create a new
+session in the target workspace, and send the real task prompt. This installs
+the generic template; the Project2 benchmark template requires an explicit
+<code>--template project2</code> selection and installs under a separate preset id.</p>
+<p>Clone this repository, then copy the entire <code>preset</code> directory into the user
+preset root under the id <code>anchored-standard</code>. Every mode directory in this
+repository is self-contained: the <code>zero-anchored-standard/</code>,
+<code>whoami-standard/</code>, <code>prefab/</code>, <code>eternal-minimal/</code>, <code>wire-think-standard/</code>, and
+<code>combo-anchored/</code> variants install the same way, alone or together, with no
+other directory required (see their sections below). <code>prefab/</code> automatically
+hydrates newly selected sessions; follow <a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/prefab/README.md" target="_blank" rel="noopener noreferrer"><code>prefab/README.md</code></a>.</p>
+<p>PowerShell:</p>
+<pre><code class="language-powershell">$target = Join-Path $env:USERPROFILE '.dsh\.agent-presets\anchored-standard'
+if (Test-Path -LiteralPath $target) { throw "Preset already exists: $target" }
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+Copy-Item -Recurse -LiteralPath '.\preset' -Destination $target
+</code></pre>
+<p>Linux/macOS:</p>
+<pre><code class="language-sh">dsh_home="${DSH_HOME:-$HOME/.dsh}"
+mkdir -p "$dsh_home/.agent-presets"
+test ! -e "$dsh_home/.agent-presets/anchored-standard"
+cp -R preset "$dsh_home/.agent-presets/anchored-standard"
+</code></pre>
+<p>Fully restart DeepSeek Harness, create a blank session, and select
+<strong>Anchored Standard (experimental)</strong>. Do not switch an active session from a
+different preset.</p>
+<h2>Verify</h2>
+<p>Export the session JSONL and inspect <code>request/header</code> events. Reproduction
+checklist (issue #11 asks for the first two explicitly, because both are the
+variables that decide the anchor):</p>
+<ul>
+<li><strong>First-request <code>config.maxTokens</code> value</strong>: with <code>bootstrapMaxTokens</code> unset
+(the default), the first header records the adapter default (e.g. 256000
+with <code>adapterDefaults.maxTokens: true</code>); with a cap configured it records
+the cap (e.g. 1024 with no maxTokens adapterDefault).</li>
+<li><strong>First-request tool schema source</strong>: the first header's <code>tools</code> array must
+be exactly <code>["bash", "str_replace_editor"]</code> — the official Minimal preset's
+real schemas, not Standard's <code>pwsh</code>/<code>read</code>.</li>
+<li>the first request's messages should contain no AGENTS.md/CLAUDE.md digest and
+no available-skills reminder — only the user message and the minimal persona
+system prompt;</li>
+<li>after the first tool call or the first assistant reply, the next changed
+header should contain the promoted resident catalog: the bootstrap pair plus
+<code>dev_tool_search</code>/<code>skill_search</code>/<code>skill_load</code> plus any tools the model
+already unlocked;</li>
+<li>subsequent requests should keep that resident set (it grows only through
+explicit <code>dev_tool_search</code> unlocks) and restore the standard context
+injections.</li>
+</ul>
+<p>Run the local zero-dependency tests with:</p>
+<pre><code class="language-sh">npm test
+</code></pre>
+<h2>Important behavior</h2>
+<ul>
+<li>With the default <code>promoteOn: either</code>, the session promotes after its first
+durable <code>tool/call</code> OR its first <code>assistant/message</code>, whichever comes first —
+request #1 sees the bootstrap catalog and every later request sees the
+resident catalog. A text-only first reply therefore still promotes at
+request #2; set <code>promoteOn: tool-call</code> to restore the original behavior,
+where a first response that makes no tool call never promotes.</li>
+<li>A failed tool execution still promotes the session because the durable
+<code>tool/call</code> already exists.</li>
+<li>The first request's output budget is NOT capped by default: the Minimal tool
+schema anchors at the adapter-default maxTokens, so <code>bootstrapMaxTokens</code> is
+opt-in. When set, the first request is capped and the cap is explicitly
+stripped after promotion (the next request's seed proposal carries the
+previous header's maxTokens forward).</li>
+<li>The promoted catalog is the RESIDENT set — the bootstrap pair plus the
+discovery tools plus everything the model unlocked via <code>dev_tool_search</code> —
+not the full Standard dump. The Standard sandboxed <code>bash</code> row stays disabled
+in favor of the persistent shell (same tool name, same layer; see Why). When
+unlocked, the <code>read</code>/<code>write</code>/<code>edit</code> tools keep the sandboxed filesystem while
+<code>str_replace_editor</code> uses the preset's local fs.</li>
+<li>A missing bootstrap tool degrades to the full catalog with a one-time
+warning instead of failing requests, so a composition drift cannot brick a
+session; invalid <code>promoteOn</code> values fail at preset mount instead.</li>
+<li>Promotion decisions are memoized per session for the process lifetime; the
+durable event scan runs once per session per process.</li>
+<li>While a session is unpromoted, the <code>context-gate</code> plugin closes BOTH unified
+injection paths: the assembly's runtime-context contributions are blanked
+(the whole <code>SystemPrompt.context()</code> family, without enumerating sources),
+and the pre-step waterfall keeps only the claimed batch plus the
+<code>allowKinds</code> entries. At promotion the loop's snapshot projection diffs in
+exactly ONE fresh runtime-context message; a gate failure degrades to
+keeping every message rather than eating context.</li>
+<li>The tool catalog changes at promotion and again whenever <code>dev_tool_search</code>
+unlocks a new tool; request-prefix cache continuity breaks at those points.</li>
+<li>The preset has the same trust level as shell access. Review its files before
+installation.</li>
+<li>The plugin performs no network requests and adds no telemetry.</li>
+</ul>
+<h3>Troubleshooting: a duplicate <code>instruction-hint</code> after a host restart</h3>
+<p><code>instruction-hint</code> injects its hint at most once per session via a durable scan of
+<code>session.events</code>. The scan is preventive, not guaranteed: if the first <code>agent/pre-step</code>
+after a host restart runs before the session log is materialized, the scan sees an empty
+event list and re-injects the hint. Older versions also used a deterministic id
+(<code>instruction-hint-&lt;sessionId&gt;</code>), so a re-injected duplicate collided with the original
+message and stopped history assembly. Since the unique-id change, a re-injection degrades
+to a few wasted context tokens instead. If an old log was broken by the deterministic-id
+collision, repairing it should dedup on <code>source.kind === 'instruction-hint'</code>, which still
+identifies the old rows (they share one id; new rows no longer do).</p>
+<h2>Zero-Anchored Standard (experimental)</h2>
+<p>An extra test mode that does not change the Anchored Standard logic above. It
+uses the same Minimal-aligned system prompt, but instead of exposing two tools
+on the first request it injects one fixed zero-tool anchor turn:</p>
+<ol>
+<li>When the user sends their first message, the <code>anchor-turn</code> plugin prepends a
+fixed user message — "This round is a test. Tools are not open yet; all
+tools will open next round." — ahead of it.</li>
+<li>The first real model request carries ZERO tools, so the session's first
+reasoning chain follows the zero-injection "we" trajectory.</li>
+<li>Once that anchor response is durable, the resident catalog is exposed
+and the real message proceeds with it.</li>
+</ol>
+<p>Anchoring on the first message — not on session creation — keeps the
+blank-session preset switcher usable. Subagents always see the resident
+catalog.</p>
+<p>Measured behavior (opencode-go, DeepSeek V4 Pro, <code>reasoningEffort=max</code>): the
+anchor request is stable "we"-style with zero <code>let me</code>; the following
+tool-bearing requests return to the "The user wants…/Let me" style. This mode
+is a comparison point for whether the zero-tool first turn is worth the extra
+model call — not a claim that tool rounds stay "we"-style.</p>
+<p>Install as a separate preset id:</p>
+<pre><code class="language-sh">dsh_home="${DSH_HOME:-$HOME/.dsh}"
+mkdir -p "$dsh_home/.agent-presets"
+test ! -e "$dsh_home/.agent-presets/zero-anchored-standard"
+cp -R zero-anchored-standard "$dsh_home/.agent-presets/zero-anchored-standard"
+</code></pre>
+<p>Restart DeepSeek Harness, create a blank session, select <strong>Zero-Anchored
+Standard (experimental)</strong>, then send your first message.</p>
+<h2>Whoami Standard (experimental)</h2>
+<p>A usability-oriented variant of the zero-tool anchor idea: the first turn is a
+natural self-introduction prompt instead of a fixed test message, and the
+user's real first message is deferred to the next turn. Whatever the user types
+first, the session warms up exactly one round and everything is ready when the
+real message is processed:</p>
+<ol>
+<li>When the user sends their first message, the <code>anchor-turn</code> plugin prepends a
+fixed user message — "你是谁" (who are you) — ahead of it in the <code>next-turn</code>
+inbox queue.</li>
+<li>dsh claims exactly ONE <code>next-turn</code> message per turn, so the first model
+request sees only the anchor on an EMPTY tool surface and replies with a
+self-introduction; that reply is the promotion signal.</li>
+<li>The real message is claimed by the NEXT turn, with the promoted resident
+catalog (shells, <code>str_replace_editor</code>, the discovery tools) already
+unlocked — heavier Standard tools are one <code>dev_tool_search</code> away.</li>
+</ol>
+<p>The anchor text is configurable via the <code>anchor-turn</code> row's <code>text</code> option
+(default "你是谁"). Anchoring on the first message — not session creation —
+keeps the blank-session preset switcher usable.</p>
+<h3>Full-powered subagents</h3>
+<p>Whoami Standard ships with <code>includeSubagents: true</code> on both the
+<code>zero-tool-bootstrap</code> and <code>anchor-turn</code> rows, so subagents spawned from a
+session inherit the same anchor flow as top-level sessions:</p>
+<ol>
+<li>A newly spawned subagent's first model request sees only the "你是谁"
+anchor on an empty tool catalog.</li>
+<li>The subagent's self-introduction reply is the promotion signal.</li>
+<li>The delegated prompt runs on the next turn with the promoted resident
+catalog (shells, <code>str_replace_editor</code>, and the discovery tools).</li>
+</ol>
+<p>Set <code>includeSubagents: false</code> on both rows to restore the plain behavior,
+where subagents start with the resident catalog immediately. Each subagent
+costs one extra model call for its anchor turn — a delegation-heavy session
+pays it per subagent.</p>
+<p><code>zero-anchored-standard</code> keeps subagents plain by default; enabling the same
+flow there means setting <code>includeSubagents: true</code> on its <code>zero-tool-bootstrap</code>
+and <code>anchor-turn</code> rows (its anchor text stays the fixed test notice).</p>
+<p>The trade-off of the mode itself is one extra model call per session: the
+anchor turn is always taken, even when the first message is urgent.</p>
+<p>The directory is self-contained; install it alone or alongside any other mode.</p>
+<p>Install as a separate preset id:</p>
+<pre><code class="language-sh">dsh_home="${DSH_HOME:-$HOME/.dsh}"
+mkdir -p "$dsh_home/.agent-presets"
+test ! -e "$dsh_home/.agent-presets/whoami-standard"
+cp -R whoami-standard "$dsh_home/.agent-presets/whoami-standard"
+</code></pre>
+<p>Restart DeepSeek Harness, create a blank session, select <strong>Whoami Standard
+(experimental)</strong>, then send your first message — the self-introduction round
+runs first, and your message is answered with the full tooling on the next
+turn.</p>
+<h2>Eternal Minimal (experimental)</h2>
+<p>The "make the model believe it never left Minimal" mode: the model-visible
+catalog stays EXACTLY the Minimal pair (<code>bash</code> + <code>str_replace_editor</code>) for
+the WHOLE session — no anchor round, no promotion, no discovery tools, no
+catalog growth — while the full Standard toolset stays registered and
+executes FOR REAL behind the <code>dshx</code> bash gateway:</p>
+<pre><code>dshx list                           # list every gateway tool
+dshx web_search '{"query": "..."}'  # execute the real web_search
+dshx read_image '{"path": "..."}'   # execute the real read_image
+</code></pre>
+<ol>
+<li><strong>Eternal pair</strong>: <code>system-prompt/assemble</code> keeps only the shells +
+<code>str_replace_editor</code> on every request (think steps, post-compaction,
+subagents — everything), and auto-injected context is stripped everywhere
+(there is no promotion boundary to key suppression on).</li>
+<li><strong>Gateway</strong>: a <code>tools/pre-execute</code> listener intercepts bash commands
+starting with <code>dshx</code>, dispatches them through <code>ctx.tools.execute()</code> (the
+full registry pipeline — policy, guards, execution, rendering), and
+returns the rendered output as the command result. The deny channel is the
+only sanctioned pre-dispatch way to substitute a result, so gateway
+payloads arrive flagged as errors — every payload states plainly that the
+tool executed and its output follows, so the model reads it as output.
+The real tool really ran: the user sees genuine effects (files, searches,
+subagents) exactly as if it had been called by name.</li>
+<li><strong>Guide</strong>: a short <code>dshx</code> capability guide is appended to the system
+prompt (<code>guide: false</code> for a byte-pure Minimal persona) so the model knows
+the gateway exists without a third visible tool.</li>
+</ol>
+<p>The gateway refuses to dispatch the shells/<code>str_replace_editor</code> themselves
+("invoke them directly"), which also makes recursion impossible. Unknown
+tools, malformed JSON, and tool failures all come back as readable payloads.
+Set <code>gateway: false</code> for a bare two-tool session with no interception.</p>
+<p>Install as a separate preset id:</p>
+<pre><code class="language-sh">dsh_home="${DSH_HOME:-$HOME/.dsh}"
+mkdir -p "$dsh_home/.agent-presets"
+test ! -e "$dsh_home/.agent-presets/eternal-minimal"
+cp -R eternal-minimal "$dsh_home/.agent-presets/eternal-minimal"
+</code></pre>
+<p>Restart DeepSeek Harness, create a blank session, select <strong>Eternal Minimal
+(experimental)</strong>, then work as usual — the model composes shell commands,
+and <code>dshx …</code> lines run the heavier Standard tools for real.</p>
+<h2>Wire Think-Execute Standard (experimental)</h2>
+<p>The wire-level mode: every user turn opens with one think step that keeps
+tool definitions PRESENT in the request while the wire forbids invocation
+(<code>tool_choice: "none"</code>), then a steering notice opens the execute phase on
+the official provider with the resident catalog.</p>
+<p><code>tool_choice</code> is outside the harness <code>GenerateOptions</code> vocabulary (the
+official deepseek adapter documents the mapping as an MVP cut), so reaching
+this condition takes the sanctioned wire seam:</p>
+<ol>
+<li><strong>Sibling route</strong>: <code>toolchoice-adapter.mjs</code> (row 1) registers a
+zero-dependency DeepSeek chat-completions adapter under its OWN provider
+id (<code>deepseek-wire-think</code>) that puts <code>tool_choice: "none"</code> on the wire
+whenever tool definitions are present. The official <code>DeepSeekAdapter</code>
+cannot be wrapped (its wire body is built inside a private generator), so
+this file vendors a minimal, protocol-faithful subset of the official
+serialize/SSE/translate pipeline — the same assistant-message nuances
+(<code>content: ""</code> never null, <code>reasoning_content</code> replayed only on
+tool-call turns, tool results as <code>role: "tool"</code> with an <code>(no output)</code>
+fallback) and the same usage/finish translation. Connection facts
+resolve row config &gt; <code>llm-deepseek</code> settings section &gt; env, exactly like
+the official row, so the same <code>DEEPSEEK_API_KEY</code> serves both routes.</li>
+<li><strong>Per-step routing</strong>: <code>wire-think.mjs</code> keeps the think step's assembled
+catalog UNTOUCHED (that is the condition being reproduced) and swaps ONLY
+the provider in the <code>agent/request</code> waterfall — the frozen loop-built
+request and the log-reconstructability invariant are preserved. Execute
+steps (and every subagent) are routed back to the captured original
+provider even when the folded session header seeds them with the think
+route.</li>
+<li><strong>Steer + resident</strong>: <code>agent/turn-stopping</code> steers exactly once per turn
+(resume-safe from durable <code>steering/message</code> events), and execute steps
+see the promoted RESIDENT set.</li>
+</ol>
+<p>Degradation ladder: if the sibling route is not registered (row removed, or
+a second preset already mounted the same id — <code>DUPLICATE_ADAPTER</code> is caught
+and warned), think steps fall back to the zero-tool condition, so a
+composition mistake can never brick a session. <code>mode: first-turn</code> limits the
+routing (and its costs) to the session's first user turn.</p>
+<p>Costs to know before adopting: the think/execute alternation switches the
+tools block of the request prefix twice per turn, so DeepSeek prefix-cache
+reuse breaks from the first changed token each switch (provider id itself is
+invisible to the backend cache; the tools block is what diverges). Each swap
+appends a <code>request/header</code> change event. Set <code>logprobs: true</code> on the adapter
+row for the opt-in research hook — the adapter requests token logprobs and
+logs a per-request mean summary (the harness StreamChunk vocabulary has no
+surface for logprob data, so logging is all a plugin can do today; that log
+stream is exactly what offline trajectory analysis would consume).</p>
+<p>Install as a separate preset id:</p>
+<pre><code class="language-sh">dsh_home="${DSH_HOME:-$HOME/.dsh}"
+mkdir -p "$dsh_home/.agent-presets"
+test ! -e "$dsh_home/.agent-presets/wire-think-standard"
+cp -R wire-think-standard "$dsh_home/.agent-presets/wire-think-standard"
+</code></pre>
+<h2>Combo Anchored (experimental) — the combination package</h2>
+<p>The everything-is-a-plugin showcase: THREE orthogonal anchoring mechanisms
+composed as independent rows, each with its own knobs, each removable or
+retunable by editing one line of <code>agent.cordis.yml</code>. They attack the
+pre-tool deliberation collapse at different moments of a turn:</p>
+<table>
+<thead>
+<tr>
+<th>Row</th>
+<th>Mechanism</th>
+<th>Owns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>think-phase</code></td>
+<td>zero-tool think step + steering notice</td>
+<td>the turn OPENING</td>
+</tr>
+<tr>
+<td><code>deliberation-gate</code></td>
+<td>depth gate denies the first tool call of a shallow turn</td>
+<td>the FIRST ACTION</td>
+</tr>
+<tr>
+<td><code>cot-drip</code></td>
+<td>one "We …" beat after every Nth tool result (<code>tools/post-execute</code> additionalContexts — never blocking, never erroring)</td>
+<td>the LONG MIDDLE</td>
+</tr>
+</tbody></table>
+<p>With <code>mode: every-turn</code> the think step opens every turn, the gate catches
+the paths that skip it (steering continuations, resumed sessions,
+straight-to-tools follow-ups), and the drip sustains deliberation across
+long tool loops. Defaults are deliberately gentle (<code>minChars: 400</code>,
+<code>every: 4</code>, one beat per turn); tune per workload. Swapping the
+<code>think-phase</code> row for <code>wire-think</code> + <code>toolchoice-adapter</code> upgrades the
+opening to the wire-level condition (see above) at the cost of the sibling
+route and its prefix-cache churn.</p>
+<p>Explored and rejected for this package: pure Code Mode presentation
+(<code>presentAs('code')</code> collapses the catalog into one <code>run_code</code> tool) — a
+single-tool surface measurably underperforms the two-tool condition in the
+sibling project's evaluations; and text-only fake tools or ghost tool-call
+histories — both proved unreliable anchors in practice.</p>
+<h2>Official ecosystem guidance</h2>
+<p>DeepSeek currently asks community plugin authors to publish plugins in their own
+GitHub projects and add the <a href="https://github.com/topics/dsh-plugin" target="_blank" rel="noopener noreferrer"><code>dsh-plugin</code></a>
+repository topic for discovery. The official repository does not currently
+accept external pull requests and does not mandate a community repository
+template. See the official
+<a href="https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer"><code>CONTRIBUTING.md</code></a>.</p>
+<h2>License</h2>
+<p>MIT. <code>preset/agent.cordis.yml</code> is derived from the DeepSeek Harness Standard
+preset; the original DeepSeek copyright and MIT notice are retained in
+<a href="https://github.com/xiaobright/dsh-anchored-standard/blob/HEAD/NOTICE" target="_blank" rel="noopener noreferrer"><code>NOTICE</code></a>.</p>

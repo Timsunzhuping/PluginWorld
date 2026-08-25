@@ -1,0 +1,650 @@
+<h1>AnkiMCP Server (Addon)</h1>
+
+  <img src="https://raw.githubusercontent.com/ankimcp/anki-mcp-server-addon/HEAD/docs/images/ankimcp.png" alt="Anki + MCP Integration" width="600" />  <p><strong>Seamlessly integrate <a href="https://apps.ankiweb.net" target="_blank" rel="noopener noreferrer">Anki</a> with AI assistants through the <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">Model Context Protocol</a></strong></p>
+<p>An Anki addon that exposes your collection to AI assistants via the <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener noreferrer">Model Context Protocol (MCP)</a>.</p>
+<h2>What is this?</h2>
+<p>AnkiMCP Server runs a local MCP server inside Anki, allowing AI assistants like Claude to interact with your flashcard collection. This enables AI-powered study sessions, card creation, and collection management.</p>
+<p>Part of the <a href="https://ankimcp.ai" target="_blank" rel="noopener noreferrer">ankimcp.ai</a> project.</p>
+<h2>Note on First Run</h2>
+<p>On first run, this addon downloads <code>pydantic_core</code> (~2MB) from PyPI. This is required because pydantic_core contains platform-specific binaries (Windows/macOS/Linux) that cannot be bundled in a single addon file.</p>
+<p>A second native dependency, <code>rpds</code> (from <code>rpds-py</code>), is handled the same way — but it is almost never downloaded: Anki already ships <code>rpds</code> as a transitive dependency of its own <code>jsonschema</code>, so the addon just imports it. The download only kicks in on the rare install where that import fails. Both downloads are cached under the addon's <code>_cache/</code> directory, so they happen once, not on every launch.</p>
+<h2>Features</h2>
+<ul>
+<li><strong>Local HTTP server</strong> - Runs on <code>http://127.0.0.1:3141/</code> by default</li>
+<li><strong>Remote tunnel</strong> - Access your collection from anywhere via a public HTTPS URL</li>
+<li><strong>MCP protocol</strong> - Compatible with any MCP client (Claude Desktop, etc.)</li>
+<li><strong>Auto-start</strong> - HTTP server starts automatically when Anki opens</li>
+<li><strong>Tunnel-friendly</strong> - Works with Cloudflare Tunnel, ngrok, or the built-in tunnel (exposing the HTTP server this way also requires extending the <a href="#allowed-hosts-and-origins-dns-rebinding-protection" target="_blank" rel="noopener noreferrer">allowed hosts/origins</a>)</li>
+<li><strong>DNS-rebinding protection</strong> - The HTTP server validates <code>Host</code>/<code>Origin</code> headers against a loopback allowlist by default; <a href="#allowed-hosts-and-origins-dns-rebinding-protection" target="_blank" rel="noopener noreferrer">extend it</a> for tunnel/reverse-proxy exposure</li>
+<li><strong>Optional API key</strong> - Require an <code>Authorization: Bearer</code> token on the HTTP transport via <a href="#api-key-optional-http-auth" target="_blank" rel="noopener noreferrer"><code>http_api_key</code></a> (AnkiConnect-style; empty = disabled)</li>
+<li><strong>Toolbar indicator</strong> - A <code>● AnkiMCP</code> item in the top toolbar shows tunnel connection state at a glance (opt out via <code>show_toolbar_indicator</code>)</li>
+<li><strong>Diagnostic logging</strong> - Opt-in <a href="#diagnostic-file-logging" target="_blank" rel="noopener noreferrer"><code>log_to_file</code></a> writes a rotating, secret-redacted log to <code>user_files/ankimcp.log</code>, with <strong>Open log folder</strong> / <strong>Copy diagnostics</strong> buttons in settings</li>
+<li><strong>Field management</strong> - Add, rename, and reposition note-type fields via the <code>model_fields</code> tool (with an opt-in <a href="#destructive-tools-opt-in" target="_blank" rel="noopener noreferrer">destructive</a> remove)</li>
+<li><strong>Bulk card stats</strong> - The read-only <code>cards_stats</code> tool returns compact per-card scheduling metrics (type/queue/interval/tags/<code>dueToday</code>) for a whole deck including subdecks, FSRS-independent — a lean bulk read for analytics</li>
+<li><strong>Cross-platform</strong> - Works on macOS, Windows, and Linux (x64 and ARM)</li>
+</ul>
+<h2>Installation</h2>
+<h3>From AnkiWeb (recommended)</h3>
+<ol>
+<li>Open Anki and go to <em>Tools → Add-ons → Get Add-ons...</em></li>
+<li>Enter code: <code>124672614</code></li>
+<li>Restart Anki</li>
+</ol>
+<h3>From GitHub Releases</h3>
+<ol>
+<li>Download <code>anki_mcp_server.ankiaddon</code> from <a href="https://github.com/ankimcp/anki-mcp-server-addon/releases" target="_blank" rel="noopener noreferrer">Releases</a></li>
+<li>Double-click to install, or use <em>Tools → Add-ons → Install from file...</em></li>
+<li>Restart Anki</li>
+</ol>
+<h3>NixOS</h3>
+<h4>With flakes (recommended)</h4>
+<p>Add the flake input and use the pre-built package:</p>
+<pre><code class="language-nix"># flake.nix
+{
+  inputs.anki-mcp.url = "github:ankimcp/anki-mcp-server-addon";
+
+  outputs = { nixpkgs, anki-mcp, ... }: {
+    # Option A: Standalone — Anki with the addon pre-installed
+    environment.systemPackages = [
+      anki-mcp.packages.${system}.default
+    ];
+
+    # Option B: Composable with other addons via overlay
+    nixpkgs.overlays = [ anki-mcp.overlays.default ];
+    environment.systemPackages = [
+      (pkgs.anki.withAddons [ pkgs.ankiAddons.anki-mcp-server ])
+    ];
+  };
+}
+</code></pre>
+<h4>Without flakes</h4>
+<pre><code class="language-nix"># configuration.nix
+{ pkgs, ... }:
+let
+  python3 = pkgs.python3;
+
+  ankiMcpPythonDeps = python3.withPackages (ps: with ps; [
+    mcp pydantic pydantic-settings starlette uvicorn anyio httpx websockets
+  ]);
+
+  anki-mcp-server = pkgs.anki-utils.buildAnkiAddon (finalAttrs: {
+    pname = "anki-mcp-server";
+    version = "0.20.0";
+    src = pkgs.fetchFromGitHub {
+      owner = "ankimcp";
+      repo = "anki-mcp-server-addon";
+      rev = "v${finalAttrs.version}";
+      hash = ""; # nix will tell you the correct hash on first build
+    };
+    sourceRoot = "${finalAttrs.src.name}/anki_mcp_server";
+  });
+
+  ankiWithMcp = pkgs.anki.withAddons [ anki-mcp-server ];
+
+  ankiWrapped = pkgs.symlinkJoin {
+    name = "anki-with-mcp";
+    paths = [ ankiWithMcp ];
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+    postBuild = ''
+      wrapProgram $out/bin/anki \
+        --prefix PYTHONPATH ':' "${ankiMcpPythonDeps}/${python3.sitePackages}"
+    '';
+  };
+in
+{
+  environment.systemPackages = [ ankiWrapped ];
+}
+</code></pre>
+<h2>Usage</h2>
+<p>The server starts automatically when you open Anki. Check status via <em>Tools → AnkiMCP Server Settings...</em></p>
+<h3>Connect with Claude Desktop</h3>
+<p>Requires <a href="https://nodejs.org/" target="_blank" rel="noopener noreferrer">Node.js</a> installed. Add to your Claude Desktop config (<code>~/Library/Application Support/Claude/claude_desktop_config.json</code> on macOS):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "anki": {
+      "command": "npx",
+      "args": ["mcp-remote", "http://127.0.0.1:3141"]
+    }
+  }
+}
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> Claude Desktop doesn't natively support HTTP servers in its JSON config — <code>mcp-remote</code> bridges the connection via stdio.</p>
+</blockquote>
+<h3>Connect with Claude Code</h3>
+<pre><code class="language-bash">claude mcp add anki --transport http http://127.0.0.1:3141/
+</code></pre>
+<h3>Opencode</h3>
+<pre><code class="language-bash">opencode mcp add anki --url http://127.0.0.1:3141/
+</code></pre>
+<h3>Tunnel (Remote Access)</h3>
+<p>The built-in tunnel gives your Anki collection a public HTTPS URL, so AI assistants can reach it from anywhere — no port forwarding or reverse proxy needed. The collection is relayed through a WebSocket tunnel server (<code>wss://tunnel.ankimcp.ai</code> by default). Requires an <a href="https://ankimcp.ai" target="_blank" rel="noopener noreferrer">ankimcp.ai</a> account to log in.</p>
+<p><strong>How to connect:</strong></p>
+<ol>
+<li>Open <em>Tools -&gt; AnkiMCP Server Settings...</em></li>
+<li>Click <strong>Connect Tunnel</strong></li>
+<li>If not logged in, a login dialog appears — it shows a one-time code; click <strong>Open Browser</strong> and enter that code at the verification URL (OAuth 2.0 device flow)</li>
+<li>Once connected, a public tunnel URL is displayed (e.g., <code>https://tunnel.ankimcp.ai/e3439277-9d1e-47a1-b961-d193a4590da0</code>)</li>
+<li>Use this URL in your AI client instead of <code>http://127.0.0.1:3141</code></li>
+</ol>
+<p><strong>Using with Claude Desktop:</strong></p>
+<p>Replace the localhost URL with your tunnel URL in the Claude Desktop config:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "anki": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://tunnel.ankimcp.ai/&lt;your-tunnel-id&gt;"]
+    }
+  }
+}
+</code></pre>
+<p><strong>Using with Claude Code:</strong></p>
+<pre><code class="language-bash">claude mcp add anki --transport http https://tunnel.ankimcp.ai/&lt;your-tunnel-id&gt;
+</code></pre>
+<p><strong>Disconnect vs. Logout:</strong></p>
+<ul>
+<li><strong>Disconnect</strong> closes the tunnel connection. Credentials stay on disk — next Connect reconnects without re-login.</li>
+<li><strong>Logout</strong> deletes credentials. Next Connect triggers the login dialog again.</li>
+</ul>
+<p><strong>Tunnel config fields</strong> (for advanced users / self-hosters):</p>
+<ul>
+<li><code>tunnel_server_url</code> — WebSocket URL of the tunnel relay server (default: <code>wss://tunnel.ankimcp.ai</code>)</li>
+<li><code>tunnel_client_id</code> — OAuth client identifier (default: <code>ankimcp-cli</code>)</li>
+</ul>
+<p>Credentials are stored in the addon's own <code>user_files/credentials.json</code> (preserved across addon updates). They are not shared with the <a href="https://github.com/ankimcp/anki-mcp-cli" target="_blank" rel="noopener noreferrer">AnkiMCP CLI</a> — the CLI keeps its own credentials under <code>~/.ankimcp/</code>, so you log in to the addon and the CLI independently. The on-disk format is identical between the two.</p>
+<h2>Configuration</h2>
+<p>Edit via Anki's <em>Tools → Add-ons → AnkiMCP Server → Config</em>:</p>
+<pre><code class="language-json">{
+  "http_enabled": true,
+  "http_port": 3141,
+  "http_host": "127.0.0.1",
+  "http_path": "",
+  "http_allowed_hosts": [],
+  "http_allowed_origins": [],
+  "http_api_key": "",
+  "cors_origins": [],
+  "cors_expose_headers": ["mcp-protocol-version"],
+  "disabled_tools": [],
+  "enabled_destructive_tools": [],
+  "max_notes_per_batch": 100,
+  "tunnel_server_url": "wss://tunnel.ankimcp.ai",
+  "tunnel_client_id": "ankimcp-cli",
+  "media_import_dir": "",
+  "media_allowed_types": [],
+  "media_allowed_hosts": [],
+  "show_settings_menu_item": true,
+  "show_toolbar_indicator": true,
+  "show_sync_tooltip": true,
+  "log_to_file": false
+}
+</code></pre>
+<h3>HTTP Server Toggle</h3>
+<p>The <code>http_enabled</code> setting controls whether the local HTTP server runs. When set to <code>false</code>, the HTTP server won't start — only the tunnel transport is available. Default is <code>true</code>.</p>
+<pre><code class="language-json">{
+  "http_enabled": false
+}
+</code></pre>
+<p>This is useful if you only use the tunnel and don't want a local HTTP server listening.</p>
+<h3>Tools Menu Item</h3>
+<p>The <em>AnkiMCP Server Settings…</em> entry in Anki's <em>Tools</em> menu is shown by default. Set <code>show_settings_menu_item</code> to <code>false</code> to hide it (takes effect after an Anki restart).</p>
+<pre><code class="language-json">{
+  "show_settings_menu_item": false
+}
+</code></pre>
+<p>Note: if you hide the menu item <strong>and</strong> the toolbar indicator, there's no in-app way left to open the settings dialog — you can still edit the config via <em>Tools → Add-ons → AnkiMCP Server → Config</em>.</p>
+<h3>Toolbar Status Indicator</h3>
+<p>A persistent <code>● AnkiMCP</code> item in Anki's top toolbar shows tunnel connection state (grey = off, amber = connecting, green = connected); clicking it opens the settings dialog. It's shown by default. Set <code>show_toolbar_indicator</code> to <code>false</code> to hide it (takes effect after an Anki restart).</p>
+<pre><code class="language-json">{
+  "show_toolbar_indicator": false
+}
+</code></pre>
+<h3>Sync Tooltip</h3>
+<p>When an AI client triggers a sync, the addon shows a brief, non-modal tooltip in Anki's UI as the sync starts and finishes (e.g. <code>AnkiMCP: syncing…</code>, <code>AnkiMCP: sync complete</code>). This is the only visual cue for these otherwise-silent background syncs. It's shown by default. Set <code>show_sync_tooltip</code> to <code>false</code> to suppress it.</p>
+<pre><code class="language-json">{
+  "show_sync_tooltip": false
+}
+</code></pre>
+<h3>Diagnostic File Logging</h3>
+<p>Set <code>log_to_file</code> to <code>true</code> to write a rotating log to <code>user_files/ankimcp.log</code> (~1 MB per file, 3 backups). It's <strong>off by default</strong>. When enabled, the addon records a startup diagnostics snapshot (addon/Anki/Qt/Python versions plus the live provenance of shared libraries like <code>pydantic</code>, <code>mcp</code>, <code>protobuf</code>, etc.), which is the key data for diagnosing cross-add-on conflicts. Secrets — the <code>http_api_key</code>, OAuth tokens, and any <code>Bearer</code> token — are <strong>redacted</strong> before anything is written to disk.</p>
+<pre><code class="language-json">{
+  "log_to_file": true
+}
+</code></pre>
+<p>The settings dialog (<em>Tools → AnkiMCP Server Settings…</em>) has an <strong>Open log folder</strong> button and a <strong>Copy diagnostics</strong> button (the same snapshot, formatted for pasting into a forum post). Takes effect after an Anki restart.</p>
+<h3>Disabling Tools</h3>
+<p>Hide specific tools or actions from AI clients to reduce token usage:</p>
+<pre><code class="language-json">{
+  "disabled_tools": [
+    "sync",
+    "card_management:bury",
+    "card_management:unbury"
+  ]
+}
+</code></pre>
+<ul>
+<li><code>"tool_name"</code> — disables the entire tool</li>
+<li><code>"tool_name:action"</code> — disables a specific action within a multi-action tool</li>
+</ul>
+<p>Disabled tools are removed from the MCP schema entirely — AI clients never see them. Typos in tool/action names will produce console warnings.</p>
+<h3>Destructive Tools (Opt-In)</h3>
+<p>Tools or actions classified as destructive (high-risk operations) are <strong>hidden from AI clients by default</strong>. To expose them, add them to the <code>enabled_destructive_tools</code> allow-list:</p>
+<pre><code class="language-json">{
+  "enabled_destructive_tools": [
+    "some_destructive_tool",
+    "some_tool:destructive_action"
+  ]
+}
+</code></pre>
+<ul>
+<li><code>"tool_name"</code> — opts in an entire destructive tool</li>
+<li><code>"tool_name:action"</code> — opts in a destructive action within a multi-action tool (a whole-tool entry does not implicitly opt in its destructive actions)</li>
+<li><code>disabled_tools</code> still applies on top — an opted-in tool can still be disabled</li>
+<li>Entries that don't match anything, or match a non-destructive tool/action, produce console warnings</li>
+</ul>
+<p>This is server-side enforcement: until opted in, destructive tools are absent from the MCP schema, so even a misbehaving client cannot call them. Currently shipped destructive entries: <code>change_note_type</code> (whole tool — rewrites every selected note's field layout) and <code>model_fields:remove</code> (action — permanently deletes a field and its content on every note of the type).</p>
+<h3>Custom Path</h3>
+<p>Set <code>http_path</code> to serve the MCP endpoint under a custom path. Useful when exposing Anki via a tunnel (Cloudflare, ngrok) to avoid a fully open endpoint:</p>
+<pre><code class="language-json">{
+  "http_path": "my-secret-path"
+}
+</code></pre>
+<p>The server will be accessible at <code>http://localhost:3141/my-secret-path/</code> instead of the root. Leave empty for default behavior.</p>
+<blockquote>
+<p><strong>Note:</strong> A custom path alone is not enough to expose the HTTP server through a tunnel or reverse proxy. You must also populate <code>http_allowed_hosts</code>/<code>http_allowed_origins</code>, or requests are rejected (<code>421</code> for a non-loopback <code>Host</code>, <code>403</code> for a non-loopback <code>Origin</code>) — see <a href="#allowed-hosts-and-origins-dns-rebinding-protection" target="_blank" rel="noopener noreferrer">Allowed Hosts and Origins (DNS-Rebinding Protection)</a>.</p>
+</blockquote>
+<h2>Security</h2>
+<p>The local HTTP server accepts requests only from loopback <code>Host</code>/<code>Origin</code> values by default, so <strong>ordinary local use needs no setup</strong> — localhost clients work out of the box. The sections below cover the available hardening layers (DNS-rebinding allowlist, optional API key, CORS, and media-import validation) for when you expose the server beyond your machine.</p>
+<p><strong>Upgrading from ≤ 0.20.0:</strong> if you reach the server through a tunnel, reverse proxy, or by binding to <code>0.0.0.0</code>, requests now arrive with a non-loopback <code>Host</code> and are rejected with <code>421</code> until you allowlist that host — see <a href="#allowed-hosts-and-origins-dns-rebinding-protection" target="_blank" rel="noopener noreferrer">Allowed Hosts and Origins (DNS-Rebinding Protection)</a>. (Browser clients additionally need their <code>Origin</code> allowlisted, otherwise <code>403</code>.) Plain localhost setups are unaffected.</p>
+<h3>Allowed Hosts and Origins (DNS-Rebinding Protection)</h3>
+<p>The HTTP server enables DNS-rebinding protection with a built-in loopback allowlist (copied verbatim from the MCP SDK's own default):</p>
+<ul>
+<li>Hosts: <code>127.0.0.1:*</code>, <code>localhost:*</code>, <code>[::1]:*</code></li>
+<li>Origins: <code>http://127.0.0.1:*</code>, <code>http://localhost:*</code>, <code>http://[::1]:*</code></li>
+</ul>
+<p>Ordinary localhost clients therefore work out of the box. Two details of these defaults are worth knowing:</p>
+<ul>
+<li>The <code>:*</code> patterns match a <strong>host with a port</strong> (<code>localhost:3141</code> ✓). A port-less <code>Host</code> header — which browsers and clients send only when the server runs on port 80 — does not match, so a non-default <code>"http_port": 80</code> needs <code>"localhost"</code>/<code>"127.0.0.1"</code> added to <code>http_allowed_hosts</code> explicitly.</li>
+<li>The default origins are <strong><code>http://</code>-only</strong>. An <code>https://localhost</code> origin is not covered and must be added to <code>http_allowed_origins</code>. (Requests with no <code>Origin</code> header at all — the normal case for non-browser MCP clients — always pass.)</li>
+</ul>
+<p>If you expose the HTTP server through a tunnel or reverse proxy (e.g. ngrok, Cloudflare), requests arrive with a non-loopback <code>Host</code> (rejected with <code>421</code>) — and, for browser clients, a non-loopback <code>Origin</code> (rejected with <code>403</code>) — unless you extend the allowlist:</p>
+<pre><code class="language-json">{
+  "http_allowed_hosts": ["myapp.ngrok.io", "myapp.ngrok.io:443"],
+  "http_allowed_origins": ["https://myapp.example"]
+}
+</code></pre>
+<ul>
+<li><code>http_allowed_hosts</code> — <code>Host</code>-header values <strong>without</strong> a scheme (e.g. <code>"myapp.ngrok.io"</code> or <code>"myapp.ngrok.io:443"</code>)</li>
+<li><code>http_allowed_origins</code> — full origins <strong>with</strong> a scheme (e.g. <code>"https://myapp.example"</code>)</li>
+</ul>
+<p>Both lists are appended to the built-in loopback defaults (the defaults are not replaced). Changing these requires an Anki restart, consistent with the other <code>http_*</code> settings.</p>
+<blockquote>
+<p>DNS-rebinding vulnerability reported by <a href="https://github.com/avishaigo-commits" target="_blank" rel="noopener noreferrer">avishaigo-commits</a>.</p>
+</blockquote>
+<h3>API Key (Optional HTTP Auth)</h3>
+<p><code>http_api_key</code> adds an optional shared-secret auth layer on top of the HTTP transport (AnkiConnect-style). It is <strong>empty by default</strong>, which disables the layer and leaves the default behavior unchanged. When set to a non-empty value, <strong>every</strong> HTTP request must send an <code>Authorization: Bearer &lt;key&gt;</code> header matching that value, or it is rejected with <code>403</code>:</p>
+<pre><code class="language-json">{
+  "http_api_key": "a-long-random-secret-key"
+}
+</code></pre>
+<p>Configure your client to send the header. With Claude Code:</p>
+<pre><code class="language-bash">claude mcp add anki --transport http http://127.0.0.1:3141/ --header "Authorization: Bearer a-long-random-secret-key"
+</code></pre>
+<p>With <code>mcp-remote</code> (e.g. Claude Desktop):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "anki": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "http://127.0.0.1:3141",
+        "--header",
+        "Authorization: Bearer a-long-random-secret-key"
+      ]
+    }
+  }
+}
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li><strong>HTTP-only.</strong> The key applies only to the local HTTP transport. The tunnel does its own OAuth login and is unaffected by <code>http_api_key</code>.</li>
+<li><strong>Complementary, not a replacement.</strong> It sits alongside DNS-rebinding protection (Allowed Hosts and Origins) — it does not replace it. Both layers apply independently.</li>
+<li><strong>Pairs naturally with <code>http_path</code> + <code>http_allowed_hosts</code></strong> when exposing the HTTP server through a tunnel or reverse proxy: a secret path obscures the endpoint, the allowlist permits the proxy host, and the API key authenticates each request.</li>
+<li>Use a long, random key (at least 16 characters). Leading/trailing whitespace is stripped from the presented token, so a configured key with surrounding whitespace will never match.</li>
+<li>Changing this requires an Anki restart, consistent with the other <code>http_*</code> settings.</li>
+</ul>
+<h3>CORS Configuration</h3>
+<p>To allow browser-based MCP clients (like web-hosted MCP Inspector), add allowed origins:</p>
+<pre><code class="language-json">{
+  "cors_origins": ["https://inspector.example.com", "http://localhost:5173"]
+}
+</code></pre>
+<p>Use <code>["*"]</code> to allow all origins (not recommended for production).</p>
+<blockquote>
+<p><strong>Note:</strong> A browser origin allowed via <code>cors_origins</code> must <strong>also</strong> be added to <code>http_allowed_origins</code>. CORS and the DNS-rebinding allowlist are separate layers: even with CORS configured, a non-loopback <code>Origin</code> is rejected with <code>403</code> by DNS-rebinding protection unless it is in <code>http_allowed_origins</code>.</p>
+</blockquote>
+<p>The <code>cors_expose_headers</code> setting controls which response headers browsers can read. The default (<code>mcp-protocol-version</code>) lets browser-based MCP clients negotiate the protocol version. Since v0.16.0 the server runs in stateless mode, so <code>mcp-session-id</code> is no longer emitted and no longer needs to be exposed.</p>
+<h3>Media Security</h3>
+<blockquote>
+<p>Thanks to <strong><a href="https://github.com/Koukyosyumei" target="_blank" rel="noopener noreferrer">Hideaki Takahashi</a></strong> (Columbia University) for responsibly disclosing the media path traversal vulnerability.</p>
+</blockquote>
+<p>The <code>store_media_file</code> tool validates all inputs to prevent path traversal and SSRF attacks:</p>
+<ul>
+<li><strong>File paths</strong> are restricted to media files only (images, audio, video) via MIME type checking</li>
+<li><strong>URLs</strong> must use <code>http://</code> or <code>https://</code> and cannot target private/internal networks</li>
+<li><strong>Filenames</strong> are sanitized to remove path traversal sequences</li>
+</ul>
+<p>Optional hardening via config:</p>
+<pre><code class="language-json">{
+  "media_import_dir": "/Users/me/anki-media",
+  "media_allowed_types": ["application/pdf"],
+  "media_allowed_hosts": ["192.168.1.50", "my-nas.local"]
+}
+</code></pre>
+<ul>
+<li><code>media_import_dir</code> — restrict file path imports to this directory tree (empty = no restriction)</li>
+<li><code>media_allowed_types</code> — allow additional MIME types beyond image/audio/video</li>
+<li><code>media_allowed_hosts</code> — allow specific hosts to bypass private network blocking</li>
+</ul>
+<h2>Available Tools</h2>
+<h3>Essential Tools</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sync</code></td>
+<td>Synchronize collection with AnkiWeb (asynchronous job: <code>sync()</code> starts a sync, <code>sync(job_id)</code> polls its status, <code>sync(job_id, resolve=...)</code> resolves a full-sync conflict)</td>
+</tr>
+<tr>
+<td><code>list_decks</code></td>
+<td>List all decks in the collection</td>
+</tr>
+<tr>
+<td><code>create_deck</code></td>
+<td>Create a new deck</td>
+</tr>
+<tr>
+<td><code>find_notes</code></td>
+<td>Search for notes using Anki's search syntax. <code>include_first_field=true</code> adds a <code>noteLabels</code> array (<code>{noteId, firstField, truncated, fullLength}</code>) so you can search and label notes in one call</td>
+</tr>
+<tr>
+<td><code>notes_info</code></td>
+<td>Get detailed information about notes. <code>excerpt_chars</code> caps every field value at that many characters, marking each with <code>truncated</code>/<code>fullLength</code> — a cheap way to survey many notes</td>
+</tr>
+<tr>
+<td><code>add_note</code></td>
+<td>Add a new note to a deck</td>
+</tr>
+<tr>
+<td><code>add_notes</code></td>
+<td>Batch-add up to <code>max_notes_per_batch</code> notes (default 100) sharing the same deck and model. Uses Anki's native batch API for atomic undo. Supports partial success — individual failures don't affect others</td>
+</tr>
+<tr>
+<td><code>card_management</code></td>
+<td>Manage cards with 9 actions: <code>reposition</code> (set learning order), <code>change_deck</code> (move between decks), <code>bury</code>/<code>unbury</code> (hide until tomorrow), <code>suspend</code>/<code>unsuspend</code> (indefinitely exclude from review), <code>set_flag</code> (color flags 0-7), <code>set_due_date</code> (reschedule with days DSL), <code>forget_cards</code> (reset to new)</td>
+</tr>
+<tr>
+<td><code>tag_management</code></td>
+<td>Manage tags with 6 actions: <code>add_tags</code>/<code>remove_tags</code> (bulk add/remove on notes), <code>replace_tags</code> (swap one tag for another), <code>get_tags</code> (list all, or scoped to a deck via the optional <code>deck</code> param — distinct tags on notes with a card in that deck, subdecks included), <code>clear_unused_tags</code> (remove orphans), <code>batch_tags</code> (apply multiple add/remove operations in one call, partial success)</td>
+</tr>
+<tr>
+<td><code>filtered_deck</code></td>
+<td>Filtered deck lifecycle with 5 actions: <code>create_or_update</code> (create or modify a filtered deck from 1-2 search terms — Anki's hard limit), <code>rebuild</code> (repopulate), <code>empty</code> (return cards to home decks), <code>delete</code> (return cards, then remove the deck), <code>get_info</code> (read-only inspection of up to 50 deck IDs per call — returns search terms, limit, order, reschedule flag and card count; non-filtered decks come back with <code>is_filtered=false</code>, unknown IDs are skipped and counted in <code>not_found</code>)</td>
+</tr>
+<tr>
+<td><code>update_note_fields</code></td>
+<td>Update fields of existing notes. Two modes: full replace, or patch via <code>old_str</code>/<code>new_str</code> (find-and-replace within a field; must match exactly once or nothing is written)</td>
+</tr>
+<tr>
+<td><code>update_notes</code></td>
+<td>Batch-update fields of multiple notes in one atomic undo step (single backend call). Validates every entry first; supports partial success up to <code>max_notes_per_batch</code></td>
+</tr>
+<tr>
+<td><code>delete_notes</code></td>
+<td>Delete notes from the collection</td>
+</tr>
+<tr>
+<td><code>get_due_cards</code></td>
+<td>Get next due card for review (supports <code>skip_images</code>/<code>skip_audio</code> for voice mode)</td>
+</tr>
+<tr>
+<td><code>cards_stats</code></td>
+<td>Bulk per-card scheduling stats for a deck (incl. subdecks): type/queue/interval/tags/dueToday, paginated. FSRS-independent, compact payload for analytics</td>
+</tr>
+<tr>
+<td><code>present_card</code></td>
+<td>Get card content for review</td>
+</tr>
+<tr>
+<td><code>rate_card</code></td>
+<td>Rate a card after review (Again/Hard/Good/Easy)</td>
+</tr>
+<tr>
+<td><code>model_names</code></td>
+<td>List available note types</td>
+</tr>
+<tr>
+<td><code>model_field_names</code></td>
+<td>Get field names and descriptions for a note type</td>
+</tr>
+<tr>
+<td><code>model_styling</code></td>
+<td>Get CSS styling for a note type. <code>include_latex=true</code> also returns the LaTeX preamble (<code>latex_pre</code>, <code>latex_post</code>, <code>latex_svg</code>)</td>
+</tr>
+<tr>
+<td><code>update_model_styling</code></td>
+<td>Update CSS styling for a note type — full replace, or patch via <code>old_str</code>/<code>new_str</code> (must match exactly once). Can also write the LaTeX preamble (<code>latex_pre</code>/<code>latex_post</code>/<code>latex_svg</code>)</td>
+</tr>
+<tr>
+<td><code>model_templates</code></td>
+<td>Read the Front/Back HTML templates for each card type in a note type</td>
+</tr>
+<tr>
+<td><code>update_model_templates</code></td>
+<td>Update Front/Back template HTML — full replace, or patch via <code>old_str</code>/<code>new_str</code> (must match exactly once). Rejects unrecognized keys (case-sensitive) and unknown template names up front, applying all edits atomically — a failed call leaves the model unchanged</td>
+</tr>
+<tr>
+<td><code>model_fields</code></td>
+<td>Manage fields on an existing note type: <code>add</code> (optionally at a 0-based index), <code>rename</code> (preserves content; card templates are <strong>not</strong> auto-updated), <code>reposition</code> (reorder). A <code>remove</code> action also exists but is <a href="#destructive-tools-opt-in" target="_blank" rel="noopener noreferrer">destructive</a> — hidden unless opted in via <code>enabled_destructive_tools</code>. <code>add</code>, <code>remove</code> and <code>reposition</code> change field ordinals and force a one-way full sync; a pure <code>rename</code> does not. Every result carries <code>will_force_full_sync</code>, the collection's actual (sticky, collection-wide) state after the write</td>
+</tr>
+<tr>
+<td><code>create_model</code></td>
+<td>Create a new note type</td>
+</tr>
+<tr>
+<td><code>change_note_type</code></td>
+<td>Move existing notes to a different note type, remapping fields by name (<code>{old field: new field or null}</code>). <a href="#destructive-tools-opt-in" target="_blank" rel="noopener noreferrer">Destructive</a> — hidden unless opted in via <code>enabled_destructive_tools</code>. Two-step flow: <code>dry_run=true</code> returns the resolved plan (mapping, dropped fields, cards removed), then the same call with <code>dry_run=false</code> <strong>and</strong> <code>confirm=true</code> applies it. All notes must share one source note type</td>
+</tr>
+<tr>
+<td><code>store_media_file</code></td>
+<td>Store a media file (image/audio) via base64, file path, or URL. File paths are validated against a media-type allowlist; URLs are checked for SSRF</td>
+</tr>
+<tr>
+<td><code>get_media_files_names</code></td>
+<td>List media files matching a pattern</td>
+</tr>
+<tr>
+<td><code>delete_media_file</code></td>
+<td>Move a media file to Anki's trash (recoverable via Check Media)</td>
+</tr>
+</tbody></table>
+<h3>FSRS Tools</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>get_fsrs_params</code></td>
+<td>Get FSRS scheduler parameters for deck presets</td>
+</tr>
+<tr>
+<td><code>set_fsrs_params</code></td>
+<td>Update FSRS parameters (weights, desired retention, max interval)</td>
+</tr>
+<tr>
+<td><code>get_card_memory_state</code></td>
+<td>Get FSRS memory state (stability, difficulty, retrievability) for cards</td>
+</tr>
+<tr>
+<td><code>optimize_fsrs_params</code></td>
+<td>Run FSRS parameter optimization using Anki's built-in optimizer</td>
+</tr>
+</tbody></table>
+<h3>GUI Tools</h3>
+<p>These tools interact with Anki's user interface:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>gui_browse</code></td>
+<td>Open the card browser with a search query</td>
+</tr>
+<tr>
+<td><code>gui_add_cards</code></td>
+<td>Open the Add Cards dialog</td>
+</tr>
+<tr>
+<td><code>gui_edit_note</code></td>
+<td>Open the note editor for a specific note</td>
+</tr>
+<tr>
+<td><code>gui_current_card</code></td>
+<td>Get info about the currently displayed card</td>
+</tr>
+<tr>
+<td><code>gui_show_question</code></td>
+<td>Show the question side of current card</td>
+</tr>
+<tr>
+<td><code>gui_show_answer</code></td>
+<td>Show the answer side of current card</td>
+</tr>
+<tr>
+<td><code>gui_select_card</code></td>
+<td>Select a specific card in the reviewer</td>
+</tr>
+<tr>
+<td><code>gui_deck_browser</code></td>
+<td>Navigate to deck browser</td>
+</tr>
+<tr>
+<td><code>gui_undo</code></td>
+<td>Undo the last operation</td>
+</tr>
+</tbody></table>
+<h3>Resources</h3>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>URI</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>system_info</code></td>
+<td><code>anki://system-info</code></td>
+<td>Anki version, profile, and scheduler info</td>
+</tr>
+<tr>
+<td><code>query_syntax</code></td>
+<td><code>anki://query-syntax</code></td>
+<td>Anki search query syntax reference</td>
+</tr>
+<tr>
+<td><code>schema</code></td>
+<td><code>anki://schema</code></td>
+<td>Data model documentation (entities, fields, relationships)</td>
+</tr>
+<tr>
+<td><code>stats_today</code></td>
+<td><code>anki://stats/today</code></td>
+<td>Today's study statistics</td>
+</tr>
+<tr>
+<td><code>stats_forecast</code></td>
+<td><code>anki://stats/forecast</code></td>
+<td>30-day review forecast</td>
+</tr>
+<tr>
+<td><code>stats_collection</code></td>
+<td><code>anki://stats/collection</code></td>
+<td>Overall collection statistics</td>
+</tr>
+<tr>
+<td><code>fsrs_config</code></td>
+<td><code>anki://fsrs/config</code></td>
+<td>FSRS configuration summary and parameters</td>
+</tr>
+</tbody></table>
+<h3>Prompts</h3>
+<table>
+<thead>
+<tr>
+<th>Prompt</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>review_session</code></td>
+<td>Guided review session workflow. Args: <code>deck_name</code> (default <code>Default</code>), <code>card_limit</code> (default 20), <code>review_style</code> — <code>interactive</code>, <code>quick</code>, or <code>voice</code></td>
+</tr>
+<tr>
+<td><code>twenty_rules</code></td>
+<td>Dr. Piotr Woźniak's <em>Twenty Rules of Formulating Knowledge</em> (SuperMemo), as card-authoring guidance for the assistant. No arguments</td>
+</tr>
+</tbody></table>
+<h2>Requirements</h2>
+<ul>
+<li><strong>Anki 25.07 or later</strong> (ships Python 3.13)</li>
+<li>Anki 25.02 and earlier ship Python 3.9, which is <strong>not supported</strong> — the MCP SDK requires Python 3.10+ (<a href="https://github.com/ankimcp/anki-mcp-server-addon/issues/8" target="_blank" rel="noopener noreferrer">#8</a>)</li>
+</ul>
+<h2>Architecture</h2>
+<p>The addon runs an MCP server in a background thread with two independent transports: local HTTP (FastMCP + uvicorn) and remote tunnel (WebSocket relay with in-memory transport). Both share the same FastMCP server instance. All Anki operations are bridged to the main Qt thread via a queue system, following the same proven pattern as AnkiConnect.</p>
+<p>For details, see <a href="https://addon-docs.ankiweb.net/" target="_blank" rel="noopener noreferrer">Anki Add-on Development Documentation</a>.</p>
+<h2>Development</h2>
+<h3>Running E2E Tests</h3>
+<p>E2E tests run against a real Anki instance in Docker using <a href="https://github.com/ankimcp/headless-anki" target="_blank" rel="noopener noreferrer">headless-anki</a>.</p>
+<pre><code class="language-bash"># Install test dependencies
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+
+# Build the addon
+./package.sh
+
+# Start Anki container
+cd .docker &amp;&amp; docker compose up -d &amp;&amp; cd ..
+
+# Run tests (waits for server automatically)
+pytest tests/e2e/ -v
+
+# Stop container
+cd .docker &amp;&amp; docker compose down
+</code></pre>
+<p>Or use the Makefile shortcuts:</p>
+<pre><code class="language-bash">make e2e        # Build, start container, run tests, stop
+make e2e-up     # Just start container
+make e2e-test   # Just run tests
+make e2e-down   # Just stop container
+</code></pre>
+<h3>CI</h3>
+<p>E2E tests run automatically on push to any branch and on PRs to <code>main</code>. See <code>.github/workflows/e2e.yml</code>.</p>
+<h2>License</h2>
+<p>AGPL-3.0-or-later</p>
+<h2>Links</h2>
+<ul>
+<li><a href="https://ankimcp.ai" target="_blank" rel="noopener noreferrer">ankimcp.ai</a> - Project homepage</li>
+<li><a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener noreferrer">MCP Protocol</a> - Model Context Protocol specification</li>
+<li><a href="https://addon-docs.ankiweb.net/" target="_blank" rel="noopener noreferrer">Anki Add-on Docs</a> - Official Anki addon development documentation</li>
+</ul>
