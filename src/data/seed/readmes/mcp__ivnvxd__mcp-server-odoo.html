@@ -16,7 +16,9 @@
 <li>🔢 <strong>Count records</strong> matching specific criteria</li>
 <li>📋 <strong>Inspect model fields</strong> to understand data structure</li>
 <li>📊 <strong>Server-side aggregation</strong> — group, sum, and count without pulling raw rows</li>
-<li>⚡ <strong>Workflow actions</strong> — invoke any public Odoo method (post invoice, confirm SO, etc.) via an opt-in escape hatch</li>
+<li>⚡ <strong>Workflow actions</strong> — invoke public business methods (post invoice, confirm SO, etc.) via an opt-in escape hatch</li>
+<li>📎 <strong>Binary &amp; attachment resources</strong> — fetch images, documents, and <code>ir.attachment</code> files via resource URIs</li>
+<li>👤 <strong>Personalized session context</strong> — the connected user, timezone, and company scope injected into the session instructions</li>
 <li>🔐 <strong>Secure access</strong> with API key or username/password authentication</li>
 <li>🎯 <strong>Smart pagination</strong> for large datasets</li>
 <li>🧠 <strong>Smart field selection</strong> — automatically picks the most relevant fields per model</li>
@@ -272,7 +274,7 @@ pip install -e .
 <td><code>false</code>, <code>true</code></td>
 </tr>
 </tbody></table>
-<p>*Either <code>ODOO_API_KEY</code> or both <code>ODOO_USER</code> and <code>ODOO_PASSWORD</code> are required.</p>
+<p>*Either <code>ODOO_API_KEY</code> or both <code>ODOO_USER</code> and <code>ODOO_PASSWORD</code> are required. In YOLO mode, <code>ODOO_USER</code> is required even when using an API key.</p>
 <p><strong>Notes:</strong></p>
 <ul>
 <li>If database listing is restricted on your server, you must specify <code>ODOO_DB</code></li>
@@ -319,6 +321,16 @@ pip install -e .
 <td>Path for rotating log file (10 MB, 5 backups)</td>
 </tr>
 <tr>
+<td><code>ODOO_MCP_LOG_FORMAT</code></td>
+<td>—</td>
+<td>Custom Python logging format string (default: <code>%(asctime)s - %(name)s - %(levelname)s - %(message)s</code>)</td>
+</tr>
+<tr>
+<td><code>ODOO_MCP_SLOW_OPERATION_THRESHOLD_MS</code></td>
+<td><code>1000</code></td>
+<td>Threshold in milliseconds above which an operation is logged as slow</td>
+</tr>
+<tr>
 <td><code>ODOO_MCP_TRANSPORT</code></td>
 <td><code>stdio</code></td>
 <td>Transport type (<code>stdio</code>, <code>streamable-http</code>)</td>
@@ -336,12 +348,17 @@ pip install -e .
 <tr>
 <td><code>ODOO_MCP_ALLOWED_HOSTS</code></td>
 <td>—</td>
-<td>Comma-separated <code>Host</code> headers to accept for HTTP transport (DNS-rebinding protection). Set when running <code>streamable-http</code> behind a reverse proxy that forwards an external host, e.g. <code>odoo.example.com,localhost</code>. Unset leaves the default (no host validation).</td>
+<td>Comma-separated <code>Host</code> headers to accept for HTTP transport (DNS-rebinding protection). Set when running <code>streamable-http</code> behind a reverse proxy that forwards an external host, e.g. <code>odoo.example.com,localhost</code>. IPv6 literals may be bracketed or bare (<code>[::1]:8000</code>, <code>::1</code>). <strong>Unset, protection is only auto-enabled for a loopback bind</strong> — binding any other host (e.g. <code>0.0.0.0</code>) runs with no <code>Host</code>/<code>Origin</code> validation at all.</td>
 </tr>
 <tr>
 <td><code>ODOO_MCP_SESSION_IDLE_TIMEOUT</code></td>
 <td>—</td>
 <td>Seconds of inactivity before a <code>streamable-http</code> session is closed and its server-side state freed, e.g. <code>600</code>. Unset means sessions never expire.</td>
+</tr>
+<tr>
+<td><code>ODOO_MCP_MAX_BINARY_SIZE</code></td>
+<td><code>52428800</code></td>
+<td>Maximum bytes returned by a single binary/attachment <code>resources/read</code>. Checked before the payload is fetched (a <code>bin_size</code> probe for record fields, the stored <code>file_size</code> for attachments), so an oversized read is refused with a clean error instead of being pulled into memory and re-encoded to base64 for the wire.</td>
 </tr>
 </tbody></table>
 <h3>Transport Options</h3>
@@ -370,7 +387,7 @@ uvx mcp-server-odoo
 </code></pre>
 <p>The HTTP endpoint will be available at: <code>http://localhost:8000/mcp/</code></p>
 <blockquote>
-<p><strong>Note</strong>: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.9.4 or higher for proper session management.</p>
+<p><strong>Note</strong>: SSE (Server-Sent Events) transport has been deprecated in MCP protocol version 2025-03-26. Use streamable-http transport instead for HTTP-based communication. Requires MCP library v1.27.0 or higher.</p>
 </blockquote>
 <details>
 <summary>Running streamable-http transport for remote access</summary><pre><code class="language-json">{
@@ -527,7 +544,7 @@ uvx mcp-server-odoo
 <li>Omit <code>fields</code> or set to <code>null</code>: Returns smart selection of common fields</li>
 <li>Specify field list: Returns only those specific fields</li>
 <li>An empty list <code>[]</code> is treated like <code>null</code> (smart defaults)</li>
-<li>Use <code>["__all__"]</code>: Returns all fields (use with caution)</li>
+<li>Use <code>["__all__"]</code>: Returns all fields (use with caution) — credential-like fields are withheld and listed in the response's <code>note</code>; request them explicitly by name if needed</li>
 </ul>
 <h3><code>get_record</code></h3>
 <p>Retrieve a specific record by ID.</p>
@@ -542,8 +559,20 @@ uvx mcp-server-odoo
 <li>Omit <code>fields</code> or set to <code>null</code>: Returns smart selection of common fields with metadata</li>
 <li>Specify field list: Returns only those specific fields</li>
 <li>An empty list <code>[]</code> is treated like <code>null</code> (smart defaults)</li>
-<li>Use <code>["__all__"]</code>: Returns all fields without metadata</li>
+<li>Use <code>["__all__"]</code>: Returns all fields — credential-like fields are withheld and noted in the response metadata; request them explicitly by name if needed</li>
 </ul>
+<p>Responses also include <code>related_summaries</code>: display names for one2many/many2many collections holding at most 5 ids, so small relations are readable without extra lookups.</p>
+<h3><code>get_fields</code></h3>
+<p>Describe a model's fields — type, label, required/readonly, relation target, and selection options. Use it to discover a model's schema before reading or writing records. Omit <code>attributes</code> for the curated default set (<code>type</code>, <code>string</code>, <code>required</code>, <code>readonly</code>, <code>relation</code>, <code>selection</code>); an explicit list replaces the curated set — include the defaults in your list if you still need them (e.g. <code>["type", "string", "help", "store"]</code>). Omit <code>field_names</code> to describe every field on the model. An empty list <code>[]</code> for either parameter is treated like omitting it.</p>
+<pre><code class="language-json">{
+  "model": "res.partner",
+  "field_names": ["name", "email", "parent_id"]
+}
+</code></pre>
+<h3><code>get_current_context</code></h3>
+<p>Return the current session context: the connected user, their timezone, the active company plus any other allowed companies, and UTC datetime-handling guidance. Useful when unsure which user or company a request runs as, or how to interpret datetimes. Spec-compliant clients also receive this context through the <code>initialize</code> response instructions.</p>
+<pre><code class="language-json">{}
+</code></pre>
 <h3><code>list_models</code></h3>
 <p>List all models enabled for MCP access.</p>
 <pre><code class="language-json">{}
@@ -582,7 +611,7 @@ uvx mcp-server-odoo
 }
 </code></pre>
 <h3><code>post_message</code></h3>
-<p>Post a message to a record's chatter (<code>mail.thread</code>). <code>subtype="note"</code> (default) is an internal log; <code>subtype="comment"</code> notifies followers. Set <code>body_is_html=true</code> for HTML markup. Optional <code>partner_ids</code> and <code>attachment_ids</code> reference existing partners and attachments.</p>
+<p>Post a message to a record's chatter (<code>mail.thread</code>). <code>subtype="note"</code> (default) is an internal log; <code>subtype="comment"</code> notifies followers. Set <code>body_is_html=true</code> for HTML markup. Optional <code>subject</code> sets a message subject line; optional <code>partner_ids</code> and <code>attachment_ids</code> reference existing partners and attachments.</p>
 <pre><code class="language-json">{
   "model": "res.partner",
   "record_id": 42,
@@ -598,7 +627,7 @@ uvx mcp-server-odoo
 }
 </code></pre>
 <h3><code>aggregate_records</code></h3>
-<p>Server-side aggregation. Use this whenever the question is "totals/counts/groupings" rather than "list of records" — it pushes the work down to PostgreSQL instead of pulling raw rows. Dispatches to <code>formatted_read_group</code> on Odoo 19+ (the new dedicated method) and falls back to <code>read_group</code> with response normalization on older versions. Callers see a consistent response shape on every supported version. When <code>aggregates</code> is omitted, defaults to <code>["__count"]</code> so each group always carries a count.</p>
+<p>Server-side aggregation. Use this whenever the question is "totals/counts/groupings" rather than "list of records" — it pushes the work down to PostgreSQL instead of pulling raw rows. Dispatches to <code>formatted_read_group</code> on Odoo 19+ (the new dedicated method) and falls back to <code>read_group</code> with response normalization on older versions. Callers see a consistent response shape on every supported version. When <code>aggregates</code> is omitted, defaults to <code>["__count"]</code> so each group always carries a count. When more groups exist beyond the requested page, the response sets <code>has_more: true</code> and a <code>next_hint</code> with the follow-up offset.</p>
 <pre><code class="language-json">{
   "model": "sale.order",
   "groupby": ["date_order:month"],
@@ -612,10 +641,18 @@ uvx mcp-server-odoo
 }
 </code></pre>
 <h3><code>call_model_method</code></h3>
-<p>Generic XML-RPC <code>execute_kw</code> escape hatch — invokes any <strong>public</strong> method on any model, for workflow actions not covered by CRUD (post invoice, confirm sale order, validate picking, etc.). Available <strong>only</strong> when both <code>ODOO_YOLO=true</code> (full YOLO) and <code>ODOO_MCP_ENABLE_METHOD_CALLS=true</code> are set; otherwise the tool is not registered. Only public ASCII Python identifiers are accepted as method names — dotted, dashed, whitespace, non-ASCII, and <code>_</code>-prefixed names are rejected.</p>
+<p>Generic XML-RPC <code>execute_kw</code> escape hatch — invokes public <strong>business</strong> methods, for workflow actions not covered by CRUD (post invoice, confirm sale order, validate picking, etc.). Available <strong>only</strong> when both <code>ODOO_YOLO=true</code> (full YOLO) and <code>ODOO_MCP_ENABLE_METHOD_CALLS=true</code> are set; otherwise the tool is not registered. Only public ASCII Python identifiers are accepted as method names — dotted, dashed, whitespace, non-ASCII, and <code>_</code>-prefixed names are rejected.</p>
+<p>Some calls are blocked for safety even in full YOLO mode:</p>
+<ul>
+<li><strong><code>ir.actions.*</code> / <code>ir.cron</code> models</strong> — their methods run with elevated privileges (server actions, scheduled jobs)</li>
+<li><strong><code>run</code> / <code>method_direct_trigger</code></strong> on any model — same escalation risk via proxies</li>
+<li><strong>ORM CRUD/data-access primitives</strong> (<code>create</code>, <code>write</code>, <code>unlink</code>, <code>read</code>, <code>search*</code>, <code>copy</code>, <code>sudo</code>, ...) — use the dedicated tools instead</li>
+<li><strong><code>web_*</code> methods</strong> — the web-client data-access family</li>
+</ul>
+<p>List results are truncated to 100 items.</p>
 <blockquote>
 <p>[!WARNING]
-This tool can invoke <strong>any</strong> public method, including destructive ones (e.g. <code>unlink</code>, <code>button_draft</code>, custom workflow methods). Enable only in trusted environments where you accept the blast radius. Odoo's record rules and ACLs still apply for the authenticated user.</p>
+This tool can still invoke destructive workflow methods (e.g. <code>button_draft</code>, <code>action_cancel</code>, <code>toggle_active</code>, custom methods). Enable only in trusted environments where you accept the blast radius. Odoo's record rules and ACLs still apply for the authenticated user.</p>
 </blockquote>
 <pre><code class="language-json">{
   "model": "account.move",
@@ -636,7 +673,8 @@ This tool can invoke <strong>any</strong> public method, including destructive o
 <li><strong>Essential fields</strong> like <code>id</code>, <code>name</code>, <code>display_name</code>, and <code>active</code> are always included</li>
 <li><strong>Business-relevant fields</strong> (state, amount, email, phone, partner, etc.) are prioritized</li>
 <li><strong>Technical fields</strong> (message threads, activity tracking, website metadata) are excluded</li>
-<li><strong>Expensive fields</strong> (binary, HTML, large text, computed non-stored) are skipped</li>
+<li><strong>Expensive fields</strong> (binary, HTML, large text) are skipped; computed non-stored fields are deprioritized</li>
+<li><strong>Credential-like fields</strong> (names ending in <code>*password</code>, <code>*_pass</code> like <code>smtp_pass</code>, <code>passwd</code>, <code>*secret</code>, <code>*_token</code>, <code>*apikey</code>, or a <code>*_key</code> compound such as <code>api_key</code>/<code>secret_key</code>) are excluded from smart defaults and withheld from <code>["__all__"]</code> reads with an explanatory note — requesting such a field explicitly by name still returns it</li>
 </ul>
 <p>The default limit is 15 fields per request. Responses include metadata showing which fields were returned and how many total fields are available. You can adjust the limit with <code>ODOO_MCP_MAX_SMART_FIELDS</code> or bypass it entirely with <code>fields: ["__all__"]</code>.</p>
 <h2>Resources</h2>
@@ -664,6 +702,14 @@ This tool can invoke <strong>any</strong> public method, including destructive o
 <td><code>odoo://{model}/fields</code></td>
 <td>Get field definitions and metadata for a model</td>
 </tr>
+<tr>
+<td><code>odoo://{model}/record/{id}/{field}</code></td>
+<td>Fetch a binary/image field from a record, served with the correct mimeType</td>
+</tr>
+<tr>
+<td><code>odoo://attachment/{id}</code></td>
+<td>Fetch an <code>ir.attachment</code> by ID (url-type attachments return their URL as text)</td>
+</tr>
 </tbody></table>
 <p><strong>Examples:</strong></p>
 <ul>
@@ -671,7 +717,12 @@ This tool can invoke <strong>any</strong> public method, including destructive o
 <li><code>odoo://product.product/search</code> — List first 10 products</li>
 <li><code>odoo://res.partner/count</code> — Count all partners</li>
 <li><code>odoo://product.product/fields</code> — Show all fields for products</li>
+<li><code>odoo://res.partner/record/1/image_128</code> — Get partner 1's avatar image</li>
+<li><code>odoo://attachment/42</code> — Download attachment 42</li>
 </ul>
+<p>Populated binary fields in <code>get_record</code>/<code>search_records</code> results are returned as these resource URIs instead of inline base64 — read the URI to retrieve the actual bytes. Binary content is served exclusively via MCP resources: tool results carry URIs, never inline base64, so your MCP client must support <code>resources/read</code> to fetch it.</p>
+<p>Record and search resource reads withhold credential-like fields the same way the tools' bulk reads do — to read such a field, request it explicitly by name via the tools' <code>fields</code> parameter.</p>
+<p>Binary and attachment reads are served whole, up to <code>ODOO_MCP_MAX_BINARY_SIZE</code> (default 50 MB). The size is checked before the payload is fetched, so an oversized field or attachment is refused with a clean error rather than buffered into a correspondingly large response.</p>
 <blockquote>
 <p><strong>Note:</strong> Resource URIs don't support query parameters (like <code>?domain=...</code>). For filtering, pagination, and field selection, use the <code>search_records</code> tool instead.</p>
 </blockquote>

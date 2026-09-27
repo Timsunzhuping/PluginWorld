@@ -57,8 +57,8 @@ return await agent(
 <li><strong>Real parallel orchestration</strong> — fan out up to 16 concurrent and 1000 total subagents from one orchestration script.</li>
 <li><strong>Per-agent model routing</strong> — use <code>small</code>, <code>medium</code>, or <code>big</code> tiers, or choose an exact provider/model and thinking level.</li>
 <li><strong>Journaled resume</strong> — replay completed agents after interruption without rerunning them or spending their tokens again. The orchestrator can also resume with an <strong>edited script</strong> (<code>resumeFromRunId</code>): unchanged <code>agent()</code> calls replay from cache and only edited/new ones re-run — so a single bad prompt no longer means paying to re-run the whole workflow.</li>
-<li><strong>Git worktree isolation</strong> — let parallel agents edit safely on throwaway branches with <code>isolation: "worktree"</code>.</li>
-<li><strong>Measured usage</strong> — report real tokens and cost from each subagent session; add run, phase, or agent budgets only when you want them.</li>
+<li><strong>Git worktree isolation</strong> — parallel agents edit on separate branches with <code>isolation: "worktree"</code>. Kept by default for merge; pass <code>keepWorktree: false</code> to delete (tests).</li>
+<li><strong>Measured usage</strong> — report real tokens and cost from each subagent session; add run, phase, or agent budgets only when you want them. When a provider session ends without reporting usage, the affected totals are heuristic character estimates and UI token surfaces render them with a <code>~</code> prefix (e.g. <code>~640 tok</code>) — never silently as metered figures. (Script-facing <code>budget.spent()/remaining()</code> are raw numbers and cannot carry the marker.)</li>
 <li><strong>Visible background runs</strong> — track phases, agents, models, fresh/cache tokens, cost, and live tok/s from the progress panel or <code>/workflows</code> navigator.</li>
 <li><strong>Quality patterns</strong> — compose <code>verify()</code>, <code>judgePanel()</code>, <code>loopUntilDry()</code>, and <code>completenessCheck()</code> instead of rebuilding review loops.</li>
 <li><strong>Reusable workflows</strong> — save any run as a command and call saved workflows from other workflows.</li>
@@ -79,7 +79,7 @@ return await agent(
 <td>agent</td>
 <td>runtime-global</td>
 <td><code>agent(prompt, options?) =&gt; Promise&lt;string | structured value | null&gt;</code></td>
-<td><code>label</code>: string (optional; default: derived from phase and call count)<br /><code>phase</code>: string (optional; default: current phase)<br /><code>schema</code>: plain JSON Schema (optional)<br /><code>model</code>: string (optional)<br /><code>tier</code>: string (optional)<br /><code>isolation</code>: "worktree" (optional)<br /><code>thread</code>: string (optional)<br /><code>agentType</code>: string (optional)<br /><code>timeoutMs</code>: number | null (optional; default: run timeout; null disables)<br /><code>retries</code>: number (optional; default: run retry count)</td>
+<td><code>label</code>: string (optional; default: derived from phase and call count)<br /><code>phase</code>: string (optional; default: current phase)<br /><code>schema</code>: plain JSON Schema (optional)<br /><code>model</code>: string (optional)<br /><code>thinking</code>: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" (optional)<br /><code>tier</code>: string (optional)<br /><code>isolation</code>: "worktree" | false (optional)<br /><code>keepWorktree</code>: boolean (optional; default: true)<br /><code>cwd</code>: string (optional)<br /><code>thread</code>: string (optional)<br /><code>agentType</code>: string (optional)<br /><code>timeoutMs</code>: number | null (optional; default: run timeout, finite ms in [1, 2^31-1]; null disables)<br /><code>retries</code>: number (optional; default: run retry count)</td>
 </tr>
 <tr>
 <td>parallel</td>
@@ -138,7 +138,7 @@ return await agent(
 <tr>
 <td>checkpoint</td>
 <td>runtime-global</td>
-<td><code>checkpoint(prompt, options?) =&gt; Promise&lt;unknown&gt;</code></td>
+<td><code>checkpoint(prompt, options?) | checkpoint({ kind, checkpointId, payload }) =&gt; Promise&lt;unknown&gt;</code></td>
 <td><code>default</code>: unknown (optional; default: true when no UI and omitted)<br /><code>headless</code>: "default" | "abort" (optional; default: "default")<br /><code>kind</code>: "confirm" | "input" | "select" (optional; default: "confirm")<br /><code>choices</code>: string[] (optional)<br /><code>timeoutMs</code>: number (optional)</td>
 </tr>
 <tr>
@@ -356,7 +356,7 @@ return await agent(
 </tr>
 <tr>
 <td><code>budget</code></td>
-<td>Inspect real tokens spent and remaining</td>
+<td>Inspect tokens spent and remaining (raw numbers; UI surfaces mark heuristic estimates with <code>~</code>)</td>
 </tr>
 </tbody></table>
 <table>
@@ -380,7 +380,11 @@ return await agent(
 </tr>
 <tr>
 <td><code>isolation</code></td>
-<td>Use <code>"worktree"</code> for conflict-free parallel edits</td>
+<td><code>"worktree"</code> for conflict-free parallel edits; <code>false</code> opts out of an agentType default</td>
+</tr>
+<tr>
+<td><code>keepWorktree</code></td>
+<td>Default <code>true</code> (kept for merge). <code>false</code> deletes after the call (test runs)</td>
 </tr>
 <tr>
 <td><code>schema</code></td>
@@ -395,6 +399,7 @@ return await agent(
 <td>Optional per-agent timeout and recoverable-failure retries</td>
 </tr>
 </tbody></table>
+<p>Host setting / SDK option (not an <code>agent()</code> call option): <code>providerMiddlewareExtensions: string[]</code> opts child sessions into trusted provider/auth extensions; default <code>[]</code>.</p>
 <p><code>agent()</code> resolves to plain text unless <code>schema</code> is set — a prompt that merely asks the model to "return JSON" does not change that, and reading a field off unparsed text fails silently (<code>undefined</code>, not an error), which can make a whole <code>parallel()</code> fleet look "successful" while every result is unusable. Parse and validate defensively when a schema isn't set, and flag what doesn't parse instead of dropping it:</p>
 <pre><code class="language-js">function parseOrFlag(text, requiredKeys) {
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -410,7 +415,7 @@ return await agent(
 <p>Prefer <code>schema</code> (JSON Schema validation with bounded repair) over ad hoc parsing whenever the result's shape matters downstream.</p>
 <p>The <a href="https://quintinshaw.github.io/pi-dynamic-workflows/" target="_blank" rel="noopener noreferrer">full documentation</a> covers every option, structured output, determinism, saved workflows, and operational control.</p>
 <details>
-<summary><strong>Model tiers and run controls</strong></summary><p>Model tiers live at <code>~/.pi/workflows/model-tiers.json</code> and accept Pi CLI-style thinking suffixes:</p>
+<summary><strong>Model tiers and run controls</strong></summary><p>Model tiers live at <code>~/.pi/workflows/model-tiers.json</code>. A project file at <code>~/.pi/workflows/projects/&lt;project&gt;/model-tiers.json</code> overlays the global map (project keys win). They accept Pi CLI-style thinking suffixes:</p>
 <pre><code class="language-json">{
   "tiers": {
     "small": "openai-codex/gpt-5.4-mini:low",
@@ -419,21 +424,28 @@ return await agent(
   }
 }
 </code></pre>
-<p>Use <code>/workflows-models</code> to edit them interactively. Without a config, the extension ranks authenticated models by capability hints and assigns distinct models when possible.</p>
-<p>Omitted <code>tokenBudget</code> and <code>agentTimeoutMs</code> values use configured <code>defaultTokenBudget</code> and <code>defaultAgentTimeoutMs</code> settings; without them, runs are unlimited and have no hard per-agent timeout. Add per-run or per-agent values when you need explicit gates. <code>concurrency</code> is clamped to 16; <code>agentRetries</code> retries only recoverable failures. Defaults live in <code>~/.pi/workflows/settings.json</code>; <code>defaultTokenBudget</code> is a soft pre-call gate, and a project-level override of <code>null</code> cancels a global budget.</p>
-<p>A schema-less agent call that comes back as whitespace-only text is a recoverable <code>AGENT_EMPTY_OUTPUT</code> failure and retries like any other. Some models occasionally hit this on an otherwise-fine first attempt; if a fleet is built on one of them, set <code>agentRetries: 1-2</code> rather than treating an isolated empty output as a failed run.</p>
+<p>Use <code>/workflows-models</code> to edit them interactively; it is cwd-aware and can save to the project or global file. A project save writes the resolved map, including keys currently inherited from global. Without a config, the extension ranks authenticated models by capability hints and assigns distinct models when possible.</p>
+<p>Untagged <code>agent()</code> calls (no <code>model</code>, no <code>tier</code>, and no agentType/phase routing) use the configured <code>medium</code> tier, or the Pi settings default when no tiers are saved. Set <code>"inheritMainModel": true</code> in <code>~/.pi/workflows/settings.json</code> (or a project overlay) to instead have untagged agents inherit the orchestrating session's main model — the model in effect when the run starts; a mid-run <code>/model</code> switch applies to subsequent runs; when the session has no main model, legacy routing applies — with no tier config required. Explicit <code>model</code>/<code>tier</code> tags are unaffected, and an unavailable inherited model degrades to the settings default with a run-visible warning instead of throwing.</p>
+<p>Omitted <code>tokenBudget</code> and <code>agentTimeoutMs</code> values use configured <code>defaultTokenBudget</code> and <code>defaultAgentTimeoutMs</code> settings; without them, runs are unlimited and have no hard per-agent timeout. Add per-run or per-agent values when you need explicit gates. <code>concurrency</code> is clamped to 16; <code>agentRetries</code> retries only recoverable failures. Programmatic runs can tune the retry pacing via <code>agentRetryBackoffMs?: (failedAttempt: number) =&gt; number</code> (default <code>min(250*2^(N-1), 2000)</code> ms; the retry holds its concurrency slot during the wait). Settings load in order (later wins): global <code>~/.pi/workflows/settings.json</code> → repo-local <code>&lt;cwd&gt;/.pi/workflows/settings.json</code> → the existing external project override <code>~/.pi/workflows/projects/&lt;project&gt;/settings.json</code>. Repo-local defaults can be version-controlled and shared as common repository configuration; external project overrides remain user-specific. <code>defaultTokenBudget</code> is a soft pre-call gate, and a project-level override of <code>null</code> cancels a global budget.</p>
+<p>Child sessions intentionally disable host extensions to avoid per-child factory churn and recursive orchestration. Some providers require extension request/auth hooks in addition to a shared model registry. To opt in, set <code>"providerMiddlewareExtensions": ["example-provider-adapter"]</code> in <code>~/.pi/workflows/settings.json</code> (also available on <code>WorkflowAgent</code>, <code>runWorkflow</code>, and <code>WorkflowManager</code> SDK options). Omitted or <code>[]</code> keeps all host extensions disabled. Names match an extension filename without its JS/TS suffix, an exact npm package identity, or a resolved local/Git package source name, case-insensitively; ancestor directory names do not authorize descendants; only enabled resources are considered, and project resources still require Pi project trust. <code>pi-dynamic-workflows</code>, <code>workflow</code>, and <code>pi-subagents</code> are always excluded, even if allowlisted. Only allow trusted, child-safe middleware: the allowlist enables whole extensions, not a hook-only sandbox, and opted-in factories and runtimes are isolated per child session and receive session_shutdown before disposal. Extension-free resource loaders remain shared. Explicit SDK resource-loader injection remains authoritative and bypasses this discovery filter.</p>
+<p>Set <code>"defaultEffort": "high"</code> or <code>"ultra"</code> in that settings file to opt a fresh session into the corresponding orchestration effort (<code>"off"</code> is the default). Project settings overlay the global value. This is an initial in-memory value only: <code>/effort</code> and <code>/ultracode</code> change the current session without writing settings, and reload/new/fork/session switches retain their existing in-process effort.</p>
+<p>A schema-less agent call that comes back as whitespace-only text is a recoverable <code>AGENT_EMPTY_OUTPUT</code> failure and retries like any other. Some models occasionally hit this on an otherwise-fine first attempt; if a fleet is built on one of them, set <code>agentRetries: 1-2</code> rather than treating an isolated empty output as a failed run. Because an exhausted recoverable failure resolves to <code>null</code> rather than throwing, a run whose <strong>every</strong> agent came back empty still reports <code>completed</code>; when that happens the runtime logs a prominent <code>⚠ Workflow produced no usable results</code> warning (naming the empty agents and pointing at <code>agentRetries</code> and output-token limits) so an all-null fleet can't be mistaken for success.</p>
 <p>Pausing and resuming a run keeps the limits it started with — <code>maxAgents</code>, <code>agentTimeoutMs</code>, <code>concurrency</code>, and <code>agentRetries</code> carry over instead of falling back to defaults, and <code>tokenBudget</code> tracking is cumulative across the pause, so a run can't reset its spend by pausing and resuming.</p>
+<p>Programmatic hosts can set <code>drainAbortGraceMs</code> on <code>runWorkflow</code> or manager execution options to bound the final wait for agents that ignore cancellation. The default is 10,000 ms; <code>Infinity</code> waits without a bound. Finite values from 1 through 2,147,483,647 are rounded down; other values use the default. This is a host-only option, not a <code>workflow</code> tool input or persisted setting. It does not limit a successful run's final wait or a checkpoint suspension unless the run is also cancelled. After abandonment, already-reported terminal usage is retained, provisional usage is rolled back, and late agent callbacks cannot modify the settled run.</p>
 </details><details>
 <summary><strong>Storage, resume, and persisted sessions</strong></summary><p>Extension state lives outside the repository under <code>~/.pi/workflows</code>:</p>
 <ul>
 <li>global settings and tiers: <code>~/.pi/workflows/settings.json</code> and <code>model-tiers.json</code></li>
-<li>project runs, journals, locks, and saved overrides: <code>~/.pi/workflows/projects/&lt;project&gt;/</code></li>
+<li>project runs, journals, locks, saved overrides, and optional tier overlay: <code>~/.pi/workflows/projects/&lt;project&gt;/</code></li>
 <li>older project-local <code>.pi/workflows/runs</code> and <code>.pi/workflows/saved</code> remain readable as fallbacks</li>
+<li>repo-local <code>&lt;cwd&gt;/.pi/workflows/settings.json</code> is also read for shared defaults, between global settings and the existing external project override <code>~/.pi/workflows/projects/&lt;project&gt;/settings.json</code>. This path is relative to the supplied project cwd; it does not search parent directories. Missing, corrupt, or invalid files are ignored. Saving settings still targets global or external project settings, not the repo-local file.</li>
 </ul>
-<p>Subagents are in-memory by default. Set <code>persistAgentSessions: true</code> to retain full transcripts in Pi's standard session directory. This creates one file per unthreaded call or named thread and may store sensitive material that an agent read, so enable it deliberately.</p>
-<p>Completed background runs persist their full result in the project run JSON. The conversation delivery includes a pointer to that file when the visible summary is shortened.</p>
+<p>Subagents are in-memory by default. Set <code>persistAgentSessions: true</code> to retain full transcripts in Pi's standard session directory, with one file per unthreaded call or named thread. Persisted child session headers link back to the originating host session through <code>parentSession</code> when the parent has a persisted file. Workflow run JSON records the original parent session ID/file and each call's child session ID/file; those links and historical call timestamps survive journal replay on resume. Delivery may move to a replacement host session without rewriting the original parent lineage. In-memory children still have session IDs, but no session files for reconstructing historical per-message usage. Persisted transcripts may store sensitive material that an agent read, so enable them deliberately.</p>
+<p><code>PI_WORKFLOW_AGENT_CACHE_RETENTION</code> sets the prompt-cache retention tier for agent sessions, overriding <code>PI_CACHE_RETENTION</code> for them only. Anthropic charges more per cache write on the 1h tier than the 5m one; a long-lived parent conversation earns that back by surviving idle gaps, but agent sessions are short-lived and rarely idle long enough to claim the longer window, so a wide fan-out pays the higher write price without the benefit. Set <code>PI_CACHE_RETENTION=long PI_WORKFLOW_AGENT_CACHE_RETENTION=short</code> to keep the longer window for your own conversation only. Unset by default, so agents inherit the parent's retention and behaviour is unchanged unless you opt in. The override is applied to each agent session's own stream function rather than to <code>process.env</code>, so a background run cannot change retention for a parent turn streaming at the same time.</p>
+<p>Run storage uses a small versioned <code>&lt;runId&gt;.json</code> index head plus an append-only <code>&lt;runId&gt;.json.events.jsonl</code> change log. Only bytes committed by the head participate in replay. Existing full-JSON run files remain readable and migrate on their next write; read-only scans never migrate them. Older releases cannot read the new format, so retain a pre-upgrade backup if you need to downgrade. See <a href="https://github.com/QuintinShaw/pi-dynamic-workflows/blob/HEAD/docs/run-storage.md" target="_blank" rel="noopener noreferrer">the storage protocol</a> for recovery and compatibility details.</p>
+<p>Completed background runs retain their full result in run storage. Conversation delivery also creates an immutable JSON result artifact (<code>&lt;runId&gt;.json.result-&lt;content-hash&gt;</code>) and links to it, so a shortened summary still has a directly readable full result. These artifacts are removed with the run. Other Pi extensions can subscribe to the exported <code>WORKFLOW_LIFECYCLE_EVENT</code> through <code>pi.events</code>. Background workflows emit <code>{ status, runId, name }</code> and include <code>sessionId</code> when the originating Pi session is known, where <code>status</code> is <code>started</code>, <code>resumed</code>, <code>paused</code>, <code>completed</code>, <code>failed</code>, or <code>stopped</code>.</p>
 <p>In-process session replacements (<code>/reload</code>, <code>/new</code>, resume, fork) keep the live workflow manager when the installed extension version has not changed. Active background runs therefore continue streaming progress, remain controllable, and deliver their result into the replacement session; session-local <code>/effort</code> also survives. If the package version changes, or the process is exiting, active runs are paused onto the journal recovery path instead of mixing extension versions or burning tokens after teardown. A process restart uses the same durable journal path, recovering an interrupted running workflow as paused so it can be resumed safely.</p>
-<p>Finished runs (completed, failed, or aborted) are retained in full on disk, capped at the 300 most recent per project — older ones are evicted first, and a running or paused run is never touched. Only a smaller number (20 by default) also stay fully loaded in memory for instant access right after they finish; older finished runs still show up in <code>/workflows</code> and <code>workflow_control list</code>, just read back from disk instead of memory. Library embedders can tune both caps — <code>maxTerminalRunsInMemory</code> on <code>WorkflowManager</code> and <code>maxTerminalRunsOnDisk</code> on the run-persistence layer.</p>
+<p>Finished runs (completed, failed, or aborted) are retained in full on disk, capped at the 300 most recent per project — older ones are evicted first; running, paused, leased and undelivered runs are protected. Only a smaller number (20 by default) also stay fully loaded in the live manager. History listings and startup recovery read small index heads; details hydrate on demand through a cache capped at eight records and a 16 MiB serialized-weight budget. The navigator retains only its most recently selected historical snapshot. Library embedders can tune <code>maxTerminalRunsInMemory</code> on <code>WorkflowManager</code> and <code>maxTerminalRunsOnDisk</code> on the run-persistence layer.</p>
 </details><details>
 <summary><strong>Keyword trigger</strong></summary><p>Set a literal, case-insensitive custom trigger in <code>~/.pi/workflows/settings.json</code>:</p>
 <pre><code class="language-json">{
@@ -499,6 +511,27 @@ return await agent(
 <li><strong>Subagents no longer load host extensions by default.</strong> Each run now builds one shared, extension-free resource loader for all of its subagents (a memory-leak mitigation). Skills, prompts, and <code>AGENTS.md</code> context still load, and the coding tools and any toolset (e.g. <code>web-research</code>) you hand a subagent are unaffected. What subagents lose is <strong>host-extension-registered tools</strong> — MCP bridges, browser tools, or anything else another installed extension adds. If an <code>agentType</code> names one of those tools in its allowlist, that entry now matches nothing. This also means a subagent can no longer recurse into another orchestration extension, even one not covered by the existing tool denylist.</li>
 <li><strong>Checkpoints persisted before this release re-run once.</strong> <code>checkpoint()</code>'s resume-identity hash now also covers <code>default</code>, <code>headless</code>, and <code>timeoutMs</code>, so changing any of them between runs correctly invalidates a stale cached answer. This is a one-time effect: any checkpoint cached under the old hash simply re-prompts once and then caches normally again.</li>
 </ul>
+<h2>Host: customize worker model before session creation</h2>
+<p>An independent Pi extension (or embedder) can register one process-wide policy that runs <strong>after</strong> Dynamic Workflows resolves <code>model</code> / <code>tier</code> / phase intent and <strong>before</strong> <code>createAgentSession</code>. The policy may leave routing unchanged, override the concrete model, or reject the spawn. With no policy registered, routing is unchanged.</p>
+<pre><code class="language-ts">import { setPreSpawnModelResolver } from "@quintinshaw/pi-dynamic-workflows";
+
+export default function (_pi) {
+  // Example host policy — not required DW behavior.
+  setPreSpawnModelResolver(async (ctx) =&gt; {
+    // ctx.modelSource is "explicit" | "tier" | "phase" | "default" | "session"
+    if (ctx.modelSource === "explicit" || ctx.modelSource === "tier" || ctx.modelSource === "phase") {
+      return { action: "unchanged" };
+    }
+    // Only untagged default / session fallback is overridden in this example.
+    return { action: "use", model: "provider/model-id" };
+    // return { action: "reject", reason: "policy refused this spawn" };
+  });
+}
+</code></pre>
+<p>Unexpected policy errors do not fall back to the parent/session model.</p>
+<p>The separate agent <code>thinking</code> option is passed to policy as <code>ctx.requestedThinking</code>. A thinking suffix on the selected model takes precedence, including a policy's <code>use</code> decision. A selection without a suffix retains the separate option; omitting both retains the existing session default. Call-site <code>thinking</code> overrides agent-type frontmatter, and invalid call-site values fail before dispatch.</p>
+<p><strong>Resolver precedence (highest wins):</strong> per-run <code>AgentRunOptions.preSpawnModel</code> &gt; instance <code>WorkflowAgentOptions.preSpawnModel</code> &gt; process <code>setPreSpawnModelResolver</code>.</p>
+<p><strong>Process-wide, single resolver.</strong> Registration is stored on <code>globalThis</code> under <code>Symbol.for("@quintinshaw/pi-dynamic-workflows.preSpawnModelResolver")</code> so an independent extension and the packaged/dist workflow runtime share one slot even if Node loaded two copies of this package. There is no middleware chain, priority, or registry: the last <code>setPreSpawnModelResolver</code> call wins; pass <code>undefined</code> to clear. The resolver is not serialized into worker context and does not cross process boundaries.</p>
 <h2>Development</h2>
 <pre><code class="language-bash">npm install
 npm test     # Biome, TypeScript, unit tests, and release checks

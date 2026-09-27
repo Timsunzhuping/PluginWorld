@@ -1,0 +1,516 @@
+<h1>@yawlabs/postgres-mcp</h1>
+<p><a href="https://yaw.sh/mcp/install?name=Postgres&amp;command=npx&amp;args=-y%2C%40yawlabs%2Fpostgres-mcp&amp;description=Query%20PostgreSQL%20-%20schema%20introspection%2C%20EXPLAIN%20plans%2C%20health%20diagnostics%2C%20read-only%20by%20default&amp;source=https%3A%2F%2Fgithub.com%2FYawLabs%2Fpostgres-mcp" target="_blank" rel="noopener noreferrer"><img src="https://yaw.sh/yaw-mcp-button.svg" alt="Add to Yaw MCP" /></a></p>
+<p>One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.</p>
+<p><a href="https://www.npmjs.com/package/@yawlabs/postgres-mcp" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/@yawlabs/postgres-mcp" alt="npm version" /></a>
+<a href="https://opensource.org/licenses/MIT" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a></p>
+<p><strong>Query a PostgreSQL database from Claude Code, Cursor, and any MCP client.</strong> Read-only by default - writes opt in via a single env var - so an agent can't silently drop your tables.</p>
+<p>Built and maintained by <a href="https://yaw.sh" target="_blank" rel="noopener noreferrer">Yaw Labs</a>.</p>
+<h2>What's new in 0.12</h2>
+<p>An index advisor, opt-in audit logging, structured tool output, and support for current-revision MCP clients. Full detail in the <a href="https://github.com/YawLabs/postgres-mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG</a>.</p>
+<ul>
+<li><strong><code>pg_index_advisor</code></strong> recommends indexes for a workload and keeps only the ones that measurably lower estimated cost. Candidates are costed with HypoPG hypothetical indexes, never created on disk, and the search knows that PostgreSQL 18's skip scan changes which multi-column indexes are useful.</li>
+<li><strong>Opt-in audit logging</strong> of the SQL tools send: one JSON line per audited statement, to stderr or a file. Bound parameter values are never recorded. Off by default, and not a complete record -- see <a href="#audit-logging" target="_blank" rel="noopener noreferrer">Audit logging</a>.</li>
+<li><strong>Structured tool output.</strong> Every tool declares an <code>outputSchema</code> and returns <code>structuredContent</code> alongside the unchanged text block, so anything reading the text today keeps working.</li>
+<li><strong>Both MCP protocol eras.</strong> The server used to speak only the legacy (2025) protocol revisions, which a client on the current 2026-07-28 revision fails against. It now serves both.</li>
+</ul>
+<p><strong>On 0.12.0? Upgrade.</strong> 0.12.1 closes a stacked-query hole in <code>pg_index_advisor</code>: SQL passed in its <code>statements</code> argument ran on a protocol that accepts several commands in one string, so <code>SELECT 1; COMMIT; DROP SCHEMA public CASCADE;</code> escaped the read-only transaction. The tool is annotated read-only, so hosts often auto-allow it. The same release stops <code>pg_inspect_locks</code> attributing a lock held in another database to whichever local table shares its OID, fixes the advisor's greedy search, and makes audit lines carry the <code>tool</code> field they were missing.</p>
+<p><strong>Coming from 0.10.x?</strong> 0.11.0 has three breaking changes: <code>pg_seq_scan_tables</code>, <code>pg_unused_indexes</code> and <code>pg_top_queries</code> return an envelope (read <code>data.rows</code> where you used to read <code>data</code>), <code>pg_explain</code> with <code>analyze: true</code> emits <code>BUFFERS</code> (pass <code>buffers: false</code> for the old output), and Node 22 is the floor. Details in the <a href="https://github.com/YawLabs/postgres-mcp/blob/HEAD/CHANGELOG.md#0110---2026-08-23" target="_blank" rel="noopener noreferrer">0.11.0 changelog entry</a>.</p>
+<h2>Backstory</h2>
+<p>Anthropic's reference Postgres MCP server, <code>@modelcontextprotocol/server-postgres</code>, was <a href="https://github.com/modelcontextprotocol/servers-archived/tree/main/src/postgres" target="_blank" rel="noopener noreferrer">archived in May 2025</a> and <a href="https://www.npmjs.com/package/@modelcontextprotocol/server-postgres" target="_blank" rel="noopener noreferrer">marked deprecated on npm</a> in July 2025. Anthropic has not shipped a replacement. Despite the deprecation, the last published version (v0.6.2) is still pulled ~20,000 times per week - a lot of agents are pointed at an unmaintained package.</p>
+<p>That unmaintained package also has a known, <a href="https://securitylabs.datadoghq.com/articles/mcp-vulnerability-case-study-SQL-injection-in-the-postgresql-mcp-server/" target="_blank" rel="noopener noreferrer">publicly documented stacked-query SQL injection</a> (Datadog Security Labs) that bypasses its <code>BEGIN READ ONLY</code> wrapper with input like <code>COMMIT; DROP SCHEMA public CASCADE;</code>. It has never been patched at npm.</p>
+<p>A handful of community forks have appeared, but each fills a narrow slice:</p>
+<ul>
+<li><a href="https://www.npmjs.com/package/@zeddotdev/postgres-context-server" target="_blank" rel="noopener noreferrer"><code>@zeddotdev/postgres-context-server</code></a> - Zed's fork, primarily a security patch on the original shape.</li>
+<li><strong>Postgres MCP Pro</strong> (Crystal DBA) - focused on index tuning and hypothetical-index / buffer-cache diagnostics.</li>
+<li><strong>AWS Labs Postgres MCP</strong> - tied to Aurora / RDS Data API + Secrets Manager.</li>
+</ul>
+<p>None of them position themselves as a general-purpose daily driver you'd hand to Claude Code or Cursor against an arbitrary Postgres: modern introspection, perf helpers, role/privilege awareness, and a write-safety posture out of the box. That's the gap <code>@yawlabs/postgres-mcp</code> fills.</p>
+<h2>Why this one?</h2>
+<ul>
+<li><strong>Read-only by default, with an unconditional read-only tool too</strong> - <code>pg_query</code> runs user SQL in a <code>BEGIN READ ONLY</code> transaction, so postgres itself (not string parsing) blocks writes; opt in to writes with <code>ALLOW_WRITES=1</code>. <code>pg_readonly</code> is a separate tool that stays read-only regardless of <code>ALLOW_WRITES</code>, so hosts that gate tools individually (Claude Code permissions, mcp.hosting) can auto-allow it -- paired with a least-privileged role, since <code>READ ONLY</code> bounds writes to the database rather than every side effect (<a href="#per-tool-gating-in-the-host" target="_blank" rel="noopener noreferrer">details</a>).</li>
+<li><strong>Role-based access as the primary control</strong> - the recommended posture is to use a least-privileged postgres role in <code>DATABASE_URL</code> (e.g. one with <code>GRANT pg_read_all_data</code>); postgres itself then enforces the boundary, no env var needed. See <a href="#configuring-access" target="_blank" rel="noopener noreferrer">Configuring access</a>.</li>
+<li><strong>Extended query protocol for all user SQL</strong> - <code>pg_query</code> sends user input with <code>queryMode: 'extended'</code>, which restricts each request to a single statement. This closes the <a href="https://securitylabs.datadoghq.com/articles/mcp-vulnerability-case-study-SQL-injection-in-the-postgresql-mcp-server/" target="_blank" rel="noopener noreferrer">stacked-query injection class</a> (<code>COMMIT; DROP SCHEMA x CASCADE;</code>) that defeated the reference server's <code>BEGIN READ ONLY</code> wrapper. Integration test asserts the rejection.</li>
+<li><strong>Parameterized queries</strong> - <code>pg_query</code> takes a <code>params</code> array for <code>$1</code>, <code>$2</code>, etc. No string-interpolated SQL in our code path.</li>
+<li><strong>Written from scratch, actively maintained</strong> - not a fork of the deprecated code. Unit + integration tests (<code>npm test</code>, <code>npm run test:integration</code>) run against a real Postgres; releases cut via <code>release.sh</code>.</li>
+<li><strong>Schema introspection built in</strong> - <code>pg_list_schemas</code>, <code>pg_list_tables</code>, <code>pg_describe_table</code> return columns, primary keys, foreign keys, and indexes without the agent having to remember <code>pg_catalog</code> joins.</li>
+<li><strong><code>EXPLAIN</code> as a first-class tool</strong> - text or JSON format, with optional <code>ANALYZE</code>. ANALYZE for non-SELECT statements requires <code>ALLOW_WRITES=1</code> and always rolls back, so the plan is real but the written rows don't persist. (What Postgres never rolls back still sticks: a sequence the statement advanced stays advanced.)</li>
+<li><strong>Perf diagnostics the deprecated server never had</strong> - <code>pg_top_queries</code> (from <code>pg_stat_statements</code>), <code>pg_seq_scan_tables</code>, <code>pg_unused_indexes</code>, <code>pg_table_bloat</code>, <code>pg_inspect_locks</code>, <code>pg_replication_status</code>. Answer "why is this slow?" in one tool call.</li>
+<li><strong>Health snapshot</strong> - <code>pg_health</code> returns version, db size, connection counts, and the 10 longest-running active queries in one call.</li>
+<li><strong>Role and privilege awareness</strong> - <code>pg_list_roles</code> and <code>pg_table_privileges</code> for the common "who can touch what?" questions.</li>
+<li><strong>Instant startup</strong> - ships as a single bundled file with zero runtime dependencies. No multi-minute <code>node_modules</code> install on every <code>npx</code> cold start.</li>
+<li><strong>Result truncation</strong> - large result sets are capped at <code>POSTGRES_MAX_ROWS</code> (default 1000) with a <code>truncated: true</code> flag, so a stray <code>SELECT * FROM events</code> doesn't blow out the model context.</li>
+</ul>
+<h2>Quick start</h2>
+<p><strong>1. Create <code>.mcp.json</code> in your project root</strong></p>
+<p>macOS / Linux / WSL:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@yawlabs/postgres-mcp@latest"],
+      "env": {
+        "DATABASE_URL": "postgres://user:password@host:5432/dbname"
+      }
+    }
+  }
+}
+</code></pre>
+<p>Windows:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "postgres": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@yawlabs/postgres-mcp@latest"],
+      "env": {
+        "DATABASE_URL": "postgres://user:password@host:5432/dbname"
+      }
+    }
+  }
+}
+</code></pre>
+<blockquote>
+<p><strong>Why the extra step on Windows?</strong> Since Node 20, <code>child_process.spawn</code> cannot directly execute <code>.cmd</code> files (that's what <code>npx</code> is on Windows). Wrapping with <code>cmd /c</code> is the standard workaround.</p>
+</blockquote>
+<p><strong>2. Restart and approve</strong></p>
+<p>Restart Claude Code (or your MCP client) and approve the postgres MCP server when prompted.</p>
+<p><strong>3. (Optional) Enable writes</strong></p>
+<p>Read-only is the default. If you want the agent to be able to <code>INSERT</code>, <code>UPDATE</code>, <code>DELETE</code>, or run DDL, add <code>ALLOW_WRITES=1</code> to the <code>env</code> block:</p>
+<pre><code class="language-json">"env": {
+  "DATABASE_URL": "postgres://...",
+  "ALLOW_WRITES": "1"
+}
+</code></pre>
+<p>Prefer scoping this to dev/test databases - for production, leave writes off and use migration tools out-of-band.</p>
+<h2>Configuring access</h2>
+<p>The role in <code>DATABASE_URL</code> is the primary access control. Postgres has had a battle-tested permission system for 30 years; lean on it instead of relying on <code>ALLOW_WRITES</code> alone. A least-privileged role makes writes server-rejected no matter what tools or env vars are configured.</p>
+<p><strong>Read-only agent (recommended default):</strong></p>
+<pre><code class="language-sql">CREATE ROLE mcp_reader LOGIN PASSWORD 'change-me';
+GRANT CONNECT ON DATABASE your_db TO mcp_reader;
+GRANT USAGE ON SCHEMA public TO mcp_reader;
+GRANT pg_read_all_data TO mcp_reader;
+</code></pre>
+<p>Point <code>DATABASE_URL</code> at <code>mcp_reader</code>. Postgres rejects every write, every DDL, every privilege change - regardless of <code>ALLOW_WRITES</code>. No app-level guard to bypass; the database is the boundary.</p>
+<p><strong>Scoped write agent (dev/test or narrow production use):</strong></p>
+<pre><code class="language-sql">CREATE ROLE mcp_writer LOGIN PASSWORD 'change-me';
+GRANT CONNECT ON DATABASE your_db TO mcp_writer;
+GRANT USAGE ON SCHEMA public TO mcp_writer;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mcp_writer;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO mcp_writer;
+-- DDL not granted -- the agent can change data but not schema.
+</code></pre>
+<p>Set <code>ALLOW_WRITES=1</code> so <code>pg_query</code> will issue writes, and rely on the role to keep the agent away from DDL and other schemas.</p>
+<p><a target="_blank" rel="noopener noreferrer"></a><strong>Per-tool gating in the host:</strong></p>
+<p>Tools split cleanly across two authority classes:</p>
+<ul>
+<li><strong>Auto-allow:</strong> <code>pg_readonly</code> (server-side <code>BEGIN READ ONLY</code>, unconditional), <code>pg_index_advisor</code> (only ever EXPLAINs the statements it is given, never with ANALYZE, inside <code>BEGIN READ ONLY</code>), plus the introspection and diagnostics tools (<code>pg_list_*</code>, <code>pg_describe_table</code>, <code>pg_search_columns</code>, <code>pg_health</code>, <code>pg_inspect_locks</code>, <code>pg_table_bloat</code>, <code>pg_unused_indexes</code>, <code>pg_seq_scan_tables</code>, <code>pg_top_queries</code>, <code>pg_io_stats</code>, <code>pg_replication_status</code>, <code>pg_advisor</code>, <code>pg_table_privileges</code>).</li>
+<li><strong>Always prompt:</strong> <code>pg_query</code> (writes when <code>ALLOW_WRITES=1</code> is set and the role allows it), <code>pg_explain</code> (<code>analyze: true</code> executes the statement; with <code>ALLOW_WRITES=1</code> that includes writes, which are rolled back, and without it the tool has the same reach as <code>pg_readonly</code>), <code>pg_kill</code> (changes session state; requires <code>ALLOW_WRITES=1</code>).</li>
+</ul>
+<p>The split follows each tool's <code>readOnlyHint</code> annotation, and Claude Code's <code>permissions</code> block and mcp.hosting's per-tool toggle both honor it.</p>
+<blockquote>
+<p><strong>What <code>READ ONLY</code> does and does not cover.</strong> A <code>BEGIN READ ONLY</code> transaction blocks writes to the <em>database</em> -- INSERT/UPDATE/DELETE, DDL, <code>nextval</code>/<code>setval</code>. It does not block functions whose effect lands outside the table data. <code>SELECT pg_terminate_backend(...)</code>, <code>pg_cancel_backend</code>, <code>pg_read_file</code>, <code>lo_export</code>, and <code>COPY ... TO PROGRAM</code> all run to completion inside <code>pg_readonly</code>, which means auto-allowing <code>pg_readonly</code> reaches the same capability that <code>pg_kill</code> puts behind <code>ALLOW_WRITES=1</code>. Every one of them still requires a privilege the <code>DATABASE_URL</code> role must actually hold (<code>pg_signal_backend</code>, <code>pg_read_server_files</code>, superuser), so <strong>the role is the control that bounds this tool, not the transaction mode.</strong> If you auto-allow <code>pg_readonly</code>, use a least-privileged role -- see <a href="#configuring-access" target="_blank" rel="noopener noreferrer">Configuring access</a>.</p>
+</blockquote>
+<p><strong><code>ALLOW_WRITES</code> as defense-in-depth:</strong></p>
+<p><code>ALLOW_WRITES</code> is a secondary belt-and-braces gate. Useful when:</p>
+<ul>
+<li>You're on a managed database where creating a second role is awkward (some Supabase/Neon plans).</li>
+<li>You want a single role that can write, but want the MCP server to refuse writes anyway during normal operation.</li>
+</ul>
+<p>Otherwise, configure the role and stop relying on <code>ALLOW_WRITES</code>.</p>
+<h2>What can an agent do with this?</h2>
+<p>Once connected, the agent picks tools automatically based on what you ask. A few single-tool examples:</p>
+<ul>
+<li><strong>"Describe the users table"</strong> -&gt; <code>pg_describe_table</code> -&gt; returns kind, columns, PK, FKs, indexes.</li>
+<li><strong>"Which tables have a <code>user_id</code> column?"</strong> -&gt; <code>pg_search_columns</code> with pattern <code>user_id</code> -&gt; one call instead of iterating every table.</li>
+<li><strong>"This query is slow, why?"</strong> -&gt; <code>pg_explain</code> with <code>analyze: true</code> -&gt; returns the plan with actual row counts and timing.</li>
+<li><strong>"What's the slowest query we run?"</strong> -&gt; <code>pg_top_queries</code> -&gt; returns the top N from <code>pg_stat_statements</code> with mean/total/min/max times.</li>
+<li><strong>"Do we have any unused indexes?"</strong> -&gt; <code>pg_unused_indexes</code> -&gt; returns non-unique, non-primary indexes with zero or low scan counts + their size.</li>
+<li><strong>"Is <code>pgvector</code> installed?"</strong> -&gt; <code>pg_list_extensions</code> -&gt; yes/no with version.</li>
+</ul>
+<p>The bigger leverage is multi-tool reasoning. A few real workflows:</p>
+<ul>
+<li><strong>Unstick a hung app.</strong> <code>pg_inspect_locks</code> returns blocked PID + blocking PID + the offending query, then <code>pg_kill</code> (<code>ALLOW_WRITES=1</code> required) cancels the blocker. The agent can run both in one turn - it's the fastest path from "the app is frozen" to "back up."</li>
+<li><strong>Chase a slow page.</strong> <code>pg_top_queries</code> ranks the worst queries, <code>pg_explain</code> with <code>analyze: true</code> shows the plan for the top hit, <code>pg_seq_scan_tables</code> and <code>pg_unused_indexes</code> say whether the answer is "add an index here" or "drop a dead one there."</li>
+<li><strong>Oncall triage.</strong> <code>pg_health</code> checks connectivity + active-query count + database size; <code>pg_inspect_locks</code> and <code>pg_replication_status</code> confirm whether contention or replication lag is in play before paging the on-call DBA.</li>
+</ul>
+<h2>Tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>pg_readonly</code></td>
+<td>Run a SQL statement with no persistent data changes - always inside <code>BEGIN READ ONLY</code>, regardless of <code>ALLOW_WRITES</code>. The recommended tool for read access, and the one to auto-allow for ad-hoc SQL; pair it with a least-privileged role (<a href="#per-tool-gating-in-the-host" target="_blank" rel="noopener noreferrer">why</a>).</td>
+</tr>
+<tr>
+<td><code>pg_query</code></td>
+<td>Run a SQL query. Writes gated by the role in <code>DATABASE_URL</code> first, <code>ALLOW_WRITES</code> second. Supports parameterized queries via <code>params</code>. Result fields include <code>dataTypeName</code> (e.g. <code>int4</code>, <code>jsonb</code>) alongside <code>dataTypeID</code>.</td>
+</tr>
+<tr>
+<td><code>pg_list_schemas</code></td>
+<td>List non-system schemas.</td>
+</tr>
+<tr>
+<td><code>pg_list_tables</code></td>
+<td>List tables (and optionally views) in a schema with estimated row counts. Paginated via <code>limit</code>/<code>offset</code>.</td>
+</tr>
+<tr>
+<td><code>pg_describe_table</code></td>
+<td>Kind, columns, PK, outgoing FKs, incoming FKs (<code>referenced_by</code>), CHECK / UNIQUE / EXCLUDE constraints, indexes, and partition parent/children for a relation. Generated and identity columns are flagged (<code>generated</code>, <code>identity</code>, <code>generation_expression</code>) so an agent doesn't try to write to them. Constraints carry <code>validated</code>, plus <code>enforced</code> / <code>has_period</code> on PG18+.</td>
+</tr>
+<tr>
+<td><code>pg_list_views</code></td>
+<td>List views and materialized views in a schema, including their SQL definitions.</td>
+</tr>
+<tr>
+<td><code>pg_list_functions</code></td>
+<td>List functions, procedures, and aggregates in a schema with signatures and return types.</td>
+</tr>
+<tr>
+<td><code>pg_list_extensions</code></td>
+<td>List installed extensions (pgvector, postgis, pg_stat_statements, etc.) with versions.</td>
+</tr>
+<tr>
+<td><code>pg_search_columns</code></td>
+<td>Find columns by name pattern across all user schemas. Case-insensitive, supports SQL LIKE wildcards.</td>
+</tr>
+<tr>
+<td><code>pg_explain</code></td>
+<td><code>EXPLAIN</code> or <code>EXPLAIN ANALYZE</code> for a SQL statement. Text or JSON output. Planner options: <code>buffers</code> (on by default with <code>analyze</code>), <code>settings</code>, <code>verbose</code>, <code>wal</code>, <code>costs</code>, <code>timing</code>, plus <code>generic_plan</code> (PG16+, plan a parameterized query with no values) and <code>memory</code> / <code>serialize</code> (PG17+). Optional <code>hypothetical_indexes</code> (requires the <a href="https://github.com/HypoPG/hypopg" target="_blank" rel="noopener noreferrer">HypoPG</a> extension) lets you ask "what would the plan be with these indexes?" without creating them on disk.</td>
+</tr>
+<tr>
+<td><code>pg_index_advisor</code></td>
+<td>Recommend indexes for a workload and prove each one pays for itself first. Takes <code>statements</code> you pass or the top N from <code>pg_stat_statements</code>, harvests candidate columns from what the <strong>planner</strong> reports as filters / join keys / sort keys (no SQL parser - every token is intersected with the real <code>pg_attribute</code> column list), then costs each candidate with <a href="https://github.com/HypoPG/hypopg" target="_blank" rel="noopener noreferrer">HypoPG</a> hypothetical indexes and keeps only what measurably lowers estimated cost. Greedy and bounded via <code>max_candidates</code> / <code>max_explains</code>, so a big workload cannot run away; <code>budget_exhausted</code> flags a truncated search. Returns the <code>CREATE INDEX</code> (plus a <code>CONCURRENTLY</code> form), cost before/after, which statements each index helps, and the estimated size. <strong>PG18-aware:</strong> PG18 added B-tree skip scan, so a multi-column index whose leading column is never filtered is no longer useless - that classic prune is gated on the server version rather than applied blindly. Requires HypoPG; indexes are session-scoped and reset on every exit path.</td>
+</tr>
+<tr>
+<td><code>pg_health</code></td>
+<td>Server version, database size, connections against <code>max_connections</code>, active queries with wait events and transaction age, <code>pg_stat_database</code> rollup (deadlocks, temp files, cache hit ratio), table count.</td>
+</tr>
+<tr>
+<td><code>pg_top_queries</code></td>
+<td>Top N queries by total/mean execution time. Requires the <code>pg_stat_statements</code> extension. Returns <code>stats_reset</code> (from <code>pg_stat_statements_info</code>, a different clock from the other stats tools) and <code>dealloc</code> on extension 1.9+ - a non-zero <code>dealloc</code> means entries were evicted past <code>pg_stat_statements.max</code>, so the ranking is drawn from an incomplete population.</td>
+</tr>
+<tr>
+<td><code>pg_seq_scan_tables</code></td>
+<td>Tables with heavy sequential scans - missing-index candidates. Returns the <code>stats_reset</code> window alongside the rows, since the counters mean nothing without it. <code>last_seq_scan</code> / <code>last_idx_scan</code> on PG16+.</td>
+</tr>
+<tr>
+<td><code>pg_unused_indexes</code></td>
+<td>Non-unique, non-primary indexes with low scan counts - drop candidates. Also returns <code>stats_reset</code>: a recently reset counter makes every index look unused, which is how a load-bearing index gets dropped. <code>last_idx_scan</code> on PG16+.</td>
+</tr>
+<tr>
+<td><code>pg_io_stats</code></td>
+<td>I/O observability: <code>pg_stat_io</code> read/write/extend/fsync counts, bytes and times per backend type and context (PG16+), plus in-flight async I/O handles from <code>pg_aios</code> and the active <code>io_method</code> (PG18+).</td>
+</tr>
+<tr>
+<td><code>pg_inspect_locks</code></td>
+<td>Who is blocking whom right now (blocked PID, blocker PID, lock type, queries).</td>
+</tr>
+<tr>
+<td><code>pg_list_roles</code></td>
+<td>Database roles with login/superuser/createdb flags and group memberships.</td>
+</tr>
+<tr>
+<td><code>pg_table_privileges</code></td>
+<td>Who has SELECT/INSERT/UPDATE/DELETE/etc. on a table or whole schema.</td>
+</tr>
+<tr>
+<td><code>pg_table_bloat</code></td>
+<td>Tables with high dead-tuple ratios - VACUUM candidates.</td>
+</tr>
+<tr>
+<td><code>pg_replication_status</code></td>
+<td>Replication slots, connected replicas, and current WAL position.</td>
+</tr>
+<tr>
+<td><code>pg_advisor</code></td>
+<td>Rolled-up DBA lints in one call: sequence-exhaustion candidates, wraparound risk for both counters (per-database and per-table <code>age(relfrozenxid)</code> against <code>autovacuum_freeze_max_age</code>, and <code>mxid_age(relminmxid)</code> against <code>autovacuum_multixact_freeze_max_age</code> -- a lock-heavy workload can exhaust multixacts while xids look healthy; <code>triggered_by</code> says which), tables without a primary key, and (configurable) public tables with RLS disabled. The "what should I be looking at?" starting point.</td>
+</tr>
+<tr>
+<td><code>pg_kill</code></td>
+<td>Cancel a running query or terminate a backend connection. Requires <code>ALLOW_WRITES=1</code>.</td>
+</tr>
+</tbody></table>
+<h2>Configuration</h2>
+<p>All env vars are read from the MCP server's environment:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DATABASE_URL</code></td>
+<td>(required)</td>
+<td>PostgreSQL connection string.</td>
+</tr>
+<tr>
+<td><code>ALLOW_WRITES</code></td>
+<td>unset</td>
+<td>Secondary write gate for <code>pg_query</code>, <code>pg_explain</code> ANALYZE-of-writes, and <code>pg_kill</code>. Set to <code>1</code> or <code>true</code> to lift the <code>BEGIN READ ONLY</code> wrapper on the first two and let <code>pg_kill</code> run. The role in <code>DATABASE_URL</code> is the primary control - see <a href="#configuring-access" target="_blank" rel="noopener noreferrer">Configuring access</a>. Does not affect <code>pg_readonly</code>, which is unconditional.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_STATEMENT_TIMEOUT_MS</code></td>
+<td><code>30000</code></td>
+<td>Per-statement timeout.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_CONNECTION_TIMEOUT_MS</code></td>
+<td><code>10000</code></td>
+<td>TCP connect timeout. Without this, a dead host hangs until the OS gives up (~2 minutes).</td>
+</tr>
+<tr>
+<td><code>POSTGRES_MAX_ROWS</code></td>
+<td><code>1000</code></td>
+<td>Cap on rows returned by <code>pg_query</code>.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_POOL_MAX</code></td>
+<td><code>5</code></td>
+<td>Max pool connections. Set to <code>1</code> for single-threaded backends (pglite-socket, PgBouncer transaction mode).</td>
+</tr>
+<tr>
+<td><code>POSTGRES_SSL_REJECT_UNAUTHORIZED</code></td>
+<td>unset</td>
+<td>Set to <code>false</code> to skip TLS cert verification (for managed DBs using private-CA certs). Connection is still encrypted.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_APPLICATION_NAME</code></td>
+<td><code>postgres-mcp</code></td>
+<td>Value reported in <code>pg_stat_activity.application_name</code>, so agent traffic is identifiable to whoever is watching the database. An <code>application_name</code> in <code>DATABASE_URL</code> takes precedence over this.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_AUDIT_LOG</code></td>
+<td>unset (off)</td>
+<td><code>1</code>, <code>true</code> or <code>stderr</code> turns on the audit log, one JSON line per audited statement, written to stderr unless <code>POSTGRES_AUDIT_LOG_FILE</code> is also set. <code>0</code>, <code>false</code> or <code>off</code> is the explicit off. Case-insensitive. Any other value stops the server at startup, including an empty or whitespace-only one. See <a href="#audit-logging" target="_blank" rel="noopener noreferrer">Audit logging</a>.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_AUDIT_LOG_FILE</code></td>
+<td>unset</td>
+<td>Append the audit lines to this file instead of stderr. Setting it alone turns auditing on. The server refuses to start if the value is empty, if the file cannot be opened, or if <code>POSTGRES_AUDIT_LOG</code> is explicitly off.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_AUDIT_REDACT</code></td>
+<td>unset (off)</td>
+<td><code>1</code> or <code>true</code> logs each statement's first keyword plus a SHA-256 of its text instead of the SQL. <code>0</code>, <code>false</code> or <code>off</code> is the explicit off: full SQL is logged. Does not turn auditing on by itself. Any other value stops the server at startup, including an empty or whitespace-only one, even with auditing off.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_MCP_RUNTIME</code></td>
+<td><code>auto</code></td>
+<td>Which JS runtime executes the server: <code>auto</code> (the newest <a href="https://oamjs.org" target="_blank" rel="noopener noreferrer">oam</a> at 0.15.2 or newer, else Node), <code>oam</code> (the same, but exit with an error instead of falling back to Node), <code>node</code> (always Node -- launched with <code>oam run</code>, it hands off to Node on <code>PATH</code>; refused when <code>POSTGRES_MCP_SANDBOX</code> is on). Case-insensitive; any other value behaves like <code>auto</code>. See <a href="#runtime" target="_blank" rel="noopener noreferrer">Runtime</a>.</td>
+</tr>
+<tr>
+<td><code>OAM_BIN</code></td>
+<td>unset</td>
+<td>Path to an <code>oam</code> binary to use in preference to discovery, when it is 0.15.2 or newer. If it does not exist, is older, or will not run, the launcher says so on stderr and carries on with discovery.</td>
+</tr>
+<tr>
+<td><code>POSTGRES_MCP_SANDBOX</code></td>
+<td>unset (off)</td>
+<td><code>1</code> or <code>true</code> runs the server under oam's <code>--permission</code> sandbox: filesystem and child processes denied, and network access limited to the one host and port the pg driver connects to -- from <code>DATABASE_URL</code> (its <code>host=</code> and <code>port=</code> parameters win), else <code>PGHOST</code>/<code>PGPORT</code>, else <code>localhost:5432</code>, the driver's own order. <code>0</code>, <code>false</code> or <code>off</code> is the explicit off. Case-insensitive. Any other value stops the launcher at startup, including an empty or whitespace-only one: that is usually an <code>env</code> entry such as <code>"POSTGRES_MCP_SANDBOX": "${SANDBOX}"</code> whose variable is unset where your MCP client runs, and reading it as unset would run the server without the sandbox. Only a variable that is not set at all counts as unset. The sandbox never turns itself off quietly: when it cannot be applied -- <code>POSTGRES_MCP_RUNTIME=node</code>, no usable oam 0.15.2 or newer, an oam that fails to launch, or a database endpoint it cannot pin to one TCP host and port (a Unix socket, several hosts, a port outside 1-65535, a host that is not a plain DNS name or IP address, a <code>DATABASE_URL</code> that is not a readable <code>postgres://</code> URL) -- the launcher exits with a message naming the fix. With <code>DATABASE_URL</code> unset the server gets no network access at all and its tools report the missing variable. Per oam's changelog, <code>--permission</code> did not cover all of <code>fs</code> and <code>child_process</code> until 0.9.1, and the port grant was not exact until 0.15.0. oam does not gate DNS lookups. The file audit sink cannot open under the sandbox; use the stderr sink. See <a href="#troubleshooting" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</td>
+</tr>
+</tbody></table>
+<h3>Supported Postgres versions</h3>
+<p>Tested on <strong>PostgreSQL 15, 17 and 18</strong> in the integration matrix.</p>
+<p>Works on PG13+, but note where upstream support actually sits: <strong>PG13 reached end of life on 2025-11-13 and PG14 does so on 2026-11-12.</strong> PG13/14 are not exercised here and are not a compatibility target going forward. PG12 and below are further out of support and some tools rely on columns that landed in PG13 (<code>pg_replication_status</code> reading <code>wal_status</code>, <code>pg_top_queries</code> reading <code>*_exec_time</code>).</p>
+<p>Newer server versions unlock extra fields rather than being required. Every version-dependent column is gated on <code>server_version_num</code> and simply omitted on servers that predate it, so nothing errors -- you get a slightly thinner answer. The cut points that matter:</p>
+<table>
+<thead>
+<tr>
+<th>Server</th>
+<th>What it adds</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>PG16+</td>
+<td><code>last_idx_scan</code> / <code>last_seq_scan</code> in the stats tools (index/table staleness rather than a bare counter), <code>pg_explain</code> <code>generic_plan</code></td>
+</tr>
+<tr>
+<td>PG17+</td>
+<td><code>pg_explain</code> <code>memory</code> and <code>serialize</code></td>
+</tr>
+<tr>
+<td>PG18+</td>
+<td>Generated-column form (<code>stored</code> vs <code>virtual</code>), NOT NULL constraint validity, <code>conenforced</code> / <code>conperiod</code> constraint metadata in <code>pg_describe_table</code>, <code>relallfrozen</code> freeze coverage in <code>pg_advisor</code>. <code>BUFFERS</code> is on by default with <code>EXPLAIN ANALYZE</code> server-side</td>
+</tr>
+</tbody></table>
+<p>If the version probe fails, the server assumes the oldest supported shape rather than emitting SQL a server might reject.</p>
+<h3>Runtime</h3>
+<p>The published <code>postgres-mcp</code> command is a small launcher that prefers the newest <a href="https://oamjs.org" target="_blank" rel="noopener noreferrer">oam</a> runtime it can find and falls back to Node.</p>
+<p><strong>If you do not have oam, nothing changes</strong> -- unless <code>POSTGRES_MCP_SANDBOX</code> is on, which needs oam and stops the launcher with a message when there is none. The fallback is not a re-exec: npm already started Node to run the launcher, so falling back is a plain <code>import()</code> of the server into that same process. It costs a few <code>existsSync</code> calls and no subprocess, and behaves identically to running <code>dist/index.js</code> under Node directly.</p>
+<p><strong>Which oam.</strong> Only oam 0.15.2 or newer -- the latest release -- is used. The launcher looks in the installed locations (<code>%LOCALAPPDATA%\oam\bin</code> then <code>~/.oam/bin</code> on Windows, <code>~/.oam/bin</code> elsewhere) and on <code>PATH</code>, asks every <code>oam</code> it finds for its version, and runs the newest; on a tie the installed copy wins. An older oam is passed over. On Windows only <code>oam.exe</code> counts; an <code>oam.cmd</code> / <code>oam.bat</code> shim is never run. The passed-over binaries and any shim are named on stderr only when no usable oam is found -- when a newer oam runs, nothing is printed about them. An <code>OAM_BIN</code> that cannot be used is always named whenever the launcher looks for an oam, even when a newer one then runs. When a host launches the command with <code>oam run</code> on oam 0.15.2 or newer, the server runs inside that oam with no second one -- except when <code>POSTGRES_MCP_SANDBOX</code> is on, which needs a freshly launched oam and exits with an error when none can be launched. A host oam older than 0.15.2 never serves the server itself: it hands off to the newest usable oam, else (without the sandbox) to Node on <code>PATH</code>, else exits with an error.</p>
+<p><strong>If you do have a usable oam,</strong> the server runs under it. Verified equivalent on both runtimes: all 23 tools register, queries return identical rows and <code>dataTypeName</code> values, and the error paths match. oam supplies every <code>node:</code> builtin the driver needs, including <code>net</code>, <code>tls</code>, <code>crypto</code>, and <code>dns</code> (SCRAM auth and the extended query protocol both work).</p>
+<p><strong>Startup cost, measured.</strong> windows-arm64, 1.4 MB bundle, <code>postgres-mcp version</code> (full module init), every binary warmed first, mean of 12 runs:</p>
+<table>
+<thead>
+<tr>
+<th>path</th>
+<th>startup</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>standalone binary (<code>oam compile</code>)</td>
+<td>298ms</td>
+</tr>
+<tr>
+<td><code>oam run dist/index.js</code></td>
+<td>306ms</td>
+</tr>
+<tr>
+<td><code>node dist/index.js</code></td>
+<td>358ms</td>
+</tr>
+<tr>
+<td>launcher -&gt; Node (in-process)</td>
+<td>370ms</td>
+</tr>
+<tr>
+<td>launcher -&gt; oam (spawn)</td>
+<td>409ms</td>
+</tr>
+</tbody></table>
+<p>oam starts <strong>faster</strong> than Node here. What the launcher costs is the <em>spawn</em>: reaching oam means Node has already booted, and that hop (~100ms) is larger than oam's ~52ms advantage. So through the npm <code>bin</code>, the two land within ~40ms of each other, and <code>POSTGRES_MCP_RUNTIME=node</code> is a marginal win rather than a meaningful one. Those figures were taken with one oam on the machine: the launcher now runs <code>--version</code> on every oam binary it finds, so each extra copy adds a probe.</p>
+<p>Either way it is a <strong>one-time cost per MCP session</strong>, not per tool call -- hosts spawn the server once and hold it open. If startup genuinely matters, the standalone binary avoids the launcher entirely and is the fastest option.</p>
+<blockquote>
+<p>Earlier releases of this README reported ~650-900ms for Node and ~980-1290ms for oam, and advised opting out of oam on that basis. Those figures were measured against cold, freshly-built binaries and reflected the Windows on-access virus scanner rather than either runtime. They were wrong in both magnitude and direction. Corrected in 0.9.1.</p>
+</blockquote>
+<pre><code class="language-jsonc">{
+  "mcpServers": {
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@yawlabs/postgres-mcp"],
+      "env": {
+        "DATABASE_URL": "postgres://...",
+        "POSTGRES_MCP_RUNTIME": "node"  // opt out of oam
+      }
+    }
+  }
+}
+</code></pre>
+<h3>Connecting to managed Postgres (Supabase, Neon, RDS, etc.)</h3>
+<p>Most managed databases require TLS but serve certs signed by a private CA that Node's default trust store doesn't recognize. The symptom is one of:</p>
+<ul>
+<li><code>self signed certificate in certificate chain</code></li>
+<li><code>unable to get local issuer certificate</code></li>
+<li><code>unable to verify the first certificate</code></li>
+</ul>
+<p>To allow the connection while keeping traffic encrypted, add <code>POSTGRES_SSL_REJECT_UNAUTHORIZED=false</code> to the <code>env</code> block:</p>
+<pre><code class="language-json">"env": {
+  "DATABASE_URL": "postgres://user:pass@host:5432/db?sslmode=require",
+  "POSTGRES_SSL_REJECT_UNAUTHORIZED": "false"
+}
+</code></pre>
+<p>This disables certificate chain verification only -- the TCP connection is still TLS-encrypted end-to-end. For production setups where you can install the CA, prefer putting the cert in the Node trust store (<code>NODE_EXTRA_CA_CERTS</code>) over disabling verification globally.</p>
+<p><strong>Shaving a round trip on PG17+.</strong> Postgres 17 added direct TLS negotiation, which skips the plaintext <code>SSLRequest</code> handshake before the TLS one. The bundled driver supports it, so append <code>sslnegotiation=direct</code> to your <code>DATABASE_URL</code>:</p>
+<pre><code>postgres://user:pass@host:5432/db?sslmode=require&amp;sslnegotiation=direct
+</code></pre>
+<p>It is opt-in rather than a default because a PG16-or-older server will reject the connection outright, and the saving is one round trip per pooled connection -- worth it on a distant managed database, invisible on a local one.</p>
+<h3>Audit logging</h3>
+<p>Off by default. Turn it on in the <code>env</code> block with <code>POSTGRES_AUDIT_LOG=stderr</code>, or with <code>POSTGRES_AUDIT_LOG_FILE</code> alone:</p>
+<pre><code class="language-json">"env": {
+  "DATABASE_URL": "postgres://...",
+  "POSTGRES_AUDIT_LOG_FILE": "/var/log/postgres-mcp/audit.jsonl"
+}
+</code></pre>
+<p>The server then writes one JSON line per audited statement. Two captured from PostgreSQL 17 -- a parameterized query, then a failing one:</p>
+<pre><code class="language-json">{"ts":"2026-09-12T19:26:42.587Z","tool":"pg_query","source":"user","sql":"SELECT $1::int AS n","params":1,"ms":2.827,"rows":1,"ok":true}
+{"ts":"2026-09-12T19:26:42.591Z","tool":"pg_readonly","source":"user","sql":"SELECT * FROM does_not_exist_xyz","params":0,"ms":2.217,"rows":null,"ok":false,"sqlstate":"42P01"}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ts</code></td>
+<td>ISO 8601 time the line was written, just after the statement finished.</td>
+</tr>
+<tr>
+<td><code>tool</code></td>
+<td>The MCP tool that issued the statement. Absent only when the server's query functions are called outside a tool handler, e.g. when embedding it in-process.</td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td><code>user</code> for SQL passed to <code>pg_query</code>, <code>pg_readonly</code> or <code>pg_explain</code>. <code>internal</code> for everything else: the server's own catalog queries (one <code>pg_describe_table</code> call writes several), <code>pg_kill</code>'s signal call (the server writes that statement; the agent supplies only the pid), and every statement <code>pg_index_advisor</code> runs -- including workload SQL passed in its <code>statements</code>. Filtering on <code>user</code> does not show all agent-supplied SQL, and it does not show <code>pg_kill</code> calls: filter on <code>tool</code> for those. A kill sent as SQL (<code>SELECT pg_terminate_backend(...)</code> through a tool that takes SQL) is an ordinary <code>user</code> line under that tool's name.</td>
+</tr>
+<tr>
+<td><code>sql</code></td>
+<td>The statement text as sent. For <code>pg_explain</code> that is the composed statement: <code>EXPLAIN SELECT ...</code>, or <code>EXPLAIN (ANALYZE, BUFFERS) SELECT ...</code> with options.</td>
+</tr>
+<tr>
+<td><code>sqlKeyword</code>, <code>sqlSha256</code></td>
+<td>Replace <code>sql</code> when <code>POSTGRES_AUDIT_REDACT</code> is on: the first run of letters after any leading whitespace or <code>(</code>, uppercased (<code>UNKNOWN</code> when anything else comes first, such as a comment), and a hex SHA-256 of the full text. The keyword is the first word, not the effect: a CTE that deletes logs <code>WITH</code>, and every <code>pg_explain</code> line logs <code>EXPLAIN</code>.</td>
+</tr>
+<tr>
+<td><code>params</code></td>
+<td>How many bound parameters were passed. The count, never the values.</td>
+</tr>
+<tr>
+<td><code>ms</code></td>
+<td>Wall-clock milliseconds for the audited step, not server execution time. A <code>user</code> line runs from the connection checkout to the statement's completion, so it includes waiting for a pooled connection, the <code>BEGIN</code>, <code>pg_explain</code>'s hypothetical-index setup, and the row-cap cursor's round trips; <code>internal</code> lines can include waiting for a pool connection or behind the same call's other catalog queries.</td>
+</tr>
+<tr>
+<td><code>rows</code></td>
+<td><code>null</code> on failure. Otherwise the count postgres reported, or the rows returned when it reports none (<code>SET</code> logs <code>0</code>). A capped <code>SELECT</code> reports at most <code>POSTGRES_MAX_ROWS</code> + 1, the extra row being how truncation is detected; statements that cannot use the cursor (<code>EXPLAIN</code>, <code>SHOW</code>, <code>... RETURNING</code>) report their full count even when the response is truncated.</td>
+</tr>
+<tr>
+<td><code>ok</code></td>
+<td>Whether the statement ran and succeeded. <code>false</code> also covers a statement that was never sent because the call failed first -- the connection was refused, <code>BEGIN</code> failed, or <code>pg_explain</code> could not create a hypothetical index -- and the line then carries that failure's code; PostgreSQL's own log has no record of such a statement. For agent SQL <code>true</code> does not mean it committed: the <code>COMMIT</code> that follows is not logged, so a write whose commit fails still reads <code>true</code>.</td>
+</tr>
+<tr>
+<td><code>sqlstate</code></td>
+<td>Only when <code>ok</code> is <code>false</code> and the error carries a code. Usually a five-character SQLSTATE such as <code>42P01</code>, but a failed connection records a Node error code instead (<code>ECONNREFUSED</code>, <code>ENOTFOUND</code>); a connect timeout records none, and neither does a missing <code>DATABASE_URL</code>.</td>
+</tr>
+</tbody></table>
+<p><strong>Never logged, in any mode:</strong> bound parameter values (only their count) and error messages (only the code), since postgres quotes offending values back in its messages. Statement text is logged as written, so pass sensitive literals as <code>params</code> to <code>pg_query</code>, <code>pg_readonly</code> or <code>pg_explain</code>. <code>pg_index_advisor</code> takes no <code>params</code>; write <code>$1</code>-style placeholders in its <code>statements</code> instead (planned with <code>GENERIC_PLAN</code>, PostgreSQL 16+).</p>
+<p><strong>Values are parsed strictly.</strong> A value outside the accepted sets in the <a href="#configuration" target="_blank" rel="noopener noreferrer">Configuration</a> table -- <code>yes</code>, <code>on</code>, <code>hash</code> -- stops the server at startup instead of reading as off, even for <code>POSTGRES_AUDIT_REDACT</code> with auditing off. An audit control that quietly disabled itself would be worse than none. Case and surrounding whitespace are ignored. A variable that is set but empty, or only whitespace, stops the server too: that is usually an <code>env</code> entry such as <code>"POSTGRES_AUDIT_REDACT": "${AUDIT_REDACT}"</code> whose variable is unset where your MCP client runs (on Windows, variables from a bash or WSL profile do not reach a server launched via <code>cmd</code>), and reading it as unset would log full SQL. Only a variable that is not set at all counts as unset, so to leave either flag off, remove it from the <code>env</code> block or set it to <code>0</code>.</p>
+<p><strong>The file sink.</strong> <code>POSTGRES_AUDIT_LOG_FILE</code> alone turns auditing on, and it wins over <code>POSTGRES_AUDIT_LOG=stderr</code> without a warning when both are set. As with the other two variables, an empty or whitespace-only value is an error, not unset. The path must name a file in an existing directory: the file is created if missing, opened for append at startup, and held open for the life of the process. Use an absolute path; a relative one resolves against whatever directory your MCP client launches the server from. A write that fails later (full disk) never fails the query: one warning goes to stderr and later lines keep trying.</p>
+<p><strong>On stderr,</strong> audit lines are mixed with the startup banner and warnings, so skip lines that are not JSON; the file sink holds only audit lines. stdout is never used -- it is the MCP protocol channel.</p>
+<p><strong>Redaction hides text, not guesses.</strong> Identical statements hash identically, so you can still count and correlate them -- and for the same reason, anyone holding the log can confirm a guessed statement, so a short literal inside a predictable query is recoverable. Bound parameters are the safe place for sensitive values.</p>
+<p><strong>Under <code>POSTGRES_MCP_SANDBOX</code></strong> the sandbox denies the filesystem, so the file sink cannot open and the server exits at startup (<code>could not be opened for append: Access to this API has been restricted</code>). Use <code>POSTGRES_AUDIT_LOG=stderr</code> there; all three audit variables pass through the sandbox.</p>
+<p><strong>What the trail does not show.</strong></p>
+<ul>
+<li><strong>Which backend <code>pg_kill</code> signalled.</strong> Each signal writes one line -- <code>tool: "pg_kill"</code>, <code>source: "internal"</code>, <code>params: 1</code>, and <code>sql</code> either <code>SELECT pg_cancel_backend($1) AS signaled</code> or <code>SELECT pg_terminate_backend($1) AS signaled</code> -- but the pid is a bound parameter, so only its count is logged (PostgreSQL's own log can record the value; see the end of this section). If the target was one of this server's own statements and the signal took effect, that statement writes its own <code>ok: false</code> line (normally <code>sqlstate</code> <code>57014</code> for a cancel and <code>57P01</code> for a terminate), and <code>ts</code> is all that pairs the two. Measured against local servers over loopback TCP, the target's line usually carried the same millisecond as the <code>pg_kill</code> line or the next, and terminating a CPU-bound target took up to a few hundred milliseconds; a target that is slow to reach an interrupt check can take longer still. The target's line is normally the later of the two, occasionally the earlier. Treat closeness as evidence, not proof: a statement timeout writes <code>57014</code> too. Under <code>POSTGRES_AUDIT_REDACT</code> both modes read <code>sqlKeyword</code> <code>SELECT</code>, so tell a cancel from a terminate by hashing the two texts above -- the exact text with no trailing newline, single-quoted in a shell so that <code>$1</code> survives.</li>
+<li><strong>Whether a <code>pg_kill</code> signal took effect.</strong> <code>ok</code> describes <code>pg_kill</code>'s own statement, and the <code>signaled</code> value it returned is not logged. <code>ok: true</code> covers a signal that landed, a pid that is not a backend (postgres answers <code>false</code>), and a cancel that changed nothing: postgres answers <code>true</code> once the signal is sent, not once it has taken effect, and a session that is idle in a transaction, for one, ignores it. <code>ok: false</code> with <code>42501</code> is a refusal: the role may not signal that backend. <code>ok: false</code> with <code>57014</code> or <code>57P01</code> on the <code>pg_kill</code> line itself means <code>pg_kill</code>'s own statement was cancelled or terminated, as happens when the pid names the connection <code>pg_kill</code> is running on; after such a terminate that backend is gone, even though the line reads <code>ok: false</code>. A call refused for want of <code>ALLOW_WRITES=1</code> sends nothing and writes nothing.</li>
+<li>The scaffolding around agent SQL (<code>BEGIN READ ONLY</code>, the row-cap savepoint and cursor, the closing <code>COMMIT</code> / <code>ROLLBACK</code>), the <code>pg_type</code> lookup behind <code>dataTypeName</code>, and the <code>hypopg_create_index</code> / <code>hypopg_reset</code> calls behind <code>pg_explain</code>'s <code>hypothetical_indexes</code>. None of these gets a line of its own. A <code>BEGIN</code>, a savepoint or a <code>hypopg_create_index</code> that fails does show, on the statement's own <code>ok: false</code> line (see <code>ok</code> above), because the statement is never sent; a <code>pg_type</code> lookup that fails does not, because the statement already ran and the lookup only decorates its result. <code>pg_index_advisor</code> is the exception: everything it sends is logged, including its transaction control and the <code>EXPLAIN</code> of each workload statement. The server-version probe some tools run first, <code>SELECT current_setting('server_version_num') AS v</code>, is an ordinary <code>internal</code> line: once per successful reading, which is then cached for the life of the process (calls that race the first reading share it), and on every probing call while the server is unreachable, since a failure is not cached.</li>
+<li>The statement a call never got as far as composing. Every tool records a refused connection as the <code>ok: false</code> line of the first statement it was about to send, under its own <code>tool</code>, with <code>sqlstate</code> holding the Node error code or absent for a connect timeout: the agent's SQL for <code>pg_query</code> and <code>pg_readonly</code>; for <code>pg_explain</code> the <code>EXPLAIN</code> itself, unless a version-floored option (<code>settings</code>, <code>wal</code>, <code>generic_plan</code>, <code>memory</code>, <code>serialize</code>, <code>buffers</code> without <code>analyze</code>) or <code>hypothetical_indexes</code> was passed, when the line is the version probe's or the HypoPG check's and the <code>EXPLAIN</code>, composed only after them, is not on it; the signal statement for <code>pg_kill</code>; and the version probe or the first catalog query for the rest, including the tools that share one connection across several queries (<code>pg_describe_table</code>, <code>pg_health</code>, <code>pg_advisor</code>, <code>pg_replication_status</code>, <code>pg_seq_scan_tables</code>, <code>pg_unused_indexes</code>, <code>pg_io_stats</code>), whose first query is the one that checks the connection out.</li>
+</ul>
+<p>PostgreSQL's own logging is the complete server-side record: <code>log_statement = 'all'</code> records every statement that reaches execution, and <code>log_min_error_statement</code>, at its default <code>error</code>, adds statements that fail earlier. It also records exactly what this trail keeps out -- bound parameter values and full error messages.</p>
+<h2>Troubleshooting</h2>
+<p><strong><code>DATABASE_URL is not set</code></strong> - Your MCP client is launching the server without the env var. On Windows especially, env vars set in bash / PowerShell profiles are not inherited by MCP servers launched via <code>cmd</code>. Put <code>DATABASE_URL</code> directly in the <code>env</code> block of <code>.mcp.json</code>.</p>
+<p><strong><code>password authentication failed</code></strong> - Check the username, password, and that the user has <code>CONNECT</code> privilege on the database. URL-encode special characters in the password (<code>@</code> → <code>%40</code>, <code>#</code> → <code>%23</code>, <code>/</code> → <code>%2F</code>).</p>
+<p><strong><code>SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string</code></strong> - The password in your connection string is empty or became <code>null</code> after URL decoding. Re-check your connection string.</p>
+<p><strong><code>canceling statement due to statement timeout</code></strong> - A single query exceeded <code>POSTGRES_STATEMENT_TIMEOUT_MS</code> (default 30s). Increase it, narrow the query with <code>WHERE</code>, or add an index. This is working as designed -- the timeout exists so a runaway query cannot hang the agent.</p>
+<p><strong><code>Write blocked: this server is in read-only mode</code></strong> - You asked the agent to write via <code>pg_query</code> but <code>ALLOW_WRITES</code> is not set. Either add <code>ALLOW_WRITES=1</code> to the <code>env</code> block of <code>.mcp.json</code> and restart your MCP client (dev/test DBs), or - cleaner for production - use a role with <code>INSERT/UPDATE/DELETE</code> grants in <code>DATABASE_URL</code> and keep <code>ALLOW_WRITES</code> unset. See <a href="#configuring-access" target="_blank" rel="noopener noreferrer">Configuring access</a>. Note that <code>pg_readonly</code> always rejects writes; if you want writes, the call has to go through <code>pg_query</code>.</p>
+<p><strong><code>Error: [postgres-mcp] POSTGRES_AUDIT_...</code> or <code>Error: [postgres-mcp] audit log file ... could not be opened for append</code> at startup</strong> - An audit variable is misconfigured, and the server exits with a stack trace rather than guess. The <code>Error:</code> line says which case you hit: an unrecognized value (it lists the accepted ones), a variable that is set but empty (usually an unexpanded variable in the MCP config -- remove it from the <code>env</code> block, or give it a real value: <code>0</code> or <code>1</code> for the two flags, a path for the file), a file set while <code>POSTGRES_AUDIT_LOG</code> is off, or the OS error from opening the file -- <code>ENOENT</code> usually means its directory does not exist, and <code>Access to this API has been restricted</code> means <code>POSTGRES_MCP_SANDBOX=1</code>. See <a href="#audit-logging" target="_blank" rel="noopener noreferrer">Audit logging</a>.</p>
+<p><strong><code>postgres-mcp: POSTGRES_MCP_SANDBOX=... refusing to start without the sandbox</code></strong> - The sandbox was requested but cannot be applied, so the launcher stops rather than run the server without it. The first line names the case and the last line the fix: <code>POSTGRES_MCP_RUNTIME=node</code> (Node has no <code>--permission</code>); no usable oam 0.15.2 or newer (the indented lines list what was found and why each was passed over); an oam that failed to launch; or a database endpoint that cannot be pinned -- a Unix socket, several hosts, a port outside 1-65535, a host with whitespace or non-ASCII characters (use its <code>xn--</code> form), or a <code>DATABASE_URL</code> that is not a readable <code>postgres://</code> URL. <code>DATABASE_URL</code> itself is never printed. <strong><code>postgres-mcp: POSTGRES_MCP_SANDBOX="..." is not a recognized value</code></strong> means the value is wrong: <code>1</code> or <code>true</code> turns the sandbox on, <code>0</code>, <code>false</code> or <code>off</code> turns it off.</p>
+<p><strong>Connection pool exhaustion with PgBouncer transaction mode or pglite-socket</strong> - These backends don't support concurrent queries on a single connection. Set <code>POSTGRES_POOL_MAX=1</code> in the env block.</p>
+<p><strong>First query is slow, subsequent queries are fast</strong> - Expected. The pg driver lazily establishes the first connection; subsequent queries reuse the pool.</p>
+<h2>Development</h2>
+<p>Run the full suite (unit + integration) against a real Postgres:</p>
+<pre><code class="language-bash">DATABASE_URL='postgres://user:pass@host:5432/db' POSTGRES_MCP_INTEGRATION=1 npm run test:integration
+</code></pre>
+<p>The integration suite assumes a disposable database -- it creates and drops a <code>test_fixture</code> schema. Don't point it at anything you care about.</p>
+<p>To also run the destructive tests (REVOKE / restricted-role path), add <code>POSTGRES_MCP_DESTRUCTIVE_TESTS=1</code>. Only safe on a disposable cluster:</p>
+<pre><code class="language-bash">DATABASE_URL='postgres://user:pass@host:5432/db' POSTGRES_MCP_INTEGRATION=1 POSTGRES_MCP_DESTRUCTIVE_TESTS=1 npm run test:integration
+</code></pre>
+<h3>Windows: integration tests via WSL2</h3>
+<p>Native Postgres on Windows ARM64 is fragile (UCRT runtime gaps, missing ARM64 builds). The reliable path is a disposable Ubuntu under WSL2 with the integration suite running inside WSL (WSL2's NAT blocks the Windows host from reaching :5432, so don't try to run the tests from PowerShell):</p>
+<pre><code class="language-powershell">wsl --install -d Ubuntu --no-launch
+# reboot, then:
+wsl -d Ubuntu -u root bash -c "apt-get update &amp;&amp; apt-get install -y nodejs npm rsync"
+wsl -d Ubuntu -u root bash /mnt/c/path/to/postgres-mcp/scripts/wsl-pg-setup.sh
+wsl -d Ubuntu -u root bash /mnt/c/path/to/postgres-mcp/scripts/wsl-test-matrix.sh
+</code></pre>
+<p><code>wsl-pg-setup.sh</code> installs PG15, PG17 and PG18 from the PGDG apt repo (ports are auto-assigned by <code>pg_createcluster</code> -- typically 17 on 5432, 18 on 5433, 15 on 5434), sets the <code>postgres</code> password to <code>postgres</code>, and creates <code>postgres_mcp_test</code> in each. <code>wsl-test-matrix.sh</code> rsyncs the working tree into <code>/root/postgres-mcp</code>, runs <code>npm ci</code> once, and runs the integration suite against every cluster found via <code>pg_lsclusters</code>.</p>
+<p><strong>Running these from Git Bash instead of PowerShell?</strong> Prefix both script invocations with <code>MSYS_NO_PATHCONV=1</code>. Git Bash rewrites the <code>/mnt/c/...</code> argument before <code>wsl.exe</code> sees it, so the script arrives as <code>C:/Users/&lt;you&gt;/scoop/apps/git/&lt;ver&gt;/mnt/c/...</code> and bash exits with "No such file or directory" having run nothing. Also avoid piping either script into <code>tail</code>/<code>head</code> -- the pipeline's exit status is the last command's, so a failing matrix reports success.</p>
+<p>Tear down when finished: <code>wsl --unregister Ubuntu</code>.</p>
+<h2>License</h2>
+<p>MIT © 2026 YawLabs</p>
+<p><a href="https://x.com/YawLabs" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/follow-%40YawLabs-000000?logo=x&amp;logoColor=white" alt="Follow @YawLabs on X" /></a></p>

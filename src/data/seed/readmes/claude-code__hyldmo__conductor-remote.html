@@ -1,0 +1,849 @@
+<h1>conductor-remote</h1>
+<p>A phone control panel for your <strong>local</strong> Conductor agents. Monitor every
+workspace, read live transcripts, view diffs, and send prompts — from your
+phone, over your Tailnet, no cloud, no App Store.</p>
+<p>Installable as a PWA (Add to Home Screen). Reads ride Conductor's on-disk SQLite</p>
+<img width="600" height="800" alt="demo-workspaces" src="https://github.com/user-attachments/assets/e098f964-29b2-4614-b200-9dc977799eb8" /><h2>Install</h2>
+<p>Needs <a href="https://conductor.build" target="_blank" rel="noopener noreferrer">Conductor</a> running on the same Mac, Node ≥ 24, and
+<a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on the Mac + phone. Then:</p>
+<pre><code class="language-bash">npm i -g conductor-remote
+conductor-remote service install    # run on login; prints your phone URL
+</code></pre>
+<p><strong>Private tailnet only?</strong> Pass <code>--expose tailnet</code> to skip public Funnel, so the URL
+is reachable only from devices logged into your tailnet:</p>
+<pre><code class="language-bash">conductor-remote service install --expose tailnet
+</code></pre>
+<p>The choice is remembered across re-deploys; see <strong>Reachability</strong> below for the trade-off.</p>
+<p>Or the one-liner (checks Node, offers <code>brew install node</code> if missing, installs,
+registers the service):</p>
+<pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/hyldmo/conductor-remote/main/install.sh | bash
+</code></pre>
+<p>The published package needs no local build toolchain or native addons, so installation
+is still a plain <code>npm i -g</code>. <code>service install</code>
+prints a phone URL with an embedded token; open it and <strong>Add to Home Screen</strong>.
+Manage the service with <code>conductor-remote service status|restart|uninstall</code>.</p>
+<p><code>conductor-remote config</code> prints what the daemon is <strong>actually</strong> configured with and
+where each value came from, then cross-checks the configured reachability against what
+Tailscale is doing. Change one value with <code>conductor-remote config set &lt;setting&gt; &lt;value&gt;</code>.
+The setter preserves the other values in the LaunchAgent plist and restarts the relay.</p>
+<p><strong>Install flags.</strong> <code>service install</code> takes flags for the install-time knobs (each
+also settable via the env var in brackets — the flag wins when both are given).
+Run <code>conductor-remote --help</code> for the full list. The common ones:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Env</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--expose public|tailnet</code></td>
+<td><code>EXPOSE</code></td>
+<td>Reachability (public Funnel default, or tailnet-only)</td>
+</tr>
+<tr>
+<td><code>--port &lt;n&gt;</code></td>
+<td><code>RELAY_PORT</code></td>
+<td>Listen port (default <code>8787</code>)</td>
+</tr>
+<tr>
+<td><code>--token &lt;secret&gt;</code></td>
+<td><code>RELAY_TOKEN</code></td>
+<td>Pin the shared secret (default: generated + persisted)</td>
+</tr>
+<tr>
+<td><code>--write-strategy &lt;s&gt;</code></td>
+<td><code>WRITE_STRATEGY</code></td>
+<td><code>applescript</code> (default) or <code>sidecar</code></td>
+</tr>
+<tr>
+<td><code>--prevent-screen-lock on|off</code></td>
+<td><code>PREVENT_SCREEN_LOCK</code></td>
+<td>Block the automatic lock during nosleep windows (default <code>on</code>)</td>
+</tr>
+</tbody></table>
+<p><strong>Reachability (<code>--expose</code>).</strong> By default the URL is exposed publicly via
+<a href="https://tailscale.com/kb/1223/funnel" target="_blank" rel="noopener noreferrer">Tailscale Funnel</a> — reachable from any
+browser, gated by the embedded 128-bit token (so the phone needs <strong>no</strong> Tailscale
+app). Funnel must be enabled once for your tailnet (Admin console). To keep it
+tailnet-only instead (devices logged into your tailnet, via <code>tailscale serve</code>),
+install with <code>--expose tailnet</code> (or <code>EXPOSE=tailnet</code>). The choice is remembered
+across re-deploys.</p>
+<p>The relay sits on <code>:443</code> by default. When another service already holds that
+port (Funnel is per port, and some webhooks only ever dial 443), the deploy leaves
+it alone and mounts the relay on the next free port instead, so the phone URL can
+read <code>https://&lt;node&gt;:8787/</code>. <code>service status</code> and <code>config</code> report whichever
+port is live; a mapping already in place is kept wherever it is.</p>
+<p><strong>Voice (optional).</strong> The phone button immediately left of <strong>+</strong> opens one
+fleet-wide control-room call over WebRTC. Its orchestrator can give a fresh,
+paged and filterable summary of current workspace progress, bring forward one
+decision at a time, create a workspace, and dispatch an exact prompt. Both
+writes require a spoken preview and confirmation. The call survives
+workspace navigation, includes live captions and a typed fallback, and needs
+only a locally stored OpenAI key; it does not need SIP, Twilio, a webhook, or
+public ingress. A separate dial-in transport remains available for
+locked-screen/PSTN use. See
+<a href="https://github.com/hyldmo/conductor-remote/blob/HEAD/docs/voice-setup.md" target="_blank" rel="noopener noreferrer">Voice setup</a>.</p>
+<h2>Architecture</h2>
+<pre><code> Phone PWA  ──HTTP/poll──►  Relay (Node, on the Mac, bound to Tailscale)
+ (React, installable)                 │
+                                      ├─ reads:  node:sqlite ⟶ conductor.db   (workspaces, sessions, transcripts)
+                                      ├─ reads:  git ⟶ each worktree           (diffs vs target branch)
+                                      ├─ usage: provider CLIs ⟶ rolling plan limits (no model prompt)
+                                      ├─ writes: Actuator ⟶ Conductor
+                                      │          ├─ applescript (default): osascript ⟶ focused session
+                                      │          └─ sidecar (opt-in):      unix socket ⟶ exact session
+                                      ├─ workflow: orchestration.db ⟷ coordinator ⟶ tracked UI effects
+                                      ├─ dev:    Run/Stop ⟶ CONDUCTOR_PORT ⟶ tailnet-only HTTPS
+                                      └─ push:   turn ended ⟶ Web Push ⟶ your lock screen
+</code></pre>
+<ul>
+<li><strong>Two halves.</strong> A <strong>Node relay</strong> on the Mac (reads Conductor's state, drives
+the write path) and a <strong>React PWA</strong> the phone installs. Vite builds the PWA to
+<code>dist/</code>, which the relay serves.</li>
+<li><strong>Reads are durable.</strong> No Conductor API, no injection — the SQLite schema and
+git worktrees outlive UI changes.</li>
+<li><strong>Plan usage is prompt-free.</strong> The usage gauge asks Conductor's bundled Claude
+and Codex CLIs for structured rolling limits only while the sheet is open, then
+caches the result for a minute. Cursor/OpenCode say why no plan quota is available.</li>
+<li><strong>Writes are the one fragile nerve</strong> and are isolated behind a swappable
+<code>Actuator</code> (<code>src/writes/types.ts</code>, implemented in <code>src/writes/actuator.ts</code>).</li>
+<li><strong>Workflow orchestration is relay-owned.</strong> A separate WAL SQLite database
+records frozen roles, jobs, capabilities, UI effects, receipts, and recovery;
+a cross-process lease prevents two compatible relays from driving the shared
+Conductor window at once.</li>
+<li><strong>Notifications ride the durable side.</strong> The relay watches the same SQLite for
+turns ending and sends a Web Push straight to the phone — no Conductor process
+involved, and it works with the app closed.</li>
+</ul>
+<h2>Stack</h2>
+<p>React 19 · React Router 7 · Vite 7 · Tailwind v4 · <code>vite-plugin-pwa</code> · TanStack
+Query · Zustand · Biome · lucide. The relay is Node 24 (<code>node:sqlite</code> + native TS
+type-stripping), with Drizzle and Zod defining and validating its owned database.</p>
+<h2>Requirements</h2>
+<ul>
+<li>Node ≥ 24. (<a href="https://yarnpkg.com" target="_blank" rel="noopener noreferrer">Yarn</a> — Berry, the repo pins <code>yarn@4</code> — is
+only needed to run from source; the published package installs with plain npm.)</li>
+<li>Conductor running on the same Mac.</li>
+<li><a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on the Mac and the phone (or any shared
+private network) to reach the relay.</li>
+<li>For the <strong>write</strong> path only: macOS <strong>Accessibility</strong> permission for whatever
+runs the relay (Terminal/node) — System Settings ▸ Privacy &amp; Security ▸
+Accessibility. Reads work without it.</li>
+</ul>
+<h2>Run from source</h2>
+<p>For contributing or running an unpublished checkout (the <code>npm i -g</code> path above
+needs neither a clone nor a build):</p>
+<pre><code class="language-bash">git clone https://github.com/hyldmo/conductor-remote.git
+cd conductor-remote
+yarn install
+yarn build          # builds the PWA into dist/
+yarn start          # serves dist/ + the API (node bin/cli.js)
+</code></pre>
+<p>Or in one step: <code>yarn preview</code> (build + start). For live development with HMR,
+<code>yarn dev</code> runs Vite (<code>:5173</code>, proxying <code>/api</code>) alongside the relay in a
+<a href="https://github.com/hyldmo/numux" target="_blank" rel="noopener noreferrer">numux</a> TUI — one tab each, <code>numux.config.ts</code>
+picks the ports (needs <a href="https://bun.sh" target="_blank" rel="noopener noreferrer">Bun</a> on PATH). Open the URL the relay tab
+prints: it points at Vite's origin and carries the token, which Vite can't print.</p>
+<p>The relay prints a phone URL with an embedded token:</p>
+<pre><code>Open on your phone (same Tailnet):
+  http://100.x.y.z:8787/#token=&lt;generated&gt;
+</code></pre>
+<p>Open that on the phone and <strong>Add to Home Screen</strong>. The token is stored in
+<code>localStorage</code>; every <code>/api/*</code> call carries it, so other devices on the LAN
+can't read your sessions.</p>
+<p>Read marks and unsent prompt drafts stay local-first for offline use and are also
+mirrored to <code>~/Library/Application Support/conductor-remote/prefs.json</code>. A draft
+includes its ready attachments and staged agent choices; file bytes stay in the
+workspace or the relay's pre-workspace staging directory. That durable copy survives
+a PWA hostname/origin change and restores the same state on another authenticated
+device. Access tokens, uploads still in flight, and in-flight send state remain
+device-local.</p>
+<h3>Deploy (run on login as a background service)</h3>
+<p>The relay must run on the Mac that runs Conductor — it reads the local state DB
+and git worktrees and drives the local sidecar/AX write path, so there is
+nothing to host in the cloud. "Deployment" here means installing it as a macOS
+<strong>LaunchAgent</strong> that starts on login and restarts if it dies:</p>
+<pre><code class="language-bash">yarn deploy            # build dist/ + install &amp; start the LaunchAgent, prints the phone URL
+yarn service status    # state + pid + phone URL
+yarn service restart   # e.g. after Tailscale comes up late, or a code change
+yarn service uninstall # tear it down
+</code></pre>
+<p>From a global install the same commands are <code>conductor-remote service &lt;status|restart|uninstall&gt;</code> (and <code>conductor-remote service install</code> in place of
+<code>yarn deploy</code>, since <code>dist/</code> ships prebuilt in the package).</p>
+<p>The token is now <strong>persisted</strong> (<code>~/Library/Application Support/conductor-remote/token</code>),
+so the home-screen URL stays valid across restarts and reboots. Logs land in
+<code>~/Library/Logs/conductor-remote/</code>. Two caveats: the agent bakes the absolute
+<code>node</code> path at install time — re-run <code>yarn deploy</code> after an nvm node upgrade —
+and the AppleScript write path needs Accessibility permission granted to that
+<code>node</code> binary (System Settings ▸ Privacy &amp; Security ▸ Accessibility).</p>
+<h3>Config (env / flags)</h3>
+<p>Each knob is an env var (honored by <code>yarn start</code> and <code>service install</code>) and, for
+<code>service install</code>, the CLI flag in the second column. A flag wins over the ambient
+env. <code>EXPOSE</code>/<code>--expose</code> is documented under Install above.</p>
+<p><code>service install</code> bakes these into the LaunchAgent plist, so that plist is the daemon's
+environment. Use <code>config set</code> for later changes. <code>conductor-remote config</code> reads them back:</p>
+<pre><code>$ conductor-remote config
+plist:  ~/Library/LaunchAgents/no.adluna.conductor-remote.plist
+state:  ~/Library/Application Support/conductor-remote
+daemon: running  (pid 85882)
+
+  expose                    tailnet      plist
+  port                      8787         default
+  write-strategy            applescript  default
+  …
+  token                     99f6…6b38    token file
+
+  ✓ tailscale agrees: serve only (tailnet)
+</code></pre>
+<pre><code class="language-bash">conductor-remote config set port 9000
+conductor-remote config set write-strategy sidecar
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Var</th>
+<th>Flag</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>RELAY_PORT</code></td>
+<td><code>--port</code></td>
+<td><code>8787</code></td>
+<td>Listen port</td>
+</tr>
+<tr>
+<td><code>RELAY_HOST</code></td>
+<td><code>--host</code></td>
+<td>auto (Tailscale <code>100.x</code>, else <code>127.0.0.1</code>)</td>
+<td>Bind address</td>
+</tr>
+<tr>
+<td><code>RELAY_TOKEN</code></td>
+<td><code>--token</code></td>
+<td>persisted (auto-generated, reused across restarts)</td>
+<td>Override the shared secret</td>
+</tr>
+<tr>
+<td><code>WRITE_STRATEGY</code></td>
+<td><code>--write-strategy</code></td>
+<td><code>applescript</code></td>
+<td><code>applescript</code> (focused session) or <code>sidecar</code> (precise per-session — see below)</td>
+</tr>
+<tr>
+<td><code>PREVENT_SCREEN_LOCK</code></td>
+<td><code>--prevent-screen-lock</code></td>
+<td><code>on</code></td>
+<td>Block the automatic lock during nosleep windows</td>
+</tr>
+<tr>
+<td><code>AUTO_UPDATE</code></td>
+<td><code>--auto-update</code></td>
+<td><code>auto</code></td>
+<td>Self-update mode: <code>auto</code> / <code>check</code> / <code>off</code></td>
+</tr>
+<tr>
+<td><code>CONDUCTOR_DB</code></td>
+<td><code>--db</code></td>
+<td><code>~/Library/Application Support/com.conductor.app/conductor.db</code></td>
+<td>State DB</td>
+</tr>
+<tr>
+<td><code>CONDUCTOR_WORKSPACES</code></td>
+<td><code>--workspaces</code></td>
+<td><code>~/conductor/workspaces</code></td>
+<td>Worktree root</td>
+</tr>
+<tr>
+<td><code>PUSH_NOTIFY</code></td>
+<td>—</td>
+<td><code>on</code></td>
+<td><code>off</code> disables push notifications entirely</td>
+</tr>
+<tr>
+<td><code>PUSH_SUBJECT</code></td>
+<td>—</td>
+<td>the project's repo URL</td>
+<td>VAPID <code>sub</code> (a <code>mailto:</code> or <code>https:</code> URL identifying the sender)</td>
+</tr>
+</tbody></table>
+<p>The token is auto-generated once and persisted, so the home-screen icon keeps
+working across restarts without any env var. To pin a specific secret (e.g. to
+share a known URL), set <code>RELAY_TOKEN</code>:</p>
+<pre><code class="language-bash">RELAY_TOKEN=$(openssl rand -hex 16) yarn start
+</code></pre>
+<h2>What works today</h2>
+<ul>
+<li>✅ Live list of active workspaces with agent status (working / idle / done),
+repo, branch, model, per-chat context %, and an unread mark on any workspace whose chats
+finished something you haven't looked at — reading it <em>on the phone</em> clears it,
+which Conductor itself only does when you open the workspace on the Mac. Tap a tab's
+context percentage or the segmented composer donut beside Attachments for estimated
+initial/chat/thinking/tool-call composition and the approximate payload size of each
+full-history fork format.</li>
+<li>✅ <strong>Closed tabs</strong> beside New chat — search closed conversations in this workspace
+and restore the original tab with its history intact.</li>
+<li>✅ <strong>Models</strong> panel — change Claude Code and Codex defaults for new chats, written
+to <code>~/.conductor/settings.toml</code>, and see rolling plan usage from their structured
+CLI protocols with no model request. Cursor Agent and OpenCode keep their own
+provider cards without pretending local accounting is a subscription limit.</li>
+<li>✅ Live transcript per session (assistant text, tool calls, queued messages),
+incremental polling. Provider-native subagents reuse the workflow agent-subtab
+strip: the parent keeps one compact spawn row, while each native child opens as
+its own read-only transcript slice instead of duplicating its work inline.</li>
+<li>✅ <strong>Fork a chat</strong> with the selected response only, a concise transcript,
+reasoning, or the full tool-call transcript. Keep it as a new tab over the same files,
+or switch on <strong>To new workspace</strong> to carry the current committed, staged,
+unstaged, and untracked-not-ignored code into a separate worktree.</li>
+<li>✅ Diff vs the workspace's target branch (file list + colorized patch,
+including untracked files), with merge controls and <strong>Continue</strong> after a PR
+lands — the same workspace and chats move onto a fresh branch. Archived chats
+remain read-only and never show the action.</li>
+<li>✅ <strong>Launch and forward dev servers</strong> — the workspace header's Play button
+starts Conductor's Run task directly when there is one choice. With multiple
+named <code>[scripts.run.&lt;id&gt;]</code> configs it opens a menu and asks which one to start
+every time—there is no remembered default. The relay then expands the
+repository's named <code>[[preview_urls]]</code> entries (including <code>$CONDUCTOR_PORT</code>) and
+exposes every local HTTP preview at its own tailnet-only HTTPS URL. The primary
+preview opens directly; additional previews appear in its dropdown. Preview
+paths, queries and fragments are preserved while only the loopback origin is
+replaced. Repositories without <code>preview_urls</code> use Conductor's exact Open-control
+destination when it is exposed to Accessibility, with detected-port fallback
+behavior for current Conductor builds.
+Open and Stop controls appear once it is running; Stop uses Conductor's own
+button and removes only this relay's Serve mappings. Forwarding a server that
+is already up presses nothing in Conductor, so it takes about a second and
+opens the tab from that same tap. This requires a Run task configured
+in Conductor and Tailscale on the viewing device, even when the relay itself
+uses public Funnel.</li>
+<li>✅ <strong>Send prompt</strong> — two strategies:<ul>
+<li><strong><code>applescript</code></strong> (default): drives Conductor's real UI send, landing in the
+<em>focused</em> session. Uses the session's own model/permission mode (zero risk of
+altering the agent). Bring the target workspace to front first.</li>
+<li><strong><code>sidecar</code></strong> (opt-in, <code>WRITE_STRATEGY=sidecar</code>): <strong>broken against current
+Conductor builds</strong> — Conductor changed the private <code>-v2-</code> IPC the send payload
+was reverse-engineered from, so sends are rejected upstream. AppleScript above
+is the working path. Fixes welcome (see issue #97 for the probe handover).</li>
+</ul>
+</li>
+<li>✅ <strong>Attach images and files</strong> — tap the paperclip or paste an image into the
+composer. Text pastes over 2,000 characters become a removable <code>pasted-text.txt</code>
+attachment in chats and New workspace; shorter or offline pastes stay in the
+editor. Files up to 25 MB are stored in Conductor's own attachment layout before
+the prompt is sent.</li>
+<li>✅ <strong>Deterministic cross-provider Workflow</strong> — configure exact picker-backed
+planning, exploration, and implementation roles, then turn on <strong>Workflow</strong> in
+New workspace or an untouched <strong>+ New chat</strong>. The PWA calls the UI-only
+<code>POST /api/workflows</code>; a <code>202</code> means the immutable objective, all three frozen
+role snapshots, the prepared target effect, and a dormant bootstrap explorer
+are durable before Conductor is touched. One tracked explorer is guaranteed,
+the planner may request independent extras, every current exploration Baton must
+be delivered before implementation opens, and review stays visible until another
+tracked pass or an explicit completion. The phone shows phase, frozen roles, child
+tabs, exact sanitized failures, and Retry/Adopt/confirmed Replay/Cancel/Complete actions.
+Model, effort, and Fast are frozen for active roots and children. Generic Plan
+remains its ordinary independent control; Workflow adds no Plan-specific policy
+or copy. The planner's no-edit boundary is an instruction plus orchestration gates,
+not an OS sandbox around its filesystem tools.</li>
+<li>✅ <strong>Push notifications</strong> when an agent finishes its turn or hits an error —
+see below.</li>
+</ul>
+<h2>MCP: let your agents drive Conductor</h2>
+<p><code>conductor-remote mcp</code> is an MCP server on stdio. It gives a coding agent
+relay-backed reads and ordinary Conductor controls. Workflow Start, recovery, and
+role editing deliberately remain authenticated phone UI operations.</p>
+<p>Two transports, same tools.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search_chats</code> · <code>read_chat</code></td>
+<td>full-text search every chat on this Mac, archived included, then read one</td>
+</tr>
+<tr>
+<td><code>list_voice_calls</code> · <code>search_voice_calls</code> · <code>read_voice_call</code></td>
+<td>list, search, and read saved voice-call transcripts, with surrounding context and recording gaps</td>
+</tr>
+<tr>
+<td><code>list_workspaces</code> · <code>list_chats</code> · <code>workspace_diff</code> · <code>list_repos</code></td>
+<td>what is running, and what it changed</td>
+</tr>
+<tr>
+<td><code>plan_usage</code></td>
+<td>prompt-free Claude/Codex subscription allowances and reset times</td>
+</tr>
+<tr>
+<td><code>create_workspace</code></td>
+<td>start ordinary work in a repo, with an optional first prompt and model/effort/plan/fast choices. Creation uses a deep link; selected settings apply before the prompt</td>
+</tr>
+<tr>
+<td><code>dev_server</code></td>
+<td>inspect, start, forward or stop a workspace's configured Conductor Run task; use this instead of launching a long-lived server from an agent shell</td>
+</tr>
+<tr>
+<td><code>send_prompt</code> · <code>stop_turn</code> · <code>close_chat</code></td>
+<td>talk to a running agent, cancel its turn, or hide a chat tab</td>
+</tr>
+<tr>
+<td><code>split_chat</code></td>
+<td>move a tangent into a fresh tab, or set <code>new_workspace</code> to carry the transcript and current code into a separate worktree</td>
+</tr>
+<tr>
+<td><code>list_roles</code></td>
+<td>inspect configured roles and validation issues for lightweight delegation or future Workflows; role editing remains a phone UI action</td>
+</tr>
+<tr>
+<td><code>delegate_task</code> · <code>list_delegations</code></td>
+<td>spawn a lightweight tracked child from an ordinary chat, or a capability-scoped child from a Workflow root; observe active/failed jobs</td>
+</tr>
+<tr>
+<td><code>list_models</code> · <code>set_agent_options</code> · <code>set_default_model</code></td>
+<td>cached model labels (including the starred default), model, effort, plan, fast; starring a default also selects it for the target chat, matching Conductor</td>
+</tr>
+<tr>
+<td><code>set_workspace_status</code></td>
+<td>move a workspace between the sidebar's status groups</td>
+</tr>
+<tr>
+<td><code>archive_workspace</code></td>
+<td>put a finished workspace away (Conductor's ⌘⇧A) — deletes the worktree, keeps the chat</td>
+</tr>
+<tr>
+<td><code>dismiss_prompt</code></td>
+<td>throw away a prompt the relay is still holding</td>
+</tr>
+<tr>
+<td><code>keep_awake</code></td>
+<td>hold this Mac awake with the lid shut, so a long run stays reachable</td>
+</tr>
+<tr>
+<td><code>relay_logs</code></td>
+<td>the relay's own log — why a send failed</td>
+</tr>
+</tbody></table>
+<p><strong>Name it <code>conductor-remote</code>, not <code>conductor</code>.</strong> Conductor injects an MCP server of its
+own into every agent it runs, and that one is already called <code>conductor</code>. Register this
+under the same name and inside a Conductor workspace the two collide: Conductor's tools
+win, these tools vanish, and the only trace left is this server's instructions text —
+so it reads as if the tools should be there.</p>
+<p><strong>stdio</strong> — for an agent running on this Mac. The client spawns it as a child process;
+there is no URL and nothing is exposed.</p>
+<pre><code class="language-bash">claude mcp add --scope user conductor-remote -- conductor-remote mcp
+</code></pre>
+<p><code>--scope user</code> because a Conductor workspace is a fresh worktree each time, and a
+project-scoped server registered against your main checkout does not reach it.</p>
+<p><strong>HTTP</strong> — for an agent that can only reach a URL, at <code>POST /mcp</code> on the relay, gated by
+the same token as <code>/api/*</code>.</p>
+<pre><code class="language-bash">claude mcp add --transport http conductor-remote https://&lt;your-magicdns&gt;/mcp \
+  --header "Authorization: Bearer $(cat ~/Library/Application\ Support/conductor-remote/token)"
+</code></pre>
+<p>Either way the relay must be running (<code>conductor-remote service status</code>). The stdio
+server reads the persisted token itself, so it needs no configuration at all.</p>
+<p><strong>Who can reach the HTTP endpoint depends on <code>EXPOSE</code></strong>, and this is the decision worth
+making deliberately:</p>
+<table>
+<thead>
+<tr>
+<th><code>EXPOSE</code></th>
+<th>fronted by</th>
+<th>who reaches <code>/mcp</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>tailnet</code></td>
+<td><code>tailscale serve</code></td>
+<td>any device signed into your tailnet, from any network</td>
+</tr>
+<tr>
+<td><code>public</code> (default)</td>
+<td><code>tailscale funnel</code></td>
+<td>anyone on the internet holding the token</td>
+</tr>
+</tbody></table>
+<p><code>tailnet</code> is not LAN-only — a laptop on hotel wi-fi reaches it fine, over WireGuard. But
+a <em>hosted</em> client is not on your tailnet: an agent running on someone else's servers
+needs <code>public</code>, where the token is the only thing between the internet and
+<code>create_workspace</code> / <code>send_prompt</code>. Prefer stdio when the agent is local, which is most
+of the time.</p>
+<table>
+<thead>
+<tr>
+<th>tool</th>
+<th>what it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search_chats</code></td>
+<td>full-text search every chat on the Mac, archived included</td>
+</tr>
+<tr>
+<td><code>read_chat</code></td>
+<td>a transcript by <code>session_id</code> — works for archived workspaces</td>
+</tr>
+<tr>
+<td><code>list_voice_calls</code></td>
+<td>recent saved voice calls with previews and call IDs, including older pages</td>
+</tr>
+<tr>
+<td><code>search_voice_calls</code></td>
+<td>search caller and assistant text across saved calls, with IDs for reading context</td>
+</tr>
+<tr>
+<td><code>read_voice_call</code></td>
+<td>a saved call's latest entries or a window around a search hit, with partial text and recording gaps labeled</td>
+</tr>
+<tr>
+<td><code>list_workspaces</code></td>
+<td>what is running right now, with status and model</td>
+</tr>
+<tr>
+<td><code>list_chats</code></td>
+<td>the chat tabs in a workspace</td>
+</tr>
+<tr>
+<td><code>list_roles</code></td>
+<td>picker-backed cross-provider role definitions and validation issues</td>
+</tr>
+<tr>
+<td><code>delegate_task</code></td>
+<td>enqueue a tracked sibling subtab from an ordinary chat with <code>session_id</code>, <code>role</code>, and <code>prompt</code>; active Workflows require their root's id/current phase capability</td>
+</tr>
+<tr>
+<td><code>list_delegations</code></td>
+<td>active and failed delegated jobs</td>
+</tr>
+<tr>
+<td><code>workspace_diff</code></td>
+<td>a workspace's diff against its target branch</td>
+</tr>
+<tr>
+<td><code>list_repos</code></td>
+<td>repos a workspace can be created in</td>
+</tr>
+<tr>
+<td><code>plan_usage</code></td>
+<td>Claude/Codex rolling subscription limits, without sending a prompt</td>
+</tr>
+<tr>
+<td><code>create_workspace</code></td>
+<td>start an ordinary new workspace, optionally with a first prompt and agent settings</td>
+</tr>
+<tr>
+<td><code>dev_server</code></td>
+<td>inspect/start/stop the configured Run task and its tailnet preview (<code>status</code> is read-only; start/stop drive the real UI)</td>
+</tr>
+<tr>
+<td><code>send_prompt</code></td>
+<td>send into an existing chat (drives the real UI)</td>
+</tr>
+<tr>
+<td><code>stop_turn</code></td>
+<td>cancel a running answer (drives the real UI)</td>
+</tr>
+<tr>
+<td><code>close_chat</code></td>
+<td>hide a chat tab without deleting its transcript (drives the real UI)</td>
+</tr>
+<tr>
+<td><code>set_workspace_status</code></td>
+<td>set the sidebar status (drives the real UI)</td>
+</tr>
+<tr>
+<td><code>archive_workspace</code></td>
+<td>archive a workspace (drives the real UI, deletes the worktree)</td>
+</tr>
+</tbody></table>
+<p>Search, transcript, workspace/chat, diff, repo, role, delegation-status,
+dev-server status, keep-awake-status, and log reads touch no Conductor UI. <code>create_workspace</code> opens a
+Conductor deep link, so creation itself needs no Accessibility and steals no focus;
+requested model, effort, plan, and fast settings are applied later before the first
+prompt. Neither <code>create_workspace</code> nor <code>send_prompt</code> can start or join a Workflow.
+Workflow Start is deliberately PWA-only: the relay first accepts <code>POST /api/workflows</code>,
+then its durable coordinator performs the workspace/root effects. For an active Workflow,
+<code>delegate_task</code> requires the Workflow id, root session, role, and opaque capability delivered
+for the current phase; it persists and returns immediately while the coordinator later
+opens/configures/sends the child. MCP cannot start, retry, adopt, replay, cancel,
+complete, edit roles, or dismiss a managed failure. Generic Plan remains independent
+on the ordinary agent-option routes and is not part of Workflow's frozen tuple.
+Agents are explicitly told to use <code>dev_server</code> instead of starting a long-lived server
+from their shell. Its start and stop actions go through Conductor's Run controls, which
+preserves the workspace's allocated ports, run-mode policy and process-group cleanup;
+the MCP tool cannot forbid shell commands, but removes the reason to use one here.</p>
+<p><strong>Lightweight codebase agents need no Workflow.</strong> In an ordinary chat, call <code>list_roles</code>,
+then <code>delegate_task</code> with <code>session_id</code>, a configured <code>role</code>, and a focused <code>prompt</code>.
+Choose a role whose instructions fit the task, usually <code>exploration</code> for investigation.
+Its model, effort, Fast mode, and preamble come from the role configuration. Repeat the call
+for independent questions: children run concurrently after their serialized UI setup,
+each appears under its parent in <strong>Delegated agents</strong>, and each returns its result.
+The parent keeps its own model and role. A completed child stays under the correct
+parent even after its successful job is removed. No planning or implementation phase
+is scheduled, and a Baton's suggested next role is only advice.</p>
+<p>Ordinary calls can set <code>return_mode</code> (<code>queue</code> behind the current turn by default;
+use <code>steer</code> to receive the result during the current turn), <code>through</code>
+(a <code>read_chat</code> cursor), and <code>include_thinking</code> (false by default). These options are
+refused on Workflow calls, where the coordinator owns the handoff and return path.
+Both active Workflow roots and their children are refused by ordinary-chat intake;
+only the root can delegate through its current phase capability. Each accepted ad hoc
+job freezes the configured role, which must use a different provider than its parent.</p>
+<p>Skills such as gstack can use the same routing through a user instruction override.
+See <a href="https://github.com/hyldmo/conductor-remote/blob/HEAD/docs/conductor-agent-routing.md" target="_blank" rel="noopener noreferrer">Conductor agent routing</a> for a prompt block that
+preserves skill steps and routes helper work through tracked chats without changing
+gstack source.</p>
+<p>The HTTP transport is deliberately minimal: the server never initiates a message, so
+there is no SSE stream and <code>GET /mcp</code> answers 405, which the spec allows. It keeps no
+session either. A request carrying an <code>Origin</code> header is refused outright — a real MCP
+client sends none and a browser cannot omit one, which closes the DNS-rebinding hole
+without the relay having to know its own hostname behind Tailscale's TLS.</p>
+<p><strong>Two agents—or two compatible relay processes—cannot intentionally overlap UI
+writes.</strong> Conductor has one window, so a priority lock serializes work inside each
+process and a lease in <code>orchestration.db</code> serializes cooperating processes. Workflow
+effects persist their dispatch boundary and external PID/start identity before they
+may execute, so a successor reconciles positive evidence instead of blindly repeating
+an abandoned action. Agents remain background priority behind the phone, and past four
+locally queued operations a caller is refused with "busy, retry shortly" rather than
+joining a line it would only time out waiting in.</p>
+<p>Worth knowing before you wire it up: <code>send_prompt</code> into a chat that is already
+working <strong>steers that agent</strong> rather than starting a new turn, and <code>stop_turn</code>
+destroys work in flight. <code>close_chat</code> keeps the transcript and is reversible with
+the phone's <strong>Closed tabs</strong> view or Conductor's ⌘⇧T; a working chat is refused until
+<code>close_running</code> explicitly confirms the desktop's own warning. The tool descriptions
+surface each of those choices.</p>
+<p>The workflow icon in either workspace header opens <strong>Roles</strong>. Models there are
+choices previously read from Conductor's real picker; a missing or ambiguous label
+stays red and Start is refused before the relay opens a tab. The shipped
+role placeholders stay invalid until an exact model is selected for each role.
+Start freezes all three roles for that run; editing a
+definition later affects only the next run. The root receives those frozen model labels
+and responsibilities in its first prompt; it does not need to call <code>list_roles</code>, whose
+output describes mutable defaults for later runs. In the sidebar, a Workflow workspace
+replaces the active model label with an ordered icon stack: Workflow, planning,
+exploration, then implementation; the frozen stack remains after completion. In
+<strong>New workspace</strong> and the composer of
+an untouched <strong>+ New chat</strong>, the <strong>Workflow</strong> pill is the kickoff switch. Its accepted
+state appears immediately from the top-level Workflow list, including before a new
+workspace is bound. The planning tuple is read-only, while the generic Plan control
+keeps its normal availability and meaning. A delivered root prompt activates the
+already-recorded bootstrap explorer. The planner can request extras only through its
+Workflow-scoped <code>delegate_task</code> phase
+capability. Once a chat has a first message or belongs to an active Workflow, the
+kickoff pill is gone. Blocked runs remain visible for phone-owned recovery, and
+reviewing runs remain until <strong>Mark complete</strong>; Cancel stops orchestration without
+deleting worktrees, chats, or turns.</p>
+<h2>Notifications</h2>
+<p>Turn them on from the <strong>Connect sheet</strong> (the QR button in the workspace list
+header) ▸ <em>Notifications</em>. The relay then pings that phone whenever an agent
+<strong>ends a turn</strong> — which covers finishing, asking you a question, and stopping at
+a permission prompt — or <strong>errors</strong>. The notification carries the workspace name,
+the repo, and the agent's last line; tapping it opens that workspace.</p>
+<p>Notifications arrive with the app closed. There's a <em>Send a test notification</em>
+link right under the switch to prove the path end to end.</p>
+<p><strong>On iPhone/iPad you must add the app to your Home Screen first</strong> — iOS only
+exposes notifications to installed web apps, never to a Safari tab. The switch
+says so if you haven't. The connection also has to be <code>https://</code> (the Tailscale
+URL <code>yarn deploy</code> sets up, or <code>127.0.0.1</code> locally); a plain LAN IP is not a
+secure context and browsers refuse push there.</p>
+<p>Under the hood: standard Web Push (VAPID + <code>aes128gcm</code>), implemented directly on
+<code>node:crypto</code> so the package keeps its zero runtime dependencies. Subscriptions
+and the VAPID keypair live in
+<code>~/Library/Application Support/conductor-remote/push.json</code> (mode <code>0600</code>). The
+relay only ever POSTs to Apple's/Google's/Mozilla's push endpoint for the phones
+you subscribed; nothing else leaves the Mac. <code>PUSH_NOTIFY=off</code> disables the whole
+thing.</p>
+<h2>Layout</h2>
+<pre><code>src/       the Node relay: stable server.ts/mcp.ts entries; http/ startup services
+           and route groups; reads/, writes/, orchestration/, delivery/, agents/,
+           dev-server/, files/, git/, host/, usage/, search/, transcript/,
+           notifications/ and voice/ domains
+web/       the React PWA (Vite root): app shell, feature component folders,
+           grouped hooks and client helpers
+public/    icon.svg + PWA PNGs, at the repo root so Conductor's icon lookup
+           finds them, plus the push and self-heal service-worker halves
+scripts/   stable service.ts CLI plus service/ helpers, icon/keep-awake setup,
+           AppleScript manifest copying and repository validators
+tests/     Vitest unit, contract, concurrency and integration suites by domain
+dist/      built PWA (gitignored) — what the relay serves
+</code></pre>
+<p>A per-file map, with what each one owns, is in
+<a href="https://github.com/hyldmo/conductor-remote/blob/HEAD/ARCHITECTURE.md" target="_blank" rel="noopener noreferrer">ARCHITECTURE.md</a>.</p>
+<h2>Security notes</h2>
+<ul>
+<li>The relay binds to your Tailnet IP (or loopback), not <code>0.0.0.0</code>.</li>
+<li>All data endpoints require the shared token; static shell assets are public
+but carry no secrets. The service worker never caches <code>/api/*</code>.</li>
+<li>The write path can drive your real agents — keep the token private and the
+bind address off untrusted networks.</li>
+<li>The relay reads Conductor's SQLite DB <strong>read-only</strong> and never writes to it.
+Your Conductor data stays on your machine. Opening Models makes the already
+authenticated Claude/Codex CLI request its account-limit snapshot; it sends no
+prompt, transcript, or workspace data.</li>
+</ul>
+<h2>Troubleshooting</h2>
+<h3>The phone can't reach a tailnet-only relay (Tailscale says Connected)</h3>
+<p>Suspect <strong>iCloud Private Relay</strong> first. It routes WebKit traffic — Safari, and any
+home-screen web app — through Apple, around the VPN and its DNS, so MagicDNS never
+answers. Turn it off in Settings ▸ Apple ID ▸ iCloud ▸ Private Relay.</p>
+<p>It fails permanently rather than slowly, because <code>&lt;node&gt;.ts.net</code> keeps resolving
+<em>publicly</em> to the Funnel ingress addresses long after Funnel is switched off (measured
+unchanged 10+ minutes later, across three public resolvers), and those addresses answer
+nothing once <code>serve</code> replaced <code>funnel</code>. A tailnet device gets the node's <code>100.x</code> address
+from MagicDNS instead. So anything that bypasses MagicDNS lands on a dead address and
+stays there. The same phone works fine on <code>--expose public</code>, where those ingress
+addresses are live — which is what makes this look like the relay's fault.</p>
+<p>To tell them apart from the Mac:</p>
+<pre><code class="language-bash">tailscale ping &lt;phone-name&gt;                        # is the tunnel actually up?
+dig +short &lt;node&gt;.ts.net @1.1.1.1                  # public answer
+dscacheutil -q host -a name &lt;node&gt;.ts.net          # MagicDNS answer
+</code></pre>
+<p>Different answers plus a phone that is on the tailnet means something on the phone is
+resolving outside the VPN.</p>
+<h3>Something failed and the Mac is somewhere else</h3>
+<p>The relay's own log is readable from the phone: <strong>Connect sheet ▸ Relay logs</strong>
+(the QR button in the workspace header). It has three sources — <code>Live</code> is the
+running relay's console, ordered and timestamped; <code>relay.log</code> / <code>relay.err.log</code>
+tail the LaunchAgent's files on disk, which is where the output of a <em>previous</em>
+process survives a crash-and-restart. <strong>Problems only</strong> filters to warnings and
+errors, and <strong>Copy</strong> puts the visible lines on the clipboard for pasting into an
+issue.</p>
+<p>The same thing over HTTP (the access token is redacted from every response, so
+what comes back is safe to share):</p>
+<pre><code class="language-bash">curl -s -H "authorization: Bearer $TOKEN" "$RELAY/api/logs?limit=100"                  # live
+curl -s -H "authorization: Bearer $TOKEN" "$RELAY/api/logs?file=relay.err.log"         # on disk
+</code></pre>
+<p>On the Mac itself, <code>conductor-remote service logs</code> still follows both files.</p>
+<h3>The relay stops answering when the Mac is on battery</h3>
+<p><strong>Symptom.</strong> On battery, the phone loses the relay after a few minutes — even
+though the LaunchAgent is still running and a keep-awake app (Amphetamine,
+KeepingYouAwake, <code>caffeinate</code>) is active. Plug into power and it recovers. This
+bites anyone running the relay on an unplugged laptop; it is <strong>not</strong> a bug in
+conductor-remote.</p>
+<p><strong>Cause — it's <em>Maintenance Sleep</em>, not idle sleep.</strong> Confirm the reason:</p>
+<pre><code class="language-bash">pmset -g log | grep "Entering Sleep state due to" | tail
+#  'Maintenance Sleep' / 'Sleep Service Back to Sleep'  ← the culprit
+#  'Idle Sleep'                                          ← NOT what's happening
+</code></pre>
+<p>macOS has two independent sleep paths, and the popular keep-awake tools only
+reach one of them:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Sleep type</th>
+<th>Controlled by</th>
+<th>Keep-awake apps reach it?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Idle timer</td>
+<td><code>Idle Sleep</code></td>
+<td><code>PreventUserIdleSystemSleep</code> power assertion</td>
+<td>✅ yes</td>
+</tr>
+<tr>
+<td>Standby / Power Nap</td>
+<td><strong><code>Maintenance Sleep</code></strong></td>
+<td><code>pmset</code> <code>standby</code> / <code>powernap</code></td>
+<td>❌ <strong>no</strong></td>
+</tr>
+</tbody></table>
+<p>Amphetamine, KeepingYouAwake and <code>caffeinate -i</code> all hold only the <em>idle</em>
+assertion. On battery the Mac isn't idle-sleeping — it's cycling through
+<strong>standby maintenance sleep</strong> (a periodic dark-wake → back-to-sleep loop) that
+lives at the root <code>pmset</code> layer no assertion can touch. Running those tools with
+<code>sudo</code> changes nothing: the assertion is identical at any privilege, and there is
+no assertion for the standby layer. Closing the lid is the same story one level
+down: it sleeps an Apple Silicon Mac immediately and no assertion stops that
+either, so a keep-awake app plus a shut lid is still a sleeping Mac. The root
+<code>disablesleep</code> flag <em>does</em> hold it awake lid-closed, which is one lever <code>nosleep</code>
+pulls below (in use on an M5 Pro). The other is a bounded <code>caffeinate -d</code> display
+assertion. ScreenSaverDaemon checks it before starting the idle screen saver, so
+the automatic screen lock stays off while the window runs. A manual lock or lid
+close can still lock the session; sends then park until you unlock (#87).</p>
+<p><strong>Fix — <code>conductor-remote nosleep</code>.</strong> It blocks sleep at the root <code>pmset</code> layer (the
+one no assertion reaches) for a bounded window and <strong>auto-reverts</strong> on exit, Ctrl-C, or
+the timeout — nothing permanent, nothing left on your machine:</p>
+<pre><code class="language-bash">conductor-remote nosleep 2h     # also 90m, 30s, bare seconds; no arg = until Ctrl-C
+</code></pre>
+<p>The confirmation carries the wall-clock <strong>expiry</strong>, measured from when your password lands
+rather than when you typed the command. It also warns that the automatic lock is off:</p>
+<pre><code class="language-text">✓ Sleep disabled until 21:45 (2h, incl. lid closed). Ctrl-C to restore.
+⚠ Automatic screen lock is disabled for this window. Anyone with physical access can use this Mac.
+</code></pre>
+<p>This is on by default because the AppleScript write path needs an unlocked session. Configure
+it from the Mac CLI. The value applies to terminal and phone-armed windows:</p>
+<pre><code class="language-bash">conductor-remote config set prevent-screen-lock off
+conductor-remote config  # reports prevent-screen-lock off from the plist
+</code></pre>
+<p>Use <code>on</code> to restore the default. <code>PREVENT_SCREEN_LOCK=off</code> remains available as an
+environment override for direct relay runs.</p>
+<p>Out of the box it prompts for <code>sudo</code> and runs in the foreground. Since sending from the
+phone already means manually turning on your hotspot, flipping this on for the session is
+the same kind of deliberate, revertable switch — no boot daemon, no permanent change.
+Simplest of all: keep the Mac on <strong>AC power</strong>, where it never maintenance-sleeps.</p>
+<p><strong>Stop it asking — <code>conductor-remote nosleep setup</code>.</strong> One-time, one password:</p>
+<pre><code class="language-bash">conductor-remote nosleep setup              # install
+conductor-remote nosleep status             # what's installed, does it work, is sleep blocked now
+conductor-remote nosleep setup --uninstall  # remove both files
+</code></pre>
+<p>It installs a root-owned helper at <code>/usr/local/libexec/conductor-remote-nosleep</code> and a
+sudoers drop-in naming exactly that one command <code>NOPASSWD</code>. After it, <code>nosleep</code> needs no
+password — which is also what would let the <strong>relay</strong> arm it, since the LaunchAgent has no
+terminal to prompt on and so can never self-arm without this.</p>
+<p>It is deliberately narrow, because a rule like this is the classic way a machine gets a
+root hole. The helper lives in a directory only root can write (<code>/usr/local/bin</code> is
+group-writable by <code>admin</code> on a stock Mac, so anything there would be trivially replaceable);
+it is <strong>copied out</strong> of the package rather than referenced inside it, so the self-updater
+can't smuggle new root-executed code in behind you (a stale copy is reported, never
+silently refreshed); and the rule carries no argument wildcard — the helper validates its
+own input. The drop-in is checked with <code>visudo -cf</code> as a draft and the assembled set is
+re-checked after install, with the drop-in pulled back out if anything is wrong, since a
+bad <code>/etc/sudoers.d</code> entry can cost you <code>sudo</code> altogether.</p>
+<p><strong>From the phone.</strong> Once the rule is installed, the Connect sheet grows a <strong>Mac</strong> section:
+tap 1h / 4h / 10h to choose a duration, or use the clock to enter the same duration syntax
+as the CLI (<code>80h</code>, <code>90m</code>, <code>30s</code>, or bare seconds). "Let it sleep" ends the window early
+(<code>GET</code>/<code>POST</code>/<code>DELETE /api/nosleep</code>, capped at 168h / 7 days). On screens narrower than
+400px, the 4h button is hidden to keep the controls on one row. It reports whether the active
+window blocks the screen lock. The armed window is spawned
+<em>detached</em>, because the relay restarts itself on every self-update and a plain child would
+die with it and quietly restore sleep at the worst moment; the relay finds it again after a
+restart by reading <code>/var/run/conductor-remote-nosleep.pid</code>. Only one window may be armed —
+arming takes over from any other, including one you left running in a terminal. That is not
+politeness: two windows would each capture the <em>other's</em> already-flipped values and
+"restore" those on the way out, leaving a Mac that can never sleep again.</p>
+<p>Ending the window — "Let it sleep", or the timer running out — actually <em>sleeps</em> a
+lid-closed Mac rather than just re-allowing sleep. Clamshell sleep is an event macOS fires
+when the lid closes, and the lid closed while sleep was disabled, so restoring
+<code>disablesleep 0</code> on its own leaves the Mac sitting awake under a shut lid indefinitely.
+The relay checks the lid (<code>AppleClamshellState</code>) and runs <code>pmset sleepnow</code> — no root
+needed — a beat after answering, so the phone gets its confirmation before the Mac drops
+off the network. An open lid just gets sleep re-enabled, exactly as before.</p>
+<p>The same section carries a <strong>fallback network</strong>: pick a Wi-Fi network the Mac already knows
+(your phone's hotspot), and if the Mac loses its link entirely the funnel watchdog joins it
+and re-registers Funnel, whose ingress a change of public endpoint invalidates anyway. It
+stores <strong>SSIDs only</strong> — macOS holds the credentials, and passing a password to
+<code>networksetup</code> would <em>write</em> one into the keychain. Off by default, behind a 5-minute
+cooldown, and gated on <code>route -n get default</code> finding nothing: the associated SSID is not a
+usable signal, since macOS hides it behind Location Services (this Mac reports "not
+associated" while a default route is live on the same interface).</p>
+<p><strong>Check / undo:</strong></p>
+<pre><code class="language-bash">pmset -g | grep -i sleepdisabled                    # 1 = sleep blocked
+sudo pmset -b standby 1 powernap 1 disablesleep 0   # restore defaults
+</code></pre>
+<p>While <code>nosleep</code> is running you can quit any keep-awake app — those only ever asserted
+on the idle layer, which was never the problem. It restores on its own; the manual undo
+above is only for the rare case where it was killed hard.</p>
+<h2>Disclaimer</h2>
+<p>Unofficial and not affiliated with, endorsed by, or supported by Conductor. It
+reads your own local Conductor data and automates your own machine. It depends
+on Conductor's on-disk layout (a SQLite DB + git worktrees) and, for the sidecar
+write strategy, a private IPC — neither is a public API and both may change
+between Conductor releases. See <a href="https://github.com/hyldmo/conductor-remote/blob/HEAD/FINDINGS.md" target="_blank" rel="noopener noreferrer">FINDINGS.md</a> for how it's
+structured to keep breakage rare and cheap to repair. macOS only.</p>
+<h2>License</h2>
+<p><a href="https://github.com/hyldmo/conductor-remote/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>

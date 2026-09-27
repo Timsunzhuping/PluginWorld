@@ -111,6 +111,21 @@ this shared file. The OAuth flow uses PKCE.</p>
 </code></pre>
 <p>App actor tokens can request <code>app:assignable</code> and <code>app:mentionable</code>, but not
 <code>admin</code>. The authorized app user ID is stored in <code>oauth.json</code> as <code>viewerId</code>.</p>
+<p>OAuth apps that have Linear's client-credentials grant enabled can obtain an
+app-user token without a browser. Keep the secret out of argv and source it
+through an environment variable:</p>
+<pre><code class="language-bash">export LINEAR_OAUTH_CLIENT_SECRET="..."
+el-linear init oauth --client-credentials --actor app \
+  --client-id your-linear-oauth-client-id
+</code></pre>
+<p>Use <code>--client-secret-env NAME</code> to read a differently named variable and
+<code>--scopes read,write,issues:create,comments:create</code> to override the configured
+scope set. The 0600 profile state stores the secret so el-linear can acquire a
+new token before expiry and once after an HTTP 401; client-credentials tokens
+do not have refresh tokens. Keep the scope set stable: Linear revokes an app's
+existing client-credentials tokens when a new token requests different scopes.
+This flow is opt-in. Remote automation can keep using <code>LINEAR_API_TOKEN</code>, which
+remains higher precedence than profile OAuth.</p>
 <p>At runtime, credentials are resolved in this order:</p>
 <ol>
 <li><code>--api-token &lt;token&gt;</code> flag.</li>
@@ -509,6 +524,70 @@ el-linear issues list --status "Todo,In Progress"   # any explicit status disabl
 (explicit choice always wins). The change is per-command and only affects
 list-shaped reads — single-issue <code>issues read DEV-123</code> is unaffected.</p>
 <h2>Output formats</h2>
+<p>Commands whose request path exposes Linear response headers include aggregate
+quota observations as optional <code>_rateLimit</code> metadata in JSON output:</p>
+<pre><code class="language-json">{
+  "identifier": "DEV-123",
+  "_rateLimit": {
+    "limit": 2500,
+    "remaining": 2498,
+    "resetAt": "2026-08-11T10:00:00.000Z",
+    "observedRequests": 2,
+    "minimumRemaining": 2498,
+    "complexity": {
+      "cost": 30,
+      "totalCost": 50,
+      "limit": 2000000,
+      "remaining": 1999950,
+      "minimumRemaining": 1999950,
+      "resetAt": "2026-08-11T10:00:00.000Z"
+    },
+    "endpoints": {
+      "Issue": {
+        "limit": 1000,
+        "remaining": 998,
+        "minimumRemaining": 998,
+        "resetAt": "2026-08-11T10:00:00.000Z",
+        "observedRequests": 2
+      }
+    }
+  }
+}
+</code></pre>
+<p>Summary output renders the same information as an <code>_rateLimit:</code> line. With a
+bare-array output such as <code>--raw</code>, the line goes to stderr so stdout remains
+valid JSON. Current remaining/reset values come from the most recent response;
+<code>observedRequests</code>, <code>minimumRemaining</code>, <code>complexity.totalCost</code>, and each
+endpoint entry expose the command's aggregate cost and lowest observed
+headroom. Rate-limited error envelopes include the same metadata. Commands
+served entirely from cache omit it.</p>
+<p>Automation can reserve a request floor before issuing another GraphQL call:</p>
+<pre><code class="language-bash">export EL_LINEAR_RATE_LIMIT_HEADROOM=250
+export EL_LINEAR_QUOTA_KEY=verticalint-shared-linear-user
+</code></pre>
+<p>When Linear's last observed remaining count reaches the configured floor,
+<code>el-linear</code> refuses the request until the observed reset time instead of
+consuming capacity reserved for higher-priority work. Admission and response
+observations are serialized across local processes. The state filename is a
+SHA-256 digest; neither the credential nor <code>EL_LINEAR_QUOTA_KEY</code> is written in
+clear text. Set the same non-secret quota key for API keys belonging to the
+same Linear user, because Linear pools those keys by user. Without an explicit
+key, API keys coordinate by credential and OAuth tokens coordinate by token.
+Profile OAuth uses its stable app/viewer identity so token refreshes keep the
+same local quota state.</p>
+<p>This file-backed admission is intentionally a same-machine boundary. Separate
+hosts can opt into the companion distributed coordinator:</p>
+<pre><code class="language-bash">export EL_LINEAR_RATE_LIMIT_COORDINATOR_URL=https://el-linear-control-plane.example.workers.dev
+export EL_LINEAR_RATE_LIMIT_COORDINATOR_TOKEN="..."
+</code></pre>
+<p>The URL switches admission and observations to the coordinator's atomic
+Durable Object for the hashed quota key. Admission fails closed when that
+service is unavailable; a completed Linear response is never replayed merely
+because its observation could not be persisted. Without the URL, do not
+interpret the file-backed setting as distributed admission.</p>
+<p>Read-through cache misses for teams, projects, labels, and similar cached lists
+are also single-flighted across local processes, preventing a cold-cache burst
+from issuing the same request once per command.</p>
 <p>Every command accepts <code>--format &lt;kind&gt;</code> at the root:</p>
 <ul>
 <li><code>--format json</code> (default) — emits the full structured envelope. Stable
@@ -624,6 +703,99 @@ el-linear projects list --format summary --fields name,state,progress,lead,teams
 # ...
 </code></pre>
 <p>Unrecognized field names are reported as a <code>_warnings:</code> line appended after the summary block (<code>fields_unprojectable: --format summary on issues list does not project foo, bar; ...</code>) — same signal scripts get on the JSON path. Resources whose summary formatter doesn't yet wire <code>--fields</code> (cycles, milestones, project updates, comments, teams, labels, users, documents, templates, attachments, releases, search results) emit the same warning and render their default summary.</p>
+<h3>Error envelope</h3>
+<p>Every command reports a failure the same way: <strong>exit code 1</strong>, and a
+single JSON object on <strong>stdout</strong> (the same stream as success, so a caller
+capturing one stream always gets exactly one parseable object).</p>
+<pre><code class="language-json">{
+  "error": "Ratelimit exceeded",
+  "activeProfile": "work",
+  "errorDetail": {
+    "httpStatus": 429,
+    "code": "RATELIMITED",
+    "retryable": true
+  }
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Always present</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>error</code></td>
+<td>yes</td>
+<td>The failure message, token-sanitized.</td>
+</tr>
+<tr>
+<td><code>activeProfile</code></td>
+<td>yes</td>
+<td>Which profile the command ran under — distinguishes "not found" from "wrong workspace".</td>
+</tr>
+<tr>
+<td><code>errorDetail</code></td>
+<td>no</td>
+<td>Classification of a <strong>Linear GraphQL</strong> failure or quota admission refusal. See below.</td>
+</tr>
+</tbody></table>
+<p><code>errorDetail</code> is emitted when the failure came from a request to the
+Linear GraphQL API or the quota admission that precedes it. Its fields:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>httpStatus</code></td>
+<td><code>number | null</code></td>
+<td>HTTP status of Linear's response; <code>null</code> when no response arrived.</td>
+</tr>
+<tr>
+<td><code>code</code></td>
+<td><code>string | null</code></td>
+<td>The first GraphQL error's <code>extensions.code</code>; <code>null</code> when absent.</td>
+</tr>
+<tr>
+<td><code>retryable</code></td>
+<td><code>boolean</code></td>
+<td>Whether the failure is transient — retrying after an appropriate wait could succeed.</td>
+</tr>
+<tr>
+<td><code>resetAt</code></td>
+<td>optional <code>string</code></td>
+<td>Known quota reset or recovery-probe deadline, normalized to a UTC ISO timestamp.</td>
+</tr>
+</tbody></table>
+<p><code>retryable</code> is <code>true</code> for HTTP 408 / 429 / 5xx, for the <code>RATELIMITED</code>,
+<code>INTERNAL_SERVER_ERROR</code> and <code>SERVICE_UNAVAILABLE</code> GraphQL codes, and for a
+transport failure that never reached a response (<code>fetch failed</code>,
+<code>ECONNRESET</code>, …). Reading <code>code</code> separately matters: Linear can answer a
+rate limit under a status that would otherwise read as permanent, so
+<code>httpStatus</code> alone is not the whole verdict.</p>
+<p><code>retryable: true</code> says the failure is transient — <strong>not</strong> that retrying
+immediately is a good idea. A rate limit is transient and reported as such,
+but its window may be minutes away; the wait is the caller's policy.</p>
+<p>A local or distributed quota admission refusal uses <code>code: "RATELIMITED"</code>,
+<code>retryable: true</code> and <code>httpStatus: null</code>: no request was sent to Linear.
+When known, <code>resetAt</code> comes from the quota state or the existing recovery-probe
+lease. Missing or malformed deadlines are omitted; message text never supplies
+a deadline. These refusals retain the configured headroom and do not trigger an
+immediate retry inside the CLI. The deadline permits a later attempt, not a
+guarantee of capacity or permission.</p>
+<p><strong>A missing <code>errorDetail</code> is not "not retryable".</strong> It means the failure
+was not a classified Linear request or quota refusal — a bad argument, an unreadable
+<code>--file</code>, a missing token. Treat its absence as <em>unclassified</em> and apply
+your own policy; emitting a fabricated <code>retryable: false</code> there would let
+an argv typo masquerade as a verdict about Linear.</p>
+<p>Automation that shells out to <code>el-linear</code> (a job runner deciding whether
+to retry, say) should branch on <code>errorDetail.retryable</code> rather than
+substring-matching <code>error</code>.</p>
 <h3>Windowed metadata (<code>WindowedMeta</code>)</h3>
 <p>When a command returns less than its complete result set — because it
 windowed by time, paginated, filtered, or hit a <code>--limit</code> — it should make

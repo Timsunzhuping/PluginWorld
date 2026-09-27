@@ -1,0 +1,148 @@
+<h1>pi-control-chrome</h1>
+<p><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer">English</a> · <a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/README-zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+<p>Codex-aligned Chrome and Edge browser control for Pi, Codex and DSH. It reuses the user's existing Chromium profile through a local WebSocket Bridge and a Manifest V3 extension.</p>
+<blockquote>
+<p>The Stage 1/2 core implementation is complete. Later-stage capabilities remain tracked separately in <a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/FEATURES.md" target="_blank" rel="noopener noreferrer"><code>FEATURES.md</code></a>.</p>
+</blockquote>
+<h2>What it provides</h2>
+<ul>
+<li>Reuses the current Chrome or Edge profile, login state, cookies, extensions, and tabs.</li>
+<li>Lets Pi inspect and claim explicitly selected existing tabs without moving them by default.</li>
+<li>Places Agent-created tabs in a dedicated blue <code>Pi</code> tab group.</li>
+<li>Tracks Agent ownership, sessions, <code>handoff</code>, and <code>deliverable</code> lifecycle states.</li>
+<li>Closes unmarked Agent temporary tabs at turn end, releases claimed user tabs without closing them, and preserves only handoff or deliverable tabs marked for the current turn.</li>
+<li>Provides DOM, accessibility, locator, coordinate, and native CDP controls.</li>
+<li>Returns bounded semantic page state by default: visible/actionable snapshot nodes, 20,000-character/200-node snapshot and DOM-CUA budgets, and a shared 12,000-character extract budget. Same-origin iframe text is included by default with bounded <code>frames</code> diagnostics; pass <code>includeFrames: false</code> for shell-only inspection. <code>browser_snapshot</code> keeps refs and <code>snapshotId</code> while Pi/DSH projections omit duplicate raw accessibility and frameTree data; the Bridge advertises <code>capabilities.compactResponses</code> and negotiates compact page-read responses, while unspecified mode remains raw-compatible for older consumers; when tab metadata already carries title and URL, projections do not repeat them inside page results, and full page text is reserved for <code>browser_extract</code> when no semantic state is available.</li>
+<li>Accessibility reads prefer the real Chromium AX tree and support full, incremental-diff, and unchanged states; actionable/focusable AX nodes may carry document-scoped <code>aN</code> refs, which require the matching <code>snapshotId</code> for operations. Sensitive values stay redacted in AX and locator results. If the Accessibility domain is unavailable, reads safely fall back to the DOM semantic tree. Pass <code>disableDiffing: true</code> only when a complete AX state is required. Snapshot, accessibility, extract, and DOM-CUA reads accept optional <code>selector</code>, <code>includeFrames</code>, and output budgets. Pi and DSH adapters omit blank optional <code>selector</code>, <code>snapshotId</code>, <code>incarnation</code>, and screenshot <code>path</code> fields before dispatch.</li>
+<li>Ordinary <code>role</code>/<code>name</code>, label, and accessible-text locator, wait, and interaction targets now try Chromium AX first. AX resolves the computed role/name/state, then maps the current backend DOM node under the existing document/frame fence; successful actions expose internal provenance as <code>resolvedBy: "chromium_ax"</code>. AX ambiguity, incomplete trees, and unsafe DOM mapping fail closed. Only an unavailable Accessibility domain, or a text-only target whose custom clickable element is absent from AX, uses the bounded DOM fallback; selectors, test IDs, and placeholders remain DOM-driven.</li>
+<li>Bounds <code>browser_evaluate</code> results to depth 8, 2,000 array items, 200 object fields, and 200,000 characters before returning them through the Bridge.</li>
+<li>Supports screenshots, page extraction, Console, Network, JavaScript dialogs, file upload, downloads, and clipboard text. Console and Network listings retain at most 200 entries and 20,000 serialized characters per read; Console reads support bounded <code>only: "errors"</code> filtering and <code>since</code>/<code>nextSince</code> cursors, including <code>pageerror</code> events.</li>
+<li><code>browser_probe_interaction</code> performs exactly one explicit page action and returns before/after document identity, action confirmation, post-action Console errors, settle status, and post-action target state for UI regression diagnosis. It never replays an uncertain side effect.</li>
+<li>Captures ordinary active-tab viewport screenshots without opening a DevTools debugger session; full-page and background-tab captures use a short session-owned debugger lease.</li>
+<li>Persists debugger lease identity across an MV3 worker restart. Ordinary cleanup reports an unverified old lease instead of detaching an untracked target; explicit stale recovery verifies the current tab fence and CDP target identity before detaching it.</li>
+<li>Fences tab handles with a tab fence and document identity. Snapshot refs are document-scoped: the same element keeps its number for the life of the document, and a ref outlives the observation that published it (resolved from the page document registry and reported as resolvedBy: document_registry). DOM-CUA node ids are live observations within their originating document: title/focus changes, user tab switching, later observations, and unrelated DOM churn do not invalidate them; an original detached node can be rebound once only when a strongly equivalent replacement is unique. Navigation, reload, and document replacement remain hard boundaries and reject old observations with <code>BROWSER_DOCUMENT_CHANGED</code>; tab closure and tab-fence changes reject them with <code>BROWSER_TAB_CLOSED</code> and <code>BROWSER_TAB_FENCE_CHANGED</code>; <code>navigate(wait: false)</code>, <code>back</code>, <code>forward</code>, and <code>reload</code> return a tab marked <code>transitionPending</code> whose handle omits unstable URL/title and document-incarnation fields, so wait or re-observe before document-bound work. Read-only page reads re-observe a user tab and retry once when its document changes, while side-effecting operations that lose document identity return an uncertain result and are not replayed automatically.</li>
+<li>Keeps a Manifest V3 Bridge socket active with application heartbeats, preventing idle worker suspension from creating avoidable connection-generation churn during long browser waits.</li>
+<li>Includes a reusable <code>pi-control-chrome</code> Skill. Browser tool schemas are hidden until that Skill is explicitly loaded for the current session; the bundled CLI remains available for explicit human/developer workflows and tests.</li>
+</ul>
+<h2>Semantic page interaction</h2>
+<p>The common click and form tools accept a semantic <code>target</code> such as <code>{ "role": "button", "name": "Submit" }</code>, <code>{ "label": "Email" }</code>, <code>{ "placeholder": "Search" }</code>, <code>{ "text": "Next" }</code>, or <code>{ "testId": "submit-button" }</code>. Semantic interactions wait for one visible match and fail closed when a target is missing, hidden, disabled, or ambiguous; use an explicit zero-based <code>index</code> only when multiple matches are intentional. Actions apply that index after visibility filtering, so hidden duplicate controls do not consume it. Role/name, label, and accessible-text targets prefer Chromium's computed AX semantics and return <code>resolvedBy: "chromium_ax"</code> on successful mapped actions; CSS selectors, test IDs, and placeholders continue through DOM resolution. Same-origin iframe AX nodes participate in the same bounded semantic read, while cross-origin frame content remains a diagnostic boundary. <code>browser_snapshot</code> returns document-scoped live <code>eN</code> refs and a <code>snapshotId</code>; pass that matching <code>snapshotId</code> with every ref-based interaction or element-state wait. The resolver uses the original connected element first and allows one unique, strongly equivalent same-document rebind; CSS selectors remain supported.</p>
+<p>Text targets used by action and element-state locators project a matching text leaf to its nearest actionable ancestor, so <code>isEnabled</code> and <code>browser_wait</code> report the state of the control that receives the action. <code>browser_wait</code> supports <code>load</code>, <code>url</code>, <code>text</code>, <code>text_gone</code>, <code>visible</code>, <code>hidden</code>, and <code>enabled</code>. Text conditions use <code>text</code>; element conditions use the same semantic <code>target</code> accepted by interactions. <code>url</code> and <code>urlIncludes</code> can constrain every wait condition. <code>hidden</code> succeeds when the target has no visible matches, including an absent target or multiple hidden matches; <code>visible</code> and <code>enabled</code> require one visible match, and multiple visible matches fail closed. For <code>visible</code> and <code>enabled</code>, an explicit index is applied after visibility filtering. Browser page matching runs inside the selected tab, while the Bridge continues to enforce the existing browser target and connection-generation fence. If a side-effecting interaction loses its injected result after navigation, it reports an uncertain outcome and is never replayed automatically.</p>
+<h2>Architecture</h2>
+<pre><code class="language-text">Pi Extension
+     ↕ WebSocket
+127.0.0.1 Local Bridge
+     ↕ WebSocket
+Chrome / Edge Manifest V3 Extension
+     ↕
+Current Chromium Profile
+</code></pre>
+<p>The Bridge binds to loopback and requires a local pairing token for WebSocket operations. Its <code>/pair</code> bootstrap response is intentionally available to any caller on that loopback port so an unpacked extension can pair without reading the host token file; any local process or installed extension that can reach the port is therefore trusted with browser control. Keep the Bridge port off network proxies. Host-launched instances expose a non-secret instance id, launcher label and capability list; any paired DSH or Pi Host in the same local-user control domain may request a cooperative restart when the Bridge exposes <code>capabilities.localUserRestart: true</code> and has no pending browser request. The instance id prevents stale restart races, and a restart lock serializes concurrent requests. Unknown legacy Bridges remain untouched when they do not expose the local-user capability. Installing the extension and completing local pairing are the trust steps; normal browser operations do not request repeated per-action authorization.</p>
+<h2>Installation</h2>
+<h3>From npm (recommended)</h3>
+<pre><code class="language-powershell">pi install npm:pi-control-chrome
+</code></pre>
+<h3>From GitHub</h3>
+<pre><code class="language-powershell">pi install git:github.com/lyd123qw2008/pi-control-chrome
+</code></pre>
+<h3>From a local checkout</h3>
+<pre><code class="language-powershell">pi install &lt;path-to&gt;/pi-control-chrome
+</code></pre>
+<p>The package registers the Pi extension and the bundled Skill through its <code>package.json</code> <code>pi</code> manifest. It requires Node.js 22 or newer.</p>
+<h3>DSH integration</h3>
+<p>This repository also contains the standalone <a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/dsh-tool-control-chrome/README.md" target="_blank" rel="noopener noreferrer"><code>@lyd123qw2008/dsh-tool-control-chrome</code></a> package. It registers the same browser-control surface as model-facing DeepSeek Harness tools and routes calls through the local Bridge. Install the DSH package in the active DSH Profile:</p>
+<pre><code class="language-powershell">dsh plugin --profile web add @lyd123qw2008/dsh-tool-control-chrome
+</code></pre>
+<p>Then merge the <code>insert</code> entry from its <code>cordis.patch.yml</code> into the existing <code>cordis.patch.yml</code> when installing by hand (<code>dsh plugin --profile web add</code> applies that bundle patch automatically), and keep Bridge settings in <code>&lt;DSH_HOME&gt;/settings.yaml</code>.</p>
+<p>The DSH package reuses this project's Bridge and Manifest V3 extension. Its default <code>lazyTools: true</code> mode exposes only the <code>pi-control-chrome</code> Skill metadata initially; after a successful Skill load, all 43 <code>browser_*</code> tools are registered in that Agent and remain active across turns in the current Agent session. At turn end, the host closes unmarked Agent temporary tabs, releases claimed user tabs without closing them, and detaches the session debugger lease. Bridge, browser tools, and Browser binding remain available for later turns. A model must call <code>browser_mark_handoff</code> or <code>browser_mark_deliverable</code> to preserve an Agent tab through the current turn cleanup, and repeat the mark in a later turn when needed. Only an explicit user request to close temporary tabs, release claims, or clean the browser task may trigger <code>browser_cleanup</code>; it performs immediate task cleanup while retaining the lazy tools and healthy Bridge. <code>browser_context_reset</code> is the separate explicit user-requested operation that finalizes resources and deactivates lazy tools. Agent and plugin disposal retry final cleanup; failed recovery blocks a replacement Agent that reuses the same session ID until cleanup succeeds. Set <code>lazyTools: false</code> for eager visibility. Pi registers the same native tools once but hides them with its active-tool set until the explicit <code>/skill:pi-control-chrome</code> expansion or another successful Skill activation. Ordinary web search does not activate browser control. The DSH package also provides human-only <code>/chrome status</code>, <code>/chrome targets</code>, <code>/chrome profile [browserId]</code>, <code>/chrome connect</code>, <code>/chrome disconnect</code>, <code>/chrome doctor</code>, <code>/chrome restart</code>, and <code>/chrome tabs</code> commands. It does not install browser extensions automatically, read Chrome Profile files, or expose the Bridge beyond loopback.</p>
+<h3>Codex CLI and Desktop</h3>
+<p>The repository includes a Codex plugin manifest and a local MCP <code>stdio</code> adapter. After installing a package version containing this adapter, register it with <code>codex mcp add pi-control-chrome -- pi-control-chrome-codex</code>, or point <code>codex mcp add</code> at <code>mcp/mcp-server.mjs</code> in this checkout. The generic MCP adapter exposes the complete browser tool catalog by default; the checked-in Codex configuration explicitly selects its bounded <code>codex</code> mode, including <code>browser_restart</code> after explicit user confirmation. It does not open an additional MCP port. See <a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/mcp/README.md" target="_blank" rel="noopener noreferrer"><code>mcp/README.md</code></a> for setup, modes, and safety rules.</p>
+<h2>Load the browser extension</h2>
+<p>Pi cannot install an unpacked browser extension automatically. Load the shared <code>extension/</code> directory once in Chrome or Edge:</p>
+<ol>
+<li>Open <code>chrome://extensions</code> or <code>edge://extensions</code>.</li>
+<li>Enable <strong>Developer mode</strong>.</li>
+<li>Select <strong>Load unpacked</strong>.</li>
+<li>Choose the repository or installed package's <code>extension/</code> directory.</li>
+<li>Start or reload Pi.</li>
+</ol>
+<p>Check the connection in Pi:</p>
+<pre><code class="language-text">/chrome status
+/chrome targets
+/chrome profile &lt;browserId&gt;
+/chrome tabs
+</code></pre>
+<p>The extension is shared by Chrome and Edge and uses Chromium Manifest V3 capability detection rather than separate browser-specific implementations. One Bridge can now keep multiple identified browser targets connected at once. Each target is keyed by its stable <code>browserId</code>; requests use target-qualified routing and connection-generation fencing, so a newer connection for Profile A cannot replace Profile B or satisfy Profile A's stale requests. When multiple targets are available, select one explicitly with <code>/chrome profile &lt;browserId&gt;</code> or <code>browser_status</code>/the Skill CLI <code>--browser-id</code>; the runtime never guesses from the newest connection or active window.</p>
+<h2>Skill CLI</h2>
+<p>The bundled scripts are for explicit human/developer workflows and automated tests. They connect to the Bridge directly and must not be invoked by a model shell as a substitute for the Skill-gated native tools:</p>
+<pre><code class="language-powershell">node skills/pi-control-chrome/scripts/browser.mjs status --browser-id &lt;browserId&gt;
+node skills/pi-control-chrome/scripts/browser.mjs tabs --browser-id &lt;browserId&gt; --json
+node skills/pi-control-chrome/scripts/browser.mjs group --browser-id &lt;browserId&gt; --json
+node skills/pi-control-chrome/scripts/browser.mjs view https://example.com --browser-id &lt;browserId&gt; --session example-session --turn 1 --screenshot "$env:TEMP\example.png"
+node skills/pi-control-chrome/scripts/browser.mjs cleanup --browser-id &lt;browserId&gt; --session &lt;session-id&gt; [--recover-stale]
+</code></pre>
+<p>Managed CLI commands use explicit lifecycle identity: <code>open</code> and <code>cleanup</code> require <code>--session &lt;id&gt;</code>, and <code>view</code> requires both <code>--session &lt;id&gt;</code> and <code>--turn &lt;n&gt;</code> unless it is explicitly temporary. The CLI does not derive ownership from a process id, so a later invocation can address the same tabs safely. Use <code>cleanup --recover-stale</code> only for an explicit recovery decision after an extension runtime change; it forgets matching unknown-incarnation ownership records without closing those tabs and reports their ids in <code>recovered</code> for manual inspection.</p>
+<p>The bundled scripts support these environment variables. The Pi extension also accepts <code>PI_CONTROL_CHROME_BRIDGE_PORT</code> when the local Bridge uses another loopback port; its host remains <code>127.0.0.1</code>:</p>
+<pre><code class="language-text">PI_CONTROL_CHROME_BRIDGE_HOST   # bundled CLI only
+PI_CONTROL_CHROME_BRIDGE_PORT   # bundled CLI and Pi extension
+</code></pre>
+<p>The checked-in browser extension still connects to <code>127.0.0.1:17318</code> and its manifest CSP allowlist is fixed to that endpoint. Use a matching rebuilt extension and CSP before pointing the Pi extension or DSH client at another endpoint.</p>
+<p>Use the native <code>browser_*</code> Pi or DSH tools for model browser work. They preserve the current Agent session, target identity, and tab ownership protections. User tabs remain valid browser targets, but their documents can be replaced while the user or DSH UI is active; read-only page reads re-observe a changing document once, while side-effecting operations retain strict document fencing. Automated browser verification should use an Agent-owned test tab or an isolated browser profile instead of the active DSH GUI tab.</p>
+<h2>Development and tests</h2>
+<pre><code class="language-powershell">cd &lt;path-to&gt;/pi-control-chrome
+npm install
+npm run check
+npm test
+npm run test:pi:lifecycle
+npm run test:skill
+npm run pack:check
+npm run test:package-install
+</code></pre>
+<p><code>npm run test:skill</code> requires a connected Chrome or Edge profile and the local Bridge. It creates temporary Agent tabs, so when multiple ready targets exist it skips rather than choosing one; set <code>PI_CONTROL_CHROME_TEST_BROWSER_ID</code> only for an explicitly authorized target. The high-coverage browser smoke test is:</p>
+<pre><code class="language-powershell">npm run smoke:e2e
+</code></pre>
+<p>The multi-target acceptance test launches two isolated temporary profiles of the configured browser (Edge by default, or Chrome for Testing when selected) and verifies explicit routing, target disconnect isolation, and same-Profile reconnection fencing:</p>
+<pre><code class="language-powershell">npm run smoke:e2e:multi-profile
+</code></pre>
+<p>The smoke test defaults to Edge. The current worktree has passed the same isolated coverage on Edge and Chrome for Testing 149.0.7827.55. Run it against Chrome for Testing with:</p>
+<pre><code class="language-powershell">$env:PI_CONTROL_CHROME_BROWSER = "&lt;path-to&gt;\chrome-for-testing\chrome.exe"
+npm run smoke:e2e
+</code></pre>
+<p>This requests a unique temporary <code>--user-data-dir</code> rather than the normal user profile. The harness fails if the browser process exits before the extension handshake, which detects common Windows singleton delegation; Chrome for Testing provides the most reliable isolated executable. The installed Google Chrome may reject command-line unpacked-extension flags; load <code>extension/</code> manually from <code>chrome://extensions</code> for a normal-profile check.</p>
+<h2>Design principles</h2>
+<ol>
+<li><strong>Install once, operate with low friction.</strong> Extension installation and local pairing are the user-facing trust steps.</li>
+<li><strong>The extension is the browser capability boundary.</strong> Pi communicates with it only through the local Bridge.</li>
+<li><strong>User tabs are preserved by default.</strong> Claiming a tab establishes control ownership; it does not move the tab into the Agent group.</li>
+<li><strong>Agent tabs are reclaimable.</strong> Agent-created tabs carry ownership and session metadata and are cleaned up according to lifecycle policy.</li>
+<li><strong>Chrome and Edge share one implementation.</strong> The extension uses Manifest V3 and capability detection.</li>
+<li><strong>Observable behavior is aligned without copying private Codex runtime code.</strong> Pi uses its own Bridge protocol and Extension API.</li>
+<li><strong>Capability layer, not a site adapter.</strong> The plugin understands page structure, identity, safety boundaries, and generic primitives; a product's DOM, workflow, and field names belong to the calling Skill. See <a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/ARCHITECTURE.md#capability-layer-and-personalization-layer" target="_blank" rel="noopener noreferrer">Capability layer and personalization layer</a>.</li>
+</ol>
+<h2>Documentation</h2>
+<ul>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/ARCHITECTURE.md" target="_blank" rel="noopener noreferrer"><code>ARCHITECTURE.md</code></a> — English architecture documentation.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/README-zh-CN.md" target="_blank" rel="noopener noreferrer"><code>README-zh-CN.md</code></a> — Simplified Chinese guide.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/FEATURES.md" target="_blank" rel="noopener noreferrer"><code>FEATURES.md</code></a> — feature scope and future work.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/CODEX-ALIGNMENT.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>CODEX-ALIGNMENT.zh-CN.md</code></a> — Codex behavior alignment notes.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/DECISIONS.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>DECISIONS.zh-CN.md</code></a> — project decisions.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/docs/RELEASE-CHECKLIST.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>docs/RELEASE-CHECKLIST.zh-CN.md</code></a> — package/version, dependency, PR, npm publication and active DSH Profile release checklist.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/skills/pi-control-chrome-release/SKILL.md" target="_blank" rel="noopener noreferrer"><code>skills/pi-control-chrome-release/SKILL.md</code></a> — executable release procedure for Pi and DSH packages.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/skills/pi-control-chrome/SKILL.md" target="_blank" rel="noopener noreferrer"><code>skills/pi-control-chrome/SKILL.md</code></a> — bundled Pi Skill.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer"><code>CHANGELOG.md</code></a> — release history.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/BROWSER-ACTIVATION-DESIGN.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>BROWSER-ACTIVATION-DESIGN.zh-CN.md</code></a> — browser capability activation and on-demand Skill design.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/docs/BROWSER-LIFECYCLE-CODEX-ALIGNED.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>docs/BROWSER-LIFECYCLE-CODEX-ALIGNED.zh-CN.md</code></a> — implemented Codex-aligned browser lifecycle.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/docs/BROWSER-OUTPUT-COMPACTION-DESIGN.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>docs/BROWSER-OUTPUT-COMPACTION-DESIGN.zh-CN.md</code></a> — implemented bounded model-facing browser output and AX revision design.</li>
+<li><a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/docs/AGENT-BROWSER-RUNTIME-DESIGN.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>docs/AGENT-BROWSER-RUNTIME-DESIGN.zh-CN.md</code></a> — Agent-first live-ref runtime design, implementation status, and AX runtime status.</li>
+</ul>
+<h2>Current future scope</h2>
+<p>The following items are planned for later stages and do not block the current browser-control loop:</p>
+<ul>
+<li>WebMCP, GSuite export, and browsing history APIs.</li>
+<li>Dedicated media-download interfaces.</li>
+<li>Capability discovery beyond the current Bridge target and extension capability handshake.</li>
+<li>Chrome Web Store and Edge Add-ons release packages.</li>
+<li>Dedicated Brave and Chromium acceptance coverage.</li>
+<li>Cross-Bridge orchestration and simultaneous multi-target control within one session.</li>
+</ul>
+<h2>License</h2>
+<p>MIT. See <a href="https://github.com/lyd123qw2008/pi-control-chrome/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><code>LICENSE</code></a>.</p>

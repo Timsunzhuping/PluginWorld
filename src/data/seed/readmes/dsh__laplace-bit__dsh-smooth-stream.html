@@ -1,82 +1,166 @@
 <h1>dsh-smooth-stream</h1>
-<p><a href="https://github.com/Laplace-bit/dsh-smooth-stream/blob/HEAD/README.en.md" target="_blank" rel="noopener noreferrer">English</a> | 中文</p>
-<p><strong>dsh-smooth-stream</strong> 为 <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a>（<code>dsh</code>）Web UI 带来流畅的流式渲染和丝滑滚动。文字、Markdown、代码块、表格以及工具结果会随着输出自然呈现；内容逐步增长时，页面平稳跟随，整轮回复保持连贯的视觉节奏。</p>
-<p>项目主页：<a href="https://laplace-bit.github.io/dsh-smooth-stream/" target="_blank" rel="noopener noreferrer">https://laplace-bit.github.io/dsh-smooth-stream/</a></p>
-<p><a href="https://laplace-bit.github.io/dsh-smooth-stream/install.html" target="_blank" rel="noopener noreferrer">安装指南</a> · <a href="https://laplace-bit.github.io/dsh-smooth-stream/how-it-works.html" target="_blank" rel="noopener noreferrer">工作原理与可复现基准</a></p>
-<h2>效果</h2>
+<blockquote>
+<p><strong>让 AI 的长篇生成如提词器般温润流淌。</strong><br />为 DeepSeek Harness（<code>dsh</code>）打造的二阶弹簧物理流式渲染与零重排跟随引擎。</p>
+</blockquote>
+<p><a href="https://github.com/Laplace-bit/dsh-smooth-stream/blob/HEAD/README.en.md" target="_blank" rel="noopener noreferrer">English</a> · <a href="https://laplace-bit.github.io/dsh-smooth-stream/" target="_blank" rel="noopener noreferrer">项目主页</a> · <a href="https://laplace-bit.github.io/dsh-smooth-stream/how-it-works.html" target="_blank" rel="noopener noreferrer">工作原理与基准</a> · <a href="https://www.npmjs.com/package/dsh-smooth-stream" target="_blank" rel="noopener noreferrer">npm</a></p>
+<hr />
+<h2>极致丝滑的阅读手感</h2>
+<p>无论是阅读数百行的长篇推演，还是紧盯高速吐字的代码生成，<code>dsh-smooth-stream</code> 带来的是一种<strong>沉浸、连贯且零视觉负担</strong>的阅读质感：</p>
+<ul>
+<li><strong>如水流般自然铺展</strong>：告别大段文本突然“砸”在屏幕上的视觉压迫，字句如打字机般富有呼吸感地逐字涌现；</li>
+<li><strong>视线无需追赶跳动</strong>：视口如同搭载了高精度阻尼滑轨，随文字增长平稳匀速推移，彻底终结换行时的突发踢移；</li>
+<li><strong>呼吸感与实时性的平衡</strong>：慢速输出时从容优雅，高并发爆发时平稳追赶，无论模型吐字多快，画面始终从容自若。</li>
+</ul>
+<hr />
+<h2>为什么需要它？</h2>
+<p>大模型输出是通过网络分块到达的。一个数据包可能在几毫秒内送达数百字符，下一个分块却需要数十毫秒。</p>
+<p>如果直接将 DOM 渲染和视口滚动绑定在离散的到达事件上，通常会引发两个阅读体验问题：</p>
+<ol>
+<li><strong>视觉跳跃与撕裂</strong>：段落、代码块和表格整段突发呈现，视线被迫频繁重新寻焦；</li>
+<li><strong>滚动抖动与重排风暴</strong>：依靠 <code>scrollTop = scrollHeight</code> 进行瞬时硬跳；即使用 CSS <code>scroll-behavior: smooth</code>，高频写入也会不断重置缓动曲线，导致动画永远无法收敛，高速流下伴随剧烈的主线程重排。</li>
+</ol>
+<p><code>dsh-smooth-stream</code> 将<strong>内容呈现</strong>与<strong>视口运动</strong>拆分为两个独立的物理状态机，在每一帧动画回调（rAF）中连续积分，彻底消除跳跃感。</p>
+<hr />
+<h2>核心机理与架构</h2>
+<pre><code>[ 模型 SSE 分块流 ]
+         │
+         ▼
+ ┌─────────────────┐       背压阻尼 (0.55x ~ 1.0x)       ┌─────────────────┐
+ │   揭示节奏引擎   │ ◄──────────────────────────────── │   弹簧跟随引擎   │
+ │ (Reveal Engine) │                                   │ (Follow Engine) │
+ └────────┬────────┘                                   └────────┬────────┘
+          │ 字符积压与分数积分                                      │ 二阶阻尼弹簧积分 (k=130, c=24)
+          ▼                                                     ▼
+ [ 逐帧平滑展开 DOM ] ───────────────────────────────► [ 合成层 Transform 补偿 ]
+  (单帧视觉位移 ≤ 8px)                                   (0 Reflow / 纯 GPU 合成)
+</code></pre>
+<h3>1. 动态自适应的揭示引擎（Reveal Engine）</h3>
+<ul>
+<li><strong>分数级字符积分</strong>：根据积压队列深度自适应调节速度（$v = 90 + \text{backlog}^{1.25} \times P$），低负载时从容自然，高积压时平稳追赶，绝不倾泻整段文本。</li>
+<li><strong>折行限幅平滑</strong>：长文本和代码块发生换行时，单帧视觉位移被限制在 8px 以内，将原本 24~28px 的单帧跳跃平摊至数帧完成。</li>
+<li><strong>尾部平稳收束</strong>：回合结束标记到达后，残余缓冲区以恒定速率释放，正文、思考链与工具调用之间自然衔接。</li>
+</ul>
+<h3>2. 纯合成层驱动的跟随引擎（Follow Engine）</h3>
+<ul>
+<li><strong>二阶阻尼物理系统</strong>：采用 $k=130, c=24, m=1$ 的亚步进物理弹簧，将内容高度的变化转化为平滑连续的速度与位移轨迹。</li>
+<li><strong>零重排（Zero-Reflow）位移补偿</strong>：真实滚动容器始终锚定在底部，剩余的视觉滞后完全由外层 DOM 的 <code>transform: translate3d</code> 吸收。跟随过程不读写任何触发 Layout 的属性，杜绝重排风暴。</li>
+<li><strong>闭环背压控制（Closed-Loop Backpressure）</strong>：当跟随滞后接近预留空间时，反向向揭示引擎施加阻尼（最低降至 0.55 倍速），防止文本增长超出视口弹簧范围。</li>
+<li><strong>掉帧自愈与跨刷新率一致</strong>：主线程卡顿（Stall）时自动钳位物理时间（$\le 32\text{ms}$），避免画面恢复后的突进瞬移；在 60Hz 与 120Hz（ProMotion）屏幕下拥有近乎一致的物理收敛时间。</li>
+</ul>
+<h3>3. 会话生命周期自动折叠（Turn Auto-Collapse）</h3>
+<ul>
+<li>对话进行时，思考链与工具调用保持实时展开；</li>
+<li>回合结算完成并稳定后，自动将执行过程收敛为一行极简的 <code>已处理 X 秒</code> 摘要，保持工作区专注；支持随时点击无缝展开。</li>
+</ul>
+<hr />
+<h2>效果对比</h2>
 <p>左：默认 Web UI。右：dsh-smooth-stream。</p>
 <p><img src="https://raw.githubusercontent.com/Laplace-bit/dsh-smooth-stream/HEAD/docs/compare.gif" alt="左：未使用插件。右：使用 dsh-smooth-stream。" /></p>
-<h2>核心体验</h2>
-<ul>
-<li><strong>流畅渲染。</strong> 文字边到边呈现，Markdown 结构持续更新，标题、列表、代码块和表格在流式过程中保持自然的阅读状态。</li>
-<li><strong>丝滑滚动。</strong> 内容逐步变高时，页面沿连续的滚动轨迹平稳跟随，视线始终贴着正在生成的内容。</li>
-<li><strong>统一过渡。</strong> 换行、代码块、表格和工具结果使用一致的过渡方式，正文、思考过程与工具输出衔接自然。</li>
-<li><strong>自适应节奏。</strong> 渲染速度会根据输出速度和待显示内容调整，让慢速输出从容呈现，快速输出及时跟上。</li>
-</ul>
-<h2>安装</h2>
-<p>在 DeepSeek Harness 源码仓库里：</p>
-<pre><code class="language-sh">pnpm dsh plugin --profile web add dsh-smooth-stream
-</code></pre>
-<p>如果 <code>PATH</code> 上已经有 <code>dsh</code>：</p>
-<pre><code class="language-sh">dsh plugin --profile web add dsh-smooth-stream
-</code></pre>
-<p>npm 包带预构建的 <code>lib/</code>，无需 pnpm ≥10 的构建脚本授权，直接可装。</p>
-<p>启动界面：</p>
-<pre><code class="language-sh">pnpm dsh web
-</code></pre>
-<p>Host 日志里应出现 <code>[dsh-smooth-stream] plugin loaded!</code>。</p>
-<p>卸载：<code>pnpm dsh plugin --profile web remove dsh-smooth-stream</code>（或 <code>dsh plugin --profile web remove dsh-smooth-stream</code>）。</p>
-<h2>配置</h2>
-<p>组合包默认 <code>preset: balanced</code>。要换节拍，在 profile 的 <code>cordis.patch.yml</code> 里改：</p>
+<hr />
+<h2>性能与基准</h2>
+<p>平滑度与稳定性基于本地自动化审计台架验证：</p>
 <table>
 <thead>
 <tr>
-<th><code>preset</code></th>
-<th>手感</th>
+<th align="left">验证闸门</th>
+<th align="left">测试项目</th>
+<th align="left">指标要求</th>
 </tr>
 </thead>
 <tbody><tr>
-<td><code>realtime</code></td>
-<td>更贴模型到达</td>
+<td align="left"><strong>流式渲染审计</strong></td>
+<td align="left"><code>node scripts/run-render-audit.mjs</code></td>
+<td align="left">5 种典型生成场景下 10/10 Clean，零位移回退</td>
 </tr>
 <tr>
-<td><code>balanced</code></td>
-<td>默认</td>
+<td align="left"><strong>视口溢出闸门</strong></td>
+<td align="left"><code>node scripts/verify-overflow.mjs</code></td>
+<td align="left">极限输出场景下零过滚、零反弹</td>
 </tr>
 <tr>
-<td><code>silky</code></td>
-<td>缓冲更大，追上更慢</td>
+<td align="left"><strong>尾行晃动抑制</strong></td>
+<td align="left"><code>pnpm test</code></td>
+<td align="left">单帧跳变 ≤30px，7 帧振幅峰值 ≤32px</td>
 </tr>
 </tbody></table>
-<p>旧版的 <code>mode</code>、<code>revealCharsPerSec</code>、<code>scrollSpeedPxPerSec</code> 和 <code>maxScrollSpeedPxPerSec</code> 字段仍可被加载，以兼容已有 profile；当前自适应引擎仅使用 <code>preset</code> 调整节拍。</p>
-<h2>用户设置</h2>
-<p>在 Web 界面打开 <strong>设置 → 插件 → 插件配置</strong>，会看到一张 <strong>丝滑流式（Smooth stream）</strong> 卡片，其中包含：</p>
 <ul>
-<li><strong>启用丝滑流式渲染</strong>（默认开启）：开启时由本插件接管回复和工具行的渲染与跟随；关闭后会撤销接管，完整使用 Harness 内置渲染。</li>
-<li><strong>自动展开思考</strong>：控制思考块在流式期间是否自动展开。主开关关闭时此选项不会生效。</li>
-<li><strong>显示渲染调试面板</strong>（默认关闭）：在聊天页右侧显示实时渲染、帧率和滚动跟随数据，并开放流式揭示与滚动弹簧参数。</li>
+<li>核心 ESM 产物经 Gzip 压缩后仅约 <strong>4.7 kB</strong>。详见<a href="https://laplace-bit.github.io/dsh-smooth-stream/how-it-works.html" target="_blank" rel="noopener noreferrer">工作原理与基准</a>。</li>
 </ul>
-<p>“自动展开思考”开启时，思考块会在流式时自动展开、思考结束后收起；关闭后思考块保持折叠，仍可手动点开，且不会被流式状态抢回控制。</p>
-<p>这些设置是用户级的持久化偏好，改完即生效，无需重启；会写进 DeepSeek Harness 的用户设置文档，而不是插件的组合配置。</p>
-<p>调试面板中的参数在拖动时实时生效，包括揭示倍率、队列压力、最大揭示速度、弹簧刚度/阻尼/质量、预测 runway、runway 响应时间和最低背压倍率。面板同时显示 FPS、帧耗时、积压字符、实际揭示速度、渲染进度、视觉滞后、滚动速度和可用跟随空间；可随时<strong>保存</strong>当前组合、<strong>放弃</strong>未保存修改、<strong>恢复默认</strong>，或复制当前参数与指标。关闭调试开关后，渲染引擎立即恢复正式默认参数。</p>
-<h2>关于与更新</h2>
-<ul>
-<li><strong>版本 / 主页 / 许可证</strong>：见本页顶部与 <a href="https://github.com/Laplace-bit/dsh-smooth-stream/blob/HEAD/package.json" target="_blank" rel="noopener noreferrer">package.json</a> 的 <code>version</code>、<code>homepage</code>、<code>repository</code>、<code>license</code> 字段；安装的插件列表可在 <strong>设置 → 插件 → 全部</strong> 里查看。</li>
-<li><strong>更新</strong>：卡片会显示 Host 当前加载的版本。只有当前 profile 明确把 <code>dsh-smooth-stream</code> 声明为 npm 依赖时，<strong>更新</strong>按钮才会对该 profile 执行固定的包更新，并提示重启 Harness。<code>link:</code> 或 <code>file:</code> 本地开发安装会显示为开发版本，更新按钮会保持禁用，避免覆盖你的源码目录。</li>
-</ul>
-<p>也可以通过命令行更新 npm 安装的 profile：</p>
-<pre><code class="language-sh">dsh plugin --profile web update dsh-smooth-stream
+<hr />
+<h2>安装与使用</h2>
+<p>在 DeepSeek Harness 源码根目录运行：</p>
+<pre><code class="language-sh">pnpm dsh plugin --profile web add dsh-smooth-stream
 </code></pre>
-<p>（也可用 <code>dsh plugin --profile web outdated</code> 查看是否有新版本。）</p>
-<h2>常见问题</h2>
-<p><strong>这是 DeepSeek 官方插件吗？</strong>
-不是。它是面向 DeepSeek Harness（<code>dsh</code>）Web UI 的独立维护项目，采用 MIT 许可证，和 DeepSeek 没有从属关系。</p>
-<p><strong>dsh 插件怎么安装？</strong>
-用内置插件命令：在 dsh 源码目录运行 <code>dsh plugin --profile web add dsh-smooth-stream</code>（见<a href="#%E5%AE%89%E8%A3%85" target="_blank" rel="noopener noreferrer">安装</a>）。</p>
-<p><strong>能用 npm 安装吗？</strong>
-能。<code>dsh-smooth-stream</code> 已发布到 <a href="https://www.npmjs.com/package/dsh-smooth-stream" target="_blank" rel="noopener noreferrer">npm</a>，<code>dsh plugin --profile web add dsh-smooth-stream</code> 安装的就是预构建的 npm 包。</p>
-<p><strong>支持 <code>prefers-reduced-motion</code> 吗？</strong>
-支持。系统开启减少动态效果时直接显示完整文本、不接管跟随；帧率低于 30 fps 且回复在屏外时，揭示自动暂停、恢复后再补上。</p>
-<p><a href="https://whyihaveyou.github.io/dsh-suite/" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/featured%20on-dsh--suite-4d6bfe" alt="featured on dsh-suite" /></a></p>
+<p>如果系统 <code>PATH</code> 中已有 <code>dsh</code>：</p>
+<pre><code class="language-sh">dsh plugin --profile web add dsh-smooth-stream
+</code></pre>
+<p>启动界面：</p>
+<pre><code class="language-sh">pnpm dsh web
+</code></pre>
+<p>Host 日志中显示 <code>[dsh-smooth-stream] plugin loaded!</code> 即表示已成功加载。</p>
+<p>卸载命令：<code>pnpm dsh plugin --profile web remove dsh-smooth-stream</code>。</p>
+<hr />
+<h2>内核兼容性</h2>
+<table>
+<thead>
+<tr>
+<th>DSH 内核</th>
+<th>本插件支持情况</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0.1.0-rc.5 ～ 0.1.0-rc.7</td>
+<td>✅ 全部版本</td>
+</tr>
+<tr>
+<td>0.1.1-rc.2</td>
+<td>✅ 全部版本</td>
+</tr>
+<tr>
+<td>0.1.2-alpha.1 ～ 0.1.2-alpha.3</td>
+<td>✅ 0.4.3 起；0.4.2 及更早版本因静态导入已移除的助手而在 0.1.2 上加载失败</td>
+</tr>
+</tbody></table>
+<ul>
+<li>✅ = 兼容。<code>0.1.2-alpha.3</code> 为当前宿主内核，已实测（产物导入 + 测试套件）；其余内核按双内核兼容设计支持（同一份构建、同一 API 面）。</li>
+<li><strong>0.1.2 起内核移除了 <code>settingsNamespace()</code> 运行时助手</strong>（≤ 0.1.1 上它只是个校验恒等函数，0.1.2 仅保留同名类型）。本插件不静态导入该符号，而是在注册设置命名空间时本地内联常量并断言为 <code>SettingsNamespace</code> 类型，新旧内核通用。</li>
+<li>0.4.3 起不再静态导入 <code>settingsNamespace()</code>（见 git 历史中的兼容修复）；更早版本仅在 ≤ 0.1.1 内核上可用。</li>
+<li><strong>不要对 <code>@deepseek-ai/*</code> 包的运行时符号做静态导入</strong>。宿主 CLI 经 <code>node --import tsx/esm</code> 启动，tsx 会应用宿主 <code>tsconfig</code> 的 <code>paths</code> 映射，外部插件对 <code>@deepseek-ai/*</code> 的裸导入可能被重定向进宿主源码，一旦宿主侧改名/删符号就会以模块实例化错误的形式炸掉启动。类型导入（<code>import type</code>）不受影响。</li>
+</ul>
+<h2>配置与手感预设</h2>
+<p>插件默认采用 <code>preset: balanced</code>。如需切换手感，可在对应 profile 的 <code>cordis.patch.yml</code> 中修改：</p>
+<table>
+<thead>
+<tr>
+<th align="left"><code>preset</code></th>
+<th align="left">动态特性</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left"><code>realtime</code></td>
+<td align="left">紧跟模型分块到达节奏，缓冲更小</td>
+</tr>
+<tr>
+<td align="left"><code>balanced</code></td>
+<td align="left">默认推荐，兼顾阅读流畅度与响应延迟</td>
+</tr>
+<tr>
+<td align="left"><code>silky</code></td>
+<td align="left">增大缓冲区，追赶更平缓柔和</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>用户偏好设置</h2>
+<p>在 Web 界面打开 <strong>设置 → 插件 → 插件配置</strong>，可对 <strong>丝滑流式（Smooth stream）</strong> 卡片进行个性化调节：</p>
+<ul>
+<li><strong>启用丝滑流式渲染</strong>（默认开启）：接管回复和工具行的渲染与跟随；关闭后即时恢复 Harness 内置渲染。</li>
+<li><strong>自动展开思考</strong>：流式生成期间是否自动展开思考过程。</li>
+<li><strong>对数淡入</strong>（默认开启）：回答正文和展开的思考内容中，尾部范围随输出速度从 24 扩展到最多 160 个字素，从 0% 不透明度在 240ms 内按反向对数曲线变实（前段更通透，后段变实）。网络停顿时也会恢复清晰；关闭此项保留逐字输出与滚动。遵循动效偏好，跳过代码、公式和思考摘要，不支持文字范围着色的浏览器自动使用原有输出效果。</li>
+<li><strong>完成后自动折叠</strong>（默认开启）：回合处理完成后，将思考过程与工具调用折叠为摘要行。</li>
+<li><strong>显示渲染调试面板</strong>（默认关闭）：在界面右侧开启实时 HUD，观测 FPS、字符积压、弹性曲线并微调物理参数。</li>
+</ul>
+<p>本地淡入预览：执行 <code>pnpm build:repro</code>，在仓库根目录启动 <code>python3 -m http.server 8765 --bind 127.0.0.1</code>，打开 <code>http://127.0.0.1:8765/repro/index.html?demo=fade</code>。预览包含暂停、停止、深浅主题、高速分片和代码/公式保护样例，复用真实输出引擎，富文本为测试样例。</p>
+<p>执行 <code>node scripts/verify-logarithmic-fade.mjs</code> 可验证并录制预览（需要 Chrome 和 <code>pnpm exec playwright-core install ffmpeg</code>；其他 Chrome 路径可用 <code>CHROME_BIN</code> 指定），报告与视频保存在未跟踪的 <code>repro/artifacts/logarithmic-fade/</code>。</p>
+<hr />
 <h2>许可证</h2>
 <p><a href="https://github.com/Laplace-bit/dsh-smooth-stream/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>

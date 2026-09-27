@@ -91,7 +91,7 @@
 <p><strong>Honest note:</strong> if cost were the <em>only</em> goal, lowering Claude Code's auto-compact threshold (<code>CLAUDE_CODE_AUTO_COMPACT_WINDOW</code>) buys a similar spend curve for free. What it can't buy is quality under repetition: built-in compaction replaces the whole conversation with a lossy summary every time it fires — at a low threshold it fires often, and you're soon working from a summary of a summary of a summary. The rolling design exists so aggressive compression doesn't cost you the session: recent work stays verbatim, and old work lives in one continuously-merged timeline instead of N generations of loss.</p>
 </blockquote>
 <h2>How It Works</h2>
-<pre><code>Claude Code  ──►  Rolling Context Proxy (:5588)  ──►  Anthropic API
+<pre><code>Claude Code  ──HTTPS_PROXY──►  Rolling Context MITM (:5590)  ──►  core (:5588)  ──►  Anthropic API
                          │
                          ├─ context &lt; 100K tokens? pass through unchanged
                          │
@@ -103,6 +103,7 @@
                               3. inject compressed context on next request
                               4. never blocks, never adds latency
 </code></pre>
+<p><strong>How it attaches:</strong> the plugin sets <code>HTTPS_PROXY</code> (and <code>NODE_EXTRA_CA_CERTS</code>), not <code>ANTHROPIC_BASE_URL</code>. A non-anthropic <code>ANTHROPIC_BASE_URL</code> trips Claude Code's Remote Control / GrowthBook gate; routing through <code>HTTPS_PROXY</code> keeps the destination <code>api.anthropic.com</code>, so the gate stays untouched. A small MITM front-end terminates TLS with a locally generated CA (trusted via <code>NODE_EXTRA_CA_CERTS</code>) so bodies stay visible for compression; everything that is not <code>api.anthropic.com</code> (or your configured endpoint) is blind-tunnelled untouched.</p>
 <p>Instead of replacing everything, this plugin:</p>
 <ol>
 <li><strong>Keeps recent messages untouched</strong> — recent context stays verbatim</li>
@@ -117,7 +118,7 @@
 <pre><code>/plugin marketplace add https://github.com/NodeNestor/nestor-plugins
 /plugin install rolling-context
 </code></pre>
-<p>Restart your terminal and start a new Claude Code session. On the <strong>first start</strong>, the plugin configures <code>ANTHROPIC_BASE_URL</code> and starts the proxy. Since the env var only takes effect on the next terminal, <strong>restart your terminal once more</strong> — after that, everything works automatically. No pip install needed — pure Python stdlib.</p>
+<p>Restart your terminal and start a new Claude Code session. On the <strong>first start</strong>, the plugin configures <code>HTTPS_PROXY</code> + <code>NODE_EXTRA_CA_CERTS</code> and starts the proxy. Since those env vars only take effect on the next terminal, <strong>restart your terminal once more</strong> — after that, everything works automatically. No pip install needed — pure Python stdlib (a local CA is generated with <code>cryptography</code>, which Claude Code already ships).</p>
 <h3>Option 2: Manual install</h3>
 <p><strong>Linux / macOS:</strong></p>
 <pre><code class="language-bash">git clone https://github.com/NodeNestor/claude-rolling-context.git ~/claude-rolling-context
@@ -129,7 +130,7 @@ bash install.sh
 cd $HOME\claude-rolling-context
 powershell -ExecutionPolicy Bypass -File install.ps1
 </code></pre>
-<p>The installer configures <code>ANTHROPIC_BASE_URL</code> and registers the plugin. Restart your terminal and you're done. Requires Python 3.7+ (no pip install needed — pure stdlib).</p>
+<p>The installer configures <code>HTTPS_PROXY</code> + <code>NODE_EXTRA_CA_CERTS</code> and registers the plugin. Restart your terminal and you're done. Requires Python 3.7+ (no pip install needed — pure stdlib).</p>
 <h2>How Compression Works</h2>
 <p>When the message array exceeds the trigger threshold:</p>
 <pre><code>BEFORE (hit 100K trigger):
@@ -161,7 +162,7 @@ NEXT CYCLE (grows back to 100K, triggers again):
 <li><strong>It's a prompt-cache read.</strong> The cloned prefix was just sent by the chat request, so the API serves it from cache. Measured in practice: a ~72K-token compression request cost ~400 fresh input tokens.</li>
 <li><strong>It's genuine Claude Code session traffic.</strong> Pro/Max subscription OAuth tokens are classified server-side — standalone requests that don't look like Claude Code get routed to the overage lane and rejected with 429. The cloned request passes because it <em>is</em> the session's own request shape.</li>
 </ul>
-<p>Setting <code>ROLLING_CONTEXT_MODEL</code> pins a different summarizer model (the request shape stays native, but a different model means no prompt-cache reuse). Configuring any <code>ROLLING_CONTEXT_SUMMARIZER_*</code> variable switches to a standalone flattened request instead — see below.</p>
+<p>Setting <code>ROLLING_CONTEXT_MODEL</code> pins a different summarizer model (the request shape stays native, but a different model means no prompt-cache reuse). If the session's model answers the compaction request with a 200 and no text — on <code>claude-fable-5</code> a safety classifier can return <code>stop_reason: refusal</code> with no content, deterministically for that conversation — the proxy logs the stop reason and retries once on <code>ROLLING_CONTEXT_FALLBACK_MODEL</code> instead of cooling the conversation down for nothing (#11). Configuring any <code>ROLLING_CONTEXT_SUMMARIZER_*</code> variable switches to a standalone flattened request instead — see below.</p>
 <h3>Using any API or a local model for compression</h3>
 <p>Summarization can run on a completely separate endpoint — any Anthropic-format API, or any OpenAI-compatible one (Ollama, LM Studio, vLLM, OpenRouter, DeepSeek, Groq, ...):</p>
 <pre><code class="language-bash"># Separate Anthropic API key (billed there instead of your subscription)
@@ -180,9 +181,10 @@ export ROLLING_CONTEXT_MODEL=deepseek/deepseek-chat
 </code></pre>
 <h3>Non-Anthropic endpoints (GLM/Z.ai, DeepSeek, OpenRouter, a local gateway)</h3>
 <p>Point Claude Code at your endpoint the usual way and install as normal. The hook
-chains it — <code>ANTHROPIC_BASE_URL</code> becomes the proxy, and your endpoint becomes
-<code>ROLLING_CONTEXT_UPSTREAM</code> — and <strong>both</strong> the chat traffic and the background
-compaction go there. No extra configuration.</p>
+chains it — <code>ANTHROPIC_BASE_URL</code> stays your endpoint, the MITM front-end
+intercepts that host, and your endpoint is stored as <code>ROLLING_CONTEXT_UPSTREAM</code>
+— so <strong>both</strong> the chat traffic and the background compaction go there. No extra
+configuration.</p>
 <p>Third-party endpoints implement the <code>/v1/messages</code> shape to varying depth. Native
 mode clones the request Claude Code just sent, which can include <code>cache_control</code>
 breakpoints and <code>tool_choice</code>; if your endpoint rejects one of those, the proxy
@@ -317,6 +319,11 @@ seen. That costs savings for a request, never correctness — and re-running
 <td>Seconds to wait before retrying after a failed compression</td>
 </tr>
 <tr>
+<td><code>ROLLING_CONTEXT_FALLBACK_MODEL</code></td>
+<td><code>claude-sonnet-5</code></td>
+<td>Model for the one retry when native compaction returns a 200 with no text (a refusal or a thinking-only answer on reasoning models)</td>
+</tr>
+<tr>
 <td><code>ROLLING_CONTEXT_DISABLE</code></td>
 <td><em>(unset)</em></td>
 <td><code>1</code> = off everywhere; wins over <code>/rolling-context:on --global</code></td>
@@ -380,9 +387,9 @@ rm -f ~/.claude/rolling-context-proxy.log ~/.claude/rolling-context-debug.log
 </code></pre>
 <h2>Proxy Chaining</h2>
 <p>Already using another proxy (model router, API gateway, etc.)? Rolling Context auto-detects this and chains through it:</p>
-<pre><code>Claude Code  ──►  Rolling Context (:5588)  ──►  Your Proxy  ──►  Anthropic API
+<pre><code>Claude Code  ──HTTPS_PROXY──►  Rolling Context MITM (:5590)  ──►  core (:5588)  ──►  Your Proxy  ──►  Anthropic API
 </code></pre>
-<p>If <code>ANTHROPIC_BASE_URL</code> is already set when you install, the plugin automatically saves it as <code>ROLLING_CONTEXT_UPSTREAM</code> and inserts itself in front. No manual config needed.</p>
+<p>If <code>ANTHROPIC_BASE_URL</code> is already set to a custom endpoint when you install, the plugin keeps it as the host Claude Code talks to, saves it as <code>ROLLING_CONTEXT_UPSTREAM</code>, and has the MITM front-end intercept that host too — so your endpoint is still reached and bodies are still rewritten. No manual config needed.</p>
 <p>You can also set it explicitly:</p>
 <pre><code class="language-bash">export ROLLING_CONTEXT_UPSTREAM=http://localhost:8080  # your existing proxy
 </code></pre>
@@ -427,7 +434,77 @@ proxy to answer before it exits, and says which of these happened:</p>
 <td><code>proxy did not answer on :5588 within ~8s</code></td>
 <td>It failed to start — see <code>~/.claude/rolling-context-proxy.log</code>.</td>
 </tr>
+<tr>
+<td><code>Proxy vX is newer than this plugin</code></td>
+<td>A session on a newer plugin version already upgraded it. Left alone; never downgraded.</td>
+</tr>
+<tr>
+<td><code>waiting for it to go idle before upgrading</code></td>
+<td>An older proxy has requests in flight; the hook waits up to ~6s.</td>
+</tr>
+<tr>
+<td><code>Deferring upgrade: proxy vX still has N in flight</code></td>
+<td>It stayed busy. This session uses the old proxy; the upgrade happens at a later idle session start, or now via <code>/rolling-context:restart</code>.</td>
+</tr>
 </tbody></table>
+<h3>Upgrades never cut a running stream</h3>
+<p>The proxy is shared by every Claude Code session on the machine. After a plugin
+auto-update, sessions started on the old version and sessions started on the
+new one each run the start hook from their own plugin cache directory. Up to
+v1.13.1 the hook restarted the proxy on <em>any</em> version difference, so the two
+cohorts took turns restarting it — and every restart dropped every session's
+in-flight <code>/v1/messages</code> stream as <code>API error</code> / <code>Connection dropped</code>
+(nestor-plugins issue #1, reported by @drewdrewthis: 188 such restarts in one
+log). Since v1.13.2:</p>
+<ul>
+<li><strong>Never downgrade.</strong> A running proxy of the same or a newer version is left alone.</li>
+<li><strong>Upgrade only when idle.</strong> <code>/health</code> reports <code>active_requests</code>; the hook waits
+for it to reach zero (up to ~6s), and otherwise defers the upgrade to a later
+session start rather than killing mid-stream. Proxies too old to report the
+field are judged by their established client sockets instead.</li>
+<li><strong>Drain on SIGTERM.</strong> The proxy stops accepting, finishes what is in flight
+(up to <code>ROLLING_CONTEXT_DRAIN_SECONDS</code>, default 20), then exits.</li>
+<li><strong><code>/rolling-context:restart</code></strong> forces a restart when you want the new version
+now; it still waits briefly for in-flight requests.</li>
+</ul>
+<p>Sessions still running a pre-1.13.2 plugin keep the old "restart on any
+difference" hook, so the flapping stops fully once those sessions have ended.</p>
+<h3>A transport change never strands a running session</h3>
+<p>Claude Code live-reloads the <code>env</code> block of <code>settings.json</code> into
+<strong>already-running</strong> sessions. <code>NODE_EXTRA_CA_CERTS</code>, though, is read once at
+process launch: a session started before it was wired in can never be made to
+trust the MITM cert by a later rewrite. So flipping a running session from the
+old <code>ANTHROPIC_BASE_URL</code> transport onto <code>HTTPS_PROXY</code> + MITM used to break it —
+every request reset with <code>Connection dropped (ECONNRESET)</code> until the session was
+restarted, and the front-end logged nothing (issue #12, @drewdrewthis). Since
+v1.13.3:</p>
+<ul>
+<li><strong>The flip waits for idle.</strong> If any session is established on the proxy ports
+when the start hook would flip the transport onto the MITM, the hook leaves
+<code>settings.json</code> unchanged and logs <code>DEFERRED transport change</code>. Running
+sessions keep working on the transport already in the file (the core port
+still listens); the flip happens at a later session start once they drain.
+<code>ROLLING_CONTEXT_FORCE_WIRE=1</code> overrides it — then restart or <code>--resume</code> the
+old sessions.</li>
+<li><strong>No connection is dropped silently.</strong> The MITM front-end now logs every
+connection it closes before a usable <code>CONNECT</code> — an empty connection, a client
+that spoke TLS straight at the proxy port, a non-<code>CONNECT</code> request — and a
+<code>TLSV1_ALERT_UNKNOWN_CA</code> handshake failure now says the client was started
+before <code>NODE_EXTRA_CA_CERTS</code> was wired in and should be restarted.</li>
+</ul>
+<h3><code>502 CERTIFICATE_VERIFY_FAILED</code> is the proxy's own TLS, not an outage</h3>
+<p>The proxy verifies its <strong>outbound</strong> TLS to <code>api.anthropic.com</code> against the host
+Python's CA store. On some installs that store is empty — notably a python.org
+macOS build where <code>Install Certificates.command</code> was never run — so every
+forwarded request failed <code>CERTIFICATE_VERIFY_FAILED</code>, surfaced to Claude Code as
+an opaque <code>502</code> that reads exactly like an Anthropic outage (issue #13,
+@drewdrewthis). Since v1.13.4 the outbound context loads the bundled <strong>certifi</strong>
+roots in addition to the OS store (a union, so corporate roots stay trusted), so
+verification works regardless of whether the OS cert-setup step was ever run. If
+certifi is not importable and the OS store is also empty, the proxy logs an
+actionable warning and the <code>502</code> body now names the real cause (run
+<code>pip install certifi</code> or the Python installer's <code>Install Certificates.command</code>,
+then restart the proxy) instead of passing through a bare SSL error.</p>
 <h2>Debug</h2>
 <pre><code class="language-bash">curl http://127.0.0.1:5588/debug/compressions
 </code></pre>

@@ -77,7 +77,8 @@ a replacement for it.</p>
   reason?: string,                  // shown on deny/ask
 }
 </code></pre>
-<p>An <strong>Adapter</strong> is <code>{ AGENT, COVERAGE, UNRENDERED_FIELDS, parse, render }</code>:</p>
+<p>An <strong>Adapter</strong> is
+<code>{ AGENT, COVERAGE, UNRENDERED_FIELDS, NATIVE_ASK_TIER, parse, render }</code>:</p>
 <pre><code class="language-js">parse(nativeEvent) -&gt; ToolCallEvent      // never throws on unknown input
 render(verdict, event) -&gt; nativeResponse // the agent's native shape
 
@@ -93,6 +94,22 @@ UNRENDERED_FIELDS = Object.freeze({
   [EventKind.UNKNOWN]: UNRENDERED_ON_UNKNOWN,
 })
 </code></pre>
+<pre><code class="language-js">// Does this host carry a distinct "ask the human" tier that it honours?
+// true  ⇒ a rendered `ask` suspends the call in front of a person
+//         (Claude Code's permissionDecision: "ask", Amp's exit 1).
+// false ⇒ the host has no such tier, so `render` collapses `ask` onto another
+//         signal (Gemini CLI's advisory decision: "deny") and an un-escalated
+//         ask lets the tool run.
+NATIVE_ASK_TIER = false;
+</code></pre>
+<p>Read <code>NATIVE_ASK_TIER</code> instead of keeping a list of which agents to escalate an
+<code>ask</code> to a <code>deny</code> on: a guardrail that must not let an ask through escalates it
+where the flag is <code>false</code>, and leaves it alone where the host does the asking.
+It describes the HOST, not the verdict — <code>ask</code> renders as <code>enforced: false</code>
+everywhere — and it names the pre-tool gate, since a tool that already ran has
+nothing left to suspend. Conformance probes your real <code>render</code> against it, so a
+<code>true</code> whose ask renders as your abstaining allow fails, and so does a <code>false</code>
+whose ask renders as anything but your own advisory deny.</p>
 <p><code>readonlySet([])</code> is the row for a kind that carries all three;
 <code>UNRENDERED_ON_UNKNOWN</code> is the row for one that carries none. Both come from
 <code>agent-control-plane-core/contract</code>. Build every row with <code>readonlySet</code> — a
@@ -117,6 +134,12 @@ const verdict =
 // 3. Render back to the agent's native response.
 process.stdout.write(JSON.stringify(claudeAdapter.render(verdict, event)));
 </code></pre>
+<p>Writing your own hook entry? <code>agent-control-plane-core/runtime</code> publishes the
+plumbing the four <code>bin/*-hook.mjs</code> entries share — <code>readStdin</code>,
+<code>renderHookResponse</code> (parse → judge → render, falling back to the failure
+response THAT host expects) and <code>emit</code>, whose fully-drained write is what stops
+a large deny body being truncated on a non-blocking pipe and silently becoming
+an allow.</p>
 <p>The core contract and every adapter (<code>claude</code>, <code>codex</code>, <code>amp</code>, <code>gemini</code>) are
 also on the default entry:</p>
 <pre><code class="language-js">import {
@@ -171,8 +194,40 @@ The harness probes this itself on a non-vetoable variant of every pre-tool
 fixture event, so an adapter that collapses the objection onto "run it" fails
 even with no non-vetoable fixture of its own. <code>observe_only</code> renders are
 exempt: that transport has no pre-emption channel to differ in.</li>
+<li>Your <code>NATIVE_ASK_TIER</code> declaration matches what <code>render</code> does with an <code>ask</code>,
+probed on every pre-tool fixture event (both directions, described above).</li>
 </ol>
 <p>See <code>src/fixtures/claude.json</code> and <code>src/fixtures/codex.json</code> for the format.</p>
+<h2>Validating from another language</h2>
+<p>A guardrail that is not JavaScript cannot import <code>ToolCallEvent</code>, so it
+hand-writes the field names it reads. It then drifts in the quietest direction:
+the contract renames a field, the hand-written reader sees <code>undefined</code>, and it
+takes its no-value branch instead of failing. The package ships the same
+contract as JSON Schema (draft 2020-12), so that reader validates against the
+seam instead of against its own copy.</p>
+<pre><code class="language-python">import json, pathlib, jsonschema  # a Python guardrail reading the event
+base = pathlib.Path("node_modules/agent-control-plane-core/schema/control-plane/v1")
+schema = json.loads((base / "tool-call-event.schema.json").read_text())
+jsonschema.validate(event, schema)  # raises on a field the contract does not model
+</code></pre>
+<p><code>tool-input-keys.json</code> sits beside them and publishes the input field a judge
+should read per canonical tool (<code>Bash</code> → <code>command</code>, <code>Read</code> → <code>file_path</code>), so a
+consumer looks that up rather than hard-coding it. It is plain data, not a
+schema: a validator refuses an unknown keyword under its default options, so a
+document carrying that map inside itself would not compile for the consumer who
+installed it.</p>
+<p>The event document also refuses two claims a producer must not make, each one a
+veto the host will never perform: a <code>this_call_vetoable</code> <code>unknown</code> event, and a
+<code>this_call_vetoable</code> event on an <code>observe_only</code> transport.</p>
+<p><code>pnpm gen:schema</code> generates the files from <code>src/control-plane.mjs</code>, and
+<code>test/json-schema.test.mjs</code> byte-compares the result, so a stale document reds
+the suite. The same suite validates every adapter's live output against the
+published bytes, so a renamed contract field reds too. A JavaScript caller
+builds the documents in memory from <code>agent-control-plane-core/json-schema</code>
+instead of reading the files.</p>
+<p>Read the schema from the installed package rather than pinning a copy by hand. A
+document is one release's rendering of the wire version, and an added optional
+field (backward-compatible, below) appears in the next release's document.</p>
 <h2>Versioning</h2>
 <p><code>src/control-plane.mjs</code> is the frozen contract and its own single source of
 truth. <code>SCHEMA_VERSION</code> / <code>CONTROL_PLANE_SCHEMA</code> are pinned by a test. <strong>Adding</strong>
@@ -184,6 +239,7 @@ and bumps the version.</p>
 pnpm test           # node --test
 pnpm test:coverage  # c8, 100% lines/branches/functions per file
 pnpm check          # tsc --noEmit (JSDoc types)
+pnpm gen:schema     # regenerate schema/ from the contract
 pnpm lint           # eslint
 pnpm build          # emit .d.mts declarations into types/
 </code></pre>

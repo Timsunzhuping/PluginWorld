@@ -130,6 +130,11 @@ You can also find the path to the MCP server by running <code>which fli-mcp</cod
 <td>Maximum layover duration in minutes (multi-stop only)</td>
 </tr>
 <tr>
+<td><code>top_n</code></td>
+<td>int</td>
+<td>Round-trip only: outbound options expanded into return flights (default 5, 1-10)</td>
+</tr>
+<tr>
 <td><code>currency</code></td>
 <td>string</td>
 <td>ISO 4217 code (e.g. 'EUR', 'JPY') — flows to <code>curr=</code> param</td>
@@ -154,7 +159,30 @@ You can also find the path to the MCP server by running <code>which fli-mcp</cod
 <td>int</td>
 <td>Number of adult passengers</td>
 </tr>
+<tr>
+<td><code>children</code></td>
+<td>int</td>
+<td>Number of children (ages 2-11)</td>
+</tr>
+<tr>
+<td><code>infants_in_seat</code></td>
+<td>int</td>
+<td>Number of infants (under 2) occupying their own seat</td>
+</tr>
+<tr>
+<td><code>infants_on_lap</code></td>
+<td>int</td>
+<td>Number of lap infants (under 2, no seat)</td>
+</tr>
 </tbody></table>
+<blockquote>
+<p>Total travelers (<code>passengers + children + infants_in_seat + infants_on_lap</code>) must be
+between 1 and 9, and <code>infants_on_lap</code> cannot exceed <code>passengers</code>.</p>
+<p>A round trip costs <code>1 + top_n</code> page fetches (one outbound search, plus one per
+outbound candidate expanded into return flights), so <code>top_n</code> is capped at 10. Round-trip
+results all from one airline? Raise <code>top_n</code>, or sort differently — the default sort only
+ever expands the cheapest <code>top_n</code> outbounds, which are often the same carrier.</p>
+</blockquote>
 <h4><code>search_dates</code> Parameters</h4>
 <table>
 <thead>
@@ -264,7 +292,25 @@ You can also find the path to the MCP server by running <code>which fli-mcp</cod
 <td>int</td>
 <td>Number of adult passengers</td>
 </tr>
+<tr>
+<td><code>children</code></td>
+<td>int</td>
+<td>Number of children (ages 2-11)</td>
+</tr>
+<tr>
+<td><code>infants_in_seat</code></td>
+<td>int</td>
+<td>Number of infants (under 2) occupying their own seat</td>
+</tr>
+<tr>
+<td><code>infants_on_lap</code></td>
+<td>int</td>
+<td>Number of lap infants (under 2, no seat)</td>
+</tr>
 </tbody></table>
+<blockquote>
+<p>Same passenger limits as <code>search_flights</code>: total 1-9, <code>infants_on_lap</code> ≤ <code>passengers</code>.</p>
+</blockquote>
 <h2>Quick Start</h2>
 <pre><code class="language-bash">pip install flights
 </code></pre>
@@ -313,6 +359,77 @@ fli --help
 </ul>
 </li>
 </ul>
+<h2>Search transport</h2>
+<p>Searches are served by Google's public search page rather than the
+<code>FlightsFrontendService</code> RPC. Since 2026-08 <code>GetShoppingResults</code> and
+<code>GetCalendarGraph</code> require an <code>x-goog-batchexecute-bgr</code> header that only the
+page's own JavaScript can produce, so a plain HTTP client gets HTTP 200 with no
+payload. Fli issues <code>GET https://www.google.com/travel/flights?tfs=&lt;protobuf&gt;</code>
+instead and reads the results out of the page's inline <code>AF_initDataCallback</code>
+blob keyed <code>ds:1</code>.</p>
+<p>What that means in practice:</p>
+<ul>
+<li><strong>Three filters are not supported.</strong> <code>emissions</code>, <code>bags</code> and
+<code>exclude_basic_economy</code> have no <code>tfs</code> field and cannot be reconstructed from
+the decoded rows, so they are dropped with a warning. Stops, cabin,
+passengers, alliances and layover bounds ride in the request; airline
+include/exclude, price cap, max duration and departure windows are applied to
+the results after fetching.</li>
+<li><strong>Multi-city raises <code>SearchUnsupportedError</code>.</strong> Google loads those results
+client-side through the gated RPC, so the page carries no rows to read.
+Search each leg separately.</li>
+<li><strong><code>get_booking_options</code> is unavailable.</strong> It calls <code>GetBookingResults</code>, which
+is gated the same way, and currently raises <code>SearchRejectedError</code>. The
+per-flight <code>tfs</code> booking deep links are built offline and still work.</li>
+<li><strong>Fewer rows per search.</strong> Expect roughly 20-45 itineraries, fewer than the
+old RPC returned — and a client-side filter cannot back-fill the list the way
+Google's server-side one did.</li>
+<li><strong>Children and infants thin the results — sometimes to nothing.</strong> Google
+prices those parties client-side, so the page inlines fewer itineraries for
+them, and in premium cabins often none (measured 2026-09: JFK→LHR economy
+23 rows for one adult, 16 with an infant; SFO→NRT business 9 rows for one
+or two adults, 0 with a child). Extra adults cost nothing. An empty result
+for such a search does not mean the route has no flights — and neither
+does it mean this is why: <code>search()</code> only warns when the fetched page
+itself came back with zero rows, not when the caller's own airline/price/
+duration/window filter removed rows Google did return. An adults-only
+search shows the schedule.</li>
+<li><strong>Date searches cost one page fetch per date.</strong> The page has no calendar
+grid, so a range is priced date by date; one <code>SearchDates.search</code> covers at
+most 93 dates and a wider range raises <code>ValueError</code>. Budget for it: 93 dates
+across 10 workers is several hundred MB of pages and parsed JSON at peak.
+A sweep that never manages to load a single page — the shape a blocked or
+consent-gated client produces — gives up after a handful of dates rather than
+paying the retry budget on all of them. Only pages served without results
+count towards that: a timeout or a dropped connection says nothing about the
+dates not yet tried, so those never abandon a sweep. Measured with the real backoff: <strong>42
+page fetches</strong> (bounded at 45, so up to ~135 HTTP requests once the client's
+own retries multiply in) and about 4 seconds, the same whether the range is 30
+days or 93. Unbroken, a 93-date range would have cost 279 fetches and up to
+837 requests. The bound is <code>(5 + worker count) x 3</code>, so raising
+<code>configure_concurrency</code> raises it proportionally. That breaker disarms for
+good the moment any page loads, even an empty one, so it cannot catch a
+sweep that is mostly timeouts around one lucky date — <code>SearchDates.search</code>
+raises that case too, whenever nothing priced and at least half the
+attempted dates never loaded. A minority of failures alongside real
+results, or alongside a confirmed-empty range (<code>None</code>), still returns
+normally but logs one warning naming the counts.</li>
+<li><strong>A page occasionally arrives without results.</strong> Roughly one request in sixty
+returns HTTP 200 with no <code>ds:1</code> blob; the client retries that case up to twice
+(0.5s then 1.5s) before raising <code>SearchParseError</code>. A healthy search never
+pays for it.</li>
+<li><strong><code>FLI_SOCS_COOKIE</code>.</strong> EU/EEA IPs are redirected to Google's consent
+interstitial, which serves no <code>ds:1</code> blob. The client sends a pre-accepted
+<code>SOCS</code> consent cookie by default; set <code>FLI_SOCS_COOKIE</code> to change the value,
+or to an empty string to send none.</li>
+<li><strong><code>FLI_CA_BUNDLE</code> / <code>CURL_CA_BUNDLE</code> / <code>REQUESTS_CA_BUNDLE</code>.</strong> Behind a
+TLS-intercepting corporate proxy, set one of these (checked in that order)
+to a PEM CA bundle path. A bad or missing path, or a certificate the bundle
+doesn't cover, raises <code>SearchCertificateError</code> naming the variable — the
+client does not retry it, since a fixed bundle either verifies or it doesn't.
+Read once per worker thread on its first request; changing the value
+doesn't affect a thread's already-created session.</li>
+</ul>
 <h2>CLI Usage</h2>
 <h3>Search for Flights</h3>
 <pre><code class="language-bash"># Basic flight search
@@ -333,6 +450,13 @@ fli flights JFK LHR 2026-10-25 \
     --min-layover 90 \
     --max-layover 360 \
     --currency EUR --language en-GB --country GB
+
+# Round trip: raise --top-n to see more airlines (default 5, max 10, costs 1 + top_n
+# page fetches per search)
+fli flights JFK LHR 2026-10-25 --return 2026-11-01 --top-n 8
+
+# Family mix: 2 adults, 1 child, 1 lap infant (total must be 1-9)
+fli flights JFK LHR 2026-10-25 --passengers 2 --children 1 --infants-on-lap 1
 </code></pre>
 <blockquote>
 <p>⚠️ <strong>Experimental</strong>
@@ -421,6 +545,11 @@ fli multi \
 <td><code>360</code></td>
 </tr>
 <tr>
+<td><code>--top-n</code></td>
+<td>Round-trip only: outbound options expanded into return flights (default 5, 1-10)</td>
+<td><code>8</code></td>
+</tr>
+<tr>
 <td><code>--currency</code></td>
 <td>ISO 4217 currency code</td>
 <td><code>EUR</code>, <code>JPY</code></td>
@@ -451,11 +580,38 @@ fli multi \
 <td><code>CHEAPEST</code>, <code>DURATION</code></td>
 </tr>
 <tr>
+<td><code>--passengers, -p</code></td>
+<td>Number of adult passengers</td>
+<td><code>2</code></td>
+</tr>
+<tr>
+<td><code>--children</code></td>
+<td>Number of children (ages 2-11)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>--infants-in-seat</code></td>
+<td>Number of infants occupying their own seat</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>--infants-on-lap</code></td>
+<td>Number of lap infants (must be ≤ adults)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
 <td><code>--format</code></td>
 <td>Output format</td>
 <td><code>text</code>, <code>json</code></td>
 </tr>
 </tbody></table>
+<blockquote>
+<p>Total passengers (adults + children + infants) must be between 1 and 9.</p>
+<p><code>--top-n</code> only applies to round trips (it is rejected if set on a one-way search) and
+costs <code>1 + top_n</code> page fetches. Round-trip results all from one airline? Raise <code>--top-n</code>
+(up to 10), or <code>--sort</code> differently — the default sort only expands the cheapest
+<code>top_n</code> outbounds, which are often the same carrier.</p>
+</blockquote>
 <h4>Dates Command (<code>fli dates</code>)</h4>
 <table>
 <thead>
@@ -556,6 +712,26 @@ fli multi \
 <td><code>--monday</code>, <code>--friday</code></td>
 </tr>
 <tr>
+<td><code>--passengers, -p</code></td>
+<td>Number of adult passengers</td>
+<td><code>2</code></td>
+</tr>
+<tr>
+<td><code>--children</code></td>
+<td>Number of children (ages 2-11)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>--infants-in-seat</code></td>
+<td>Number of infants occupying their own seat</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>--infants-on-lap</code></td>
+<td>Number of lap infants (must be ≤ adults)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
 <td><code>--format</code></td>
 <td>Output format</td>
 <td><code>text</code>, <code>json</code></td>
@@ -599,6 +775,26 @@ fli multi \
 <td><code>--sort, -o</code></td>
 <td>Sort results by</td>
 <td><code>CHEAPEST</code>, <code>DURATION</code></td>
+</tr>
+<tr>
+<td><code>--passengers, -p</code></td>
+<td>Number of adult passengers</td>
+<td><code>2</code></td>
+</tr>
+<tr>
+<td><code>--children</code></td>
+<td>Number of children (ages 2-11)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>--infants-in-seat</code></td>
+<td>Number of infants occupying their own seat</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>--infants-on-lap</code></td>
+<td>Number of lap infants (must be ≤ adults)</td>
+<td><code>1</code></td>
 </tr>
 </tbody></table>
 <h2>MCP Server Integration</h2>
@@ -756,6 +952,12 @@ const filters = new FlightSearchFilters({
 
 const results = await new SearchFlights().search(filters, { currency: "USD" });
 </code></pre>
+<p><code>fli-js</code> uses the same search-page transport as the Python package (see
+<a href="#search-transport" target="_blank" rel="noopener noreferrer">Search transport</a> above), with the same consequences:
+<code>emissions</code> / <code>bags</code> / <code>exclude_basic_economy</code> are dropped with a warning,
+multi-city throws <code>SearchUnsupportedError</code>, <code>getBookingOptions</code> throws
+<code>SearchRejectedError</code>, date searches cost one page fetch per date and are
+capped at 93, and <code>FLI_SOCS_COOKIE</code> controls the consent cookie.</p>
 <p>The TypeScript source lives in <a href="https://github.com/punitarani/fli/blob/HEAD/fli-js" target="_blank" rel="noopener noreferrer"><code>fli-js/</code></a>; see the
 <a href="https://punitarani.github.io/fli/typescript/quickstart/" target="_blank" rel="noopener noreferrer">TypeScript Quick Start</a>
 for the full guide.</p>
@@ -767,7 +969,7 @@ cd fli
 # Install dependencies with uv
 uv sync --all-extras
 
-# Run tests
+# Run tests (offline only — no network access required)
 uv run pytest
 
 # Run linting
@@ -779,10 +981,18 @@ uv run mkdocs serve
 
 # Or use the Makefile for common tasks
 make install-all  # Install all dependencies
-make test         # Run tests
+make test         # Run tests (offline only)
+make test-live    # Run the small, stable live tests (real network)
 make lint         # Check code style
 make format       # Format code
 </code></pre>
+<p>Tests that call the real Google Flights API are marked <code>live</code> and skipped by
+default (<code>--fuzz</code>, <code>--live</code> and <code>--all</code> are independent, skip-only gates —
+<code>--all</code> does <em>not</em> imply <code>--live</code>, and <code>--live</code> alone does <em>not</em> imply
+<code>--fuzz</code>). Run the small, stable live set with <code>make test-live</code> (or
+<code>pytest -m live --live</code>); the noisier 100-case fuzz-gated live test is a
+separate opt-in, <code>make test-live-fuzz</code> (<code>pytest --all -m live --live tests/search/test_search_flights_fuzz.py</code> — it needs <code>--all</code>/<code>--fuzz</code>
+<em>together with</em> <code>--live</code>, since it carries both markers).</p>
 <h3>Docker Development</h3>
 <pre><code class="language-bash"># Build the devcontainer
 docker build -t fli-dev -f .devcontainer/Dockerfile .

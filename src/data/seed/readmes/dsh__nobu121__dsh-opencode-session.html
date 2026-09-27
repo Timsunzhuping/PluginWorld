@@ -1,0 +1,108 @@
+<h1>dsh-opencode-session</h1>
+<p>A <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a> (DSH)
+plugin that automatically sends the <strong><code>x-opencode-session</code></strong> request header on
+model calls routed to <strong>OpenCode / OpenCode Go</strong> providers — one stable
+session id per DSH conversation.</p>
+<h2>Why</h2>
+<p>Since 2026-09-05 OpenCode's relay requires an <code>x-opencode-session</code> header on
+API requests (tracked upstream in
+<a href="https://github.com/deepseek-ai/deepseek-harness/discussions/5495" target="_blank" rel="noopener noreferrer">deepseek-harness discussion #5495</a>);
+without it, requests fail with <code>400 MissingSessionID</code>-style errors. Requests
+that share the same header value are pinned to the same upstream backend,
+which is also what keeps OpenCode's prompt cache warm across the turns of one
+conversation.</p>
+<p>This plugin:</p>
+<ul>
+<li><strong>fixes the 400</strong> by always attaching the header to OpenCode(Go) requests,</li>
+<li><strong>keeps the cache/affinity benefit</strong> by using a value that is unique <strong>per
+conversation</strong> and stable across that conversation's turns (by default the
+DSH session id itself, the same identity the official DeepSeek adapter
+already sends as <code>x-deepseek-harness-session-id</code>),</li>
+<li>leaves every other provider, and every request that already carries the
+header, untouched.</li>
+</ul>
+<h2>Install</h2>
+<p>From the npm registry (once published):</p>
+<pre><code class="language-sh">dsh plugin --profile web add dsh-opencode-session
+</code></pre>
+<p>From a local checkout:</p>
+<pre><code class="language-sh">dsh plugin --profile web add ./path/to/dsh-opencode-session
+</code></pre>
+<p>Then <strong>fully restart</strong> your dsh profile (bundle layers are read at startup).
+The startup log shows:</p>
+<pre><code>[opencode-go-session-header] active for providers [opencode, opencode-go] with mode session-id
+</code></pre>
+<p>If you run DSH from a source checkout instead, load it as an overlay:
+<code>pnpm dsh web --patch ./cordis.patch.yml</code>.</p>
+<h2>Configuration</h2>
+<p>The plugin row lives in the bundle's <code>cordis.patch.yml</code>; all keys are optional:</p>
+<pre><code class="language-yaml">- insert:
+    - id: opencode-go-session-header
+      name: dsh-opencode-session
+      config:
+        providers: [opencode, opencode-go]   # route keys to attach the header to
+        mode: session-id                     # 'session-id' | 'uuid'
+        debug: false
+        debugFile: null                      # optional absolute path
+</code></pre>
+<ul>
+<li><code>providers</code> — provider route keys whose requests get the header. The
+defaults cover the pi-ai catalog ids <code>opencode</code> and <code>opencode-go</code>; add your
+own route key when you serve OpenCode through a custom provider name.</li>
+<li><code>mode</code><ul>
+<li><code>session-id</code> (default) — header value = the DSH session id of the model
+call. Unique per conversation, stable across turns, compaction, retries
+and process restarts.</li>
+<li><code>uuid</code> — a random UUID derived once per DSH session id (opaque; kept in
+memory, so it resets when the process restarts).</li>
+</ul>
+</li>
+<li><code>debug</code> — log every streamed call that receives the header via
+<code>ctx.logger</code> (the dsh process console).</li>
+<li><code>debugFile</code> — optional absolute path. When set, every streamed call that
+receives the header appends one JSON line
+(<code>{"ts","provider","model","session","header","value"}</code>) to that file —
+handy when the dsh console is not visible.</li>
+</ul>
+<p>To override configuration in a profile without editing the package, add a
+row with the same id in the profile's own <code>cordis.patch.yml</code> (it replaces the
+whole <code>config</code>, so restate every key).</p>
+<h2>How it works</h2>
+<ol>
+<li>Listens on the <code>llm/stream</code> waterfall. A call whose <code>options.provider</code>
+names a configured OpenCode route and which carries a <code>sessionId</code> is
+driven through an <code>AsyncLocalStorage</code> store holding the header value.</li>
+<li><code>globalThis.fetch</code> is patched once. While such a store is active, the
+outgoing request receives <code>x-opencode-session: &lt;value&gt;</code> (unless it already
+carries the header — an existing value always wins).</li>
+<li>Both registrations are fiber-scoped ctx effects: stopping / updating /
+unloading the plugin restores the original <code>fetch</code> and removes the
+listener.</li>
+</ol>
+<p>Non-OpenCode providers, requests without a <code>sessionId</code> (some auxiliary
+hand-built calls), and model discovery requests pass through untouched.</p>
+<h2>Notes / limitations</h2>
+<ul>
+<li>The header is attached to chat/streaming requests inside an <code>llm/stream</code>
+call. The one-shot model listing used by the Models page
+(<code>GET &lt;baseURL&gt;/models</code>) is a separate flow and does not receive the
+header; if your OpenCode endpoint also rejects that listing, open an issue.</li>
+<li>The plugin relies on DSH outbound LLM requests going through the Node
+global <code>fetch</code>. If a future DSH version swaps its network stack, the
+plugin stops injecting (symptom: the 400 comes back) — uninstall then.</li>
+</ul>
+<h2>Development</h2>
+<pre><code class="language-sh">node --check lib/index.js
+npm test        # local behavior tests against an echo server
+</code></pre>
+<h2>Publishing (for maintainers)</h2>
+<p>The package is plain ESM JavaScript with zero dependencies; <code>npm test</code> runs
+automatically via <code>prepublishOnly</code>.</p>
+<pre><code class="language-sh">npm login                       # once, with your npm account
+npm pack --dry-run              # preview exactly what lands in the tarball
+npm publish                     # files = lib/, cordis.patch.yml, README.md
+</code></pre>
+<p>Before publishing, double-check the name is free on the npm registry and fill
+in <code>author</code>, <code>homepage</code>, and <code>repository</code> in <code>package.json</code> if you like.</p>
+<h2>License</h2>
+<p>MIT</p>

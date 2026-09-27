@@ -1,0 +1,883 @@
+<h1>tokensniff</h1>
+<p><strong>Local telemetry sidecar for AI coding CLIs.</strong></p>
+<p>Track every token, every turn, every dollar — live in your terminal and on a calendar heatmap dashboard. Zero runtime dependencies.</p>
+<p><a href="https://www.npmjs.com/package/tokensniff" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/tokensniff" alt="npm version" /></a>
+<a href="https://github.com/neerajsahu0306/tokensniff/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT" /></a>
+<a href="https://nodejs.org" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen" alt="Node.js" /></a></p>
+<hr />
+<h2>What Is tokensniff?</h2>
+<p>tokensniff is a <strong>transparent HTTP reverse proxy and local telemetry sidecar</strong> designed specifically for the <a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a> CLI harness running alongside the local <a href="https://github.com/badri-s2001/antigravity-claude-proxy" target="_blank" rel="noopener noreferrer"><code>antigravity-claude-proxy</code></a>.</p>
+<p>By default, tokensniff orchestrates and connects to <code>antigravity-claude-proxy</code> to route Claude Code API requests through Google Antigravity / Cloud Code, allowing you to utilize your Antigravity Gemini quota directly inside Claude Code.</p>
+<hr />
+<h3>⚠️ Important Notice: Use At Your Own Risk &amp; Account Warning</h3>
+<blockquote>
+<p>[!CAUTION]
+<strong>Use at your own risk.</strong> By default, tokensniff routes traffic through <a href="https://github.com/badri-s2001/antigravity-claude-proxy" target="_blank" rel="noopener noreferrer"><code>antigravity-claude-proxy</code></a>, which accesses Google Antigravity / Cloud Code endpoints using unofficial proxying techniques.</p>
+<ul>
+<li><strong>Risk of Account Suspension / Bans</strong>: Google actively monitors and enforces Terms of Service (ToS) restrictions. Accounts connected to unofficial Cloud Code and Antigravity reverse proxies risk being <strong>shadow-banned, quota-restricted, or permanently banned</strong>.</li>
+<li><strong>No Guarantees &amp; Zero Liability</strong>: The creators and maintainers of <code>tokensniff</code> provide <strong>no guarantees or warranties</strong> of any kind, express or implied. We are <strong>not responsible or liable</strong> for any account bans, suspensions, quota penalties, data loss, or any other consequences resulting from the use of this software.</li>
+<li><strong>Safety Recommendation</strong>: <strong>Do not use your primary, personal, or corporate Google account.</strong> If you choose to use this integration, use a dedicated burner/disposable Google account.</li>
+<li><strong>Learn More</strong>: Read the upstream <a href="https://github.com/badri-s2001/antigravity-claude-proxy" target="_blank" rel="noopener noreferrer">antigravity-claude-proxy GitHub Repository</a> and its <a href="https://github.com/badri-s2001/antigravity-claude-proxy#readme" target="_blank" rel="noopener noreferrer">Safety, Usage, and Risk Notices</a> to understand how the underlying authentication and proxying operate.</li>
+</ul>
+</blockquote>
+<hr />
+<p>It captures <strong>every API turn</strong> flowing through it and gives you:</p>
+<ul>
+<li><strong>Per-turn token counts</strong> — input, output, cache-read, cache-write, thinking tokens</li>
+<li><strong>Real-time cost tracking</strong> — per turn, per session, per day (in USD)</li>
+<li><strong>Performance metrics</strong> — Time to First Token (TTFT), tokens per second (TPS), turn duration</li>
+<li><strong>Live terminal status line</strong> — a single-line HUD rendered directly inside Claude Code's status bar</li>
+<li><strong>Calendar heatmap dashboard</strong> — a beautiful, self-contained HTML page showing your daily token spend over the entire year</li>
+<li><strong>Multi-terminal session management</strong> — run multiple terminals against the same proxy without conflicts</li>
+<li><strong>Tool call tracking</strong> — which tools the model called, how many times, argument token sizes</li>
+<li><strong>Context window monitoring</strong> — how full your context is, with color-coded warnings (green → yellow → red)</li>
+</ul>
+<p>All of this happens <strong>transparently</strong>. Your AI tool doesn't know tokensniff exists. It just thinks it's talking to the normal API. tokensniff forwards every byte with zero latency overhead, while quietly recording the telemetry.</p>
+<hr />
+<h2>How It Works</h2>
+<pre><code class="language-mermaid">flowchart TD
+    CLI["Claude Code CLI&lt;br/&gt;&lt;code&gt;ANTHROPIC_BASE_URL:4000&lt;/code&gt;"]
+    TS["tokensniff&lt;br/&gt;&lt;code&gt;Reverse Proxy :4000&lt;/code&gt;"]
+    Proxy["antigravity-claude-proxy&lt;br/&gt;&lt;code&gt;Local Upstream :8085&lt;/code&gt;"]
+    Google["Google Cloud Code API&lt;br/&gt;&lt;code&gt;Gemini Backend / Quota&lt;/code&gt;"]
+
+    subgraph Telemetry["Telemetry Engine"]
+        T1["latest.json"]
+        T2["totals.json"]
+        T3["history.ndjson"]
+        T4["/dashboard (HTML)"]
+    end
+
+    Statusline["Claude Code Statusline HUD"]
+    Dashboard["Live Calendar Heatmap&lt;br/&gt;&lt;code&gt;http://localhost:4000/dashboard&lt;/code&gt;"]
+
+    CLI &lt;--&gt;|"1. Anthropic API Requests / Streams"| TS
+    TS &lt;--&gt;|"2. Forward"| Proxy
+    TS --&gt;|"3. Telemetry (Async)"| Telemetry
+    Proxy &lt;--&gt;|"4. Protocol Translation"| Google
+
+    T1 --&gt; Statusline
+    T4 --&gt; Dashboard
+</code></pre>
+<ol>
+<li><strong>Harness Redirection</strong>: You point Claude Code to <code>http://localhost:4000</code> by setting <code>ANTHROPIC_BASE_URL</code> in <code>~/.claude/settings.json</code>. Claude Code continues sending standard Anthropic Messages API requests normally.</li>
+<li><strong>Upstream Proxy Startup</strong>: When launched, tokensniff checks port 8085 and automatically starts the local upstream proxy command (<code>npx antigravity-claude-proxy@latest start</code>) if it is not already running.</li>
+<li><strong>Protocol &amp; Quota Translation</strong>: The local <a href="https://github.com/badri-s2001/antigravity-claude-proxy" target="_blank" rel="noopener noreferrer"><code>antigravity-claude-proxy</code></a> receives the Anthropic-formatted request, authenticates with your Google Antigravity / Cloud Code OAuth credentials, translates the schema to Google Generative AI format, and submits it to Google Cloud Code's backend to consume your Antigravity Gemini quota.</li>
+<li><strong>Streaming Response Pass-Through</strong>: As Google's response streams back, <code>antigravity-claude-proxy</code> transforms it into Anthropic-compatible SSE events or buffered JSON. tokensniff instantly relays every raw byte back to Claude Code (<code>res.write(chunk)</code>) with zero latency overhead.</li>
+<li><strong>Telemetry Extraction</strong>: Concurrently and non-blockingly, tokensniff's parser inspects the response payload. It extracts Google's <code>usageMetadata</code> (input, output, cache-read, cache-write, and thinking/reasoning tokens), measures Time to First Token (TTFT) and token generation speed (TPS), and tracks turn duration.</li>
+<li><strong>Live Pricing Calculation</strong>: tokensniff queries live pricing from <a href="https://openrouter.ai" target="_blank" rel="noopener noreferrer">OpenRouter's model catalog</a>, computing turn cost, session cumulative spend, and daily totals.</li>
+<li><strong>Statusline HUD &amp; Calendar Heatmap</strong>: Telemetry snapshots are written atomically to disk (<code>latest.json</code>, <code>totals.json</code>, <code>history.ndjson</code>). Claude Code's status bar runs <code>tokensniff-status</code> to display the live single-line HUD, and tokensniff serves an interactive calendar heatmap dashboard at <code>http://localhost:4000/dashboard</code>.</li>
+</ol>
+<hr />
+<h2>Quick Start</h2>
+<h3>1. Install</h3>
+<pre><code class="language-bash">npm install -g tokensniff
+</code></pre>
+<p>Or with pnpm:</p>
+<pre><code class="language-bash">pnpm add -g tokensniff
+</code></pre>
+<h3>2. Initialize Configuration</h3>
+<pre><code class="language-bash">tokensniff init
+</code></pre>
+<p>This creates a configuration file at <code>~/.tokensniff/config.json</code> with sensible defaults:</p>
+<pre><code class="language-json">{
+  "upstreamCommand": "npx antigravity-claude-proxy@latest start",
+  "upstreamHost": "localhost",
+  "upstreamPort": 8085,
+  "listenPort": 4000,
+  "harnessCommand": "claude"
+}
+</code></pre>
+<blockquote>
+<p><strong>Default Upstream:</strong> Out of the box, tokensniff is pre-configured to launch <a href="https://github.com/badri-s2001/antigravity-claude-proxy" target="_blank" rel="noopener noreferrer"><code>antigravity-claude-proxy</code></a> on port <code>8085</code>, allowing you to route Claude Code prompts through your Antigravity Gemini quota. Please review the <a href="#%EF%B8%8F-important-notice-use-at-your-own-risk--account-warning" target="_blank" rel="noopener noreferrer">Risk &amp; Terms of Service Warning</a> before running with this configuration.</p>
+</blockquote>
+<h3>3. Configure Claude Code</h3>
+<p>Add the following to your <strong><code>~/.claude/settings.json</code></strong> file:</p>
+<pre><code class="language-json">{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:4000"
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "tokensniff-status",
+    "padding": 0
+  }
+}
+</code></pre>
+<p>This does two things:</p>
+<ul>
+<li><strong><code>ANTHROPIC_BASE_URL</code></strong> — Tells Claude Code to send all API requests through tokensniff's proxy on port 4000 instead of directly to Anthropic</li>
+<li><strong><code>statusLine</code></strong> — Tells Claude Code to run <code>tokensniff-status</code> and display its output as a live status bar at the bottom of the terminal</li>
+</ul>
+<h3>4. Run</h3>
+<pre><code class="language-bash">tokensniff
+</code></pre>
+<p>That's it. tokensniff will:</p>
+<ol>
+<li>Start the upstream proxy (if configured)</li>
+<li>Start the telemetry proxy on port 4000</li>
+<li>Launch Claude Code (or whatever harness command you configured)</li>
+<li>Show you a live status line and dashboard URL</li>
+</ol>
+<p>Open the dashboard in your browser:</p>
+<pre><code>http://localhost:4000/dashboard
+</code></pre>
+<hr />
+<h2>CLI Commands</h2>
+<h3><code>tokensniff</code></h3>
+<p>Runs the full telemetry pipeline: starts the upstream proxy, starts the tokensniff proxy, and launches your AI coding tool.</p>
+<pre><code class="language-bash">tokensniff
+</code></pre>
+<h3><code>tokensniff init</code></h3>
+<p>Generates the global configuration file at <code>~/.tokensniff/config.json</code> and prints the Claude Code settings.json instructions.</p>
+<pre><code class="language-bash">tokensniff init
+</code></pre>
+<h3><code>tokensniff dashboard</code></h3>
+<p>Prints the URL of the live calendar heatmap dashboard.</p>
+<pre><code class="language-bash">tokensniff dashboard
+# Output: [tokensniff] live heatmap dashboard: http://127.0.0.1:4000/dashboard
+</code></pre>
+<h3><code>tokensniff-status</code></h3>
+<p>This is the statusline renderer. You don't run this directly — Claude Code runs it automatically via the <code>statusLine</code> setting. It reads the latest telemetry snapshot from disk and outputs a formatted single-line status bar.</p>
+<p>If you want to test it manually:</p>
+<pre><code class="language-bash">echo '{}' | tokensniff-status
+</code></pre>
+<p>To get raw JSON output instead of the formatted status line:</p>
+<pre><code class="language-bash">TOKENSNIFF_JSON=1 echo '{}' | tokensniff-status
+</code></pre>
+<hr />
+<h2>The Status Line</h2>
+<p>When running inside Claude Code, you'll see a live status line at the bottom of your terminal that looks like this:</p>
+<p><strong>Wide terminals (≥ 180 columns) — single line:</strong></p>
+<pre><code>turn 3 [3.8-flash] | ctx: 38.5k/1M (3.9%) [cache: 25k (64.9%)] | input: +4.5k tok, output: 42 tok, think: 180 tok | ttft: 1.2s, 110 tok/s | cost: turn $0.0042, sess $0.058, today $0.245
+</code></pre>
+<p><strong>Standard terminals (&lt; 180 columns) — clean 2-line stack:</strong></p>
+<pre><code>turn 3 [3.8-flash] | ctx: 38.5k/1M (3.9%) [cache: 25k (64.9%)]
+input: +4.5k tok, output: 42 tok, think: 180 tok | ttft: 1.2s, 110 tok/s | cost: turn $0.0042, sess $0.058, today $0.245
+</code></pre>
+<h3>What Each Segment Means</h3>
+<table>
+<thead>
+<tr>
+<th>Segment</th>
+<th>Example</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Turn</strong></td>
+<td><code>turn 3</code></td>
+<td>Which turn number this is in the current session</td>
+</tr>
+<tr>
+<td><strong>Model</strong></td>
+<td><code>[3.8-flash]</code></td>
+<td>The AI model being used (vendor prefix stripped for readability)</td>
+</tr>
+<tr>
+<td><strong>[bg]</strong></td>
+<td><code>[bg]</code></td>
+<td>Shown when this is a background agent turn (via <code>x-app: cli-bg</code> header)</td>
+</tr>
+<tr>
+<td><strong>Context</strong></td>
+<td><code>ctx: 38.5k/1M (3.9%)</code></td>
+<td>Current context usage / max window size (percentage full)</td>
+</tr>
+<tr>
+<td><strong>Cache</strong></td>
+<td><code>[cache: 25k (64.9%)]</code></td>
+<td>How many tokens were served from cache and the cache hit ratio</td>
+</tr>
+<tr>
+<td><strong>Input</strong></td>
+<td><code>input: +4.5k tok</code></td>
+<td>New tokens added to context this turn (delta). Shows <code>freed</code> when context shrinks</td>
+</tr>
+<tr>
+<td><strong>Output</strong></td>
+<td><code>output: 42 tok</code></td>
+<td>Tokens generated by the model this turn</td>
+</tr>
+<tr>
+<td><strong>Thinking</strong></td>
+<td><code>think: 180 tok</code></td>
+<td>Reasoning/thinking tokens used (for models with extended thinking)</td>
+</tr>
+<tr>
+<td><strong>Tool</strong></td>
+<td><code>tool: Read (45 tok)</code></td>
+<td>Which tool was called and how many argument tokens it used</td>
+</tr>
+<tr>
+<td><strong>TTFT</strong></td>
+<td><code>ttft: 1.2s</code></td>
+<td>Time to First Token — how long before the model started generating</td>
+</tr>
+<tr>
+<td><strong>Speed</strong></td>
+<td><code>110 tok/s</code></td>
+<td>Generation velocity in tokens per second</td>
+</tr>
+<tr>
+<td><strong>Turn Cost</strong></td>
+<td><code>turn $0.0042</code></td>
+<td>How much this specific turn cost in USD</td>
+</tr>
+<tr>
+<td><strong>Session Cost</strong></td>
+<td><code>sess $0.058</code></td>
+<td>Total spend for this entire session</td>
+</tr>
+<tr>
+<td><strong>Today Cost</strong></td>
+<td><code>today $0.245</code></td>
+<td>Total spend across all sessions today (resets at local midnight)</td>
+</tr>
+<tr>
+<td><strong>[idle]</strong></td>
+<td><code>[idle]</code></td>
+<td>Shown when the last turn was more than 120 seconds ago</td>
+</tr>
+</tbody></table>
+<h3>Color Coding</h3>
+<p>The context percentage is color-coded based on how full your context window is:</p>
+<ul>
+<li>🟢 <strong>Green</strong> — Under 60% (plenty of room)</li>
+<li>🟡 <strong>Yellow</strong> — 60-80% (getting full, consider starting a new session)</li>
+<li>🔴 <strong>Red</strong> — Over 80% (context is nearly full, model may start forgetting earlier context)</li>
+</ul>
+<p>These thresholds are configurable via <code>warnPct</code> and <code>critPct</code>.</p>
+<hr />
+<h2>The Dashboard</h2>
+<p>tokensniff serves a <strong>live calendar heatmap dashboard</strong> directly on the proxy port. Open it in any browser:</p>
+<pre><code>http://localhost:4000/dashboard
+</code></pre>
+<p>The dashboard shows:</p>
+<ul>
+<li><strong>Total Spend</strong> — cumulative USD spent across all sessions</li>
+<li><strong>Total Tokens</strong> — cumulative token volume processed</li>
+<li><strong>Cache Ratio</strong> — what percentage of tokens were served from cache</li>
+<li><strong>Total Turns</strong> — how many API turns have been recorded</li>
+<li><strong>Calendar Heatmap</strong> — a GitHub-contributions-style grid showing daily token volume across the year</li>
+</ul>
+<h3>Heatmap Tiers</h3>
+<p>The calendar tiles are colored using a 5-tier emerald luminosity scale:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Daily Volume</th>
+<th>Color</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>No activity</td>
+<td>Dark (nearly invisible)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>&lt; 5M tokens</td>
+<td>Dark emerald</td>
+</tr>
+<tr>
+<td>2</td>
+<td>5M – 25M tokens</td>
+<td>Medium emerald</td>
+</tr>
+<tr>
+<td>3</td>
+<td>25M – 100M tokens</td>
+<td>Bright emerald</td>
+</tr>
+<tr>
+<td>4</td>
+<td>&gt; 100M tokens</td>
+<td>Vivid emerald (glowing)</td>
+</tr>
+</tbody></table>
+<p>Hover over any tile to see a detailed tooltip with exact token counts, cost, cache leverage, and turns logged for that day.</p>
+<h3>Dashboard API</h3>
+<p>There's also a JSON API endpoint for programmatic access:</p>
+<pre><code class="language-bash">curl http://localhost:4000/api/daily
+</code></pre>
+<p>Returns the raw daily rollup data as JSON.</p>
+<hr />
+<h2>Configuration</h2>
+<p>tokensniff uses a strict hierarchical configuration system:</p>
+<pre><code>Environment Variables  &gt;  Config File  &gt;  Embedded Defaults
+          (highest)                          (medium)                   (lowest)
+</code></pre>
+<h3>Config File Location</h3>
+<pre><code>~/.tokensniff/config.json
+</code></pre>
+<p>You can override this path with the <code>TOKENSNIFF_CONFIG</code> environment variable:</p>
+<pre><code class="language-bash">TOKENSNIFF_CONFIG=/path/to/custom/config.json tokensniff
+</code></pre>
+<h3>All Configuration Options</h3>
+<table>
+<thead>
+<tr>
+<th>Config Key</th>
+<th>Env Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>listenPort</code></td>
+<td><code>TOKENSNIFF_PORT</code></td>
+<td><code>4000</code></td>
+<td>Port the tokensniff proxy listens on</td>
+</tr>
+<tr>
+<td><code>listenHost</code></td>
+<td><code>TOKENSNIFF_HOST</code></td>
+<td><code>127.0.0.1</code></td>
+<td>Host/IP the proxy binds to</td>
+</tr>
+<tr>
+<td><code>upstreamHost</code></td>
+<td><code>TOKENSNIFF_UPSTREAM_HOST</code></td>
+<td><code>localhost</code></td>
+<td>Hostname of the upstream API server</td>
+</tr>
+<tr>
+<td><code>upstreamPort</code></td>
+<td><code>TOKENSNIFF_UPSTREAM_PORT</code></td>
+<td><code>8085</code></td>
+<td>Port of the upstream API server</td>
+</tr>
+<tr>
+<td><code>upstreamTimeoutMs</code></td>
+<td><code>TOKENSNIFF_UPSTREAM_TIMEOUT_MS</code></td>
+<td><code>300000</code> (5 min)</td>
+<td>Timeout for upstream requests in milliseconds (range: 1,000 – 3,600,000)</td>
+</tr>
+<tr>
+<td><code>maxBodyBytes</code></td>
+<td><code>TOKENSNIFF_MAX_BODY_BYTES</code></td>
+<td><code>10485760</code> (10 MB)</td>
+<td>Maximum request/response body size. Requests exceeding this get a 413 error (range: 1,024 – 104,857,600)</td>
+</tr>
+<tr>
+<td><code>statusDirs</code></td>
+<td><code>TOKENSNIFF_STATUS_DIRS</code></td>
+<td><code>~/.tokensniff/status</code></td>
+<td>Comma-separated list of directories where telemetry snapshots are written</td>
+</tr>
+<tr>
+<td><code>maxSessions</code></td>
+<td><code>TOKENSNIFF_MAX_SESSIONS</code></td>
+<td><code>50</code></td>
+<td>Maximum number of tracked sessions before oldest are evicted (range: 1 – 1,000)</td>
+</tr>
+<tr>
+<td><code>deadSessionMs</code></td>
+<td><code>TOKENSNIFF_DEAD_SESSION_MS</code></td>
+<td><code>259200000</code> (72 hrs)</td>
+<td>How long to keep stale session files before pruning (range: 1 hour minimum)</td>
+</tr>
+<tr>
+<td><code>staleAfterS</code></td>
+<td><code>TOKENSNIFF_STALE_AFTER_S</code></td>
+<td><code>120</code></td>
+<td>Seconds of inactivity before a session shows <code>[idle]</code> in the status line (range: 5 – 86,400)</td>
+</tr>
+<tr>
+<td><code>labelMaxIn</code></td>
+<td><code>TOKENSNIFF_LABEL_MAX_IN</code></td>
+<td><code>2000</code></td>
+<td>Maximum input tokens for a turn to be classified as a micro-label</td>
+</tr>
+<tr>
+<td><code>labelMaxOut</code></td>
+<td><code>TOKENSNIFF_LABEL_MAX_OUT</code></td>
+<td><code>60</code></td>
+<td>Maximum output tokens for a turn to be classified as a micro-label</td>
+</tr>
+<tr>
+<td><code>warnPct</code></td>
+<td><code>TOKENSNIFF_WARN_PCT</code></td>
+<td><code>60</code></td>
+<td>Context utilization % threshold for yellow warning color (range: 1 – 99)</td>
+</tr>
+<tr>
+<td><code>critPct</code></td>
+<td><code>TOKENSNIFF_CRIT_PCT</code></td>
+<td><code>80</code></td>
+<td>Context utilization % threshold for red critical color (range: 2 – 100)</td>
+</tr>
+<tr>
+<td><code>color</code></td>
+<td><code>TOKENSNIFF_COLOR</code></td>
+<td><code>true</code></td>
+<td>Enable/disable ANSI color output. Automatically disabled when <code>NO_COLOR</code> env var is set (per <a href="https://no-color.org/" target="_blank" rel="noopener noreferrer">no-color.org</a>)</td>
+</tr>
+<tr>
+<td><code>upstreamCommand</code></td>
+<td><code>TOKENSNIFF_UPSTREAM_CMD</code></td>
+<td><code>npx antigravity-claude-proxy@latest start</code></td>
+<td>Shell command to start the upstream proxy server</td>
+</tr>
+<tr>
+<td><code>upstreamStopCommand</code></td>
+<td><code>TOKENSNIFF_UPSTREAM_STOP_CMD</code></td>
+<td><em>(empty)</em></td>
+<td>Shell command to stop the upstream proxy on shutdown</td>
+</tr>
+<tr>
+<td><code>harnessCommand</code></td>
+<td><code>TOKENSNIFF_HARNESS_CMD</code></td>
+<td><code>claude</code></td>
+<td>The AI coding tool to launch (e.g., <code>claude</code>, <code>codex</code>, or any executable)</td>
+</tr>
+</tbody></table>
+<h3>Example Config File</h3>
+<pre><code class="language-json">{
+  "listenPort": 4000,
+  "listenHost": "127.0.0.1",
+  "upstreamHost": "localhost",
+  "upstreamPort": 8085,
+  "upstreamCommand": "npx antigravity-claude-proxy@latest start",
+  "upstreamStopCommand": "",
+  "harnessCommand": "claude",
+  "maxSessions": 50,
+  "staleAfterS": 120,
+  "warnPct": 60,
+  "critPct": 80,
+  "color": true
+}
+</code></pre>
+<h3>Environment Variable Examples</h3>
+<pre><code class="language-bash"># Change the proxy port
+TOKENSNIFF_PORT=5000 tokensniff
+
+# Point to a different upstream
+TOKENSNIFF_UPSTREAM_HOST=api.anthropic.com TOKENSNIFF_UPSTREAM_PORT=443 tokensniff
+
+# Disable colors
+NO_COLOR=1 tokensniff
+
+# Use a custom config file
+TOKENSNIFF_CONFIG=./my-config.json tokensniff
+
+# Write status to multiple directories
+TOKENSNIFF_STATUS_DIRS="/path/a,/path/b" tokensniff
+</code></pre>
+<hr />
+<h2>Multi-Terminal Support</h2>
+<p>tokensniff supports <strong>multiple terminal sessions</strong> running simultaneously against the same proxy. This is how it works:</p>
+<ol>
+<li>When you run <code>tokensniff</code>, it first checks if a proxy is <strong>already running</strong> on port 4000</li>
+<li>If yes, it <strong>attaches</strong> to the existing proxy (no duplicate servers) and just launches your harness</li>
+<li>Each terminal session registers itself in <code>~/.tokensniff/sessions/</code> with a PID lock file</li>
+<li>When you close a terminal (Ctrl+C or exit):<ul>
+<li>If <strong>other terminals are still active</strong> → only the local harness is terminated; the proxy stays alive</li>
+<li>If <strong>this was the last terminal</strong> → the proxy and upstream are cleanly shut down</li>
+</ul>
+</li>
+<li>Dead PID lock files (from crashed terminals) are automatically pruned</li>
+</ol>
+<p>This means you can have 5 Claude Code windows all routing through the same tokensniff proxy, and the telemetry stays unified. Session costs are tracked independently, but <code>today</code> cost accumulates across all sessions.</p>
+<hr />
+<h2>Supported Providers</h2>
+<p>tokensniff's parser understands multiple API response formats:</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Format</th>
+<th>Detection</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Anthropic</strong> (Claude)</td>
+<td>SSE streams (<code>text/event-stream</code>)</td>
+<td><code>event: message_start</code> framing</td>
+</tr>
+<tr>
+<td><strong>Anthropic</strong> (Claude)</td>
+<td>Buffered JSON (<code>application/json</code>)</td>
+<td><code>usage.input_tokens</code> / <code>usage.output_tokens</code></td>
+</tr>
+<tr>
+<td><strong>Google Gemini</strong> (Antigravity)</td>
+<td>Buffered JSON</td>
+<td><code>candidates[].content.parts[]</code> + <code>usageMetadata</code></td>
+</tr>
+</tbody></table>
+<p>The parser automatically detects the format from the response content-type and payload structure. You don't need to configure anything.</p>
+<h3>Pricing</h3>
+<p>tokensniff fetches live per-token pricing from <a href="https://openrouter.ai/api/v1/models" target="_blank" rel="noopener noreferrer">OpenRouter's public model catalog</a>. This means:</p>
+<ul>
+<li>Pricing is <strong>always up to date</strong> — no hardcoded rate tables to maintain</li>
+<li><strong>Any model</strong> listed on OpenRouter is automatically priced correctly</li>
+<li>Pricing includes prompt, completion, cache-read, and cache-write tiers</li>
+<li>Context window sizes are also pulled dynamically from the catalog</li>
+</ul>
+<p>If a model isn't found on OpenRouter, costs default to <code>$0.00</code> (zero-rate boundary) rather than guessing wrong. The context window defaults to 128K tokens for unknown models.</p>
+<p>The pricing cache is populated on-demand (first turn using a new model triggers a background fetch) and persists in memory for the lifetime of the proxy process.</p>
+<hr />
+<h2>Telemetry Data Files</h2>
+<p>tokensniff stores all telemetry in <code>~/.tokensniff/status/</code>:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Format</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>latest.json</code></td>
+<td>JSON</td>
+<td>Most recent telemetry snapshot (any session)</td>
+</tr>
+<tr>
+<td><code>latest-&lt;session_id&gt;.json</code></td>
+<td>JSON</td>
+<td>Most recent snapshot for a specific session</td>
+</tr>
+<tr>
+<td><code>totals.json</code></td>
+<td>JSON</td>
+<td>Cumulative spend per session</td>
+</tr>
+<tr>
+<td><code>history.ndjson</code></td>
+<td>Newline-delimited JSON</td>
+<td>Append-only turn-by-turn ledger (feeds the heatmap)</td>
+</tr>
+</tbody></table>
+<h3>latest.json Schema (v1)</h3>
+<pre><code class="language-json">{
+  "v": 1,
+  "session_id": "abc-123",
+  "turn_index": 5,
+  "ts": 1726056000000,
+  "model": "gemini-3.8-flash-tiered",
+  "is_bg": false,
+  "ctx": 38500,
+  "window": 1000000,
+  "pct": 3.9,
+  "cache_read": 25000,
+  "cache_create": 0,
+  "delta_in": 4500,
+  "in_tokens": 13500,
+  "out_tokens": 42,
+  "thinking": true,
+  "thinking_tokens": 180,
+  "tool": "Read",
+  "tool_tk": 45,
+  "tools_summary": [{ "name": "Read", "count": 1, "arg_tk": 45 }],
+  "stop_reason": "end_turn",
+  "is_label": false,
+  "label": "",
+  "ttft_ms": 1200,
+  "tps": 110,
+  "dur_s": 1.6,
+  "cost_turn": 0.0042,
+  "cost_session": 0.058,
+  "cost_today": 0.245,
+  "error": null,
+  "status": 200,
+  "quota_pct": null,
+  "quota_reset": null,
+  "tier": null
+}
+</code></pre>
+<h3>history.ndjson Record Format</h3>
+<p>Each line is a compact JSON object:</p>
+<pre><code class="language-json">{"d":"2026-09-11","ts":1726056000000,"s":"abc-123","t":5,"m":"gemini-3.8-flash","tk":38542,"c":0.0042,"cr":25000,"th":180}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>d</code></td>
+<td>Local calendar date (YYYY-MM-DD)</td>
+</tr>
+<tr>
+<td><code>ts</code></td>
+<td>Unix timestamp in milliseconds</td>
+</tr>
+<tr>
+<td><code>s</code></td>
+<td>Session ID</td>
+</tr>
+<tr>
+<td><code>t</code></td>
+<td>Turn number</td>
+</tr>
+<tr>
+<td><code>m</code></td>
+<td>Model name</td>
+</tr>
+<tr>
+<td><code>tk</code></td>
+<td>Total tokens (context + output)</td>
+</tr>
+<tr>
+<td><code>c</code></td>
+<td>Cost in USD</td>
+</tr>
+<tr>
+<td><code>cr</code></td>
+<td>Cache-read tokens</td>
+</tr>
+<tr>
+<td><code>th</code></td>
+<td>Thinking tokens</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Programmatic API</h2>
+<p>tokensniff exports its entire engine as a library. You can use it in your own Node.js projects:</p>
+<pre><code class="language-bash">npm install tokensniff
+</code></pre>
+<h3>Start the Proxy Programmatically</h3>
+<pre><code class="language-js">import { startProxy } from 'tokensniff';
+
+const server = startProxy({
+  listenPort: 4000,
+  listenHost: '127.0.0.1',
+  upstreamHost: 'localhost',
+  upstreamPort: 8085,
+});
+
+// server is a standard Node.js http.Server
+server.on('listening', () =&gt; {
+  console.log('tokensniff proxy is running');
+});
+</code></pre>
+<h3>Calculate Costs</h3>
+<pre><code class="language-js">import { costFor, ratesFor, resolveModelRates } from 'tokensniff/pricing';
+
+// Synchronous (from cache, or zero if not yet fetched)
+const rates = ratesFor('claude-3-7-sonnet');
+
+// Async (fetches from OpenRouter if needed)
+const rates2 = await resolveModelRates('gemini-2.5-pro');
+
+// Calculate cost
+const cost = costFor(rates, {
+  input: 10000,
+  output: 500,
+  cacheRead: 8000,
+  cacheCreate: 0,
+});
+
+console.log(`Turn cost: $${cost.toFixed(4)}`);
+</code></pre>
+<h3>Use the Schema</h3>
+<pre><code class="language-js">import { buildLatest, isTokenSniffLatest, SCHEMA_VERSION } from 'tokensniff/schema';
+
+// Build a telemetry snapshot with safe defaults
+const snapshot = buildLatest({
+  session_id: 'my-session',
+  model: 'gemini-3.8-flash',
+  ctx: 25000,
+  window: 1000000,
+  pct: 2.5,
+});
+
+// Validate unknown data
+if (isTokenSniffLatest(someData)) {
+  console.log('Valid telemetry snapshot');
+}
+</code></pre>
+<h3>Full API Exports</h3>
+<pre><code class="language-js">import {
+  // CLI Orchestrator
+  runCli,
+  countActiveSessions,
+  getSessionsDir,
+  isPortActive,
+  isProcessAlive,
+  registerSession,
+  waitForTcp,
+  writeInitFile,
+  printClaudeInstructions,
+
+  // Configuration
+  loadConfig,
+  getGlobalDir,
+  getGlobalConfigPath,
+
+  // Proxy Server
+  startProxy,
+
+  // Dashboard &amp; Analytics
+  importCapturesDirectory,
+  loadDailyRollup,
+  renderHeatmapHtml,
+
+  // Statusline Renderer
+  formatStatus,
+  formatTokenCount,
+  formatToolSegment,
+  runStatusRenderer,
+  readStdin,
+  pickLatest,
+  extractModel,
+
+  // Pricing Engine
+  costFor,
+  ratesFor,
+  resolveModelRates,
+  normalizeModelName,
+  syncOpenRouterCatalog,
+
+  // Schema &amp; Types
+  buildLatest,
+  isTokenSniffLatest,
+  extractCleanLabel,
+  SCHEMA_VERSION,
+} from 'tokensniff';
+</code></pre>
+<h3>Sub-path Exports</h3>
+<pre><code class="language-js">// Just the schema types and guards
+import { buildLatest, isTokenSniffLatest } from 'tokensniff/schema';
+
+// Just the pricing engine
+import { costFor, resolveModelRates } from 'tokensniff/pricing';
+</code></pre>
+<hr />
+<h2>Architecture</h2>
+<pre><code>tokensniff/
+├── bin/
+│   ├── tokensniff.js          # CLI entrypoint → dist/cli.js
+│   └── tokensniff-status.js   # Statusline entrypoint → dist/status.js
+├── src/
+│   ├── index.ts               # Public API facade (re-exports everything)
+│   ├── cli/
+│   │   └── run.ts             # Master CLI orchestrator &amp; multi-terminal lifecycle
+│   ├── collector/
+│   │   ├── config.ts          # Hierarchical config loader (env &gt; file &gt; defaults)
+│   │   ├── index.ts           # HTTP reverse proxy server &amp; telemetry capture
+│   │   ├── parse.ts           # SSE stream &amp; JSON payload parser (multi-provider)
+│   │   └── store.ts           # Atomic file persistence engine (Windows-safe)
+│   ├── dashboard/
+│   │   └── heatmap.ts         # Calendar heatmap HTML renderer &amp; capture importer
+│   ├── renderer/
+│   │   ├── format.ts          # Responsive statusline formatter
+│   │   └── index.ts           # Statusline CLI renderer (stdin consumer)
+│   └── shared/
+│       ├── pricing.ts         # Dynamic pricing engine (OpenRouter catalog sync)
+│       └── schema.ts          # Domain schemas, type guards, label extraction
+└── test/
+    ├── fixtures.ts            # Synthetic SSE/JSON payload generators
+    ├── collector.test.ts      # Integration: proxy, streaming, 502, 413, dashboard
+    ├── format.test.ts         # Statusline formatting &amp; responsive layouts
+    ├── heatmap.test.ts        # Daily rollups, capture import, HTML rendering
+    ├── parse.test.ts          # SSE/JSON parsing, multi-provider, tool grouping
+    ├── pricing.test.ts        # Cost math, OpenRouter sync, model normalization
+    ├── run.test.ts            # CLI routing, TCP probing, session lifecycle
+    ├── schema.test.ts         # Type guards, buildLatest, label extraction
+    └── store.test.ts          # Atomic writes, totals, history, pruning, config
+</code></pre>
+<h3>Key Design Decisions</h3>
+<ul>
+<li><p><strong>Zero runtime dependencies</strong> — The entire package uses only Node.js built-in modules (<code>http</code>, <code>fs</code>, <code>net</code>, <code>path</code>, <code>os</code>, <code>child_process</code>). No Express, no Axios, no anything. This keeps the install tiny and avoids supply chain risk.</p>
+</li>
+<li><p><strong>Atomic file writes</strong> — All file persistence uses a temp-file + OS rename pattern. This means readers (the statusline renderer) never see a half-written JSON file. On Windows, retries with exponential backoff handle EPERM/EBUSY file lock contention.</p>
+</li>
+<li><p><strong>Streaming-first proxy</strong> — Response bytes are forwarded to the client as they arrive (<code>res.write(chunk)</code>). tokensniff never buffers the full response before forwarding. This means zero latency overhead. The telemetry parsing happens on the buffered copy.</p>
+</li>
+<li><p><strong>LRU-bounded memory</strong> — Internal maps (context history, turn indices) are capped at 500 entries using LRU eviction. The proxy can run for weeks without leaking memory.</p>
+</li>
+<li><p><strong>Defensive parsing</strong> — The parser never throws. Corrupt payloads, truncated SSE streams, binary noise — everything returns a safe fallback result. This is critical because the proxy sits in the hot path of your AI tool.</p>
+</li>
+</ul>
+<hr />
+<h2>Development</h2>
+<h3>Prerequisites</h3>
+<ul>
+<li>Node.js ≥ 22.0.0</li>
+<li>pnpm 11.x</li>
+</ul>
+<h3>Setup</h3>
+<pre><code class="language-bash">git clone https://github.com/neerajsahu0306/tokensniff.git
+cd tokensniff
+pnpm install
+</code></pre>
+<h3>Build</h3>
+<pre><code class="language-bash">pnpm build
+</code></pre>
+<h3>Run Tests</h3>
+<pre><code class="language-bash">pnpm test
+</code></pre>
+<h3>Type Check</h3>
+<pre><code class="language-bash">pnpm typecheck
+</code></pre>
+<h3>Lint</h3>
+<pre><code class="language-bash">pnpm lint
+</code></pre>
+<h3>Auto-fix Lint Issues</h3>
+<pre><code class="language-bash">pnpm lint:fix
+</code></pre>
+<h3>Watch Mode (Development)</h3>
+<pre><code class="language-bash">pnpm dev
+</code></pre>
+<h3>Validate Package Structure</h3>
+<pre><code class="language-bash">pnpm check:package
+</code></pre>
+<hr />
+<h2>Troubleshooting</h2>
+<h3>"waiting for first turn..."</h3>
+<p>The status line shows this message when tokensniff hasn't received any API requests yet. Make sure:</p>
+<ol>
+<li>Your <code>ANTHROPIC_BASE_URL</code> is set to <code>http://localhost:4000</code> in <code>~/.claude/settings.json</code></li>
+<li>The tokensniff proxy is actually running (check terminal output)</li>
+<li>You've made at least one prompt in Claude Code</li>
+</ol>
+<h3>Port 4000 is already in use</h3>
+<p>Another tokensniff instance (or another program) is using port 4000. Either:</p>
+<ul>
+<li>Let tokensniff attach to it (it will do this automatically if the existing proxy is tokensniff)</li>
+<li>Change the port: <code>TOKENSNIFF_PORT=5000 tokensniff</code></li>
+<li>Kill the existing process: find and terminate whatever is using port 4000</li>
+</ul>
+<h3>Upstream proxy failed health check</h3>
+<p>tokensniff couldn't connect to the upstream API server. Check that:</p>
+<ol>
+<li>Your <code>upstreamCommand</code> is valid and the upstream server starts correctly</li>
+<li>The <code>upstreamHost</code> and <code>upstreamPort</code> match where the upstream is listening</li>
+<li>The upstream server is not firewalled or blocked</li>
+</ol>
+<p>tokensniff will continue running even if the upstream health check fails — downstream requests will get 502 errors until the upstream becomes available.</p>
+<h3>Costs showing $0.0000</h3>
+<p>This means tokensniff couldn't find pricing for the model you're using on OpenRouter. This can happen if:</p>
+<ul>
+<li>The model is brand new and not yet listed on OpenRouter</li>
+<li>The OpenRouter API was unreachable when tokensniff tried to fetch pricing</li>
+<li>You're using a custom/private model that isn't publicly listed</li>
+</ul>
+<p>The proxy and telemetry still work perfectly — only the cost calculation defaults to zero.</p>
+<h3>Status line not appearing in Claude Code</h3>
+<p>Make sure your <code>~/.claude/settings.json</code> has the exact <code>statusLine</code> block:</p>
+<pre><code class="language-json">{
+  "statusLine": {
+    "type": "command",
+    "command": "tokensniff-status",
+    "padding": 0
+  }
+}
+</code></pre>
+<p>Also verify that <code>tokensniff-status</code> is accessible in your PATH (it should be if you installed tokensniff globally).</p>
+<hr />
+<h2>Requirements</h2>
+<ul>
+<li><strong>Node.js</strong> ≥ 22.0.0</li>
+<li><strong>OS</strong>: Windows, macOS, or Linux</li>
+<li><strong>Terminal</strong>: Any terminal that supports ANSI colors (for the status line color coding)</li>
+</ul>
+<hr />
+<h2>License</h2>
+<p><a href="https://github.com/neerajsahu0306/tokensniff/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a> © 2026 tokensniff contributors</p>

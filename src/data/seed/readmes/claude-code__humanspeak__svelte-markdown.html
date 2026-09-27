@@ -24,7 +24,7 @@
 <li>🎯 GitHub-style slug generation for headers</li>
 <li>🧪 Comprehensive test coverage (vitest and playwright)</li>
 <li>🧩 First-class marked extensions support via <code>extensions</code> prop (e.g., KaTeX math, alerts)</li>
-<li>🎨 Opt-in Shiki syntax highlighting — streaming-compatible, tree-shaken out of the core bundle</li>
+<li>🎨 Opt-in syntax highlighting with one <code>HighlightedCode</code> renderer and your choice of engine (Shiki or TanStack Highlight) — streaming-compatible, tree-shaken out of the core bundle</li>
 <li>⚡ Intelligent token caching (50-200x faster re-renders)</li>
 <li>📡 LLM streaming mode with incremental rendering (~1.6ms avg per update)</li>
 <li>🖼️ Smart image lazy loading with fade-in animation</li>
@@ -320,6 +320,15 @@ const md = buildUnsupportedRenderers()
 &lt;/SvelteMarkdown&gt;
 </code></pre>
 <p>Both approaches work for any tag name. Snippet overrides take precedence over component renderers when both are provided.</p>
+<p><strong>Self-closing and empty tags</strong> are supported alongside the paired form, and render your component with no children:</p>
+<pre><code class="language-svelte">&lt;SvelteMarkdown source={'&lt;click /&gt;'} renderers={{ html: { click: ClickButton } }} /&gt;
+</code></pre>
+<p><strong>Tag names are case-insensitive</strong>, as they are in HTML. Tags are normalized to lowercase when parsed, and renderer keys and <code>html_*</code> snippet names are normalized the same way, so <code>&lt;Tooltip&gt;</code>, <code>&lt;TOOLTIP&gt;</code> and <code>&lt;tooltip&gt;</code> all reach the same renderer however they are registered — and identically whether the tag stands alone or is nested inside other HTML.</p>
+<p>One consequence worth knowing: a tag has exactly one entry, so registering the same tag under two casings is a duplicate rather than two renderers, and the last one wins. An entry you provide always takes precedence over the built-in renderer — including <code>null</code>, which blocks the tag entirely:</p>
+<pre><code class="language-svelte">&lt;!-- blocks &lt;iframe&gt;, &lt;IFRAME&gt; and &lt;IFrame&gt; alike --&gt;
+&lt;SvelteMarkdown {source} renderers={{ html: { IFRAME: null } }} /&gt;
+</code></pre>
+<p>The <code>tag</code> passed to custom renderers and to the <code>sanitizeUrl</code> / <code>sanitizeAttributes</code> hooks is always lowercase, so <code>context.tag === 'iframe'</code> is reliable.</p>
 <h2>Marked Extensions</h2>
 <p>Use <a href="https://marked.js.org/using_advanced#extensions" target="_blank" rel="noopener noreferrer">marked extensions</a> via the <code>extensions</code> prop. SvelteMarkdown ships first-class extensions for KaTeX, Mermaid, GitHub-style alerts, and footnotes from the <code>@humanspeak/svelte-markdown/extensions</code> subpath — no third-party packages required. Third-party extensions still work too; the component handles registering tokenizers internally and you just provide renderers for the custom token types.</p>
 <h3>KaTeX Math Rendering</h3>
@@ -417,6 +426,21 @@ const md = buildUnsupportedRenderers()
 <p>The package includes built-in <code>markedMermaid</code> and <code>MermaidRenderer</code> helpers for Mermaid diagram support. Install mermaid as an optional peer dependency:</p>
 <pre><code class="language-bash">npm install mermaid
 </code></pre>
+<p>Mermaid 12.0.0 pulls in Chevrotain packages that pin <code>lodash-es</code> 4.17.23,
+which is affected by <a href="https://github.com/advisories/GHSA-r5fr-rjxr-66jc" target="_blank" rel="noopener noreferrer">CVE-2026-4800</a>
+and <a href="https://github.com/advisories/GHSA-f23m-r3pf-42rh" target="_blank" rel="noopener noreferrer">CVE-2026-2950</a>.
+Until those upstream pins are updated, consumers using this dependency tree
+should override <code>lodash-es</code> to <code>^4.18.1</code> in their application and regenerate
+their lockfile. For npm, add this to the application's root <code>package.json</code>:</p>
+<pre><code class="language-json">{
+    "overrides": {
+        "lodash-es": "^4.18.1"
+    }
+}
+</code></pre>
+<p>For pnpm, add <code>overrides: { 'lodash-es@&lt;4.18.0': '^4.18.1' }</code> to the application's
+<code>pnpm-workspace.yaml</code>. This repository applies that override for its own tests
+and docs; library overrides do not propagate to consumer applications.</p>
 <p>Then use the built-in helpers — no boilerplate needed:</p>
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
     import SvelteMarkdown from '@humanspeak/svelte-markdown'
@@ -517,34 +541,76 @@ Another claim[^note] that needs a source.
 
 &lt;SvelteMarkdown {source} extensions={[markedFootnote()]} {renderers} /&gt;
 </code></pre>
-<p><code>FootnoteRef</code> renders <code>&lt;sup&gt;&lt;a href="#fn-{id}"&gt;{id}&lt;/a&gt;&lt;/sup&gt;</code> and <code>FootnoteSection</code> renders an <code>&lt;ol&gt;</code> with bidirectional links (ref to definition and back). You can also use snippet overrides for custom rendering.</p>
-<h3>Syntax Highlighting (Shiki)</h3>
-<p>Unlike the marked extensions above, syntax highlighting is a <strong>renderer-level override</strong>: you replace the default <code>code</code> renderer with <code>ShikiCode</code>, so there is <strong>no <code>extensions</code> prop entry</strong> and <strong>no marked tokenizer</strong> involved. Because highlighting stays synchronous (Shiki's <code>createHighlighterCoreSync</code> + the pure-JS regex engine), the <code>code</code> renderer never trips the async-extension guard — <strong>streaming stays fully enabled</strong>.</p>
-<p><code>shiki</code> is an optional peer dependency — install it yourself:</p>
-<pre><code class="language-bash">npm install shiki
+<p>Definitions may start with zero to three spaces. Continuation text must be indented by at least four spaces or one tab; one indentation unit is removed from the rendered plain text. A blank line belongs to a definition only when an indented continuation follows it, so an unindented paragraph, heading, list, fence, or HTML block after a definition remains normal document content. Empty definition bodies are supported. If a label is defined more than once, the first definition in document order wins.</p>
+<p><code>FootnoteRef</code> renders <code>&lt;sup&gt;&lt;a href="#fn-{id}"&gt;{id}&lt;/a&gt;&lt;/sup&gt;</code> and <code>FootnoteSection</code> renders an <code>&lt;ol&gt;</code> with bidirectional links. Simple labels containing only ASCII letters, digits, <code>_</code>, and <code>-</code> retain the legacy IDs (<code>fn-my-note</code> and <code>fnref-my-note</code>). Other UTF-16 code units use a deterministic <code>~</code> plus four-digit lowercase hexadecimal encoding: for example, <code>[^x:2]</code> uses <code>fn-x~003a2</code>. Repeated references retain their visible label while receiving occurrence IDs such as <code>fnref-note</code>, <code>fnref-note:ref:2</code>, and <code>fnref-note:ref:3</code>; the definition renders one backlink for each occurrence. Link fragments URI-encode these full DOM IDs.</p>
+<p>Custom component renderers and snippet overrides receive additive navigation props. A <code>footnoteRef</code> receives <code>{ id, referenceId? }</code>, where <code>referenceId</code> is the prepared occurrence DOM ID. A <code>footnoteSection</code> receives <code>{ footnotes }</code>, with each record shaped as <code>{ id, text, backrefs?: string[] }</code>; <code>backrefs</code> contains the prepared reference DOM IDs. The built-in renderers keep their legacy first-reference fallback when these optional props are omitted.</p>
+<p>IDs are coordinated within one <code>SvelteMarkdown</code> document. Separate component instances using the same labels are not automatically namespaced, so applications that place multiple rendered documents in one page should provide custom renderers if cross-document ID uniqueness is required. Footnote bodies are rendered as escaped plain text rather than Markdown, and this extension does not claim full CommonMark or GFM footnote compatibility.</p>
+<h3>Syntax Highlighting (Shiki or TanStack Highlight)</h3>
+<p>Unlike the marked extensions above, syntax highlighting is a <strong>renderer-level override</strong>: you replace the default <code>code</code> renderer with <code>HighlightedCode</code>, so there is <strong>no <code>extensions</code> prop entry</strong> and <strong>no marked tokenizer</strong> involved. <code>HighlightedCode</code> is engine-agnostic — it talks to a two-method <code>CodeHighlighter</code> interface, and two engines ship as opt-in factories on their own subpaths. Both are synchronous, so the <code>code</code> renderer never trips the async-extension guard — <strong>streaming stays fully enabled</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Subpath</th>
+<th>Exports</th>
+<th>Optional peer</th>
+<th>Core + <code>ts</code>/<code>js</code>/<code>json</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>@humanspeak/svelte-markdown/extensions/highlight</code></td>
+<td><code>HighlightedCode</code>, <code>CodeHighlighter</code>, <code>HIGHLIGHT_CONTEXT_KEY</code>, <code>setCodeHighlighter</code></td>
+<td>none</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>@humanspeak/svelte-markdown/extensions/shiki</code></td>
+<td><code>createShikiHighlighter</code> — TextMate grammars, inline theme colors</td>
+<td><code>shiki</code></td>
+<td>~87 KB gzip</td>
+</tr>
+<tr>
+<td><code>@humanspeak/svelte-markdown/extensions/tanstack-highlight</code></td>
+<td><code>createTanstackHighlighter</code> — hand-written scanners, semantic <code>th-*</code> classes, CSS themes</td>
+<td><code>@tanstack/highlight</code></td>
+<td>~4 KB gzip</td>
+</tr>
+</tbody></table>
+<p>Pick Shiki for editor-exact colors and 200+ grammars; pick TanStack Highlight for chat and agent UIs that stream a lot of code and care about weight (25 languages, themes are CSS variables so light/dark is a CSS toggle). Install the peer you use:</p>
+<pre><code class="language-bash">npm install shiki                # or
+npm install @tanstack/highlight
 </code></pre>
-<p>Import only the languages and themes you need (each is a separate ESM module), build a highlighter, register it, then map <code>ShikiCode</code> to the <code>code</code> renderer:</p>
+<p>Import only the languages (and, for Shiki, themes) you need, build a highlighter, register it, then map <code>HighlightedCode</code> to the <code>code</code> renderer:</p>
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
     import SvelteMarkdown from '@humanspeak/svelte-markdown'
     import {
-        createShikiHighlighter,
-        ShikiCode,
-        setShikiHighlighter
-    } from '@humanspeak/svelte-markdown/extensions/shiki'
-    import js from 'shiki/langs/javascript.mjs'
-    import ts from 'shiki/langs/typescript.mjs'
-    import githubDark from 'shiki/themes/github-dark.mjs'
+        createTanstackHighlighter,
+        HighlightedCode,
+        setCodeHighlighter
+    } from '@humanspeak/svelte-markdown/extensions/tanstack-highlight'
+    import { ts } from '@tanstack/highlight/languages/ts'
+    import { createThemeCss } from '@tanstack/highlight/theme'
+    import githubDark from '@tanstack/highlight/themes/github-dark'
+    import githubLight from '@tanstack/highlight/themes/github-light'
 
-    // Register once (module singleton). Every ShikiCode instance resolves it.
-    setShikiHighlighter(createShikiHighlighter({ langs: [js, ts], themes: [githubDark] }))
+    // Register once (module singleton). Every HighlightedCode instance resolves it.
+    setCodeHighlighter(createTanstackHighlighter({ languages: [ts] }))
+    // TanStack emits classes only — ship a theme stylesheet (match darkSelector to your app).
+    const themeCss = createThemeCss({
+        light: githubLight,
+        dark: githubDark,
+        darkSelector: 'html.dark'
+    })
 
     const source = '```ts\nconst answer: number = 42\n```'
 &lt;/script&gt;
 
-&lt;SvelteMarkdown {source} renderers={{ code: ShikiCode }} /&gt;
+&lt;svelte:head&gt;{@html `&lt;style&gt;${themeCss}&lt;/style&gt;`}&lt;/svelte:head&gt;
+&lt;SvelteMarkdown {source} renderers={{ code: HighlightedCode }} /&gt;
 </code></pre>
-<p>The highlighter is resolved in priority order: an explicit <code>highlighter</code> prop → a Svelte context set under <code>SHIKI_CONTEXT_KEY</code> (for per-subtree themes / SSR request isolation) → the module singleton from <code>setShikiHighlighter</code>. Unregistered or unknown languages, and any per-block failure, degrade to an <strong>escaped</strong> <code>&lt;pre class="shiki-fallback"&gt;</code> rather than throwing mid-stream. Shiki escapes the code it emits and the fallback escapes its inputs, so the <code>{@html}</code> sink only ever receives library-generated or explicitly-escaped markup (the same trust model as <code>KatexRenderer</code> / <code>MermaidRenderer</code>).</p>
-<p><strong>Bundle guidance — this is opt-in for a reason.</strong> A highlighter with the pure-JS engine plus two languages (js, ts) and one theme (github-dark) adds roughly <strong>85 KB gzip</strong> (~516 KB minified), dominated by the TextMate grammars and the regex engine. That cost lands <strong>only</strong> when you import and construct a highlighter — the core <code>SvelteMarkdown</code> bundle stays completely shiki-free (enforced by <code>scripts/tree-shaking.mjs</code>), and importing <code>ShikiCode</code> alone (without building a highlighter) pulls in nothing from Shiki. Import narrowly: every extra <code>shiki/langs/*</code> and <code>shiki/themes/*</code> you add is bundled. The JS engine keeps SSR trivial (no WASM); highlight-heavy client apps can opt into Shiki's faster oniguruma-WASM engine, which is still streaming-safe.</p>
+<p>The Shiki variant is the same shape: <code>createShikiHighlighter({ langs: [ts], themes: [githubDark] })</code> from <code>extensions/shiki</code> with <code>shiki/langs/*</code> and <code>shiki/themes/*</code> imports, and no stylesheet since colors are inlined.</p>
+<p>The highlighter is resolved in priority order: an explicit <code>highlighter</code> prop → a Svelte context set under <code>HIGHLIGHT_CONTEXT_KEY</code> (for per-subtree engines/themes or SSR request isolation) → the module singleton from <code>setCodeHighlighter</code>. Unregistered languages and any per-block failure degrade to an <strong>escaped</strong> fallback <code>&lt;pre&gt;</code> rather than throwing mid-stream (Shiki: <code>shiki-fallback</code>; TanStack: its own <code>th-code--plaintext</code> so the block keeps your theme, or <code>th-code--fallback</code> with <code>plaintextFallback: false</code>). Both engines escape the code they emit and every fallback escapes its inputs, so the <code>{@html}</code> sink only ever receives library-generated or explicitly-escaped markup (the same trust model as <code>KatexRenderer</code> / <code>MermaidRenderer</code>). You can also implement <code>CodeHighlighter</code> yourself to wrap any other highlighter.</p>
+<p><strong>Backward compatibility.</strong> <code>extensions/shiki</code> still exports <code>ShikiCode</code>, <code>SHIKI_CONTEXT_KEY</code>, <code>setShikiHighlighter</code>, <code>getShikiHighlighter</code>, and <code>ShikiHighlighter</code>; they are aliases of the <code>extensions/highlight</code> names (same component, same symbol, same singleton). The only visible change is that with <strong>no highlighter configured at all</strong> the renderer's fallback <code>&lt;pre&gt;</code> carries <code>highlight-fallback</code> instead of <code>shiki-fallback</code>.</p>
+<p><strong>Bundle guidance — this is opt-in for a reason.</strong> The cost lands <strong>only</strong> when you construct a highlighter: importing <code>HighlightedCode</code> alone pulls in nothing from either engine, the core <code>SvelteMarkdown</code> bundle stays engine-free, and the two engines never leak into each other (all enforced by <code>scripts/tree-shaking.mjs</code>). Import narrowly: every extra grammar, language, or theme you import is bundled. Shiki's JS engine keeps SSR trivial (no WASM); highlight-heavy client apps can opt into its faster oniguruma-WASM engine, which is still streaming-safe. See the <a href="https://markdown.svelte.page/examples/highlight-engines" target="_blank" rel="noopener noreferrer">side-by-side streaming demo</a> for live per-engine timings.</p>
 <h3>How It Works</h3>
 <p>Marked extensions define custom token types with a <code>name</code> property (e.g., <code>inlineKatex</code>, <code>blockKatex</code>, <code>alert</code>). When you pass extensions via the <code>extensions</code> prop, SvelteMarkdown automatically extracts these token type names and makes them available as both <strong>component renderer keys</strong> and <strong>snippet override names</strong>.</p>
 <p>To find the token type names for any extension, check its source or documentation for the <code>name</code> field in its <code>extensions</code> array:</p>
@@ -654,7 +720,7 @@ tokens so a hit is verified against hash collisions — <code>getTokens</code>,
 wrapped <code>{ source, tokens }</code> entry shape, not bare token arrays.</p>
 </blockquote>
 <h3>Smart Image Lazy Loading</h3>
-<p>Images automatically lazy load using native <code>loading="lazy"</code> and IntersectionObserver prefetching, with a smooth fade-in animation and error state handling. To disable lazy loading, provide a custom Image renderer:</p>
+<p>Images automatically lazy load using native <code>loading="lazy"</code> and IntersectionObserver prefetching, with a smooth fade-in animation and error state handling. When an image URL changes, its load/error state resets for the new request; unchanged image URLs keep their existing DOM and completed state during updates. Reusing the same failed URL does not automatically retry it. To disable lazy loading or provide custom retry behavior, provide a custom Image renderer:</p>
 <pre><code class="language-svelte">&lt;!-- EagerImage.svelte --&gt;
 &lt;script lang="ts"&gt;
     let { href = '', title = undefined, text = '' } = $props()
@@ -1021,16 +1087,16 @@ const customHtmlRenderers: Partial&lt;HtmlRenderers&gt; = {
 <td>Headless data tables for Svelte</td>
 </tr>
 <tr>
+<td><a href="https://virtualchat.svelte.page" target="_blank" rel="noopener noreferrer">@humanspeak/svelte-virtual-chat</a></td>
+<td>Virtual chat viewport for Svelte 5</td>
+</tr>
+<tr>
 <td><a href="https://diff.svelte.page" target="_blank" rel="noopener noreferrer">@humanspeak/svelte-diff</a></td>
 <td>Diff comparison for Svelte</td>
 </tr>
 <tr>
 <td><a href="https://purify.svelte.page" target="_blank" rel="noopener noreferrer">@humanspeak/svelte-purify</a></td>
 <td>HTML sanitisation for Svelte</td>
-</tr>
-<tr>
-<td><a href="https://virtualchat.svelte.page" target="_blank" rel="noopener noreferrer">@humanspeak/svelte-virtual-chat</a></td>
-<td>Virtual chat viewport for Svelte 5</td>
 </tr>
 <tr>
 <td><a href="https://memory.svelte.page" target="_blank" rel="noopener noreferrer">@humanspeak/memory-cache</a></td>

@@ -7,7 +7,7 @@
 <p>Part of the <a href="https://ankimcp.ai" target="_blank" rel="noopener noreferrer">ankimcp.ai</a> project.</p>
 <h2>Note on First Run</h2>
 <p>On first run, this addon downloads <code>pydantic_core</code> (~2MB) from PyPI. This is required because pydantic_core contains platform-specific binaries (Windows/macOS/Linux) that cannot be bundled in a single addon file.</p>
-<p>A second native dependency, <code>rpds</code> (from <code>rpds-py</code>), is handled the same way — but it is almost never downloaded: Anki already ships <code>rpds</code> as a transitive dependency of its own <code>jsonschema</code>, so the addon just imports it. The download only kicks in on the rare install where that import fails. Both downloads are cached under the addon's <code>_cache/</code> directory, so they happen once, not on every launch.</p>
+<p>A second native dependency, <code>rpds</code> (from <code>rpds-py</code>), is handled the same way — but it is almost never downloaded: Anki already ships <code>rpds</code> as a transitive dependency of its own <code>jsonschema</code>, so the addon just imports it. The download only kicks in on the rare install where that import fails. Both downloads are cached under Anki's own data folder (outside the addon's own folder, so it survives addon updates cleanly on every OS), falling back to the addon's <code>_cache/</code> directory when that location isn't available — so either way they happen once, not on every launch. The old in-folder fallback cache is only ever removed once the outside-the-folder cache has proven itself usable (a successful load from it) and is never touched while a native module is still loaded from it — a failed first attempt (e.g. offline) leaves the old cache untouched rather than destroyed.</p>
 <h2>Features</h2>
 <ul>
 <li><strong>Local HTTP server</strong> - Runs on <code>http://127.0.0.1:3141/</code> by default</li>
@@ -21,6 +21,7 @@
 <li><strong>Diagnostic logging</strong> - Opt-in <a href="#diagnostic-file-logging" target="_blank" rel="noopener noreferrer"><code>log_to_file</code></a> writes a rotating, secret-redacted log to <code>user_files/ankimcp.log</code>, with <strong>Open log folder</strong> / <strong>Copy diagnostics</strong> buttons in settings</li>
 <li><strong>Field management</strong> - Add, rename, and reposition note-type fields via the <code>model_fields</code> tool (with an opt-in <a href="#destructive-tools-opt-in" target="_blank" rel="noopener noreferrer">destructive</a> remove)</li>
 <li><strong>Bulk card stats</strong> - The read-only <code>cards_stats</code> tool returns compact per-card scheduling metrics (type/queue/interval/tags/<code>dueToday</code>) for a whole deck including subdecks, FSRS-independent — a lean bulk read for analytics</li>
+<li><strong>GUI review sessions</strong> - Hands-free review in Anki's own reviewer window: <code>gui_deck_review</code> opens a deck, <code>gui_answer_card</code> presses the answer button for you. <a href="#opt-in-tools" target="_blank" rel="noopener noreferrer">Opt-in</a>, hidden until named in <code>enabled_opt_in_tools</code></li>
 <li><strong>Cross-platform</strong> - Works on macOS, Windows, and Linux (x64 and ARM)</li>
 </ul>
 <h2>Installation</h2>
@@ -166,6 +167,7 @@ in
   "cors_expose_headers": ["mcp-protocol-version"],
   "disabled_tools": [],
   "enabled_destructive_tools": [],
+  "enabled_opt_in_tools": [],
   "max_notes_per_batch": 100,
   "tunnel_server_url": "wss://tunnel.ankimcp.ai",
   "tunnel_client_id": "ankimcp-cli",
@@ -242,6 +244,22 @@ in
 <li>Entries that don't match anything, or match a non-destructive tool/action, produce console warnings</li>
 </ul>
 <p>This is server-side enforcement: until opted in, destructive tools are absent from the MCP schema, so even a misbehaving client cannot call them. Currently shipped destructive entries: <code>change_note_type</code> (whole tool — rewrites every selected note's field layout) and <code>model_fields:remove</code> (action — permanently deletes a field and its content on every note of the type).</p>
+<h3>Opt-In Tools</h3>
+<p>Some tools ship <strong>hidden from AI clients by default</strong> for reasons other than "destructive" (e.g. new/experimental surface area). Expose them via the <code>enabled_opt_in_tools</code> allow-list, same syntax as <code>enabled_destructive_tools</code>:</p>
+<pre><code class="language-json">{
+  "enabled_opt_in_tools": [
+    "gui_answer_card",
+    "gui_deck_review"
+  ]
+}
+</code></pre>
+<ul>
+<li><code>"tool_name"</code> — opts in an entire opt-in tool</li>
+<li><code>"tool_name:action"</code> — opts in an opt-in action within a multi-action tool (a whole-tool entry does not implicitly opt in its opt-in actions)</li>
+<li><code>disabled_tools</code> still applies on top — an opted-in tool can still be disabled</li>
+<li>Entries that don't match anything, or match a non-opt-in tool/action, produce console warnings</li>
+</ul>
+<p>Currently shipped opt-in entries: <code>gui_deck_review</code> and <code>gui_answer_card</code> — the GUI hands-free review-session tools.</p>
 <h3>Custom Path</h3>
 <p>Set <code>http_path</code> to serve the MCP endpoint under a custom path. Useful when exposing Anki via a tunnel (Cloudflare, ngrok) to avoid a fully open endpoint:</p>
 <pre><code class="language-json">{
@@ -346,6 +364,8 @@ in
 <li><code>media_allowed_hosts</code> — allow specific hosts to bypass private network blocking</li>
 </ul>
 <h2>Available Tools</h2>
+<p>Every tool parameter carries a short <code>description</code> in the MCP input schema (since 0.29.0), so clients that show or feed the schema to the model get argument shapes without trial and error. Nested action parameters of multi-action tools are described on their Pydantic models and appear under <code>$defs</code>.</p>
+<p><strong>Upgrading from ≤ 0.27.x:</strong> <code>get_due_cards</code> no longer returns <code>back</code> unless you pass <code>include_answer=true</code>, and <code>front</code> is now the rendered question HTML rather than the raw field. Clients that read <code>back</code> from this tool need the flag.</p>
 <h3>Essential Tools</h3>
 <table>
 <thead>
@@ -408,7 +428,7 @@ in
 </tr>
 <tr>
 <td><code>get_due_cards</code></td>
-<td>Get next due card for review (supports <code>skip_images</code>/<code>skip_audio</code> for voice mode)</td>
+<td>Get next due card for review (supports <code>skip_images</code>/<code>skip_audio</code> for voice mode). Returns the rendered question only; the answer is omitted unless <code>include_answer=true</code></td>
 </tr>
 <tr>
 <td><code>cards_stats</code></td>
@@ -541,7 +561,16 @@ in
 <td><code>gui_undo</code></td>
 <td>Undo the last operation</td>
 </tr>
+<tr>
+<td><code>gui_deck_review</code></td>
+<td>Open a deck in Anki's own reviewer window. <a href="#opt-in-tools" target="_blank" rel="noopener noreferrer">Opt-in</a> — hidden unless opted in via <code>enabled_opt_in_tools</code></td>
+</tr>
+<tr>
+<td><code>gui_answer_card</code></td>
+<td>Press an answer button on the card shown in the reviewer, hands-free rating. <a href="#opt-in-tools" target="_blank" rel="noopener noreferrer">Opt-in</a> — hidden unless opted in via <code>enabled_opt_in_tools</code></td>
+</tr>
 </tbody></table>
+<p><code>gui_current_card</code> no longer returns the note's <code>answer</code>/<code>fields</code> by default -- pass <code>include_answer=true</code> to get them.</p>
 <h3>Resources</h3>
 <table>
 <thead>
@@ -597,7 +626,7 @@ in
 </thead>
 <tbody><tr>
 <td><code>review_session</code></td>
-<td>Guided review session workflow. Args: <code>deck_name</code> (default <code>Default</code>), <code>card_limit</code> (default 20), <code>review_style</code> — <code>interactive</code>, <code>quick</code>, or <code>voice</code></td>
+<td>Guided review session workflow. Args: <code>deck_name</code> (default <code>Default</code>), <code>card_limit</code> (default 20), <code>review_style</code> — <code>interactive</code>, <code>quick</code>, <code>voice</code>, or <code>gui</code></td>
 </tr>
 <tr>
 <td><code>twenty_rules</code></td>

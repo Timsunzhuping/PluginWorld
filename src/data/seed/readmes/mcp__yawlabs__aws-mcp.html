@@ -1,0 +1,599 @@
+<h1>@yawlabs/aws-mcp</h1>
+<p><a href="https://yaw.sh/mcp/install?name=AWS&amp;command=npx&amp;args=-y%2C%40yawlabs%2Faws-mcp&amp;env=AWS_PROFILE%2CAWS_REGION&amp;description=Call%20any%20AWS%20API%20from%20one%20server%20-%20CCAPI%20CRUD%2C%20multi-region%2C%20SSO%20re-login&amp;source=https%3A%2F%2Fgithub.com%2FYawLabs%2Faws-mcp" target="_blank" rel="noopener noreferrer"><img src="https://yaw.sh/yaw-mcp-button.svg" alt="Add to Yaw MCP" /></a></p>
+<p>One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.</p>
+<p>A small AWS MCP for AI assistants: <strong>one server, one config entry, SSO re-auth baked in, generic CRUD over 1,300+ resource types, live docs lookup, server-side scripting for batched workflows.</strong></p>
+<p>It's an <strong>alternative to AWS's official MCP server</strong>, not a complement -- both reach any AWS API, so running both hands the model two overlapping ways to do the same thing. (AWS gives the same advice about its own older servers: its setup guide says to remove them "to avoid tool conflicts that can confuse AI agents".) Pick one. They overlap in coverage and differ in shape. The honest comparison:</p>
+<ul>
+<li><strong><a href="https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html" target="_blank" rel="noopener noreferrer">AWS MCP Server</a></strong> -- AWS's hosted server, GA since May 2026 and part of the Agent Toolkit for AWS. Strong on AWS-team-curated skills, a server-side Python sandbox (<code>run_script</code>) with days-fresh API coverage, a read-only serverless troubleshooting capability (Lambda <code>diagnose</code>, recent changes, X-Ray trace summaries), IAM condition keys that tell its calls apart from direct API calls, and per-tool CloudWatch metrics. As of September 2026, <code>run_script</code> is its only general-purpose way to call an AWS API -- the single-call <code>call_aws</code> tool has been removed -- so every call, even a one-off <code>describe</code>, is a Python script the model writes. The endpoint runs in <code>us-east-1</code> and <code>eu-central-1</code>. Two ways to connect:<ul>
+<li><strong>OAuth</strong> through AWS Sign-in (since July 2026): nothing to install -- your client opens a browser and connects straight to the endpoint. Each session is bound to one IAM role and refreshes for up to 12 hours, and the principal needs <code>signin:AuthorizeOAuth2Access</code> and <code>signin:CreateOAuth2Token</code>.</li>
+<li><strong>SigV4</strong> through a local proxy run with <code>uv</code> (<code>uvx mcp-proxy-for-aws-cli@latest</code> in AWS's guide), signing with your AWS CLI credentials (CLI 2.32.0+). AWS recommends this path for terminal and IDE coding agents, and it is the only one that switches profiles per call, from an allowlist fixed when the proxy starts. Since AWS CLI 2.35.0, <code>aws configure agent-toolkit</code> writes a SigV4 entry (<code>uvx mcp-proxy-for-aws@latest</code>) into your agent's MCP config for you, under the key <code>aws-mcp</code>.</li>
+</ul>
+</li>
+<li><strong><code>@yawlabs/aws-mcp</code></strong> (this server) -- installs from npm and runs locally on your own <code>aws</code> CLI and profiles: one <code>npx</code> line, no <code>uv</code>, no proxy, no hosted hop. Wins on SSO re-login when <code>aws sso login</code>'s browser handoff drops (Windows especially), one AWS operation per tool call (<code>aws_call</code> takes <code>service</code>, <code>operation</code> and <code>params</code>, so a host's approval prompt shows the operation itself, not a script), ergonomic CCAPI CRUD with dry-run diffs, multi-region and multi-account fan-out, pre-flight IAM permission checks, and a JS scripting tool for when you do want a batch (in-process, not a security sandbox -- see the tools table). Live AWS docs search + page read are built in too, so you don't need a second docs server either way -- they cover the same ground as the official server's <code>search_documentation</code> / <code>read_documentation</code>, without its topic routing or skills results.</li>
+</ul>
+<p>The MCPs that genuinely pair with <em>either</em> choice are the per-service servers in <strong><a href="https://github.com/awslabs/mcp" target="_blank" rel="noopener noreferrer"><code>awslabs/mcp</code></a></strong> that reach what a general AWS-API tool cannot -- Bedrock's agentic Knowledge Base retrieval is the clearest case (see <a href="#optional-companion-aws-labs-per-service-servers" target="_blank" rel="noopener noreferrer">the companion config</a>). AWS now describes that repo as succeeded by the Agent Toolkit for AWS; it still works and takes contributions, but some of its servers are deprecated or superseded -- its general AWS API server among them -- so check a server's README before adding it.</p>
+<p>Five things this server tries to handle well:</p>
+<ol>
+<li><strong>SSO re-login.</strong> When your token expires mid-session, <code>aws sso login</code> tries to open a browser from a subprocess -- on Windows (and sometimes elsewhere) that handoff drops silently. You end up context-switching to a terminal, running the command yourself, then coming back. The <code>--no-browser</code> device-code flow fixes this: the assistant surfaces a short URL + code, you click once, done. (<code>--no-browser</code> on its own is no longer enough -- AWS CLI 2.22.0 made the PKCE authorization-code flow the default, and it prints no short code -- so this server pairs it with <code>--use-device-code</code>, probing <code>aws --version</code> once to stay compatible with pre-2.22 CLIs.) There's also <code>aws_refresh_if_expiring_soon</code> for proactive top-ups before a long workflow. AWS's hosted server goes around the problem rather than through it. On its OAuth path your MCP client runs its own browser sign-in, and the tokens are bound to that client and that server, so nothing else on the machine benefits; on its SigV4 path, AWS's troubleshooting table tells SSO users to run <code>aws sso login</code> themselves and then restart the MCP client. Here the re-login refreshes the same <code>~/.aws/sso/cache</code> token the CLI, the SDKs and every other tool on the machine read.</li>
+<li><strong>Calling any AWS API.</strong> <code>aws_call</code> proxies the <code>aws</code> CLI directly. One tool covers the full API surface -- including services AWS adds tomorrow -- with no SDK bundling and no service-by-service tool sprawl. That is not aspirational: September 2026's arrivals -- AWS Batch bulk <code>cancel-jobs</code> / <code>terminate-jobs</code> (CLI 2.36.44), the STS session-token size fields (2.36.45), Elastic Beanstalk cluster environments (2.36.47), "Tunnel" VPC endpoints (2.36.48) -- are reachable the moment your local <code>aws</code> CLI knows them, with no <code>@yawlabs/aws-mcp</code> upgrade. An older CLI rejects an operation it does not know before anything is sent, and the error says to upgrade. <code>aws_paginate</code> handles paginated list/describe ops, <code>aws_multi_region</code> fans the same op out across N regions in parallel, and a JMESPath <code>query</code> parameter trims responses server-side. Reach for them long before this server's 5 MB output cap: MCP hosts cut in much sooner -- Claude Code warns at 10,000 tokens and, by default, saves any result over 25,000 tokens to a file the model has to read back.</li>
+<li><strong>Generic CRUD across services.</strong> <code>aws_resource_*</code> (seven tools, including <code>aws_resource_diff</code> for dry-run previews) wraps AWS Cloud Control API, so the same lifecycle -- get / list / create / update / delete / status -- works for any control-plane resource with a CloudFormation schema: Lambda functions, S3 buckets, IAM roles, SSM parameters, RDS instances, and the rest of the 1,300 types on AWS's published list (not every type implements every verb). Pass <code>awaitCompletion: true</code> and the server polls the async create/update/delete through to terminal state for you. AWS Labs deprecated its own Cloud Control API MCP server in March 2026, and <a href="https://github.com/awslabs/mcp/blob/main/docs/migration-ccapi.md" target="_blank" rel="noopener noreferrer">its migration guide</a> lists no direct replacement for resource get / list / create / update / delete: the successor authors CloudFormation and CDK instead. CCAPI is control-plane only. On the data plane, DynamoDB <code>get-item</code> / <code>query</code> and Bedrock <code>converse</code> are ordinary operations <code>aws_call</code> handles (DynamoDB values stay in its typed JSON, <code>{"S": "..."}</code>), and Lambda invokes have their own tool, <code>aws_lambda_invoke</code>. Three kinds of operation are out of <code>aws_call</code>'s reach: those that write their response body to a positional outfile (S3 <code>get-object</code>, Bedrock <code>invoke-model</code>), the CLI's hand-written commands, which register no <code>--cli-input-json</code> (<code>s3 cp/ls/sync</code>, <code>logs tail</code>, <code>cloudformation deploy</code>), and event-stream operations the CLI does not ship at all (Bedrock <code>converse-stream</code>, <code>invoke-agent</code>, agentic Knowledge Base retrieval).</li>
+<li><strong>Live AWS docs.</strong> <code>aws_docs_search</code> queries the same backend that powers the docs.aws.amazon.com search box; <code>aws_docs_read</code> fetches a doc page and returns it as paginated markdown. Lets the agent discover new services and look up exact parameter names without a second MCP server installed.</li>
+<li><strong>Batched workflows in one round-trip.</strong> <code>aws_script</code> runs a short JS snippet in a <code>node:vm</code> context with <code>aws.call</code>, <code>aws.paginate</code>, <code>aws.paginateAll</code>, <code>aws.resource.*</code>, <code>aws.logsTail</code>, <code>aws.metricsQuery</code>, <code>aws.iamSimulate</code>, <code>aws.multiRegion</code>, <code>aws.assumeRole</code>, and <code>aws.docs.{search,read}</code> available. Best for "list X, fetch Y for each, return Z" pipelines that would otherwise need N tool calls. Same idea as AWS's <code>run_script</code> (Python, sandboxed server-side), which is now that server's only general-purpose way to call an AWS API; here it is the batching option -- JS-native, running locally -- with <code>aws_call</code> for single operations.</li>
+</ol>
+<h2>Optional companion: AWS Labs per-service servers</h2>
+<p>For work a general AWS-API tool cannot do, add the relevant <a href="https://github.com/awslabs/mcp" target="_blank" rel="noopener noreferrer"><code>awslabs/mcp</code></a> server alongside this one. Bedrock's agentic Knowledge Base retrieval is the clearest case: it calls <code>AgenticRetrieveStream</code>, an event-stream operation the AWS CLI leaves out of its command table, so no CLI-based tool -- <code>aws_call</code> included -- can reach it. (Plain retrieval, <code>bedrock-agent-runtime retrieve</code>, is an ordinary <code>aws_call</code> operation.) These are Python servers run with <code>uvx</code>, and they have no tool-name overlap with this one, so they pair cleanly:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "aws": {
+      "command": "npx",
+      "args": ["-y", "@yawlabs/aws-mcp@latest"]
+    },
+    "aws-bedrock-kb": {
+      "command": "uvx",
+      "args": ["awslabs.bedrock-kb-retrieval-mcp-server@latest"],
+      "env": { "AWS_PROFILE": "my-profile", "AWS_REGION": "us-east-1" }
+    }
+  }
+}
+</code></pre>
+<p>Its agentic tool works on managed knowledge bases, and by default the server lists only knowledge bases tagged <code>mcp-multirag-kb=true</code>; its <a href="https://github.com/awslabs/mcp/tree/main/src/bedrock-kb-retrieval-mcp-server" target="_blank" rel="noopener noreferrer">README</a> covers the tag and the IAM permissions. Skip the older <code>awslabs.lambda-mcp-server</code>: every release is yanked on PyPI, and Lambda invokes are built in here as <code>aws_lambda_invoke</code>.</p>
+<h2>When to reach for this vs the other AWS MCPs</h2>
+<table>
+<thead>
+<tr>
+<th>Need</th>
+<th>Best fit</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node/npm-only install, running locally on your own <code>aws</code> CLI and profiles (no <code>uv</code>, no proxy)</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong></td>
+</tr>
+<tr>
+<td>Nothing installed locally (remote server, browser sign-in)</td>
+<td><strong>AWS MCP Server</strong> (OAuth)</td>
+</tr>
+<tr>
+<td>SSO re-login on Windows / broken browser handoff, fixed for every tool on the machine</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong> (<code>aws_login_start</code> device-code flow)</td>
+</tr>
+<tr>
+<td>One AWS operation per tool call -- the approval prompt shows <code>service</code>, <code>operation</code> and <code>params</code>, not a script</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong> (<code>aws_call</code>)</td>
+</tr>
+<tr>
+<td>Generic CRUD across 1,300+ resource types</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong> (<code>aws_resource_*</code>)</td>
+</tr>
+<tr>
+<td>Dry-run an update before applying it</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong> (<code>aws_resource_diff</code>)</td>
+</tr>
+<tr>
+<td>Multi-region fan-out in one call</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong> (<code>aws_multi_region</code>)</td>
+</tr>
+<tr>
+<td>Same operation across many accounts in one call</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong> (<code>aws_multi_account</code>)</td>
+</tr>
+<tr>
+<td>Batch N tool calls into one round-trip (JS)</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong> (<code>aws_script</code>)</td>
+</tr>
+<tr>
+<td>Check IAM permissions before attempting an op</td>
+<td><strong><code>@yawlabs/aws-mcp</code></strong> (<code>aws_iam_simulate</code>)</td>
+</tr>
+<tr>
+<td>Cross-account / cross-role in one session</td>
+<td><strong>Either</strong> -- this server takes any configured <code>profile</code> on every call and adds <code>aws_assume_role</code> for STS role-chaining; AWS's takes one per call over SigV4 only, from profiles declared when its proxy starts (an OAuth session is one role)</td>
+</tr>
+<tr>
+<td>Sandboxed Python script execution server-side</td>
+<td><strong>AWS MCP Server</strong> (<code>run_script</code>)</td>
+</tr>
+<tr>
+<td>Days-fresh API coverage via hosted endpoint</td>
+<td><strong>AWS MCP Server</strong> (<code>run_script</code>)</td>
+</tr>
+<tr>
+<td>AWS-team-curated best-practice skills</td>
+<td><strong>AWS MCP Server</strong> (<code>retrieve_skill</code>)</td>
+</tr>
+<tr>
+<td>Guided Lambda troubleshooting (diagnose, recent changes, trace summary)</td>
+<td><strong>AWS MCP Server</strong> (serverless capability)</td>
+</tr>
+<tr>
+<td>Typed per-service helpers for what a CLI-based tool cannot reach (Bedrock agentic KB retrieval, ...)</td>
+<td><strong><code>awslabs/mcp</code></strong> (per-service servers)</td>
+</tr>
+</tbody></table>
+<p><code>@yawlabs/aws-mcp</code> and AWS's official server are an either/or -- pick the one whose tradeoffs fit. <code>awslabs/mcp</code> per-service servers pair cleanly with whichever you pick.</p>
+<h2>What this server borrows from AWS's official one</h2>
+<p>Credit where due -- two features here were shaped by the official AWS MCP Server:</p>
+<ul>
+<li><strong><code>aws_script</code></strong> mirrors the official server's <code>run_script</code>: a scripting tool that collapses "list X, fetch Y for each, return Z" pipelines into one round-trip. Theirs is Python, sandboxed server-side, and is now that server's only general-purpose API path; this one is JS-native, runs <strong>in this server's own process</strong> -- see the trust note in the tools table -- and sits beside <code>aws_call</code> rather than replacing it.</li>
+<li><strong><code>aws_docs_search</code> / <code>aws_docs_read</code></strong> were added so you don't need a separate docs MCP whichever server you pick. They cover the same ground as the official server's <code>search_documentation</code> / <code>read_documentation</code> -- live search and page reads -- without its topic routing or skills results.</li>
+</ul>
+<p>The rest -- SSO device-code re-login, CCAPI CRUD with dry-run diffs, multi-region fan-out, IAM pre-flight checks -- is this server's own.</p>
+<h2>Tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>aws_whoami</code></td>
+<td>Current identity (account, ARN) + SSO token expiry countdown. Call this first.</td>
+</tr>
+<tr>
+<td><code>aws_login_start</code></td>
+<td>Start <code>aws sso login --no-browser --use-device-code</code>, returns a verification URL + short code and a <code>sessionId</code>. (<code>--use-device-code</code> is omitted on AWS CLI older than 2.22.0, where the device grant is already the default.)</td>
+</tr>
+<tr>
+<td><code>aws_login_complete</code></td>
+<td>Block until the SSO subprocess finishes (you auth in your browser), returns the new identity.</td>
+</tr>
+<tr>
+<td><code>aws_refresh_if_expiring_soon</code></td>
+<td>Check the cached SSO token and auto-start a refresh when &lt; <code>thresholdMinutes</code> remain (default 10). One round-trip for "am I about to expire? if so, re-login."</td>
+</tr>
+<tr>
+<td><code>aws_session_set</code></td>
+<td>Set the default profile and/or region for the rest of this MCP session. "Switch to prod," "use us-west-2."</td>
+</tr>
+<tr>
+<td><code>aws_session_get</code></td>
+<td>Show the current session defaults and where each value came from (<code>session</code>/<code>env</code>/<code>default</code>).</td>
+</tr>
+<tr>
+<td><code>aws_session_clear</code></td>
+<td>Remove session profile/region overrides so env vars / defaults take over again. No args clears both.</td>
+</tr>
+<tr>
+<td><code>aws_list_profiles</code></td>
+<td>List profiles configured in <code>~/.aws/config</code> -- names, regions, and SSO metadata. Use before switching profiles or when an SSO error names one you haven't seen.</td>
+</tr>
+<tr>
+<td><code>aws_assume_role</code></td>
+<td>Call STS AssumeRole with your current identity and stash the temp creds as a new profile (<code>mcp-&lt;sessionName&gt;</code>) in <code>~/.aws/credentials</code>. Use for cross-account access. The secret/session token stay on disk -- not returned to the model. Optional <code>timeoutMs</code> (default 120s) for slow SAML / <code>credential_process</code> cold starts.</td>
+</tr>
+<tr>
+<td><code>aws_call</code></td>
+<td>Run any AWS API operation. <code>service: 's3api', operation: 'list-buckets'</code>, optional <code>params</code> (PascalCase JSON), optional <code>query</code> (JMESPath). Returns parsed JSON. Hand-written CLI commands (<code>s3 cp/ls/sync</code>, <code>logs tail</code>) and operations that stream their response to a file (<code>s3api get-object</code>, <code>bedrock-runtime invoke-model</code>, <code>bedrock-agentcore invoke-agent-runtime</code>, <code>lambda invoke</code>) never accept <code>--cli-input-json</code>, so <code>aws_call</code> cannot reach them; the error says so and names the alternative (<code>aws_lambda_invoke</code>, <code>aws_logs_tail</code>, <code>bedrock-runtime converse</code>, or a shell). Waiters work as <code>operation: 'wait &lt;name&gt;'</code>. Blob-typed params take base64.</td>
+</tr>
+<tr>
+<td><code>aws_paginate</code></td>
+<td>Fetch one page of a paginated list/describe operation. Supports <code>query</code> too. Returns <code>nextToken</code>/<code>hasMore</code>; call again with the token to continue.</td>
+</tr>
+<tr>
+<td><code>aws_logs_tail</code></td>
+<td>Fetch the newest CloudWatch Logs events for one log group (FilterLogEvents via <code>aws logs filter-log-events</code>), with <code>since</code>, <code>filterPattern</code> and stream-name filters; returns <code>{timestamp, logStreamName, message}</code> objects, oldest first. Bounded by <code>maxEvents</code> (default 500, max 10000): a busier window keeps the NEWEST events and reports <code>truncated: true</code>. On AWS CLI 2.35.8+ the read itself stops after <code>maxEvents</code>, so <code>totalEvents</code> is <code>null</code> when truncated; older CLIs scan the whole window and report the exact count. Accepts a log-group ARN in the call's region, sent as <code>logGroupIdentifier</code>, so a source-account ARN works from a cross-account monitoring account (needs AWS CLI 2.9.15+).</td>
+</tr>
+<tr>
+<td><code>aws_logs_query</code></td>
+<td>Run a CloudWatch Logs Insights query end to end: StartQuery, poll GetQueryResults to a terminal status, return the rows -- one call instead of the start/poll/interpret-status dance. Takes <code>logGroupNames</code> (1-50, bare names or ARNs), <code>queryString</code> (Logs Insights QL, or PPL via <code>queryLanguage</code>), and the same <code>startTime</code>/<code>endTime</code> vocabulary as <code>aws_metrics_query</code>; window capped at 90 days, <code>limit</code> defaults to 1000. Rows come back FLATTENED from the API's <code>[{field, value}]</code> pairs into plain objects, alongside <code>statistics</code> (<code>recordsMatched</code>/<code>recordsScanned</code>/<code>bytesScanned</code>). Billed by uncompressed bytes scanned, so narrow the window before widening it. On timeout or client cancellation the query is never stopped -- the <code>queryId</code> comes back and results stay retrievable for 7 days.</td>
+</tr>
+<tr>
+<td><code>aws_metrics_query</code></td>
+<td>Query CloudWatch metrics via GetMetricData (the modern multi-metric / expression-capable API). Pass <code>queries: [{id, namespace, metricName, dimensions?, statistic?, period?}]</code> or expression-based queries; <code>startTime</code>/<code>endTime</code> accept ISO 8601 or relative shorthand (<code>'15m'</code>, <code>'1h'</code>, <code>'1d'</code>). Period auto-picks from the time range. Returns <code>{series: [{id, label?, timestamps, values, period?, statusCode?}], periodSeconds, profile, region, nextToken, hasMore, messages?}</code> (full envelope under Stability).</td>
+</tr>
+<tr>
+<td><code>aws_resource_get</code></td>
+<td>Read an AWS resource via Cloud Control API by <code>typeName</code> + <code>identifier</code> (e.g. <code>AWS::Lambda::Function</code> + function name). Returns parsed Properties.</td>
+</tr>
+<tr>
+<td><code>aws_resource_list</code></td>
+<td>List resources of a type via CCAPI, paginated. Returns <code>{identifier, properties}</code> per entry plus a <code>nextToken</code>/<code>hasMore</code>.</td>
+</tr>
+<tr>
+<td><code>aws_resource_create</code></td>
+<td>Create an AWS resource via CCAPI. Async — returns top-level <code>requestToken</code> + <code>operationStatus</code>. Pass <code>awaitCompletion: true</code> to have the server poll to terminal state in one call.</td>
+</tr>
+<tr>
+<td><code>aws_resource_update</code></td>
+<td>Update an AWS resource via CCAPI using RFC 6902 JSON Patch. Same async + <code>awaitCompletion</code> shape as create.</td>
+</tr>
+<tr>
+<td><code>aws_resource_delete</code></td>
+<td>Delete an AWS resource via CCAPI. Same async + <code>awaitCompletion</code> shape as create. Destructive — verify <code>identifier</code> first.</td>
+</tr>
+<tr>
+<td><code>aws_resource_status</code></td>
+<td>Poll an async CCAPI request by <code>requestToken</code>. Returns the current state with <code>operationStatus</code>, <code>identifier</code>, <code>errorCode</code>, <code>statusMessage</code> flat-promoted (PENDING / IN_PROGRESS / SUCCESS / FAILED / CANCEL_*).</td>
+</tr>
+<tr>
+<td><code>aws_resource_diff</code></td>
+<td>Dry-run a CCAPI update: fetches current state, simulates the JSON Patch in memory, returns <code>{before, after, changes[]}</code>. No mutation sent to AWS. Supports the add/remove/replace subset of RFC 6902; <code>add</code> auto-creates missing object parents to match CCAPI's actual update semantics (so patches like <code>/Environment/Variables/NEW_KEY</code> work even when <code>/Environment/Variables</code> doesn't exist yet). <code>changes[i].after</code> reflects what op <code>i</code> produced (not the final post-patch state), so sequential ops on the same path read correctly. Call before <code>aws_resource_update</code> when you want to verify the patch does what you expect.</td>
+</tr>
+<tr>
+<td><code>aws_multi_region</code></td>
+<td>Run the same AWS operation across N regions in parallel. Same shape as <code>aws_call</code> but takes <code>regions: string[]</code>. Returns <code>{region, ok, data?, error?}[]</code> with <code>okCount</code>/<code>errorCount</code>. Partial failure is expected (services aren't everywhere, perms may be region-scoped). Up to 64 regions per call, at most 32 in flight.</td>
+</tr>
+<tr>
+<td><code>aws_multi_account</code></td>
+<td>Run the same AWS operation across N accounts in parallel, assuming <code>roleName</code> in each. Credentials for every account are held IN MEMORY for the life of the call and passed to that one spawn -- nothing is written to <code>~/.aws/credentials</code>, unlike an <code>aws_assume_role</code> loop, which either writes a section per account or stomps one repeatedly (and leaves live keys on disk if a sweep dies midway). Same envelope as <code>aws_multi_region</code> with <code>accountId</code> in place of <code>region</code>, including the 5 MB aggregate cap and <code>okCount</code>/<code>errorCount</code> computed before capping. Partial failure is expected: the role may not exist everywhere.</td>
+</tr>
+<tr>
+<td><code>aws_script</code></td>
+<td>Run a short JS snippet that orchestrates the other tools and returns a combined result. Sandbox exposes <code>aws.call</code>, <code>aws.paginate</code>, <code>aws.paginateAll</code>, <code>aws.resource.{get,list,create,update,delete,status}</code>, <code>aws.logsTail</code>, <code>aws.metricsQuery</code>, <code>aws.iamSimulate</code>, <code>aws.multiRegion</code>, <code>aws.assumeRole</code>, <code>aws.docs.{search,read}</code>, plus standard JS builtins (<code>JSON</code>, <code>Math</code>, <code>Date</code>, <code>Promise</code>, etc.) and <code>console</code>. <code>require</code>/<code>import</code>/<code>process</code>/<code>fs</code>/<code>fetch</code>/timers are not bound into the context. <strong>This is not a security boundary:</strong> the script runs in this server's own process, and host globals remain reachable from inside it, so <code>aws_script</code> is strictly more powerful than the other tools -- those are bounded by AWS and your IAM policy, this one is not. Only pass script text you would run on this machine yourself, never text that arrived from a log line, a resource tag, or any other AWS response. Best for "list X, fetch Y for each, return Z" pipelines that would otherwise be N round-trips. Use <code>return &lt;value&gt;</code> to surface a result.</td>
+</tr>
+<tr>
+<td><code>aws_iam_simulate</code></td>
+<td>Simulate IAM permissions for a principal: can principal X do actions Y on resources Z? Wraps <code>iam simulate-principal-policy</code>. Returns one entry per (action, resource) pair -- one per action with resource <code>*</code> when <code>resources</code> is omitted -- with <code>decision</code> (allowed / explicitDeny / implicitDeny / unknown), <code>matchedStatementIds</code> (which IAM statements decided), <code>missingContextValues</code> (context keys the policy needed but you didn't provide), <code>permissionsBoundaryDecision</code> and <code>organizationsDecision</code> (reported by AWS per action). An SCP deny never names its statement, and keys only an SCP references are never reported missing -- pass <code>aws:RequestedRegion</code> and the like in <code>contextEntries</code>. "allowed" is necessary, not sufficient: RCPs, the target resource's own policy, session policies and VPC endpoint policies are not evaluated. Pass the IAM role ARN, not the STS session ARN <code>aws_whoami</code> shows. Use BEFORE a risky operation to avoid a 403 -- pairs with the post-failure Suggestion from aws_call. Requires <code>iam:SimulatePrincipalPolicy</code> on the caller.</td>
+</tr>
+<tr>
+<td><code>aws_lambda_invoke</code></td>
+<td>Invoke a Lambda function synchronously and return its response payload plus the DECODED tail of its execution log. <code>aws_call</code> structurally <strong>cannot</strong> do this -- <code>aws lambda invoke</code> takes the response body as a required positional outfile and rejects <code>--cli-input-json</code> -- so this is the one Lambda path that works without a second (Python) MCP server. The decoded <code>logTail</code> collapses the usual invoke -&gt; find the log group -&gt; tail it -&gt; hope the window caught it loop into one call. A non-empty <code>functionError</code> means the function's HANDLER threw: the invocation still succeeded, so <code>ok</code> is true and the thrown error is in <code>payload</code>. The invoke is sent at most once: the CLI's automatic retries are off for this tool, because a retried invoke runs the function again. <code>timeoutMs</code> is how long to wait for the function (default 60s, at most 900000). A throttled call did not run and is safe to retry; after a timeout the error says whether the invoke was sent.</td>
+</tr>
+<tr>
+<td><code>aws_docs_search</code></td>
+<td>Search live AWS documentation (the backend behind the docs.aws.amazon.com search box). Returns ranked <code>{title, url, summary, excerpt}</code>. Each result also carries a locally computed <code>lexicalMatch</code>, and the response carries <code>queryTerms</code> / <code>termsMatchedNowhere</code> / <code>bestLexicalOverlap</code> / <code>lowRelevance</code> -- the backend always returns a full page of fuzzy matches and never says "no good match", so those are the only signal that a query found nothing. Use to discover the right doc page for a service/API/concept the model may not know -- new services, recently changed APIs, exact parameter names.</td>
+</tr>
+<tr>
+<td><code>aws_docs_read</code></td>
+<td>Fetch an <code>https://docs.aws.amazon.com/...html</code> page and return it as markdown. Strips nav/cookie-banner/feedback chrome. Long pages paginate via <code>startIndex</code> + <code>maxLength</code>; the response carries <code>hasMore</code> and <code>nextStartIndex</code>. Usually fed a url from <code>aws_docs_search</code>.</td>
+</tr>
+</tbody></table>
+<h2>Install</h2>
+<p>Add to your MCP client config (e.g. <code>.mcp.json</code>):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "aws": {
+      "command": "npx",
+      "args": ["-y", "@yawlabs/aws-mcp@latest"]
+    }
+  }
+}
+</code></pre>
+<p>Keep the key <code>aws</code> (anything but <code>aws-mcp</code>). AWS's <code>aws configure agent-toolkit</code> wizard registers its hosted server under <code>aws-mcp</code>, and reports an existing <code>aws-mcp</code> entry as already configured without looking at what it runs.</p>
+<p>The <code>-y</code> flag is what gives you <strong>auto-update on each session load</strong>: every time your MCP client spawns the server, <code>npx</code> checks the registry for the latest <code>@yawlabs/aws-mcp</code> and downloads it if newer. The first launch in a fresh cache adds ~100-500 ms; subsequent launches use npm's cache (typical metadata-freshness window: 5 min) and add ~50 ms or less. Once the server is up, tool calls have zero auto-update overhead -- the check fires only on (re-)spawn. No separate install step is needed; <code>-y</code> covers both first-time install and ongoing updates.</p>
+<p>If you'd rather pin a specific version (no auto-update, but zero startup overhead), install globally and point the config at the installed binary:</p>
+<pre><code class="language-bash">npm install -g @yawlabs/aws-mcp
+</code></pre>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "aws": {
+      "command": "aws-mcp"
+    }
+  }
+}
+</code></pre>
+<p>You'll need to <code>npm install -g @yawlabs/aws-mcp@latest</code> manually when you want a newer version.</p>
+<h2>Example session</h2>
+<p>You ask the assistant to check a staging bucket, but your SSO token just expired. What the assistant does (and what you see):</p>
+<pre><code>You:    "How many objects are in the staging-artifacts bucket right now?"
+
+Claude: (calls aws_whoami) -&gt; SSO session expired for profile 'staging'.
+        (calls aws_login_start with profile='staging')
+        "Your SSO token expired. Open
+         https://device.sso.us-east-1.amazonaws.com/
+         and enter code: ABCD-EFGH
+         I'll wait."
+
+You:    *click, authenticate in your browser*
+
+Claude: (calls aws_login_complete with the sessionId)
+        (calls aws_call with service='s3api', operation='list-objects-v2',
+                         params={ Bucket: 'staging-artifacts' },
+                         query='KeyCount')
+        "There are 4,182 objects in staging-artifacts."
+</code></pre>
+<p>The SSO flow took one click. No "the browser didn't open, let me run it in a terminal" context switch.</p>
+<p>For a larger list -- anything that would run past your MCP host's output limit, which is far smaller than this server's 5 MB cap -- the assistant reaches for <code>aws_paginate</code>:</p>
+<pre><code>(calls aws_paginate with service='ec2', operation='describe-instances',
+                        maxItems=50,
+                        query='Reservations[].Instances[].{Id:InstanceId,State:State.Name}')
+-&gt; returns one page + a nextToken; Claude calls again until hasMore=false
+</code></pre>
+<p><code>query</code> (JMESPath) trims the response server-side -- a typical <code>describe-instances</code> result shrinks from megabytes to kilobytes when you only need two fields.</p>
+<p>For "create this resource and tell me when it's ready," <code>aws_resource_create</code> with <code>awaitCompletion: true</code> collapses the usual create-then-poll loop into one tool call:</p>
+<pre><code>(calls aws_resource_create with
+   typeName='AWS::SSM::Parameter',
+   desiredState={Name: '/my/param', Type: 'String', Value: 'hello'},
+   awaitCompletion: true)
+-&gt; server polls get-resource-request-status until SUCCESS / FAILED / CANCEL_COMPLETE
+   and returns the terminal ProgressEvent in one call
+</code></pre>
+<p>Same shape for <code>aws_resource_update</code> and <code>aws_resource_delete</code>. Drop <code>awaitCompletion</code> (or set it false) for the default fire-and-poll behavior -- useful when you want to kick off a long-running update and check back later.</p>
+<p>For "preview the patch before applying":</p>
+<pre><code>(calls aws_resource_diff with
+   typeName='AWS::Lambda::Function',
+   identifier='my-fn',
+   patchDocument=[{op: 'replace', path: '/MemorySize', value: 1024}])
+-&gt; returns { before: {MemorySize: 256, ...}, after: {MemorySize: 1024, ...},
+              changes: [{op: 'replace', path: '/MemorySize', before: 256, after: 1024}] }
+</code></pre>
+<p>No mutation is sent to AWS; the agent can verify the patch before invoking <code>aws_resource_update</code>.</p>
+<p>For batched workflows, <code>aws_script</code> collapses N tool calls into one:</p>
+<pre><code>(calls aws_script with code=`
+   const listed = await aws.resource.list({ typeName: "AWS::Lambda::Function" });
+   const big = [];
+   for (const r of listed.resources) {
+     const cfg = await aws.resource.get({
+       typeName: "AWS::Lambda::Function", identifier: r.identifier });
+     if (cfg.properties.MemorySize &gt; 1024) {
+       big.push({ name: cfg.properties.FunctionName, mem: cfg.properties.MemorySize });
+     }
+   }
+   return big;
+`)
+-&gt; one round-trip; the agent gets the filtered list without N intermediate tool calls
+</code></pre>
+<p>For multi-region reads:</p>
+<pre><code>(calls aws_multi_region with
+   service='ec2', operation='describe-instances',
+   regions=['us-east-1','us-west-2','eu-west-1'],
+   query='Reservations[].Instances[].InstanceId')
+-&gt; {okCount: 3, errorCount: 0, results: [{region, ok, data}, ...]}
+</code></pre>
+<h2>Requirements</h2>
+<ul>
+<li>Node.js 22+ (or <a href="https://oamjs.org" target="_blank" rel="noopener noreferrer">oam.js</a> -- see <a href="#runtime" target="_blank" rel="noopener noreferrer">Runtime</a>)</li>
+<li>AWS CLI v2 on <code>PATH</code>. Every tool that talks to AWS shells out to it (all but <code>aws_docs_*</code>, <code>aws_session_*</code> and <code>aws_list_profiles</code>), so the CLI you have installed decides which services, operations and parameters are reachable. No minimum version is enforced:<ul>
+<li><strong>2.22.0+ recommended.</strong> That release added <code>--use-device-code</code>, which this server needs to keep the SSO short-code flow working. Older 2.x still works -- the server detects the version and adapts.</li>
+<li><strong>Developed and tested against 2.34.3.</strong> Anything newer than your CLI is rejected by the CLI itself before a request is sent: an unknown service or operation as an "invalid choice" (the error then says to upgrade), a new parameter as <code>Unknown parameter in input</code>. Upgrade with <code>aws update</code> (CLI 2.36.0+, for installs made with AWS's installer or install script), otherwise with <a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" target="_blank" rel="noopener noreferrer">the installer</a> or your package manager.</li>
+<li><strong>Security, as of 2026-09:</strong> CLI 2.35.3 or newer clears every published AWS CLI v2 advisory (<a href="https://github.com/aws/aws-cli/security/advisories/GHSA-747p-wmpv-9c78" target="_blank" rel="noopener noreferrer">GHSA-747p-wmpv-9c78</a>, <a href="https://github.com/aws/aws-cli/security/advisories/GHSA-wfp6-f47h-hxc3" target="_blank" rel="noopener noreferrer">CVE-2026-13769</a>, <a href="https://github.com/aws/aws-cli/security/advisories/GHSA-hqvf-45jj-mccq" target="_blank" rel="noopener noreferrer">CVE-2026-18654</a>). None of the affected paths is reachable through this server: the four commands (<code>emr ssh/socks/put/get</code>, <code>codeartifact login</code>, <code>deploy register</code>, <code>iam create-virtual-mfa-device</code>) all register no <code>--cli-input-json</code>, which is the only way <code>aws_call</code> passes parameters, and the third advisory is about the opt-in <code>cli_history</code> database, which this server never enables. You do share that CLI install with everything else on the machine, though. Worth checking <a href="https://github.com/aws/aws-cli/security/advisories" target="_blank" rel="noopener noreferrer">the advisory list</a> for newer ones: v2 ships as an installer, so a dependency scanner will never flag it.</li>
+<li>AWS CLI <strong>v1 is unsupported</strong>; it entered maintenance mode on 2026-07-15 and reaches end of support on 2027-07-15.</li>
+</ul>
+</li>
+<li>An AWS profile the CLI can already use -- see <a href="#environment" target="_blank" rel="noopener noreferrer">Environment</a> for how the profile is chosen. SSO / IAM Identity Center profiles also get the device-code re-login tools.</li>
+</ul>
+<h2>Runtime</h2>
+<p>This server runs on <a href="https://oamjs.org" target="_blank" rel="noopener noreferrer">oam.js</a> and on Node, unmodified, and
+the launcher never serves on an oam older than <strong>0.16.3</strong>, and picks the newest
+oam binary it can find at or above that floor. Verified on oam 0.16.3: full MCP
+handshake with all 28 tools, and the <code>aws_script</code> sandbox behavior described
+below.</p>
+<p><strong>oam 0.16.3 is the minimum.</strong> The launcher picks the newest oam it can find at
+or above it, never serves on an older one, and falls back to Node when there is
+none (<code>AWS_MCP_RUNTIME=oam</code> turns that into a hard error). A floor matters here:
+releases before 0.9.0 ran <code>child_process.execFile</code> arguments through a shell,
+accepted <code>exec</code>'s <code>timeout</code> and ignored it, and treated <code>stdio: 'inherit'</code> as
+<code>'pipe'</code>, and this server shells out to the <code>aws</code> CLI on essentially every tool.</p>
+<p>To run it under oam, point your MCP client's <code>command</code> at it:</p>
+<pre><code class="language-jsonc">{
+  "mcpServers": {
+    "aws": {
+      "command": "oam",
+      "args": ["run", "/path/to/aws-mcp/dist/index.js"],
+      "env": { "AWS_PROFILE": "my-sso-profile", "AWS_REGION": "us-west-2" }
+    }
+  }
+}
+</code></pre>
+<p><strong>Measure startup on your own hardware.</strong> An MCP client cold-starts this server
+once per session, so startup is the cost that actually gets paid. The numbers
+below were taken with oam 0.8.2, long before the current 0.16.3 floor, and have
+not been re-run since, so do not read them as a current ranking. To a completed
+<code>initialize</code> + <code>tools/list</code> handshake, median of 10 warmed runs:</p>
+<table>
+<thead>
+<tr>
+<th>Runtime</th>
+<th>Cold start</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>node dist/index.js</code></td>
+<td><strong>359 ms</strong></td>
+</tr>
+<tr>
+<td><code>oam run dist/index.js</code></td>
+<td>650 ms</td>
+</tr>
+<tr>
+<td><code>oam run src/index.ts</code> (no build step)</td>
+<td>947 ms</td>
+</tr>
+</tbody></table>
+<p>The published <code>aws-mcp</code> command prefers the newest oam it finds (see
+<code>AWS_MCP_RUNTIME</code> under <a href="#environment" target="_blank" rel="noopener noreferrer">Environment</a>). Without oam that costs
+almost nothing: discovery is file-existence checks only, never a subprocess, and
+the fallback runs the server inside the Node process npm already started. With
+oam installed, though, the command boots Node, runs <code>--version</code> on every oam
+binary it found to pick the newest, and only then boots oam, so it is always
+slower than pointing your client at oam directly with the config above.
+<code>AWS_MCP_RUNTIME=node</code> skips oam entirely.</p>
+<p>Two more places oam wins for this repo, both opt-in and neither touching the
+published npm package:</p>
+<ul>
+<li><strong><code>npm run check:oam</code></strong> -- type-checks via <code>oam check</code> (tsgo, TypeScript 7
+native). Measured <strong>~1.0s against ~3.8-4.7s</strong> for <code>tsc --noEmit</code>, resolving the
+same <code>tsconfig.json</code> and covering the same files -- including tests, confirmed
+by planting a type error in a test file and watching both reject it.
+<code>npx tsc --noEmit</code> remains the portable default.</li>
+<li><strong><code>npm run build:binary:oam</code></strong> -- builds the standalone binary via
+<code>oam compile</code> instead of Node SEA. Measured <strong>58.60 MB against 76.28 MB</strong>, plus
+~493 KB of embedded V8 bytecode the SEA path doesn't produce. Writes to the
+same <code>bin/&lt;platform&gt;-&lt;arch&gt;/</code> path as <code>npm run build:binary</code>, so the release
+staging script consumes either unchanged -- run one or the other, not both. If
+you redistribute that binary it embeds oam's runtime, so ship oam's <code>LICENSE</code>,
+<code>NOTICE</code> and <code>THIRD_PARTY_LICENSES.md</code> with it.</li>
+</ul>
+<p>The source stays runtime-agnostic on purpose: no <code>oam:</code> imports anywhere, and
+tests stay on <code>node:test</code>. That is what keeps the Node fallback real rather than
+nominal.</p>
+<p>One behavioral difference worth knowing if you run <code>aws_script</code> under oam: Node
+honors <code>codeGeneration: { strings: false }</code> on the <code>node:vm</code> context, so <code>eval</code>
+and <code>Function</code> throw; oam does not, so they work. Re-measured against oam 0.16.3
+and still divergent -- inside the sandbox, <code>eval('1+1')</code> returns 2 and
+<code>Function('return 7')()</code> returns 7 under oam, while both raise <code>EvalError</code> under
+Node -- so treat it as a standing difference. The containment that
+matters is unaffected -- under oam, <code>Function('return this')()</code> yields a global
+whose <code>process</code> and <code>require</code> are both <code>undefined</code>, and <code>Function('return require')</code> throws -- so a script gains nothing it couldn't already do by writing
+the same code in its body. <code>aws_script</code> was never a security boundary (see its
+description); the shadowed-globals list is the real defense, not that flag.</p>
+<p>Note that any <code>oam</code> invocation writes a bytecode cache to <code>oam/</code> in the working
+directory -- already in <code>.gitignore</code>.</p>
+<h2>Environment</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>AWS_PROFILE</code> / <code>AWS_DEFAULT_PROFILE</code></td>
+<td><code>default</code></td>
+<td>Profile used when a tool call omits <code>profile</code>. <code>AWS_DEFAULT_PROFILE</code> is the legacy spelling. <code>AWS_PROFILE</code> wins if both are set, as in AWS CLI v2 (standalone botocore and boto3 check <code>AWS_DEFAULT_PROFILE</code> first). An empty value counts as unset.</td>
+</tr>
+<tr>
+<td><code>AWS_REGION</code> / <code>AWS_DEFAULT_REGION</code></td>
+<td><code>us-east-1</code></td>
+<td>Region used when a tool call omits <code>region</code>. <code>AWS_REGION</code> wins if both are set.</td>
+</tr>
+<tr>
+<td><code>AWS_SHARED_CREDENTIALS_FILE</code></td>
+<td><code>~/.aws/credentials</code></td>
+<td>Where <code>aws_assume_role</code> writes the profile it creates. Honored (with <code>~</code> expansion, like botocore) so the write lands in the same file the CLI later reads.</td>
+</tr>
+<tr>
+<td><code>AWS_MCP_AWS_CLI</code></td>
+<td>unset</td>
+<td>Absolute path to the <code>aws</code> executable to run instead of the one found on <code>PATH</code>. For MCP hosts started from a GUI, which often inherit none of your shell's <code>PATH</code> -- and AWS's recommended installer now defaults to <code>~/.local/bin</code> on macOS and Linux, which such hosts rarely see. Find the path with <code>command -v aws</code> (macOS/Linux) or <code>where.exe aws</code> (Windows). In Git Bash on Windows use <code>where.exe aws</code>, not <code>command -v aws</code>: the latter prints a POSIX-style path (<code>/c/Program Files/...</code>) that this variable refuses, because it must be a native absolute path. It applies to every call and to <code>aws sso login</code>. Must be absolute, and on Windows must name <code>aws.exe</code>: a <code>.cmd</code> or <code>.bat</code> shim cannot be started without a shell. An unusable value fails every call with a message naming this variable, rather than quietly running a different CLI than you configured. Unset, the server walks the absolute directories on <code>PATH</code>; it never runs an <code>aws</code> from its working directory.</td>
+</tr>
+</tbody></table>
+<p>The launcher that the published <code>aws-mcp</code> command runs (<code>bin/aws-mcp.mjs</code>, which is what <code>npx @yawlabs/aws-mcp</code> starts) reads two more. They pick the runtime, not anything about AWS, and pointing your client straight at <code>dist/index.js</code> bypasses both. See <a href="#runtime" target="_blank" rel="noopener noreferrer">Runtime</a> for what running on oam changes.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>AWS_MCP_RUNTIME</code></td>
+<td><code>auto</code></td>
+<td><code>auto</code>: serve on the oam the launcher is already running under if that is 0.16.3 or newer; otherwise run on the newest oam binary it can find at 0.16.3 or newer (see <code>OAM_BIN</code>); otherwise on Node. An oam host older than 0.16.3 never serves the server itself -- it hands off to the newest usable oam, or to Node on <code>PATH</code>, or exits with an error when there is neither. An unusable <code>OAM_BIN</code> is always named on stderr; the other oam binaries that were passed over are named only when no usable oam is found. <code>oam</code>: the same, but exit with an error instead of falling back to Node. <code>node</code>: always Node -- in-process under <code>npx</code>, and handed off to Node on <code>PATH</code> when a client launches the command with <code>oam run</code>. Case-insensitive, and any other value behaves like <code>auto</code>.</td>
+</tr>
+<tr>
+<td><code>OAM_BIN</code></td>
+<td>unset</td>
+<td>Path to an oam binary to use in preference to discovery, when it is 0.16.3 or newer. If it does not exist, is older, or will not run, the launcher says so on stderr and carries on with discovery. Discovery looks in the installed location (<code>%LOCALAPPDATA%\oam\bin</code> then <code>~/.oam/bin</code> on Windows, <code>~/.oam/bin</code> elsewhere) and on <code>PATH</code>, asks every oam it finds for its version, and uses the newest; on a tie the installed copy wins. On Windows only <code>oam.exe</code> counts; an <code>oam.cmd</code> / <code>oam.bat</code> shim is never run, and is named on stderr when no usable oam is found. Ignored under <code>AWS_MCP_RUNTIME=node</code> and when already running on oam 0.16.3+.</td>
+</tr>
+</tbody></table>
+<p><strong>What the server sets on every <code>aws</code> call.</strong> Each <code>aws</code> child process gets these, overriding your shell and <code>~/.aws/config</code>, because each one changes output this server parses: <code>AWS_CLI_ERROR_FORMAT=enhanced</code> (CLI 2.34.0's <code>json</code>/<code>yaml</code>/<code>text</code>/<code>table</code> error formats remove the <code>An error occurred (Code)</code> text that <code>errorKind</code> classification reads), <code>AWS_CLI_AUTO_PROMPT=off</code> (auto-prompt wants a console and fails every call from an MCP host, <code>aws sso login</code> included), <code>AWS_CLI_OUTPUT_ENCODING=utf-8</code> and <code>PYTHONUTF8=1</code> (on Windows the CLI otherwise writes the ANSI code page and fails on any character outside it), and on Windows <code>NoDefaultCurrentDirectoryInExePath=1</code> (so the CLI's own helpers, such as <code>session-manager-plugin</code>, are never run from the working directory). These are environment variables rather than flags, so an older 2.x CLI that does not know one simply ignores it. One side effect, and it is <strong>Windows-only</strong>: on CLIs older than 2.25.0, <code>PYTHONUTF8=1</code> also makes the CLI read <code>~/.aws/config</code> and <code>~/.aws/credentials</code> as UTF-8, so a non-ASCII character saved there in a legacy Windows code page stops parsing -- re-save the file as UTF-8, or update the CLI. On macOS and Linux the pin costs nothing here, because there is no ANSI code page to switch away from: measured on linux/arm64 with aws-cli 2.36.49, a cp1252 byte in <code>~/.aws/config</code> fails to parse identically with <code>PYTHONUTF8</code> unset, <code>=0</code> and <code>=1</code>, and under <code>LC_ALL=C</code> and <code>LC_ALL=POSIX</code>, while the same character encoded as UTF-8 parses in all of them. Calls that carry <code>params</code> also pass <code>--cli-binary-format base64</code>, so blob-typed params are always base64 whatever your config says. Left to your config on purpose: retry mode and max attempts, <code>cli_timestamp_format</code> (config-only in the CLI; <code>wire</code> returns epoch numbers instead of ISO strings), <code>cli_history</code>, and endpoint, proxy and CA settings.</p>
+<p>If you authenticate via SAML (Okta / Azure AD / ADFS) or a custom <code>credential_process</code>, set <code>AWS_PROFILE</code> to that profile.</p>
+<p>Every call resolves a profile name first -- <strong>explicit tool <code>profile</code> argument -&gt; the session profile set by <code>aws_session_set</code> -&gt; <code>$AWS_PROFILE</code> -&gt; <code>$AWS_DEFAULT_PROFILE</code> -&gt; the literal <code>default</code></strong> -- and then passes it to the CLI as <code>--profile &lt;name&gt;</code>. There is no "no profile" mode, with one exception: <code>aws_multi_account</code> uses the resolved profile only for its <code>sts:AssumeRole</code> calls, and each per-account operation then runs on that account's assumed-role credentials with no <code>--profile</code> flag. Inside the chosen profile the CLI's own chain resolves as usual: <code>credential_process</code>, SSO sessions (both <code>sso_session</code> blocks and inline <code>sso_start_url</code>), role chaining via <code>source_profile</code> / <code>role_arn</code>, static keys stored in <code>~/.aws/credentials</code>, container credentials, and IMDS.</p>
+<p><strong>Exception -- static keys in your environment are not used.</strong> Because a profile is always passed explicitly, botocore drops the environment credential provider from the chain, so <code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code> / <code>AWS_SESSION_TOKEN</code> exported in your shell are never consulted. (Container credentials and IMDS are unaffected -- they sit later in the chain and are not profile-gated.) To use static keys, put them in a profile section of <code>~/.aws/credentials</code> and point <code>AWS_PROFILE</code> at it, rather than exporting them.</p>
+<h3>Behind a proxy or a private CA</h3>
+<p><code>aws_docs_search</code> and <code>aws_docs_read</code> fetch over HTTPS from this process, so they are the two tools a corporate gateway breaks. They now name the cause rather than blaming AWS's backend, and the fix is an <code>env</code> entry in your MCP config -- <strong>not</strong> an export in your shell, because both variables below are read when the process starts and your MCP client launches the server itself.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>NODE_EXTRA_CA_CERTS</code></td>
+<td>Path to the PEM file holding your gateway's CA certificate, when TLS interception makes the fetch fail with a self-signed or unknown-issuer error.</td>
+</tr>
+<tr>
+<td><code>NODE_USE_SYSTEM_CA=1</code></td>
+<td>Trust the operating system's certificate store instead of naming a file (Node 22.19+).</td>
+</tr>
+<tr>
+<td><code>HTTPS_PROXY</code> / <code>https_proxy</code></td>
+<td>The proxy to fetch through. On Node this is <strong>ignored</strong> unless you also opt in with <code>NODE_USE_ENV_PROXY=1</code> or <code>--use-env-proxy</code> (Node 22.21+, also accepted inside <code>NODE_OPTIONS</code>); a request otherwise goes direct and a proxy-only network simply times out. Running on oam, the variable is honored with no opt-in.</td>
+</tr>
+</tbody></table>
+<p>The AWS CLI is a separate process with its own rules, so a <code>credential_process</code>, an SSO login or any <code>aws_call</code> behind the same gateway follows the <a href="https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-proxy.html" target="_blank" rel="noopener noreferrer">AWS CLI's own proxy configuration</a> (<code>HTTP_PROXY</code> / <code>HTTPS_PROXY</code> and <code>AWS_CA_BUNDLE</code>) rather than the Node variables above. Those failures now carry their own remedy too.</p>
+<p>If a call omits <code>profile</code>, <code>aws_session_set</code> has not been called, neither <code>AWS_PROFILE</code> nor <code>AWS_DEFAULT_PROFILE</code> is set to a non-empty value, and neither <code>~/.aws/config</code> nor <code>~/.aws/credentials</code> defines a <code>default</code> profile, the CLI rejects <code>--profile default</code> with <code>ProfileNotFound</code>, which the tool reports as a <code>no_creds</code> error. Set <code>AWS_PROFILE</code> in your MCP config to your usual working profile.</p>
+<h2>How the SSO login flow works</h2>
+<pre><code>1. Claude calls aws_login_start({ profile: "prod" })
+2. Server spawns: aws sso login --no-browser --use-device-code --profile prod
+   (--use-device-code keeps the CLI on the device grant; without it, 2.22.0+
+    prints an authorize URL with no short code to surface)
+3. Server parses the URL + code from stdout, returns them to Claude
+4. Claude surfaces: "Open https://device.sso.us-east-1.amazonaws.com/ and enter ABCD-EFGH"
+5. You click — browser opens in your own user session — auth in ~10 seconds
+6. Claude calls aws_login_complete({ sessionId })
+7. Tool returns your new identity. Back to work.
+</code></pre>
+<p>The token is cached in <code>~/.aws/sso/cache/&lt;hash&gt;.json</code> the same way a normal <code>aws sso login</code> would, so the AWS CLI, the SDK, and every other tool on your machine pick it up transparently.</p>
+<h2>Why this server must run locally (not on mcp.hosting)</h2>
+<p>SSO tokens live in <code>~/.aws/sso/cache/</code> on <em>your</em> device. A remote MCP server can't read them. So this is a stdio server, not a hosted one. That's a constraint of AWS SSO, not a limitation of mcp.hosting.</p>
+<h2>Stability</h2>
+<p>From 1.0 onward this package follows <a href="https://semver.org/spec/v2.0.0.html" target="_blank" rel="noopener noreferrer">Semantic Versioning</a>. The 0.x line is the pre-stability tightening phase -- breaking changes are documented in <a href="https://github.com/YawLabs/aws-mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer"><code>CHANGELOG.md</code></a> but are not necessarily gated on a major bump.</p>
+<p><strong>Stable in 1.x (anything below is a breaking change requiring a major bump):</strong></p>
+<ul>
+<li><p><strong>Tool names</strong> -- the 28 tool names listed in the Tools table above will not be renamed or removed.</p>
+</li>
+<li><p><strong>Tool annotations</strong> -- <code>readOnlyHint</code>, <code>destructiveHint</code>, <code>idempotentHint</code>, <code>openWorldHint</code>. These signal to MCP hosts how to gate calls; flipping them silently would break host UIs. Note the direction of the guarantee: an annotation may be tightened (made more cautious) in a patch release when it was previously understating what a tool can do -- v2.0.1 set <code>destructiveHint: true</code> on <code>aws_call</code>, <code>aws_multi_region</code> and <code>aws_resource_update</code> for exactly that reason. It will not be <em>loosened</em> outside a major. If your host suppresses confirmation prompts based on these, treat <code>aws_call</code> and <code>aws_multi_region</code> as able to invoke any AWS API the caller's IAM identity permits, including deletes.</p>
+</li>
+<li><p><strong>Required input fields</strong> -- the required fields per tool will not change shape or be removed. New <em>optional</em> fields may be added.</p>
+</li>
+<li><p><strong>Success envelope shape per tool</strong> -- the <code>data</code> object on <code>{ok: true, data}</code> responses, specifically:</p>
+<ul>
+<li><code>aws_call</code> -&gt; <code>{command, commandArgv, result}</code></li>
+<li><code>aws_paginate</code> -&gt; <code>{command, result, nextToken, hasMore}</code></li>
+<li><code>aws_multi_region</code> -&gt; <code>{service, operation, regionCount, okCount, errorCount, results: [{region, ok, data?, command?, error?, errorKind?, truncated?}]}</code> (the aggregate response is capped; entries past the budget keep their <code>region</code>/<code>ok</code> but drop <code>data</code> and are flagged <code>truncated: true</code>. Error entries are never dropped, and <code>okCount</code>/<code>errorCount</code> are computed before capping, so they always describe what the calls did rather than what survived the cap.)</li>
+<li><code>aws_multi_account</code> -&gt; <code>{service, operation, roleName, accountCount, okCount, errorCount, results: [{accountId, ok, data?, command?, error?, errorKind?, truncated?}]}</code> plus <code>truncated</code>, <code>truncatedAccounts</code> and <code>maxTotalResultBytes</code> when the 5 MB aggregate cap fired. Mirrors <code>aws_multi_region</code> field for field with <code>accountId</code> in place of <code>region</code>, including that <code>okCount</code>/<code>errorCount</code> are computed BEFORE capping so they describe what the calls did rather than what survived. Duplicate account IDs collapse, so <code>results.length</code> may be under <code>accounts.length</code>; use <code>accountCount</code>. Credentials are never written to <code>~/.aws/credentials</code> and never appear in <code>command</code>, <code>error</code> or <code>rawBody</code>.</li>
+<li><code>aws_whoami</code> -&gt; <code>{account, userId, arn, profile, region, ssoToken: {expiresAt, minutesLeft, startUrl?} | null}</code> (<code>startUrl</code> is omitted when the cached token didn't record one)</li>
+<li><code>aws_login_start</code> -&gt; <code>{sessionId, profile, verificationUrl, userCode, instructions, reused?}</code> (<code>reused: true</code> when re-surfacing an in-flight login for the same profile)</li>
+<li><code>aws_login_complete</code> -&gt; <code>{loggedIn, account, userId, arn, profile, region, ssoToken}</code> (same <code>ssoToken</code> shape as <code>aws_whoami</code>, including the optional <code>startUrl</code>)</li>
+<li><code>aws_refresh_if_expiring_soon</code> -&gt; <strong>one of two shapes by branch:</strong> <code>{status: "ok", minutesLeft, expiresAt, profile}</code> when the cached token has more than <code>thresholdMinutes</code> left, or <code>{status: "refreshing", reason, sessionId, profile, verificationUrl, userCode, reused?, instructions}</code> when a refresh is in flight. Discriminate on <code>status</code>.</li>
+<li><code>aws_assume_role</code> -&gt; <code>{profile, credentialsPath, expiration, assumedRoleArn, assumedRoleId, sourceProfile, hint, warning?}</code> (<code>warning</code> is present only when the target profile already existed and its three credential keys were overwritten in place; <code>credentialsPath</code> follows <code>AWS_SHARED_CREDENTIALS_FILE</code> when that is set)</li>
+<li><code>aws_list_profiles</code> -&gt; <code>{configPath, profiles: [{name, region?, ssoStartUrl?, ssoRegion?, ssoSession?, isSso}]}</code></li>
+<li><code>aws_session_get</code> / <code>aws_session_set</code> / <code>aws_session_clear</code> -&gt; <code>{profile, region, profileSource, regionSource}</code> where <code>*Source</code> is <code>"session" | "env" | "default"</code>. All three return the same shape (set/clear return the post-mutation state).</li>
+<li><code>aws_resource_get</code> -&gt; <code>{command, typeName, identifier, properties, propertiesRaw?}</code></li>
+<li><code>aws_resource_list</code> -&gt; <code>{command, typeName, resources: [{identifier, properties, propertiesRaw?}], nextToken, hasMore}</code> (<code>propertiesRaw</code> rides along on an entry whose <code>Properties</code> string didn't parse, matching <code>aws_resource_get</code>)</li>
+<li><code>aws_resource_create</code> / <code>_update</code> / <code>_delete</code> / <code>_status</code> -&gt; flat-promoted <code>{command, requestToken, operationStatus, identifier, errorCode, statusMessage, retryAfter, progressEvent}</code> plus an <code>awaited: {attempts, elapsedMs}</code> block when <code>awaitCompletion: true</code> was passed, or an <code>awaitSkipped</code> string when <code>awaitCompletion: true</code> was passed but no request token came back to poll on</li>
+<li><code>aws_resource_diff</code> -&gt; <code>{command, typeName, identifier, before, after, changes, changeCount}</code></li>
+<li><code>aws_logs_tail</code> -&gt; <code>{command, logGroupName, logGroupIdentifier, since, eventCount, totalEvents, truncated, events}</code>. Each event is <code>{timestamp, logStreamName, message}</code>: <code>timestamp</code> is ISO 8601 UTC with milliseconds and <code>message</code> is the event text verbatim; any of the three is <code>null</code> on an event that arrived without that member, which is kept rather than dropped so <code>eventCount</code> matches what the service returned (real CloudWatch sends all three; an endpoint that diverges may not). <code>events</code> is oldest-first and capped at <code>maxEvents</code> (default 500), keeping the NEWEST; <code>eventCount</code> is how many are in <code>events</code>, and <code>truncated</code> is true exactly when the window held more. <code>totalEvents</code> is how many events the window held when the tool read all of it, and <code>null</code> when it stopped early: on AWS CLI 2.35.8+ the read goes newest-first and stops once it has more than <code>maxEvents</code>, so a truncated result there has <code>totalEvents: null</code>, while an older CLI -- or an endpoint that ignores FilterLogEvents' <code>startFromHead</code> -- reads the whole window and reports the exact count. <code>logGroupName</code> is always the bare group name; <code>logGroupIdentifier</code> is the ARN sent to FilterLogEvents (trailing <code>:*</code> removed) when the input was an ARN, otherwise <code>null</code>.</li>
+<li><code>aws_logs_query</code> -&gt; <code>{command, startCommand, profile, region, queryId, status, queryLanguage, logGroupNames, startTime, endTime, fields, rows, rowCount, statistics, truncated, polled: {attempts, elapsedMs}}</code>. <code>status</code> is always <code>"Complete"</code> on the <code>ok: true</code> arm -- every other terminal status (<code>Failed</code>, <code>Cancelled</code>, <code>Timeout</code>, an unrecognized one, or a missing one) returns <code>ok: false</code>, as do a <code>maxWaitMs</code> timeout and a client cancellation, both of which carry the <code>queryId</code> in the error string because the error envelope has no <code>data</code>. <code>command</code> is the last <code>get-query-results</code> call, <code>startCommand</code> the <code>start-query</code> call (its <code>--cli-input-json</code> payload is redacted, so the query text does not echo back). <code>rows</code> are the API's <code>[{field, value}]</code> pairs flattened to plain objects with <code>null</code> for a non-string value; <code>fields</code> is the union of field names in first-seen order; <code>logGroupNames</code> are the RESOLVED bare names actually queried (an ARN input echoes its extracted name). <code>queryLanguage</code> and <code>statistics</code> are <code>null</code> when the response omits them. <code>truncated</code> is true when <code>rowCount</code> reached the effective <code>limit</code>. The query is never stopped AWS-side by this tool on any path.</li>
+<li><code>aws_metrics_query</code> -&gt; <code>{command, profile, region, startTime, endTime, periodSeconds, series: [{id, label?, timestamps, values, period?, statusCode?}], nextToken, hasMore, messages?: [{code?, value?}]}</code> (<code>messages</code> is omitted when empty; per-series <code>label</code> / <code>period</code> / <code>statusCode</code> are present when CloudWatch returns them or the query specifies/inherits a period; <code>nextToken</code> is null and <code>hasMore</code> false unless CloudWatch truncated the response)</li>
+<li><code>aws_iam_simulate</code> -&gt; <code>{command, principalArn, summary: {allowed, denied, unknown, total}, results, marker, hasMore}</code> (<code>results</code> has one entry per (action, resource) pair, read from IAM's per-resource <code>ResourceSpecificResults</code>. A call without <code>resources</code> gets one entry per action with <code>resource: "*"</code>; an action AWS does not break down per resource gets a single entry carrying AWS's own <code>EvalResourceName</code> (<code>*</code> or the action's ARN template). <code>summary</code> counts entries. <code>organizationsDecision</code> and <code>permissionsBoundaryDecision</code> fall back to AWS's action-level value when it gives no per-resource one, except that an <code>allowed</code> entry always reads <code>"allowed"</code>. <code>unknown</code> counts entries whose decision was missing or unrecognized, so a malformed response can't be silently folded into <code>denied</code>. The CLI follows IAM's pagination itself, so a first call is complete -- <code>hasMore: false</code>, <code>marker: null</code>; the two carry a cursor only on a call that resumed from <code>marker</code>, and <code>summary</code> then describes only that page.)</li>
+<li><code>aws_lambda_invoke</code> -&gt; <code>{command, statusCode, functionError, executedVersion, payload, logTail}</code>, plus <code>payloadTruncated: true</code> only when the response body was clipped (absent otherwise, so the field reads as an exception flag rather than a size report). <code>logTail</code> is the function's <code>LogResult</code> already base64-DECODED. A non-empty <code>functionError</code> is still <code>ok: true</code>: the invocation succeeded and the function's handler threw, with the thrown error in <code>payload</code> -- an invocation failure (bad function name, no permission, throttling, timeout) is the <code>ok: false</code> case. The invoke is never sent more than once; <code>errorKind: "timeout"</code> means no answer arrived in time, and its message says whether the invoke was sent (if it was, the function may have run and may still be running).</li>
+<li><code>aws_script</code> -&gt; <code>{result, logs, truncatedLogs, durationMs}</code> where <code>result</code> is whatever the script <code>return</code>ed (any JSON-serializable value, including <code>undefined</code>)</li>
+<li><code>aws_docs_search</code> -&gt; <code>{query, count, results: [{title, url, summary?, excerpt?, lexicalMatch}], queryTerms, termsMatchedNowhere?, bestLexicalOverlap, lowRelevance, relevanceNote?}</code> (<code>summary</code> / <code>excerpt</code> are present only when the upstream search backend returns them. The relevance fields, shipped since 2.1.0, are computed locally by this server: literal word overlap between the query's terms and a result's title/summary/excerpt, NOT a backend score and NOT semantic ranking -- results are annotated, never re-ordered. Per result, <code>lexicalMatch</code> is <code>{overlap, matchedTerms, unmatchedTerms}</code>, or <code>null</code> for a query with no scorable terms -- the same case where <code>bestLexicalOverlap</code> is <code>null</code> and <code>termsMatchedNowhere</code> is omitted. <code>lowRelevance</code> is true when the best result matched at or under half the query terms, when any term appears in no result at all, or when the backend returned nothing. <code>relevanceNote</code> is the prose explanation -- of a <code>lowRelevance</code> verdict, or of the no-scorable-terms case -- and is absent when there is nothing to explain.)</li>
+<li><code>aws_docs_read</code> -&gt; <code>{url, cached, content, startIndex, endIndex, totalLength, hasMore, nextStartIndex}</code></li>
+</ul>
+</li>
+<li><p><strong>Error envelope</strong> -- <code>{ok: false, error: string, rawBody?: string, errorKind?: string, suggestion?: string}</code>. The <code>error</code> string is human-readable; its <em>wording</em> is best-effort (see below), and <code>errorKind</code> is the stable machine-readable part -- see the enum below. <code>suggestion</code> carries the one-line remedy for a recognized AWS error code; it is also embedded at the end of <code>error</code>, so it is a convenience for programmatic callers rather than extra information. On the wire an error result is a single text block, and <code>errorKind</code> rides on its own first line: <code>errorKind: &lt;kind&gt;</code> followed by a newline, then <code>Error: &lt;message&gt;</code>, then a blank line and <code>rawBody</code> when one is present and the message does not already quote it. A failure with no classification omits that line entirely and starts at <code>Error:</code> exactly as before.</p>
+</li>
+<li><p><strong><code>errorKind</code> enum</strong> -- <code>"sso_expired" | "expired_creds" | "no_creds" | "invalid_creds" | "bad_input" | "spawn_failure" | "timeout" | "output_too_large" | "malformed_json" | "nonzero_exit" | "unexpected" | "cancelled"</code>. It appears on two distinct surfaces, with different rules.</p>
+<p><strong>On the top-level error envelope</strong>, for every tool that wraps an <code>aws</code> CLI call -- <code>aws_call</code>, <code>aws_paginate</code>, <code>aws_logs_tail</code>, <code>aws_logs_query</code>, <code>aws_metrics_query</code>, <code>aws_iam_simulate</code>, <code>aws_lambda_invoke</code>, <code>aws_assume_role</code>, <code>aws_whoami</code>, <code>aws_login_complete</code>, the <code>aws_resource_*</code> family. There it is ABSENT, never defaulted, when the failure did not reach the CLI: a tool's own input validation, an <code>aws_docs_*</code> HTTP failure, a client-cancelled poll. Treat a missing <code>errorKind</code> as "unclassified", not as <code>nonzero_exit</code>.</p>
+<p><strong>On each entry of a fan-out tool's <code>results</code> array</strong> -- <code>aws_multi_region</code> and <code>aws_multi_account</code>. A per-entry <code>errorKind</code> is always present on a failed entry, including for failures that never reached the CLI: both tools classify an entry they rejected themselves (a malformed region name, an account ID that is not 12 digits) as <code>bad_input</code>, and an entry whose worker threw as <code>unexpected</code>. <code>unexpected</code> is fan-out-only -- it cannot appear on a top-level envelope, and so is <code>cancelled</code>, which marks an entry that was NEVER ATTEMPTED because the client cancelled the request before a worker claimed it. Nothing was sent to AWS for a <code>cancelled</code> entry; entries that had already run keep their real results, and the array still covers the full requested set so <code>okCount</code>/<code>errorCount</code> cannot mistake a cancelled sweep for a smaller successful one.</p>
+<p>New variants may be added (additive); existing ones won't be renamed or repurposed. The three credential kinds are deliberately distinct, because the remedy differs: <code>no_creds</code> means none were found, <code>invalid_creds</code> means credentials resolved and AWS rejected them (typical after a key rotation), and <code>expired_creds</code> means a temporary session expired. <code>expired_creds</code> is origin-agnostic -- AWS emits the same <code>ExpiredToken</code> wrapper for an SSO-derived session, an <code>aws_assume_role</code> session, and a web-identity one -- so its message names both remedies rather than assuming SSO; <code>sso_expired</code> is reserved for errors that name botocore's SSO token provider specifically. <code>malformed_json</code> means stdout opened with <code>{</code> or <code>[</code> and failed to parse, i.e. a truncated response rather than the scalar output a <code>--query</code> can legitimately produce.</p>
+</li>
+</ul>
+<p><strong>Best-effort (may change in a minor or patch):</strong></p>
+<ul>
+<li><p><strong>Error message wording.</strong> Strings like "SSO session expired for profile 'X'. Call aws_login_start..." may be retuned for clarity. Anchor on <code>errorKind</code> or the structured envelope, not on regex-matching <code>error</code> text.</p>
+</li>
+<li><p><strong><code>suggestion</code> wording</strong> -- the one-line remedy derived from a recognized AWS error code. Whether a suggestion is present tracks the error code, but the sentence itself may be retuned; branch on <code>errorKind</code>, not on this text. It is duplicated at the end of <code>error</code>, so a caller reading both must not print it twice.</p>
+</li>
+<li><p><strong><code>rawBody</code></strong> content -- raw stderr/stdout from the underlying <code>aws</code> CLI for diagnostic purposes. Format follows whatever the CLI emits in your installed version.</p>
+</li>
+<li><p><strong><code>command</code></strong> strings -- the human-readable command shown alongside results. Argv ordering and the exact redaction-stub format (<code>&lt;redacted len=N&gt;</code>) may shift. It is quoted for the shell of the host the server runs on: a POSIX shell, or PowerShell on Windows. It is <strong>not</strong> correct in <code>cmd.exe</code>, where <code>&amp;</code>, <code>|</code> and a newline are live whatever the quoting, nor in Git Bash on Windows, where a value containing a single quote loses its quotes and arrives wrong (<code>Buckets[?Name=='prod'].Name</code> is the realistic case; it becomes invalid JMESPath rather than anything that runs).</p>
+<p><strong>Use <code>commandArgv</code> instead of parsing <code>command</code>.</strong> Every envelope that carries <code>command</code> also carries <code>commandArgv</code>: the same call as an array of exact, unquoted tokens -- entry 0 the binary as displayed, then one entry per argument -- redacted identically, because the string is rendered <em>from</em> the array. It is what the server actually spawns (no shell is involved at any point), so there is nothing to unpick and nothing that can be re-interpreted by a shell you did not expect. Re-quote it for your own shell if you need to run it; the string form is a convenience for reading, and the array is the contract.</p>
+</li>
+<li><p><strong>Tool <em>descriptions</em></strong> -- the prose surfaced to the model. Tightening these is non-breaking.</p>
+</li>
+</ul>
+<p><strong>Deprecation policy:</strong> breaking a stable shape requires a major bump. A deprecation lands first in a minor (the old shape continues to work and the new shape becomes available alongside it), with a removal scheduled for the next major. Both the deprecation and the removal show up in <code>CHANGELOG.md</code>.</p>
+<h2>Development</h2>
+<p><code>npm test</code> runs both unit tests and integration tests. The integration suites
+spawn a local <code>fake-aws</code> subprocess that stubs the AWS CLI -- no AWS credentials
+or network access required. Suites named <code>*.realcli.test.ts</code> check the fake
+against the real thing: they drive the AWS CLI v2 on your <code>PATH</code> against an
+in-process endpoint on 127.0.0.1, with throwaway keys and every other address
+routed to a dead proxy, so nothing leaves the machine. The ones that need only a
+few CLI starts run on every <code>npm test</code> and skip themselves when no CLI v2 is
+installed; the ones that wait out real timeouts and retries also need
+<code>AWS_MCP_REAL_CLI_TESTS=1</code>, which <code>release.sh</code> sets. The only tests that need
+real AWS credentials are the live tests gated behind the <code>AWS_MCP_LIVE_TESTS</code>
+environment variable, which are skipped in a standard <code>npm test</code> run.</p>
+<h2>License</h2>
+<p>MIT</p>
+<p><a href="https://x.com/YawLabs" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/follow-%40YawLabs-000000?logo=x&amp;logoColor=white" alt="Follow @YawLabs on X" /></a></p>

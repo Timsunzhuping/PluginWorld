@@ -1,0 +1,249 @@
+<h1>claude-code-guardrails</h1>
+<p><a href="https://github.com/tillmeier/claude-code-guardrails/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/tillmeier/claude-code-guardrails/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://github.com/tillmeier/claude-code-guardrails/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a></p>
+<p>Hooks, commands and an output style I use with <a href="https://code.claude.com" target="_blank" rel="noopener noreferrer">Claude Code</a>, extracted
+from my private config.</p>
+<ul>
+<li><strong>Hooks</strong> — run outside the model's judgment: block bulk <code>git add</code> / <code>git commit -a</code> and
+WHERE-less SQL before the Bash call executes, record the session-start commit, snapshot work
+state before context compaction, run the project's own formatter after edits.</li>
+<li><strong>Commands</strong> — a delivery loop (<code>/plan</code> → <code>/implement</code> → <code>/verify</code> → <code>/critical-review</code> →
+<code>/crosscheck</code>) and doc-maintenance commands (<code>/save-learnings-to-docs</code>, <code>/cleanup-docs</code>,
+<code>/refactor-claude-md</code>, <code>/init-local-md</code>).</li>
+<li><strong>Reviewer backend</strong> — <code>/critical-review</code> runs an independent, read-only reviewer on the diff
+(Codex CLI, Claude Code CLI, or your own command) through one adapter script, and never shows it
+the task brief.</li>
+<li><strong>Output style</strong> — <code>terse.md</code>: result first, no padding.</li>
+<li><strong>Fleet sync</strong> — push commands/skills/styles to your servers over SSH, audit drift with <code>--check</code>.</li>
+</ul>
+<h2>Install</h2>
+<p>As a plugin (Claude Code ≥ 2.1):</p>
+<pre><code>/plugin marketplace add tillmeier/claude-code-guardrails
+/plugin install guardrails@tillmeier
+</code></pre>
+<p>Restart Claude Code. Hooks are active immediately; commands are namespaced
+(<code>/guardrails:plan</code>, <code>/guardrails:verify</code>, <code>/guardrails:critical-review</code>, …); the output style is
+selectable with <code>/output-style Terse</code>.</p>
+<p>By hand (bare <code>/plan</code>, <code>/verify</code>, … and control over which hooks run):</p>
+<pre><code class="language-bash">git clone https://github.com/tillmeier/claude-code-guardrails ~/claude-code-guardrails
+cp ~/claude-code-guardrails/commands/*.md      ~/.claude/commands/
+cp ~/claude-code-guardrails/output-styles/*.md ~/.claude/output-styles/
+</code></pre>
+<p>then wire the hooks you want into <code>~/.claude/settings.json</code>. <code>/critical-review</code> looks for its backend
+script at <code>~/claude-code-guardrails/scripts/review-backend.sh</code>; for a checkout elsewhere, export
+<code>REVIEW_BACKEND=&lt;checkout&gt;/scripts/review-backend.sh</code>. Wire the hooks:</p>
+<pre><code class="language-json">"hooks": {
+  "SessionStart": [{"hooks": [{"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/session-start.sh\""}]}],
+  "PreToolUse": [{"matcher": "Bash", "hooks": [
+    {"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/sql-guard.sh\"", "timeout": 10},
+    {"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/git-staging-guard.sh\"", "timeout": 10}
+  ]}],
+  "PostToolUse": [{"matcher": "Edit|Write|MultiEdit", "hooks": [{"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/format-file.sh\""}]}],
+  "PreCompact": [{"hooks": [{"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/precompact-handoff.sh\""}]}]
+}
+</code></pre>
+<p>Requirements: bash ≥ 3.2, git, python3. <code>/critical-review</code> needs one reviewer: the
+<a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer">Codex CLI</a> (logged in), the Claude Code CLI, or a command of your
+own (see <a href="#reviewer-backend" target="_blank" rel="noopener noreferrer">Reviewer backend</a>). Tests need
+<a href="https://github.com/bats-core/bats-core" target="_blank" rel="noopener noreferrer">bats-core</a>; the fleet sync needs ssh + rsync.</p>
+<h2>Hooks</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Fires on</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>git-staging-guard.sh</code></td>
+<td>PreToolUse (Bash)</td>
+<td>Denies <code>git add -A/--all/./:/</code> without a <code>--</code> pathspec and <code>git commit -a/-am/--all</code> — incl. <code>git -C</code> forms, command chains, <code>(…)</code>, <code>$(…)</code>, <code>{ …; }</code></td>
+</tr>
+<tr>
+<td><code>sql-guard.sh</code></td>
+<td>PreToolUse (Bash)</td>
+<td>Denies <code>DROP TABLE/DATABASE</code>, <code>TRUNCATE TABLE</code>, <code>DELETE FROM t</code> with no WHERE, on any line of the command</td>
+</tr>
+<tr>
+<td><code>session-start.sh</code></td>
+<td>SessionStart</td>
+<td>Writes HEAD, the list of already-dirty files and a blob of each one's content to per-session marker files, so <code>/verify</code> and <code>/critical-review</code> can scope to what this session changed. Write-once per session id: the re-fire after a compaction or resume keeps the original baseline</td>
+</tr>
+<tr>
+<td><code>precompact-handoff.sh</code></td>
+<td>PreCompact</td>
+<td>Appends branch, last commits, dirty files and the newest plan file to <code>~/.claude/handoffs/&lt;session&gt;.md</code> (override dir with <code>CLAUDE_HANDOFF_DIR</code>); GC after 14 days</td>
+</tr>
+<tr>
+<td><code>format-file.sh</code></td>
+<td>PostToolUse (Edit|Write|MultiEdit)</td>
+<td>Runs the nearest Biome/Prettier config (walking up to the git root), else black/ruff/isort/php-cs-fixer if installed, else nothing. Disable with <code>CLAUDE_NO_FORMAT=1</code></td>
+</tr>
+</tbody></table>
+<p>A blocked call exits 2; the tool call never runs and the model gets the stderr as the reason:</p>
+<pre><code class="language-text">$ git add -A &amp;&amp; git commit -F -
+BLOCKED by git-staging-guard: bare `git add` sweep (-A / --all / . / :/) with no explicit `--` pathspec
+
+  offending segment: git add -A
+
+Stage explicitly instead — name the files:
+  git add &lt;path&gt; [&lt;path&gt;...]
+  git diff --cached --name-only     # then read the index back before committing
+[...]
+
+$ git add hooks/git-staging-guard.sh tests/guard.bats
+$ git commit -m "guard: judge commit flags per token"
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li>Only exit 2 blocks a tool call; exit 1 is a non-blocking notice and the call proceeds. The
+tests assert exit codes, not just messages.</li>
+<li>The two Bash guards gate on a pure-bash prefilter and only parse JSON when the payload could
+match, so they cost ~milliseconds on unrelated calls. Numbers in
+<a href="https://github.com/tillmeier/claude-code-guardrails/blob/HEAD/docs/git-staging-safety.md" target="_blank" rel="noopener noreferrer">docs/git-staging-safety.md</a>.</li>
+<li>They are habit guards, not sandboxes: they inspect text, and an unusual spelling can evade
+them. A payload that merely <em>mentions</em> a guarded command (docs, commit messages) passes — and
+if it trips the guard anyway, write it with Edit/Write instead of Bash.</li>
+</ul>
+<h2>Commands</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/plan</code></td>
+<td>Short cited spec + verification plan before code; approval gate. <code>--codex</code> adds an external plan review (needs the optional <a href="https://github.com/openai/codex-plugin-cc" target="_blank" rel="noopener noreferrer">Codex plugin</a>, says so and continues without it)</td>
+</tr>
+<tr>
+<td><code>/implement</code></td>
+<td>Executes an agreed plan in small steps, verifies each, asks instead of guessing, halts on surprises</td>
+</tr>
+<tr>
+<td><code>/verify</code></td>
+<td>Ship gate: drives the changed flow for real and emits PASS/FAIL/SKIP with evidence. <code>--ui</code> iterates over screenshots per breakpoint (needs a browser MCP, degrades without)</td>
+</tr>
+<tr>
+<td><code>/critical-review</code></td>
+<td>Exit gate: an independent reviewer sees this session's diff (not the brief), you judge each finding against the code, approve the fixes once in plan mode. <code>--review-only</code> for findings in chat, <code>--adversarial</code> for the deeper prompt-mode pass, <code>--base</code>/<code>--since</code>/<code>--feature</code>/<code>--final</code> for wider scopes. Stops with a clear message when no reviewer is available — it never reviews its own work instead</td>
+</tr>
+<tr>
+<td><code>/crosscheck</code></td>
+<td>Read-only audit of recent unverified work: locate the evidence, verify before asserting, "ran" ≠ "worked"</td>
+</tr>
+<tr>
+<td><code>/save-learnings-to-docs</code></td>
+<td>Routes session learnings to the cheapest doc tier (hook → path-scoped rule → doc → skill → local → memory → CLAUDE.md last) and reconciles related docs</td>
+</tr>
+<tr>
+<td><code>/cleanup-docs</code></td>
+<td>Doc audit: measure → verify → cut; token-greps every fact before removing text; reports in bytes</td>
+</tr>
+<tr>
+<td><code>/refactor-claude-md</code></td>
+<td>Restructures CLAUDE.md into a lean core + on-demand tiers, no <code>@</code>-imports</td>
+</tr>
+<tr>
+<td><code>/init-local-md</code></td>
+<td>Generates a gitignored <code>.claude/local.md</code> from detected environment</td>
+</tr>
+</tbody></table>
+<p>The loop in practice: <code>docs/workflow-recipes.md</code>. Plan files land in <code>.claude/plans/</code>,
+gitignore them if you don't want them tracked.</p>
+<h2>Reviewer backend</h2>
+<p><code>scripts/review-backend.sh</code> is the only vendor-specific piece behind <code>/critical-review</code>. It picks a
+reviewer, assembles the review input from git (the diff; for the working tree also untracked file
+bodies), runs the reviewer read-only and prints the review — plus one stderr line saying which
+backend, model and mode actually ran.</p>
+<table>
+<thead>
+<tr>
+<th><code>REVIEWER=</code></th>
+<th>Runs</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>codex</code></td>
+<td><code>codex exec review</code> (Codex's built-in reviewer), or <code>codex exec --sandbox read-only</code> with the adversarial prompt when there is focus text / <code>--adversarial</code></td>
+<td>needs <code>codex login</code>; stdin is closed so nothing can hang</td>
+</tr>
+<tr>
+<td><code>claude</code></td>
+<td><code>claude -p --restricted</code> with only <code>Read</code>/<code>Grep</code>/<code>Glob</code>, every write and shell tool disallowed, your settings/hooks/plugins not loaded, permission prompts denied, no session persisted, structured JSON output</td>
+<td>prompt mode only</td>
+</tr>
+<tr>
+<td><code>custom</code></td>
+<td><code>REVIEW_CUSTOM_CMD</code> via <code>bash -c</code>, prompt on stdin, review on stdout</td>
+<td>any other vendor, or a wrapper of your own</td>
+</tr>
+</tbody></table>
+<p>Untracked symlinks are listed but never followed, so a link to a file outside the repository cannot
+ship that file to the reviewer. Unset, it auto-detects in that order (custom command configured →
+codex logged in → claude) and
+refuses with exit 3 and the list of what it checked when nothing is usable. A backend you name
+explicitly but that is unavailable is also exit 3 — never a silent substitute. Models are pinned in
+<code>review-backend.conf</code> (copy <code>scripts/review-backend.conf.example</code> to <code>~/.claude/review-backend.conf</code>;
+the real file is gitignored): a vendor default can be deprecated or unavailable on your account
+without warning. The codex reasoning effort is pinned the same way (<code>CODEX_REVIEW_EFFORT</code>, default
+<code>high</code>): the built-in reviewer takes no effort flag and the flagship's own default is low.
+Prompt-mode output follows <code>scripts/review-findings.schema.json</code>.</p>
+<p>The reviewer is deliberately given no way to receive the task brief: framing a change as intended or
+bug-free collapses a reviewer's true-positive rate (arXiv 2603.18740). <code>/critical-review</code> writes the
+brief for itself and applies it only after the review, behind a mandatory re-read of the source.</p>
+<p>One honest caveat: a Claude reviewer of Claude-written code is a <strong>fresh context, not an
+independent model</strong>. It catches what the author-context missed, but shares the model's blind spots.
+Codex or another vendor is the real second opinion; <code>claude</code> is the fallback when that is not
+installed.</p>
+<pre><code class="language-bash">bash scripts/review-backend.sh --detect                     # which reviewer would run
+bash scripts/review-backend.sh --base HEAD~3                # review the last three commits
+bash scripts/review-backend.sh --scope working-tree --focus "error handling in the retry path"
+bash scripts/review-backend.sh --print-prompt --base main   # show the prompt-mode input, run nothing
+</code></pre>
+<h2>Fleet sync</h2>
+<p><code>scripts/sync-commands.sh</code> pushes selected commands, skills, scripts and output styles to a list
+of servers over SSH/rsync and can activate an output style remotely. Hosts and file lists live in
+<code>sync-commands.conf</code> (gitignored — copy <code>sync-commands.conf.example</code>). <code>--check</code> compares every
+configured file against each server (POSIX cksum) and reports MISSING / DRIFT / unmanaged files,
+exit 2 on findings; <code>--dry-run</code> shows what would transfer.</p>
+<h2>Tests</h2>
+<pre><code class="language-bash">bats tests/        # 58 tests: guard patterns, SQL guard, formatter, session marker, handoff, reviewer backend, wiring
+</code></pre>
+<p>CI runs the same suite on ubuntu; macOS bash 3.2 is the primary target. The backend tests run
+against fake <code>codex</code>/<code>claude</code> executables that record their arguments — no model is ever called.</p>
+<h2>Background</h2>
+<p>The git guard exists because a chained <code>git add -A &amp;&amp; … &amp;&amp; git commit</code> once swept a parallel
+session's work into a commit. The incident, the approaches that were tried and rejected, and the
+measured hook costs are in <a href="https://github.com/tillmeier/claude-code-guardrails/blob/HEAD/docs/git-staging-safety.md" target="_blank" rel="noopener noreferrer">docs/git-staging-safety.md</a>. Why the
+reviewer never sees the brief, why <code>--restricted</code> and not <code>--bare</code>, measured review times, and what
+the reviewers found in this port are in <a href="https://github.com/tillmeier/claude-code-guardrails/blob/HEAD/docs/review-backend.md" target="_blank" rel="noopener noreferrer">docs/review-backend.md</a>.</p>
+<h2>Not included</h2>
+<ul>
+<li>My commit/push command (couples to private tooling; the staging discipline it implements is in
+the doc above).</li>
+<li>20 SEO skills and 12 agents that sit next to these files in my config — they are
+<a href="https://github.com/AgriciDaniel/claude-seo" target="_blank" rel="noopener noreferrer">AgriciDaniel's claude-seo</a> (MIT), not mine.</li>
+<li>Anything client-specific. Scrubbed by grep before every commit.</li>
+</ul>
+<h2>Differences from my private copy</h2>
+<ul>
+<li>Absolute paths → <code>${CLAUDE_PLUGIN_ROOT}</code> / <code>$HOME</code>.</li>
+<li><code>git-staging-guard.sh</code> judges <code>git commit</code> flags per token, so <code>--all</code> and <code>-a --amend</code> are
+caught too (the private copy missed both).</li>
+<li><code>sql-guard.sh</code> was a <code>jq | read</code> one-liner in settings.json that only saw the first line of a
+command; it now checks every line and has the same prefilter as the git guard.</li>
+<li><code>session-start.sh</code> keys the marker file by session id (<code>${CLAUDE_SESSION_ID}</code>) instead of an
+undocumented env-file export, and adds the dirty-file / blob snapshot.</li>
+<li><code>critical-review.md</code> calls <code>scripts/review-backend.sh</code> instead of the Codex plugin's companion
+script (my copy is pinned to Codex), logs with python3 instead of node, and stops instead of
+reviewing its own diff when no reviewer is available.</li>
+<li><code>format-file.sh</code> reads the file path from the hook JSON itself, no <code>jq</code> wrapper needed.</li>
+<li><code>sync-commands.sh</code> config moved to <code>sync-commands.conf</code>; <code>--help</code> works without one; empty
+<code>SERVERS</code> is an error, not a silent no-op.</li>
+</ul>
+<h2>License</h2>
+<p>MIT — see <code>LICENSE</code>.</p>

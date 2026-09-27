@@ -1,0 +1,131 @@
+<h1>@mcp-z/server</h1>
+<p>Shared utilities and server orchestration for building MCP (Model Context Protocol) servers</p>
+<h2>Common uses</h2>
+<ul>
+<li>Parse transport config for stdio or HTTP</li>
+<li>Wire MCP servers to stdio or Express HTTP</li>
+<li>Compose auth/logging middleware</li>
+<li>Serve generated files (PDFs, CSVs)</li>
+<li>Build field/pagination/shape schemas</li>
+</ul>
+<h2>Install</h2>
+<pre><code class="language-bash">npm install @mcp-z/server @modelcontextprotocol/server express
+</code></pre>
+<p>The example imports the MCP SDK and Express directly, so they are explicit application dependencies.</p>
+<h2>Quick start</h2>
+<pre><code class="language-ts">import express from 'express';
+import { McpServer } from '@modelcontextprotocol/server';
+import { parseConfig, connectStdio, connectHttp } from '@mcp-z/server';
+
+const config = parseConfig(process.argv.slice(2), process.env);
+const writeLog = (...args: unknown[]) =&gt; console.error(...args);
+const logger = { debug: writeLog, info: writeLog, warn: writeLog, error: writeLog };
+const buildServer = () =&gt; {
+  const server = new McpServer({ name: 'my-server', version: '1.0.0' });
+  server.registerTool('hello', { description: 'Return a greeting' }, async () =&gt; ({
+    content: [{ type: 'text', text: 'Hello from my server' }]
+  }));
+  return server;
+};
+
+if (config.transport.type === 'stdio') {
+  await connectStdio(buildServer, { logger });
+} else {
+  const app = express();
+  await connectHttp(buildServer, { logger, app, port: config.transport.port });
+}
+</code></pre>
+<p>Keep logs on stderr. Writing logs to stdout corrupts the stdio protocol stream.</p>
+<h2>Protocol versions</h2>
+<p><code>connectHttp</code> and <code>connectStdio</code> serve both the 2025 and 2026-07-28 MCP protocol revisions from
+the same server definitions, on the same HTTP endpoint and the same stdio connection. A legacy
+2025 client keeps working unchanged; support for it is not being dropped.</p>
+<p><strong>Serving both revisions requires a factory, not an <code>McpServer</code> instance.</strong> The 2026-07-28
+revision is stateless. A client speaking it sends no <code>initialize</code> handshake, and the SDK caches
+the negotiated revision on the <code>McpServer</code> instance. Its own documentation puts it plainly: once a
+version is negotiated, <em>"a negotiated session never re-routes a method onto the other era."</em> So a
+single shared instance pins itself to whichever revision reaches it first and answers the other
+with <code>-32601 Method not found</code>. A factory hands every request (HTTP) or connection (stdio) a
+fresh, un-negotiated instance, so each one negotiates for itself:</p>
+<pre><code class="language-ts">const buildServer = () =&gt; {
+  const mcpServer = new McpServer({ name: 'my-server', version: '1.0.0' });
+  // register tools/resources/prompts on mcpServer
+  return mcpServer;
+};
+
+await connectStdio(buildServer, { logger });
+// or
+await connectHttp(buildServer, { logger, app, port: config.transport.port });
+</code></pre>
+<p>Passing a ready-made <code>McpServer</code> instance is still accepted and still compiles, but it is correct only
+for a server that will speak <strong>one</strong> revision.
+If both eras must work, pass a factory. A factory serves 2025-era clients exactly as an instance
+did, so there is no reason to prefer an instance once you have one.</p>
+<h2>Cache hints</h2>
+<p>On 2026-07-28 the SDK stamps <code>ttlMs</code> and <code>cacheScope</code> onto every cacheable result, defaulting to
+<code>ttlMs: 0</code> / <code>cacheScope: 'private'</code>. This safe default disables caching.
+<code>defaultCacheHints</code> is a policy for a typical mcp-z server: catalogs are cacheable and shareable,
+anything derived from a user's account is not.</p>
+<pre><code class="language-ts">import { McpServer } from '@modelcontextprotocol/server';
+import { defaultCacheHints } from '@mcp-z/server';
+
+const mcpServer = new McpServer({ name: 'my-server', version: '1.0.0' }, { cacheHints: defaultCacheHints });
+</code></pre>
+<p><code>tools/list</code>, <code>prompts/list</code>, <code>resources/templates/list</code> and <code>server/discover</code> are given a five-minute
+TTL and <code>cacheScope: 'public'</code>, because each is fixed at registration and identical for every caller.
+<code>resources/list</code> and <code>resources/read</code> stay <code>private</code> with no TTL: those vary by account, and marking
+them <code>public</code> would let a shared cache serve one user's data to another. Override a single operation
+by spreading (<code>{ ...defaultCacheHints, 'tools/list': { ttlMs: 0 } }</code>). 2025-era responses are
+unaffected because the fields do not exist there.</p>
+<h2>Registration helpers</h2>
+<ul>
+<li><code>registerTools(server, tools)</code></li>
+<li><code>registerResources(server, resources)</code></li>
+<li><code>registerPrompts(server, prompts)</code></li>
+</ul>
+<p>Each registers in <strong>name order</strong>, not the order the array happened to arrive in, so two servers built
+from the same modules produce identical <code>tools/list</code> results. That is what lets a 2026-07-28 client
+keep a cached catalog valid across a reconnect. The array you pass is not mutated.</p>
+<h2>Middleware composition</h2>
+<p>Use <code>composeMiddleware</code> with middleware layers (auth, logging, etc.):</p>
+<pre><code class="language-ts">import { composeMiddleware, createLoggingMiddleware } from '@mcp-z/server';
+
+const logging = createLoggingMiddleware({ logger });
+const composed = composeMiddleware({ tools, resources, prompts }, [
+  { withTool: authMiddleware.withToolAuth, withResource: authMiddleware.withResourceAuth, withPrompt: authMiddleware.withPromptAuth },
+  { withTool: logging.withToolLogging, withResource: logging.withResourceLogging, withPrompt: logging.withPromptLogging }
+]);
+</code></pre>
+<h2>File serving utilities</h2>
+<p>For servers that generate files (PDFs, CSVs, images):</p>
+<ul>
+<li><code>reserveFile()</code> - Reserve a file path for streaming writes</li>
+<li><code>writeFile()</code> - Write a buffer directly</li>
+<li><code>getFileUri()</code> - <code>file://</code> or <code>http://</code> URI based on transport</li>
+<li><code>createFileServingRouter()</code> - Express router to serve files</li>
+</ul>
+<pre><code class="language-ts">import { reserveFile, getFileUri, createFileServingRouter } from '@mcp-z/server';
+
+const reservation = await reserveFile('report.csv', { resourceStoreUri: 'file:///tmp/files' });
+const uri = getFileUri(reservation.storedName, transport, {
+  resourceStoreUri: 'file:///tmp/files',
+  baseUrl: 'https://example.com',
+  endpoint: '/files'
+});
+
+const router = createFileServingRouter({ resourceStoreUri: 'file:///tmp/files' }, { contentType: 'text/csv' });
+app.use('/files', router);
+</code></pre>
+<h2>Schema helpers</h2>
+<p>Helpers for consistent tool inputs and output shaping:</p>
+<ul>
+<li><code>createFieldsSchema()</code> / <code>parseFields()</code> / <code>filterFields()</code></li>
+<li><code>createPaginationSchema()</code></li>
+<li><code>createShapeSchema()</code> / <code>toColumnarFormat()</code></li>
+</ul>
+<h2>Requirements</h2>
+<ul>
+<li>Node.js &gt;= 20</li>
+</ul>
+<h2>Documentation</h2>
+<p><a href="https://mcp-z.github.io/server" target="_blank" rel="noopener noreferrer">API Docs</a></p>

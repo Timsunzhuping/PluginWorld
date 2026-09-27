@@ -408,14 +408,24 @@ docker run --rm -i \
 <td>Comma separated values of tool names that require user confirmation before execution. Requires the client to support elicitation.</td>
 </tr>
 <tr>
+<td><code>MDB_MCP_CONNECTION_IDLE_TIMEOUT_MS</code> / <code>--connectionIdleTimeoutMs</code></td>
+<td><code>600000</code></td>
+<td>Milliseconds a MongoDB connection may stay unused (no tool call touching it) before it is closed to release the underlying connection pool and its server-side state. Applied per connection regardless of its connection scope; the preconfigured connection is excluded, and the reaper runs on this cadence. Set to 0 to disable reaping; must not be negative.</td>
+</tr>
+<tr>
 <td><code>MDB_MCP_CONNECTION_SCOPE</code> / <code>--connectionScope</code></td>
 <td><code>"session"</code></td>
-<td>Visibility scope for MongoDB connections created at runtime. With 'session' (the default), each MCP session only sees the connections it created (plus the shared 'preconfigured' one) and they are closed when the session ends — recommended when the HTTP transport is exposed to multiple clients without authentication. With 'global', connections are shared across all sessions and survive session rotation.</td>
+<td>Visibility scope for MongoDB connections created at runtime. With 'session' (the default), each MCP session only sees the connections it created (plus the shared 'preconfigured' one) and they are closed when the session ends. With 'global', connections are shared across all sessions and survive session rotation. Deprecated: the MCP protocol is moving to sessionless, so this option will soon be removed and the connection scope will default to 'global'. For shared-server use cases, use the Atlas-Managed MCP server or build an authenticated library using the @mongodb-js/mcp-cli package. Note: on the sessionless (2026-07-28) HTTP path, a request without an mcp-session-id falls back to the shared ('global') scope so it can still persist connections across requests; the legacy sessionful path always carries a server-issued session.</td>
 </tr>
 <tr>
 <td><code>MDB_MCP_CONNECTION_STRING</code> / <code>--connectionString</code></td>
 <td><code>&lt;not set&gt;</code></td>
 <td>MongoDB connection string for direct database connections. Optional, if not set, you'll need to call the connect tool before interacting with MongoDB data.</td>
+</tr>
+<tr>
+<td><code>MDB_MCP_DANGEROUS_HOST_BINDING</code> / <code>--dangerousHostBinding</code></td>
+<td><code>false</code></td>
+<td>When set to true, allows binding the HTTP server (and monitoring server) to a non-loopback host such as 0.0.0.0, a LAN IP, or an empty host (all interfaces). Binding to a non-loopback host exposes the server to the entire network and can allow unauthorized access. Off by default: the server refuses to start on a non-loopback host unless this is true.</td>
 </tr>
 <tr>
 <td><code>MDB_MCP_DISABLE_SERVER_SIDE_JS</code> / <code>--disableServerSideJs</code></td>
@@ -438,6 +448,11 @@ docker run --rm -i \
 <td>Time in milliseconds the user has to respond to an elicitation request (such as a tool confirmation prompt) before it fails.</td>
 </tr>
 <tr>
+<td><code>MDB_MCP_EVICTION_IDLE_GRACE_M_S</code> / <code>--evictionIdleGraceMS</code></td>
+<td><code>120000</code></td>
+<td>How long a session must be idle before it becomes eligible for least-recently-used eviction when the HTTP transport is at its maxSessions cap (only used when transport is 'http'). Swept back to idleTimeoutMs when larger.</td>
+</tr>
+<tr>
 <td><code>MDB_MCP_EXPORT_CLEANUP_INTERVAL_MS</code> / <code>--exportCleanupIntervalMs</code></td>
 <td><code>120000</code></td>
 <td>Time in milliseconds between export cleanup cycles that remove expired export files.</td>
@@ -455,7 +470,7 @@ docker run --rm -i \
 <tr>
 <td><code>MDB_MCP_EXTERNALLY_MANAGED_SESSIONS</code> / <code>--externallyManagedSessions</code></td>
 <td><code>false</code></td>
-<td>When true, the HTTP transport allows requests with a session ID supplied externally through the 'mcp-session-id' header. When an external ID is supplied, the initialization request is optional.</td>
+<td>When true, the 2025-era HTTP transport accepts a session ID supplied externally through the 'mcp-session-id' header. When an external ID is supplied, the initialization request is optional, and an implicitly re-initialized session restores the client's previously negotiated capabilities from the session store.</td>
 </tr>
 <tr>
 <td><code>MDB_MCP_HEALTH_CHECK_HOST</code> / <code>--healthCheckHost</code></td>
@@ -1034,5 +1049,21 @@ installed at the OS level are picked up automatically.</p>
 <p>You can deploy the MongoDB MCP Server to your preferred cloud provider using the deployment assets under <code>deploy/</code>. Each guide explains the prerequisites, configuration, and automation scripts that streamline the rollout.</p>
 <h3>Azure</h3>
 <p>For detailed Azure instructions, see <a href="https://github.com/mongodb-js/mongodb-mcp-server/blob/HEAD/deploy/azure/README.md" target="_blank" rel="noopener noreferrer">deploy/azure/README.md</a>.</p>
+<h2>Deployment Constraints</h2>
+<p>The <strong>CLI tool</strong> (<code>mongodb-mcp-server</code> / <code>npx mongodb-mcp-server</code>) is designed for <strong>single-user, localhost (or private) deployments</strong> where the operating user is the only principal. It ships with <strong>no built-in authentication</strong>, and the MCP protocol does not carry a verified end-user identity. <strong>It is not meant to serve multiple users</strong> — there is no authentication middleware in front of it to distinguish callers or control connection isolation.</p>
+<p>As a result, if you expose it to a network — or run it as a shared server — you are responsible for the isolation guarantees:</p>
+<ul>
+<li><strong>Internet exposure:</strong> binding to <code>0.0.0.0</code> / <code>::</code> (or any non-loopback host) with no auth exposes an unauthenticated endpoint that can run MongoDB operations (including destructive ones) against the configured connection string. If you intentionally bind to a non-loopback host, you must set <code>MDB_MCP_DANGEROUS_HOST_BINDING=true</code> (see <a href="#configuration-options" target="_blank" rel="noopener noreferrer">Configuration Options</a>).</li>
+<li><strong>Multi-user isolation:</strong> connections are scoped by the (soon-to-be-removed) <code>connectionScope</code> option, whose default is moving to <code>global</code> — every request shares one scope. The <code>mcp-session-id</code> header that keys the scope on the sessionless path is client-asserted, not a security boundary, and requests without it fall into the shared scope. So multiple users can see and operate on each other's connections, including any Atlas temporary database user credentials. The server does not distinguish callers. To ensure proper isolation, you can either setup an authenticated middleware which controls the <code>mcp-session-id</code> header or provide a custom scoping mechanism using the <code>@mongodb-js/mcp-*</code> library packages.</li>
+</ul>
+<p><strong>Do not</strong> run the CLI tool as a shared, internet-facing endpoint without adding your own authentication and identity layer in front of it.</p>
+<h3>Use the library and add your own auth</h3>
+<p>For multi-tenant or public deployments, <strong>build an authenticated solution</strong> using the <code>@mongodb-js/mcp-*</code> library packages instead:</p>
+<ul>
+<li>Terminate authentication / user identity at your own proxy or middleware, and pass a verified principal into the request via <code>authInfo</code> (the SDK's <code>createMcpHandler</code> and the legacy handler both forward it).</li>
+<li>Supply a <code>connectionScope</code> policy that keys on your verified end-user identity (e.g. the OIDC <code>sub</code> claim) so each user's connections and credentials are isolated — do not let it fall back to the shared <code>global</code> scope for multi-user traffic.</li>
+</ul>
+<p><strong>Already on MongoDB Atlas?</strong> For multi-tenant Atlas cluster usage, the simplest alternative is the <strong>MongoDB Atlas-Managed MCP server</strong> — a hosted, authenticated deployment that handles per-user identity (OAuth / service-account) for you instead of you standing up your own. See <a href="#option-2-connect-to-the-mongodb-atlas-managed-mcp-server" target="_blank" rel="noopener noreferrer">Option 2</a> above.</p>
+<p>See <a href="https://github.com/mongodb-js/mongodb-mcp-server/blob/HEAD/MCP_SERVER_LIBRARY.md" target="_blank" rel="noopener noreferrer">MCP_SERVER_LIBRARY.md</a> for the embedding API, <code>createHttpTransportRunnerFromConfig</code> / <code>CliMcpHttpServer</code> and the <code>connectionScope</code> policy seam, and the per-user scoping example to copy.</p>
 <h2>🤝Contributing</h2>
 <p>Interested in contributing? Great! Please check our <a href="https://github.com/mongodb-js/mongodb-mcp-server/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">Contributing Guide</a> for guidelines on code contributions, standards, adding new tools, and troubleshooting information.</p>

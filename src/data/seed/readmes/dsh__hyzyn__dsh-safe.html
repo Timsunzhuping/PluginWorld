@@ -1,0 +1,249 @@
+<h1>dsh-safe · dsh 启动保险丝</h1>
+<p>中文 | <a href="https://github.com/hyzyn/dsh-safe/blob/HEAD/README.en.md" target="_blank" rel="noopener noreferrer">English</a></p>
+<blockquote>
+<p><strong>通道适用性（先看这条）</strong>：dsh <strong>0.1.6 之前</strong>（npm <code>latest</code> 目前仍是 0.1.5-rc.3）任何插件失败都会让启动整体失败，dsh-safe 的<strong>自动隔离</strong>在这条通道上依然有效。dsh <strong>0.1.6 起</strong>（<code>next</code> / <code>alpha</code> 通道，含 0.1.7-rc.x）官方改成只对 required 条目致命、其余条目失败仅告警且启动照常成功——此时 dsh-safe <strong>不写任何文件</strong>，只做<strong>只读巡检</strong>：把未激活的插件、原因与修复方式列出来。两种模式都在包装启动里自动选择，不需要配置。</p>
+</blockquote>
+<p>DeepSeek Harness（DSH）的社区插件与 dsh 运行时不兼容时，dsh <strong>0.1.6 之前</strong>会让 <code>dsh web</code> <strong>整体启动失败</strong>——加载器把所有 patch 层拉平成同一棵加载树，任何一个插件 import 失败、<code>apply</code> 抛错、或等不到注入的服务，启动审计就会拒绝整棵树，进程退出。此时只能手动编辑 <code>cordis.patch.yml</code> 把坏插件禁用。</p>
+<p><strong>dsh-safe 把这个手动动作自动化了</strong>：包装运行 <code>dsh</code>，启动失败时从报错里识别坏插件，在 profile patch 里把对应行置为 <code>disabled: true</code>（记录进隔离台账），然后自动重试。坏插件只影响自己，dsh 照常启动。</p>
+<p>dsh <strong>0.1.6 起</strong>官方换了策略（<code>packages/boot/app-boot</code> 的 <code>auditStartupEntries</code>）：只有全局 required 条目（<code>agent-loop</code> / <code>webserver</code> / <code>modules</code> / <code>connection</code> / <code>headless-runner</code> / <code>acp</code> / <code>sdk-jsonrpc-server</code>）失败才致命，<strong>其余条目失败只打一行 warning 就继续启动</strong>。插件于是变成"静默缺席"：功能没了，而 <code>$DSH_HOME/logs/startup-*.log</code> 只对致命失败写、那行 stderr 警告是唯一线索（GUI 启动时甚至看不到）。dsh-safe 在这种情况下改做<strong>只读巡检</strong>——把 <code>warning: N entries did not activate</code> 整理成清单和修复指引，<strong>不改 patch、不写台账、不重试</strong>。</p>
+<h2>安装</h2>
+<pre><code class="language-bash">npm install -g @hyzyn/dsh-safe
+</code></pre>
+<p>要求 Node &gt;= 20，本机已安装 <code>dsh</code> 命令。零运行时依赖。</p>
+<h2>快速开始</h2>
+<p>把平时的 <code>dsh</code> 换成 <code>dsh-safe</code> 即可，推荐直接用 <code>-u</code>（更新并启动）：dsh 有新版本时先升级并恢复被隔离的插件再启动，已最新时和普通启动完全一样：</p>
+<pre><code class="language-bash">dsh-safe -u web       # 推荐：更新并启动（含自动隔离）
+dsh-safe web          # 不检查更新，直接带自动隔离启动
+dsh-safe --profile tui --patch ./extra.yml
+</code></pre>
+<p><code>-u</code> 每次启动多做一次版本检查（需要联网，检查失败只告警、照常启动）；离线或脚本环境用第二行即可。</p>
+<p>输出示例（坏插件被自动隔离后重试）：</p>
+<pre><code>Error: dsh: plugin tree failed to load: failed to apply loader entry smoke-broken (@smoke/broken-impl): Cannot find package '@smoke/broken-impl' ...
+[dsh-safe] 已禁用 @smoke/broken-impl (id: smoke-broken) → /Users/me/.dsh/profiles/web/cordis.patch.yml
+           原因: Error: failed to import loader entry smoke-broken (@smoke/broken-impl): Cannot find package …
+[dsh-safe] 重试启动…
+</code></pre>
+<h2>命令与参数</h2>
+<h3>子命令</h3>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>dsh-safe &lt;dsh 参数…&gt;</code></td>
+<td>包装运行 dsh（把平时的 <code>dsh</code> 换成 <code>dsh-safe</code>）</td>
+</tr>
+<tr>
+<td><code>dsh-safe -u [update 选项] [dsh 参数…]</code></td>
+<td>先升级 dsh 与 dsh-safe 自身（已最新则跳过），再按包装模式启动；不接任何 dsh 参数时只升级、不启动；<code>--update</code> 等价</td>
+</tr>
+<tr>
+<td><code>dsh-safe update [选项]</code></td>
+<td>只升级不启动，选项见下</td>
+</tr>
+<tr>
+<td><code>dsh-safe list [--profile &lt;名&gt;] [--json]</code></td>
+<td>查看隔离名单（<code>--json</code> 输出结构化 JSON，缺省全部 profile）</td>
+</tr>
+<tr>
+<td><code>dsh-safe doctor</code></td>
+<td>环境体检：版本、DSH_HOME、profiles、台账、各 patch 健康度</td>
+</tr>
+<tr>
+<td><code>dsh-safe restore [--profile &lt;名&gt;] (--id &lt;id&gt; | --all) [--dry-run]</code></td>
+<td>恢复被自动禁用的插件（省略 <code>--profile</code> 时遍历台账全部 profile）</td>
+</tr>
+<tr>
+<td><code>dsh-safe explain [id] [--profile &lt;名&gt; | --file &lt;路径&gt;]</code></td>
+<td>用 AI 解读失败信息：指定 <code>id</code> 解读该条隔离记录（给 repair 建议）；默认解读最近一次失败日志，无日志则解读隔离台账；<code>--file</code>/stdin 读任意日志（需 <code>DSH_SAFE_AI_KEY</code>）</td>
+</tr>
+<tr>
+<td><code>dsh-safe repair [id] [--all] [--profile &lt;名&gt;] [--to &lt;版本&gt;] [-y] [--dry-run]</code></td>
+<td>重装/升级被隔离的插件并自动恢复（限重装/升级可能修复的失败：包解析失败、导出版本不匹配等；经 <code>dsh plugin</code> 的 pnpm 通道安装）；重复挂载类支持自动去重（交互选择保留哪个来源，从 bundles 移除冗余）；适合交给 web UI 里的 AI agent 执行</td>
+</tr>
+<tr>
+<td><code>dsh-safe help</code>（<code>-h</code> / <code>--help</code>）</td>
+<td>显示帮助</td>
+</tr>
+<tr>
+<td><code>dsh-safe --version</code>（<code>-V</code>）</td>
+<td>显示版本</td>
+</tr>
+</tbody></table>
+<p>短选项都有等价的长形式（<code>-u</code> = <code>--update</code>、<code>-y</code> = <code>--yes</code>、<code>-h</code> = <code>--help</code>、<code>-V</code> = <code>--version</code>）；单字母用 <code>-</code>，多字母用 <code>--</code>。</p>
+<h3>包装模式选项（必须写在第一个位置参数之前）</h3>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--dry-run</code></td>
+<td>只解析与报告，不修改任何文件</td>
+</tr>
+<tr>
+<td><code>--max-retries &lt;n&gt;</code></td>
+<td>自动隔离后最多重试启动的次数（默认 2；<code>0</code> 表示不隔离只透传）</td>
+</tr>
+<tr>
+<td><code>--allow-first-party</code></td>
+<td>允许自动禁用 <code>@deepseek-ai/*</code> 第一方插件，duplicate 去重时允许移除官方 bundle（默认跳过，需手动处理）</td>
+</tr>
+<tr>
+<td><code>--exclude &lt;id或包名&gt;</code></td>
+<td>隔离豁免名单（可重复），命中的行永不自动禁用；也可写进 <code>config.json</code></td>
+</tr>
+</tbody></table>
+<h3>update / -u 选项（写在 <code>-u</code> 或 <code>update</code> 之后；其前的包装旗标照常生效）</h3>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>-y</code> / <code>--yes</code></td>
+<td>跳过升级确认（非交互终端必须显式加 <code>-y</code>）</td>
+</tr>
+<tr>
+<td><code>--to &lt;版本|tag&gt;</code></td>
+<td>指定 dsh 的目标版本（也接受 dist-tag，如 <code>next</code> / <code>alpha</code>），也是回滚方式（显式允许降级）；dsh-safe 自身始终升到最新</td>
+</tr>
+<tr>
+<td><code>--check</code></td>
+<td>只报告会不会升级、升到什么（含 <code>latest</code> 之外的通道差距），不提示、不安装、不启动；非交互环境无需 <code>-y</code></td>
+</tr>
+<tr>
+<td><code>--self</code></td>
+<td>只更新 dsh-safe 自身，不动 dsh 与隔离状态</td>
+</tr>
+<tr>
+<td><code>--no-restore</code></td>
+<td>升级 dsh 后不自动恢复被隔离的插件</td>
+</tr>
+<tr>
+<td><code>--no-verify</code></td>
+<td>跳过升级后的解析器自校验（临时 profile 试启新版 dsh，验证报错识别仍有效）</td>
+</tr>
+<tr>
+<td><code>--pm &lt;npm|pnpm&gt;</code></td>
+<td>强制指定包管理器（缺省自动探测）</td>
+</tr>
+</tbody></table>
+<h3>环境变量</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DSH_SAFE_LANG=zh|en</code></td>
+<td>强制提示信息语言（缺省跟随 <code>LC_ALL</code> / <code>LC_MESSAGES</code> / <code>LANG</code> / <code>LANGUAGE</code>）</td>
+</tr>
+<tr>
+<td><code>DSH_SAFE_NO_UPDATE_CHECK=1</code></td>
+<td>关闭启动期的更新提示（<code>-u &lt;dsh 参数&gt;</code> 每次启动会报的「已是最新 / 有更新」状态与 <code>latest</code> 之外通道差距提示，以及每天最多一次的 dsh-safe 新版提示）；显式 <code>update</code> / <code>--check</code> 不受影响</td>
+</tr>
+<tr>
+<td><code>DSH_HOME</code></td>
+<td>dsh 的 home 目录（dsh 自己的环境变量；隔离台账与各 patch 路径随之）</td>
+</tr>
+<tr>
+<td><code>DSH_SAFE_AI_KEY</code></td>
+<td>AI 功能 key（未设置 = AI 整体禁用）；默认对接 DeepSeek</td>
+</tr>
+<tr>
+<td><code>DSH_SAFE_AI_BASE_URL</code></td>
+<td>AI 接口地址（OpenAI 兼容），默认 <code>https://api.deepseek.com</code></td>
+</tr>
+<tr>
+<td><code>DSH_SAFE_AI_MODEL</code></td>
+<td>AI 模型，默认 <code>deepseek-chat</code></td>
+</tr>
+<tr>
+<td><code>DSH_SAFE_AI_RECOVER=1</code></td>
+<td>正则识别不出坏插件时启用 AI 兜底（结果仍走同一隔离管线）</td>
+</tr>
+</tbody></table>
+<p>升级行为：<code>dsh-safe update</code> 自动探测 dsh 的包名与安装方式（npm / pnpm 全局安装）、对比最新版本后代跑升级，完成后自动恢复所有被隔离的插件——新 dsh 下仍不兼容的会在下次启动时再次被自动隔离。日常把 <code>dsh-safe -u web</code> 当启动命令即可：dsh 已是最新时打一行状态后直接启动（仅一次版本检查），有更新时先升级并恢复隔离再启动，更新检查失败只告警、照常启动。<code>-u</code> 后可接 update 的选项（如 <code>-u -y web</code>）与包装旗标（如 <code>-u --max-retries 0 web</code>）。</p>
+<p>版本通道：只跟随 npm 的 <code>latest</code>（一次 <code>npm view &lt;包&gt; dist-tags --json</code> 拿到全部通道，不额外增加启动开销）。上游常把新版本先发在 <code>next</code> / <code>alpha</code> 等通道上，于是会出现「<code>latest</code> 已是最新，但某个通道更新」——此时会报告「latest 通道已是最新」<strong>并跟通道差距提示——每个比本地新的通道各一行，按版本升序</strong>（如 <code>next 通道已有 0.1.5-rc.2</code> 之后跟 <code>alpha 通道已有 0.1.6-alpha.1</code>；曾经只报版本最高的那个，next 就被 alpha 盖掉了），且绝不自动升级过去（dsh-safe 不替用户决定上未发布通道）。想跟进就显式 <code>dsh-safe update --to &lt;tag&gt;</code>（<code>next</code> / <code>alpha</code> 都行）。通道名不写死，上游以后加 <code>beta</code> / <code>canary</code> 也照报。启动路径也每次都报：<code>-u</code>、<code>update</code>、<code>--check</code> 一视同仁，不存在"加了 dsh 参数就沉默"的差异（曾经有过每天一次的闸，观感是"时有时无"，已取消）；日常启动嫌吵就用 <code>DSH_SAFE_NO_UPDATE_CHECK=1</code> 整体关掉。想知道「会不会升、升到什么」而不做任何改动，用 <code>dsh-safe update --check</code>。</p>
+<h2>工作原理</h2>
+<ol>
+<li><p><strong>识别失败</strong>：dsh 启动失败时，stderr 里有五类特征（<code>plugin(s) failed to load: …</code>、<code>N entries did not activate</code> 逐行失败、<code>failed to apply/import loader entry &lt;id&gt; (&lt;name&gt;)</code>、外层栈 <code>…#&lt;entryId&gt;</code>、<code>duplicate loader entry id: &lt;id&gt;</code> 重复挂载）。dsh-safe 从中提取坏插件的包名与行 id。这五类是 <strong>dsh ≤ 0.1.5</strong> 的报错形态；0.1.6 起多出两种<strong>结构化</strong>诊断，走独立解析（见下一条）。</p>
+<p><strong>dsh ≥ 0.1.6 的两种结构化诊断</strong>（独立解析，不靠正则猜自由文本）：宽容告警 <code>dsh: warning: N entries did not activate</code> + 每行 <code>&lt;行id&gt; (&lt;包名&gt;): &lt;原因&gt;</code>；致命诊断 <code>dsh: startup failed: N required plugins did not activate</code> + <code>Failed plugins (N):</code>（<code>  &lt;行id&gt; (required)</code> / <code>    Package: &lt;包名&gt;</code> / 缩进原因）与 <code>Plugins waiting for services (N):</code> 两个小节。行 id、包名、<strong>required 标记</strong>与原因都直接取自官方输出，比旧格式可靠；被这些结构消费掉的行会排除在旧规则之外（否则 <code>    Package: x</code> / <code>    Error: …</code> 会被读成假包名 <code>Package</code> / <code>Error</code>——0.17.0 在 0.1.7-rc.2 上实测如此）。</p>
+<p><strong>required 条目永不隔离</strong>：致命诊断里带 <code>(required)</code> 的行 id（<code>webserver</code> / <code>connection</code> / <code>agent-loop</code> 等）就是"启动了也等于没启动"的那几个，禁用它修不好任何问题，因此与核心依赖同等保护，任何旗标都不放开。</p>
+<p><strong>例外——环境类失败不隔离</strong>：若 stderr 里出现 errno 形式的环境错误（<code>EADDRINUSE</code> 端口被占、<code>EACCES</code>/<code>EPERM</code> 权限、<code>ECONNREFUSED</code>/<code>ENOTFOUND</code> 网络等），dsh-safe 判定这次失败<strong>不能归因到插件</strong>，一律不写任何文件、直接透传退出码并说明原因。原因是：环境问题会让健康的插件也失败（例如 <code>webServer</code> 的提供者 webserver 因端口 3080 被另一个 dsh 实例占用而 apply 失败时，依赖它的插件只会表现为 <code>pending (waiting for service: webServer)</code>），此时任何隔离决定都是误判，而隔离是持久写入。修好环境后重启即可，插件始终保持启用。</p>
+</li>
+<li><p><strong>对照真实行</strong>：扫描 profile patch、<code>$DSH_HOME/cordis.patch.yml</code>（home 层）与各 bundle 的 patch，得到「行 id ↔ 插件包名」对照表；只禁用真实存在的行，避免误伤。官方 bundle（<code>@deepseek-ai/dsh-base</code>、<code>dsh-web-app</code> 等）<strong>不在 profile 的 <code>node_modules</code> 里</strong>，而是装在 dsh 自己的安装目录下——那里也会被扫描（标记为 internal，只用于包名与来源解析，不参与 duplicate 来源判定，去重行为不受影响）。</p>
+</li>
+<li><p><strong>写入托管区块</strong>：在对应 patch 文件末尾追加带标记注释的区块（与 <code>dsh-mcp-config managed</code> 同款约定），把命中的行置为 <code>disabled: true</code>。用户已有内容与注释原样保留；全新 profile 的 <code>[]</code> 模板会被正确替换成块序列。</p>
+</li>
+<li><p><strong>台账与恢复</strong>：隔离记录存 <code>$DSH_HOME/dsh-safe/quarantine.json</code>。插件升级修复后用 <code>dsh-safe restore --profile web --all</code> 摘除区块恢复挂载（<code>patchReload: live</code> 的 profile 热生效）。</p>
+</li>
+</ol>
+<h3>只读巡检（dsh ≥ 0.1.6）</h3>
+<p>官方在 0.1.6 起把非 required 条目的失败降级为一行 warning，启动照常成功——<strong>隔离路径再也不会被触发</strong>（唯一还会致命的是 required 条目，而它们被上面的规则保护）。代价是插件静默缺席：功能没了、官方不落任何报告、GUI 启动时连那行 stderr 都看不到。</p>
+<p>dsh-safe 因此在启动成功时多做一次<strong>只读巡检</strong>：解析 <code>warning: N entries did not activate</code>，把每个未激活条目的行 id、包名、原因列出来，并给出修复入口。输出形如：</p>
+<pre><code>[dsh-safe] 启动成功，但有 1 个插件未激活（dsh 0.1.6+ 只对 required 条目致命，其余仅告警——插件会静默缺席）：
+  badplug (@acme/broken-plugin): failed to import
+[dsh-safe] 以上条目本次未改动任何文件；重装/升级: dsh-safe repair &lt;id&gt;，解读: dsh-safe explain。
+</code></pre>
+<p>巡检<strong>只读</strong>：不改 patch、不写台账、不重试，<code>--dry-run</code> 与正常启动行为一致；没有未激活条目时一个字都不输出。修复走 <code>dsh-safe repair &lt;id&gt;</code>（经 <code>dsh plugin</code> 的 pnpm 通道重装/升级）或手动处理，随后重启验证。</p>
+<h3>AI 能力（可选）</h3>
+<p>设置 <code>DSH_SAFE_AI_KEY</code> 后启用（默认对接 DeepSeek，OpenAI 兼容接口，可用 <code>DSH_SAFE_AI_BASE_URL</code> / <code>DSH_SAFE_AI_MODEL</code> 换任何兼容服务）：</p>
+<ul>
+<li><strong><code>dsh-safe explain [id] [--profile &lt;名&gt; | --file &lt;路径&gt;]</code></strong>：解读 dsh-safe 所知的失败信息——指定 <code>id</code> 时解读该条隔离记录并给出 <code>repair</code> 建议；默认解读最近一次启动失败（stderr 自动持久化到 <code>$DSH_HOME/dsh-safe/last-failure-&lt;profile&gt;.log</code>）；无日志时解读隔离台账；<code>--file</code>/stdin 读任意日志。纯只读，不碰 patch/台账。</li>
+<li><strong>AI 兜底识别</strong>（<code>DSH_SAFE_AI_RECOVER=1</code>）：正则特征识别不出坏插件时（如 dsh 升级换格式），让 AI 从 stderr 里挑元凶——<strong>结果必须仍走同一验证管线</strong>（对照真实 patch 行、第一方保护、dry-run 预览），命中不了照旧透传。仅在启动失败时调用。</li>
+<li>隐私：发送前 home 路径脱敏为 <code>~</code>；AI 任何失败都静默降级。</li>
+</ul>
+<h3>让 web UI 里的 AI agent 接管修复（推荐）</h3>
+<p>包装启动自带完整的保活：插件失败自动隔离重试，重复挂载自动去重后重试。启动成功后，台账里留下的记录就是"待修复清单"——把修复交给 web UI 里的 AI agent。将下面片段加入 dsh 的 Agent 预设（或系统提示），agent 就能主动发现并修复：</p>
+<pre><code class="language-text">本机装有 dsh-safe（dsh 的启动保险丝）。当用户报告插件功能缺失、启动
+警告或插件行为异常时：
+1. 运行 dsh-safe list --json 查看隔离台账（哪些插件被自动禁用、原因、时间）。
+   启动输出里的"[dsh-safe] 启动成功，但有 N 个插件未激活"是 dsh 0.1.6+
+   的只读巡检清单（这些条目没被禁用，只是没挂载上），同样按第 3 步处理。
+2. 需要解读时运行 dsh-safe explain &lt;id&gt;（设置 DSH_SAFE_AI_KEY 后可用）。
+3. 按原因修复：
+   - 包缺失/版本落后 → dsh-safe repair &lt;id&gt; -y（重装 latest）
+   - 已知兼容版本 → dsh-safe repair &lt;id&gt; --to &lt;版本&gt; -y（降级/指定版本）
+   - 重复挂载 → dsh-safe repair &lt;id&gt; -y（自动移除冗余挂载来源）
+   - 上游暂无兼容版本 → 保持禁用，并向用户说明。
+4. 修复后用 dsh-safe --profile &lt;名&gt; 重启验证；仍失败的会被自动重新隔离，
+   不会拖垮启动。
+</code></pre>
+<h2>安全边界</h2>
+<ul>
+<li><strong>核心依赖永不自动禁用</strong>：dsh 自身依赖的条目——官方插件（<code>@deepseek-ai/*</code>）、由官方 bundle 挂载的行、加载器机制层（<code>include</code> / <code>cordis:*</code>）、web UI 宿主入口 <code>webserver</code>——<strong>任何情况下都不参与自动隔离</strong>，也不受任何旗标影响。三条信号互相独立（行是否属于上述保留条目 / 行是否由官方 bundle 挂载 / 包名是否属于官方命名空间），任一成立即受保护；判断用的包名还会依次从 patch 行、同 id 的其它层、<strong>报错文本本身</strong>回退取得，所以 profile 覆盖行不重述 name（如 webserver 的 host/port 覆盖）也不会让保护失效。</li>
+<li><strong>包名无法确定的行同样不隔离</strong>：既不能确认它是普通第三方，就不能排除它是核心依赖——按核心对待（fail closed）。隔离是持久写入，宁可漏隔离也不误伤；确实需要禁用请手动编辑 patch。</li>
+<li><strong><code>--allow-first-party</code> 只作用于 duplicate 去重</strong>：去重（从 manifest 移除重复挂载来源）仍保留显式旗标与交互确认，缺省保留官方来源；<strong>隔离路径不受该旗标影响</strong>，核心依赖没有任何旗标可以放开。</li>
+<li><strong>duplicate 去重同受保护</strong>：缺省保留官方来源，移除官方 bundle 需显式允许或交互确认，避免连带卸载 webserver 等官方行。</li>
+<li><strong>环境类失败不隔离</strong>：stderr 里出现 <code>EADDRINUSE</code> / <code>EACCES</code> / <code>ECONNREFUSED</code> 等 errno 时，判定失败不能归因到插件，一律不写任何文件并原样透传退出码。</li>
+<li><strong>required 条目永不隔离</strong>：dsh ≥ 0.1.6 的致命诊断里带 <code>(required)</code> 标记的行 id 与核心依赖同等保护——它是 dsh 跑起来的最低要求，禁用它只会把"启动失败"换成"启动了但不可用"，任何旗标都不放开。</li>
+<li><strong>只动启动期失败</strong>：模块解析失败 / <code>apply</code> 抛错 / 等不到注入服务。运行期的未捕获异常仍由 dsh 自身的 fail-loud 策略处理，不属于启动隔离范围。</li>
+<li><strong>只读巡检不写盘</strong>：dsh ≥ 0.1.6 的宽容启动路径只解析、只报告，不碰 patch / 台账 / manifest；<code>--dry-run</code> 与正常启动的巡检行为完全一致。</li>
+<li><strong>可审计</strong>：每次写入都带原因与时间戳；<code>--dry-run</code> 可以先看会禁用谁。</li>
+<li><strong>原样透传</strong>：识别不出坏插件、超过重试上限、<code>dsh plugin</code>（pnpm 转发）等情况，退出码原样透传，不做任何修改。</li>
+</ul>
+<h2>已知限制</h2>
+<ul>
+<li>patch 文件本身 YAML 解析错误（如手改坏了）时无法识别插件，只会透传。</li>
+<li><code>--patch</code> 覆盖层里插入的行不参与对照表（对照表只扫 profile patch、home patch 与 bundle patch）。</li>
+<li>为了捕获 stderr，包装器把 dsh 的 stderr 接到管道（内容仍实时回显到终端）；stdout/stdin 直通不受影响。</li>
+<li>本项目针对 dsh 0.1.x 的报错格式做匹配（≤ 0.1.5 的五类自由文本特征 + ≥ 0.1.6 的两种结构化诊断）；dsh 大版本升级后格式变化时需要同步更新解析器。缓解：update/-u 升级 dsh 后会自动做解析器自校验——临时 profile 试启新版 dsh 并确认报错仍可识别，失配当场告警（<code>--no-verify</code> 跳过）。注意在 dsh ≥ 0.1.6 上，这个自校验会因"坏插件试启意外成功"而报未验证——那是宽容启动的预期行为，不是解析器坏了（此时隔离路径本就无触发面，巡检路径另有测试覆盖）。</li>
+<li>Windows 为尽力支持：update / --self / list / restore 已适配（.cmd shim 解析、shell 方式调用 npm/pnpm）；包装启动会把 PATH 上 dsh 的 .cmd/.ps1 shim 解析出内嵌的 node 入口、改为 <code>node &lt;入口&gt;</code> 直接启动（.exe 直接运行，shim 解析失败退回 shell 方式），绕开 Node 禁止 spawn .cmd 的限制。尚未在真实 Windows 上端到端验证，欢迎反馈。</li>
+</ul>
+<h2>开发</h2>
+<pre><code class="language-bash">npm test        # node:test 单元测试 + fake dsh 集成测试
+</code></pre>
+<p>发布流程（发布门槛、攒批、prerelease）见 <a href="https://github.com/hyzyn/dsh-safe/blob/HEAD/RELEASING.md" target="_blank" rel="noopener noreferrer">RELEASING.md</a>。</p>
+<h2>License</h2>
+<p><a href="https://github.com/hyzyn/dsh-safe/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>
