@@ -39,7 +39,7 @@
 <p>Re-run the command after upgrading: the shortcut carries its own copy of the launcher.</p>
 <h3>Prerequisites</h3>
 <ul>
-<li><strong>Node.js 20+</strong> — runtime</li>
+<li><strong>Node.js 22.19+</strong> — runtime</li>
 <li><strong><a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer">Claude Code CLI</a></strong> — installed and authenticated. Run <code>claude</code> once to complete OAuth</li>
 <li><strong>ffmpeg</strong> — required for movie generation. Skip if you don't generate videos<ul>
 <li>macOS: <code>brew install ffmpeg</code></li>
@@ -155,8 +155,9 @@ npx @mulmobridge/email@latest        # Email bridge (IMAP + SMTP)
 </code></pre>
 <p>All bridges support <strong>real-time text streaming</strong> (typing updates as the agent writes). CLI and Telegram also support <strong>file attachments</strong> (images, PDFs, DOCX, XLSX, PPTX). See <a href="https://github.com/receptron/mulmoclaude/blob/HEAD/docs/mulmobridge-guide.md" target="_blank" rel="noopener noreferrer"><code>docs/mulmobridge-guide.md</code></a> for the full platform list and setup instructions.</p>
 <h4>Auth token persistence for long-running bridges</h4>
-<p>The MulmoClaude server regenerates a fresh bearer token on every startup and writes it to <code>~/mulmoclaude/.session-token</code>. A bridge that started before the server restart keeps the <strong>old</strong> token in memory and every API call then returns <strong>401</strong>, silently.</p>
-<p><strong>Fix</strong>: set <code>MULMOCLAUDE_AUTH_TOKEN</code> to the same long random value on <strong>both</strong> the server and the bridge. The server uses it verbatim instead of regenerating, so the token survives restarts and the bridge stays authenticated.</p>
+<p>The MulmoClaude server regenerates a fresh bearer token on every startup and writes it to <code>&lt;workspace&gt;/.session-token</code> (<code>$MULMOCLAUDE_WORKSPACE_PATH</code>, or <code>~/mulmoclaude</code> when unset), alongside the port it bound in <code>.server-port</code>.</p>
+<p><strong>A bridge follows a restart on its own.</strong> When the connection fails it re-reads both files and rebuilds its socket once the server has published a new generation — new token, new port, or both (#3078). Restarting the bridge is not required.</p>
+<p>Pinning the token is still useful when the bridge runs <strong>on a different machine</strong> from the server, where it cannot read the workspace at all: set <code>MULMOCLAUDE_AUTH_TOKEN</code> to the same long random value on both sides. The server then uses it verbatim instead of regenerating.</p>
 <pre><code class="language-bash"># Server (one-time setup — same value across restarts)
 MULMOCLAUDE_AUTH_TOKEN=long-random-string yarn dev
 
@@ -256,14 +257,14 @@ examples, rotation behaviour, and recipes.</p>
 <li>Open MulmoClaude and stay in one of the skill-enabled roles: <strong>General</strong>, <strong>Office</strong>, or <strong>Tutor</strong>.</li>
 <li>Ask Claude to show your skills — e.g. <em>"show my skills"</em> or <em>"list skills"</em>.</li>
 <li>Claude invokes the <code>manageSkills</code> tool, and a split-pane <strong>Skills</strong> view opens in the canvas:<ul>
-<li><strong>Left</strong>: every skill discovered on your machine, with its description and scope badge (<code>USER</code> / <code>PROJECT</code>).</li>
+<li><strong>Left</strong>: every skill discovered on your machine, with its description and a badge for the scope it came from.</li>
 <li><strong>Right</strong>: the full <code>SKILL.md</code> content of the selected skill.</li>
 </ul>
 </li>
-<li>Click <strong>Run</strong> on a skill. MulmoClaude sends <code>/&lt;skill-name&gt;</code> to Claude as a regular chat message; Claude Code's slash-command machinery resolves it against <code>~/.claude/skills/</code> and executes the skill's instructions inline in the same chat session.</li>
+<li>Click <strong>Run</strong> on a skill. MulmoClaude sends <code>/&lt;skill-name&gt;</code> to Claude as a regular chat message; Claude Code's slash-command machinery resolves it against <code>~/.claude/skills/</code> — or against the owning plugin, for a <code>&lt;plugin&gt;:&lt;name&gt;</code> skill — and executes the skill's instructions inline in the same chat session.</li>
 </ol>
 <p>No extra typing, no copy-pasting SKILL.md bodies — the Run button is a one-click wrapper around <code>/skill-name</code>.</p>
-<h3>Skill discovery — two scopes</h3>
+<h3>Skill discovery — three scopes</h3>
 <table>
 <thead>
 <tr>
@@ -282,8 +283,13 @@ examples, rotation behaviour, and recipes.</p>
 <td><code>~/mulmoclaude/.claude/skills/&lt;name&gt;/</code></td>
 <td>MulmoClaude-workspace-scoped skills. Project scope <strong>wins</strong> if a name collides with user.</td>
 </tr>
+<tr>
+<td><strong>Claude Code plugin</strong></td>
+<td><code>&lt;plugin install path&gt;/skills/&lt;name&gt;/</code> (from <code>/plugin install</code>)</td>
+<td>Listed as <code>&lt;plugin&gt;:&lt;name&gt;</code>, the way the Claude CLI addresses them. Read-only, lowest precedence, and omitted for a plugin switched off in <code>enabledPlugins</code>. Not offered as a bridge slash command and not schedulable — a marketplace can ship hundreds of skills, and a bridge <code>/help</code> reply is one message.</td>
+</tr>
 </tbody></table>
-<p>Both scopes are read-only in phase 0 — edits happen on the file system. A future release will let MulmoClaude itself create / edit project-scope skills.</p>
+<p>Of the three scopes MulmoClaude writes only the project one — it can create, edit and delete those. User-scope and plugin skills are read-only here; edit them in their own source files.</p>
 <h3>Docker sandbox vs non-Docker</h3>
 <p>MulmoClaude's default <strong>Docker sandbox mode</strong> isolates Claude Code in a container for safety (see <a href="#security" target="_blank" rel="noopener noreferrer">Security</a>). Skill behaviour differs between the two modes:</p>
 <table>
@@ -349,7 +355,7 @@ npx mulmoclaude --disable-sandbox
 <li><strong>Slug rules</strong> — lowercase letters, digits, and hyphens; 1–64 chars; no leading / trailing or consecutive hyphens. Claude picks one automatically; if you want a specific name, mention it in the request.</li>
 </ul>
 <h3>Delete a saved skill</h3>
-<p>Project-scope skills get a <strong>Delete</strong> button next to the Run button in the Skills view (user-scope skills are read-only — no Delete button shown). Confirming the dialog removes <code>~/mulmoclaude/.claude/skills/&lt;slug&gt;/SKILL.md</code>. If you also dropped extra files in that folder by hand, they're left in place; only the SKILL.md is removed.</p>
+<p>Project-scope skills get a <strong>Delete</strong> button next to the Run button in the Skills view. Every other scope is read-only, so user-scope and plugin skills show no Delete button. Confirming the dialog removes <code>~/mulmoclaude/.claude/skills/&lt;slug&gt;/SKILL.md</code>. If you also dropped extra files in that folder by hand, they're left in place; only the SKILL.md is removed.</p>
 <p>You can also ask Claude to delete by name:</p>
 <pre><code class="language-text">"delete the fix-ci skill"
 </code></pre>

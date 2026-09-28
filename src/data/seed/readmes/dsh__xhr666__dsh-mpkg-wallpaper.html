@@ -383,8 +383,22 @@ node tools/build-bundle.mjs
 <td>Web 帧模式（网页壁纸）</td>
 <td><code>webFrameMode</code></td>
 <td><code>auto</code></td>
-<td>网页壁纸 iframe 的<strong>三档</strong>：<code>auto</code> = 隔离沙箱，被浏览器策略挡住才一次性降级兼容（默认）；<code>sandbox</code> = 强制隔离，<strong>不</strong>自动降级（原因写进状态，可查）；<code>compat</code> = 兼容档（不带 shim 标记）。判定表只有一份（<code>lib/web-wallpaper.js</code>），状态见 <code>window.__mpwWebFrame</code> 与 <code>#mpw-bgWrap[data-mpw-webframe-mode|-reason|-attr|-degraded]</code>（详见 <a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/WEB-WALLPAPER.md" target="_blank" rel="noopener noreferrer">docs/WEB-WALLPAPER.md</a> §3.0）</td>
+<td>网页壁纸 iframe 的<strong>三档</strong>：<code>auto</code> = 隔离沙箱，被浏览器策略挡住 / shim 没报到时<strong>只在沙箱内降档</strong>（去掉 shim 标记重载，仍是不透明源），<strong>不会自动升同源</strong>（默认）；<code>sandbox</code> = 强制隔离，<strong>不</strong>自动降档（原因写进状态，可查）；<code>compat</code> = 兼容档（同源 + 不带 shim 标记，<strong>只有用户显式选它才到得了</strong>）。判定表只有一份（<code>lib/web-wallpaper.js</code>），状态见 <code>window.__mpwWebFrame</code> 与 <code>#mpw-bgWrap[data-mpw-webframe-mode|-reason|-attr|-fallback|-autocompat|-degraded]</code>，台账 <code>window.__mpwWebFrameGuard</code>（详见 <a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/WEB-WALLPAPER.md" target="_blank" rel="noopener noreferrer">docs/WEB-WALLPAPER.md</a> §3.0）</td>
 <td>选 <code>auto</code>；也可用 <code>?webframe=auto|sandbox|compat</code> 临时覆盖（不改设置）</td>
+</tr>
+<tr>
+<td>自动降级到兼容档（高风险）</td>
+<td><code>webFrameAutoCompat</code></td>
+<td>关</td>
+<td><strong>风险回退口</strong>：打开后 auto 档才允许在"被策略挡住"时自动降 <code>compat</code> —— 那意味着<strong>这张第三方壁纸的脚本与 DSH 同源</strong>（可读宿主界面/本地存储、可带 cookie 打插件路由）。关着时只记账 + 面板提示手动切。判据 <code>tools/web-frame-origin-guard-test.mjs</code>（详见 <a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/SECURITY-ROUTES.md" target="_blank" rel="noopener noreferrer">docs/SECURITY-ROUTES.md</a> F5）</td>
+<td>关</td>
+</tr>
+<tr>
+<td>渲染器上游白名单</td>
+<td><code>sceneUrlWhitelist</code></td>
+<td>空</td>
+<td><strong>跨源回退口</strong>：<code>sceneRendererUrl</code>/<code>sceneExtUrl</code> 默认只允许 http(s) <strong>回环</strong>（127.0.0.1/localhost/::1）与"和页面同主机的字面 IP"；跨源上游必须把它的 <strong>origin</strong> 填在这里（逗号/空格分隔）才会被使用，否则一律拒绝并回落 <code>127.0.0.1:8902</code>（记账 + 日志，不静默）。⚠ 登记进来的上游会<strong>连同场景令牌 <code>st</code> 一起放行</strong>（详见 <a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/SECURITY-ROUTES.md" target="_blank" rel="noopener noreferrer">docs/SECURITY-ROUTES.md</a> F6）</td>
+<td>清空 = 只允许回环</td>
 </tr>
 <tr>
 <td>水平翻转（镜像）</td>
@@ -432,7 +446,7 @@ node tools/build-bundle.mjs
 <td>可调参数（折叠区）</td>
 <td><code>propEdits</code></td>
 <td>空</td>
-<td>mpkg 只读展示；网页壁纸可改（分辨率/语言/音量等，见下）</td>
+<td><strong>可改且改完即生效</strong>：mpkg 场景壁纸走 P-203 跨源属性通道（<code>mpw-user-props</code>，渲染器回执确认；见 <code>docs/WE-USER-PROPS.md</code> §3）；网页壁纸走 shim 同源通道（分辨率/语言/音量等，见下）</td>
 <td>壁纸级重置</td>
 </tr>
 <tr>
@@ -1052,6 +1066,42 @@ node tools/build-bundle.mjs
 <li><strong>零依赖</strong>：只用 <code>node:child_process</code>；<code>package.json</code> 里没有新增任何依赖。</li>
 <li><strong>环境变量</strong>：<code>MPW_MEDIA_ADAPTER</code>（强指适配器）、<code>MPW_MEDIA_PLAYER</code>（钉播放器名）、<code>MPW_MEDIA_TIMEOUT_MS</code>。</li>
 </ul>
+<h3>宿主路由的来源闸门（P-204，2026-09-27）</h3>
+<p>插件挂在 DSH 宿主上的路由此前<strong>零鉴权、零 Origin 校验</strong>，<code>/raw</code> 还会对<strong>任意 Origin</strong> 回显 <code>Access-Control-Allow-Origin</code> +
+<code>Allow-Credentials: true</code> ⇒ 任意网页可以「盲改自定义目录 → 跨源读回本机文件」。现在：</p>
+<ul>
+<li><strong>三处 ACAO 回显白名单化</strong>（<code>/raw</code>、场景音频、缩略图上报，外加 <code>/lg</code> 静态 JS）：只放 <code>Origin: null</code>（沙箱帧）
+与 <code>http://127.0.0.1:3080|8899|8902</code>（含 <code>localhost</code>）；非白名单<strong>一个 <code>Access-Control-Allow-*</code> 都不发</strong>；</li>
+<li><strong>非 GET 写请求过闸门</strong>：<code>Sec-Fetch-Site</code>（有则必须 <code>same-origin</code>/<code>none</code>）+ <code>Origin</code> 白名单；<code>/scene-thumb-token</code>
+与 <code>/settings</code> 连 GET 也过闸，且<strong>令牌只签给本机真实存在的场景</strong>、不透明源不能自签；</li>
+<li><strong><code>/custom-dir</code> 拒敏感目录</strong>（点开头的路径段、家目录自身、系统目录）；<strong><code>/raw</code> 的 <code>file</code> 有扩展名白名单</strong>
+（容器/图片/视频/音频/json）；</li>
+<li><strong>回退口</strong>（默认关，排障用）：<code>MPW_CSRF=0</code>、<code>MPW_CORS_LEGACY=1</code>、<code>MPW_CORS_ORIGINS=a,b</code>、
+<code>MPW_CUSTOM_DIR_ALLOW_ANY=1</code>；<code>GET /api/mpkg-wallpaper/security</code> 只读播报当前生效值。</li>
+</ul>
+<p>完整规格（漏洞 → 修法 → 回退口 → 判据 → 未验证边界）见 <a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/SECURITY-ROUTES.md" target="_blank" rel="noopener noreferrer"><code>docs/SECURITY-ROUTES.md</code></a>，
+判据 <code>node tools/sec-route-guard-test.mjs</code>（45 断言，含审计那条攻击链的修前/修后对拍）。</p>
+<h3>网页帧同源逃逸 + 可控上游（P-205，2026-09-28）</h3>
+<p>审计里剩下的两条（当时 <code>lib/client.js</code> 被并行线占用 ⇒ 留给本轮）：</p>
+<ul>
+<li><strong>F5 网页壁纸同源逃逸</strong>：改前入站只校验 <code>ev.source === frame.contentWindow</code>，而两条自动兜底
+（2.5s shim 没报到 / 帧内上报"策略类错误"）会把 iframe 的 <code>sandbox</code> 换成含 <code>allow-same-origin</code> 的
+兼容集 ⇒ <strong>作者页一条 <code>postMessage</code> 就能把第三方脚本升到与 DSH 同源</strong>。现在：自动降档落点恒为
+沙箱档（<code>allow-scripts</code>，不透明源）；入站消息<strong>同时</strong>校验 <code>ev.origin</code> 与"这个帧应有的来源"
+（按我们自己写的 <code>src</code>/<code>sandbox</code> 推导；不符即拒收并记账）；<code>compat</code> 只能由用户显式设置，
+风险回退口 = 设置项 <code>webFrameAutoCompat</code>（默认关，打开时台账标 <code>risk:"same-origin"</code>）。</li>
+<li><strong>F6 可控上游 + <code>st</code> 下发</strong>：改前 <code>sceneRendererUrl</code>/<code>sceneExtUrl</code> 读到什么就拼进渲染器 iframe，
+宿主签发的场景令牌 <code>st</code> 也随 <code>pkgurl</code> 一路下发。现在：设置里的外链只认 http(s) <strong>回环</strong> /
+"与页面同主机的字面 IP" / <strong>显式白名单</strong>（设置项 <code>sceneUrlWhitelist</code>）；<code>st</code> 只在目标过闸门时下发；
+非法目标一律拒绝使用（回落默认回环）+ 记账（<code>window.__mpwSceneUrlGuard</code>）+ <code>console.warn</code> + <code>/diag</code> 信标。</li>
+</ul>
+<p>判据（都注册在 <code>tools/check.sh</code> 第 5 步，各自带<strong>变异自证</strong>子进程）：
+<code>node tools/web-frame-origin-guard-test.mjs</code>（45 断言：伪造 policy 错误/来源不符 ⇒ 不降档且记账、
+显式 <code>compat</code> 零回归、回退口打开才降 compat、3 组变异必红）与
+<code>node tools/scene-url-token-guard-test.mjs</code>（41 断言：回环带 <code>st</code> / 跨源拒绝且 URL 里 0 处攻击者源 /
+白名单放行带 <code>st</code> / 同主机字面 IP 口径 / 非 http(s) 拒绝 / 4 组变异必红）。
+本仓<strong>没有新增 env / URL / localStorage 开关</strong>（两个回退口都是设置项）⇒ 渲染器仓
+<code>tests/diag-flag-check.mjs</code> 的双向比对读数不变（0/0）。</p>
 <p>⚠ <strong>接线现状（如实）</strong>：该模块<strong>尚未接进插件</strong>——<code>lib/index.js</code> / <code>lib/client.js</code> / <code>tools/build-bundle.mjs</code> 都没有 import 它，也没有 <code>/media-session</code>、<code>/media-control</code> 之类的宿主路由，所以 <strong>Now playing 控件显示的仍是「壁纸自己的媒体」，不是系统播放器</strong>。宿主路由与 UI 展示已在 <a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/MEDIA-SESSION.md" target="_blank" rel="noopener noreferrer"><code>docs/MEDIA-SESSION.md</code></a> §9/§10 规划但标注为未做。判据：<code>node tools/media-session-test.mjs</code>（95 断言 = 89 主体 + 6 变异自证），<strong>目前未接入 <code>tools/check.sh</code></strong>。</p>
 <h2>诊断与排障</h2>
 <p>出问题先来这里：一次点击把状态发回本机宿主；只有需要缩小范围时才打开个别诊断开关。</p>
@@ -1298,7 +1348,7 @@ node tools/build-bundle.mjs
 <li><strong>WE API shim（10 个全局，注入在作者脚本之前）</strong>：<code>wallpaperPropertyListener</code>、<code>wallpaperRegisterAudioListener</code>、<code>wallpaperRegisterMedia{Properties,Thumbnail,Playback,Timeline,Status}Listener</code>、<code>wallpaperRequestRandomFileForProperty</code>、<code>wallpaperMediaIntegration</code>、<code>wallpaperPluginListener</code>（<code>lib/web-wallpaper.js:540-551</code>、<code>:498-517</code>）</li>
 <li><strong>存储持久化</strong>：帧内 facade（真 <code>localStorage</code> 一读就抛时安装）+ 宿主 <code>POST/GET /api/mpkg-wallpaper/web-store</code>，按壁纸隔离（<code>sha1(label|wallKey|relFile)</code> 前 12 位）；上限 64 键 / 单值 4096 字符 / 每壁纸 64KB / 最多 64 张壁纸，落 <code>~/.dsh-mpkg-wallpaper/web-store.json</code></li>
 <li><strong>风险预检</strong>：<code>⚠重动画</code>（目录里有 <code>.skel/.atlas</code> 或名字含 spine/live2d，深度 ≤3）与 <code>🌐外网</code>（入口 HTML 前 256KB 含 <code>http(s)://</code>），只在 <code>type === "web"</code> 时显示（<code>lib/index.js:1937-1953</code>、<code>lib/client.js:12867-12868</code>）</li>
-<li><strong>CSP</strong>：命中阻断型 CSP 时<strong>不注入</strong> shim、回原字节并加 <code>x-mpw-shim-skipped: csp</code>（<code>lib/web-wallpaper.js:424-439</code>，这一处<strong>照抄</strong>上游 <code>web-rewrite.ts:26-43</code>，MIT，登记在 <code>THIRD-PARTY.md</code> §5）；客户端 2.5 秒没收到 ready 则去掉标记、切兼容沙箱、重载一次</li>
+<li><strong>CSP</strong>：命中阻断型 CSP 时<strong>不注入</strong> shim、回原字节并加 <code>x-mpw-shim-skipped: csp</code>（<code>lib/web-wallpaper.js:424-439</code>，这一处<strong>照抄</strong>上游 <code>web-rewrite.ts:26-43</code>，MIT，登记在 <code>THIRD-PARTY.md</code> §5）；客户端 2.5 秒没收到 ready 则去掉标记<strong>在沙箱档内</strong>重载一次（<code>sandbox</code> 属性保持 <code>allow-scripts</code>，<strong>不</strong>自动升同源；①P-205 F5）</li>
 <li><strong>交互模式</strong>：壁纸层是背景层（不吃指针），点右下角「交互」按钮或 URL <code>?mpwinteract=1</code> 后，指针/滚轮/触摸（<code>full</code> 档再含键盘与文本输入）会被送进壁纸内的作者脚本；<strong>一定会退出</strong>——60 秒无操作 / 180 秒总时长 / <code>Esc</code> / 右上角「退出交互」/ 切换壁纸。⚠ <strong>窗口失焦不会退出</strong>（只释放按键、发 <code>op:"blur"</code>，<code>lib/client.js:2732-2769</code>）；<code>?mpwinteract=full</code> 只改档位、<strong>不自动进入</strong>，自动进入只认 <code>1|on</code>。交互<strong>不放宽沙箱</strong>（仍只要 <code>allow-scripts</code>）、<strong>不读帧内 DOM</strong>；<code>F5/F11/F12/浏览器前进后退刷新</code>、<code>Tab</code>、<code>Backspace</code>、<code>Ctrl/Cmd+R/W/T/N/Q/L/P</code> 被拦下</li>
 <li><strong>作者脚本报错不拖垮插件</strong>：帧内 shim 兜住 listener 异常 / 全局 <code>error</code> / 未捕获 Promise，限流上报父页（<code>console.warn</code> + <code>/diag</code>）</li>
 <li><strong>已知限制</strong>：音频频谱通道仍为空（WE 的频谱语义是<strong>系统音频</strong>，拿壁纸自身声音当频谱是语义造假，故不伪造）；媒体通道已实现但未接系统媒体会话；<code>innerHTML</code> 里拼出来的 <code>file:///</code> 不覆盖；绝对系统路径映射不了；被导航到外部的页面拿不到 shim</li>
@@ -1310,7 +1360,7 @@ node tools/build-bundle.mjs
 <h2>可调参数与网页壁纸的设置接入</h2>
 <p>这节说明壁纸自带的参数在插件里能读到什么、能改什么。</p>
 <ul>
-<li><strong>mpkg 壁纸</strong>：项目自带的<strong>可调参数</strong>在「壁纸设置 → 可调参数」折叠区<strong>只读展示</strong>（浏览器显示的是预渲染素材，改参数不会改变画面），供对照。</li>
+<li><strong>mpkg 壁纸</strong>：项目自带的<strong>可调参数</strong>在「壁纸设置 → 可调参数」折叠区<strong>可改且改完即生效</strong> —— 场景壁纸由浏览器里的场景渲染器出画，改动走 P-203 跨源属性通道即时下发（渲染器回执确认，见 <code>docs/WE-USER-PROPS.md</code> §3）；静态帧/视频类 mpkg（浏览器只有预渲染素材）的画面仍要等下次应用才可能反映</li>
 <li><strong>网页壁纸（部分已接入，Live2D 立绘类）</strong>：含 <code>loadJson.json</code> / <code>SettingModel</code> 的网页壁纸，其设置项已接入<strong>同一个折叠区</strong>：分辨率（2k/4k/8k，重载生效）、语言（按壁纸实际提供）、背景音乐与语音音量（实时）、显示触摸区域框/文本框等开关。改动写入壁纸 iframe 的存储（沙箱模式下走 facade → <code>/web-store</code>），重载生效。</li>
 <li><strong>隐藏壁纸自带设置面板</strong>：这类壁纸右上角自带「设置」按钮且无法交互，插件在 iframe 加载后自动隐藏它，防挡住画面。</li>
 <li><strong>未适配的</strong>：依赖外网 SDK / 特殊交互逻辑的网页壁纸，其内置设置项尚未接入，插件内的可调参数不可用（可正常显示）。</li>
@@ -1337,7 +1387,7 @@ node tools/build-bundle.mjs
 <ul>
 <li><strong>默认无被动对外网络请求</strong>：插件后台不主动访问外部网络；日常播放只与本机 DSH 宿主（<code>127.0.0.1</code>）通信。例外都是<strong>用户显式触发</strong>：检查更新/一键更新访问 GitHub（<code>raw.githubusercontent.com</code>、<code>api.github.com</code>）、下载 ffmpeg 访问 GitHub Releases / npm 二进制镜像；<strong>打开设置面板后 0.8s 会自动静默检查一次版本</strong>（只点亮徽标，不弹窗、不下载、不上传）。此外用户手输的网络图片 URL、网页壁纸自身加载的资源也属外部访问。</li>
 <li><strong>无敏感内容</strong>：源码不含路径、密钥、令牌、个人信息；<code>node tools/secret-scan-test.mjs</code> 扫描全部 tracked 文件（凭据 12 条模式、本机路径 3 条模式）必须 0 命中。</li>
-<li><strong>网页壁纸沙箱</strong>：默认模式下 iframe 是不透明源，作者脚本读不到宿主 DOM / <code>localStorage</code> / cookie，也摘不掉自己的 sandbox；帧↔父页只走 <code>postMessage</code>（op 白名单 + 只认父窗口来源）。壁纸资源的跨源读取**只对 <code>Origin: null</code>**放行。</li>
+<li><strong>网页壁纸沙箱</strong>：默认模式下 iframe 是不透明源，作者脚本读不到宿主 DOM / <code>localStorage</code> / cookie，也摘不掉自己的 sandbox；帧↔父页只走 <code>postMessage</code>（op 白名单 + <strong><code>ev.source</code> 与 <code>ev.origin</code> 双重校验</strong>，期望来源按我们自己写的 <code>src</code>/<code>sandbox</code> 推导）。壁纸资源的跨源读取**只对 <code>Origin: null</code>**放行。<strong>自动路径不会把帧升到同源</strong>（①P-205 F5：降档落点恒为沙箱档；<code>compat</code> 只由用户显式设置），每次拒收/拦截/降档都写进 <code>window.__mpwWebFrameGuard</code>。</li>
 <li><strong>网页壁纸交互</strong>：交互事件只从插件建的<strong>交互舞台</strong>发出（舞台默认 <code>display:none</code>，未开交互时一个事件都不注入）；开启才给宿主页面打 <code>data-mpw-interact="on"</code>（此时宿主界面整体让位，右上角常驻退出按钮）；60s 无操作 / 180s 总时长 / <code>Esc</code> / 切壁纸都会退出；交互<strong>不放宽沙箱</strong>、<strong>不读帧内 DOM</strong>。</li>
 <li><strong>宿主路由</strong>：自定义目录/库路由都做了路径穿越校验（<code>..</code>、绝对路径、前导点一律拒），<code>/raw</code> 只服务已登记的容器条目。</li>
 <li><strong>数据边界</strong>：所有解析在本机完成；<code>localStorage</code> 只存背景与参数；设置另存宿主端 <code>~/.dsh-mpkg-wallpaper/settings.json</code>；网页壁纸的帧内存储在 <code>~/.dsh-mpkg-wallpaper/web-store.json</code>。</li>
@@ -1389,7 +1439,8 @@ node tools/build-bundle.mjs
 │                     #   np-sidebar-live-probe.mjs、np-media-live-probe.mjs（真机探针，需 :3080 + headless Firefox）/
 │                     #   bundle-equivalence-test.mjs / pre-commit.sh + ../.githooks/pre-commit
 ├── docs/             # 研发笔记（**不进发布包**）：WEB-WALLPAPER.md / NOW-PLAYING-DSH.md / MEDIA-SESSION.md /
-│                     #   DIAGNOSTICS.md / RELEASE.md / STYLE-SCOPE-GUARD.md / TOKEN-NAMESPACE.md / PRE-COMMIT.md …
+│                     #   DIAGNOSTICS.md / RELEASE.md / STYLE-SCOPE-GUARD.md / TOKEN-NAMESPACE.md / PRE-COMMIT.md /
+│                     #   SCENE-STALE-COMMIT.md（B1 迟到 8s 的旧 scene 翻盘：根因/修法/判据/未验证边界）…
 └── dist/             # 构建产物（**不入库、不进包**）：dsh-mpkg-wallpaper.bundle.mjs（方式四用，现生成）
 </code></pre>
 <blockquote>
@@ -1558,6 +1609,13 @@ MPW_SKIP_PRECOMMIT=1 git commit -m …   # 单次绕过（走脚本内显式口�
 <p><strong>修法</strong>：新增<strong>可播性闸门</strong>（<code>/probe</code> 只读元数据、不起 ffmpeg；判据 = 编码/容器白名单 + MP4 里 h264+opus、HEVC Main10 这类确定性缺口；探测不出来一律不改行为）——可直读就<strong>直读原片</strong>，只有真吃不下才转码。顺带修掉三个真 bug：旧 <code>direct-spec</code> 直读判据<strong>不看编码</strong>（HEVC 会被直读→黑屏）、字节上限淘汰<strong>从最新开始删</strong>（刚转好的产物被自己删掉 ⇒ 缓存永久 miss）、<strong>取消后仍换编码器重试</strong>。资源上限集中一处：产物 12 个 / <strong>512MB</strong>、并发 <strong>1</strong>、排队 30s、单任务 15min、<strong>转码默认降采样到 1920 宽</strong>（实测 4K 656MB → 1080p 275MB）、<strong>内存准入 1024MB</strong>；启动清理一次并打日志；三种状态（直读/转码中/已缓存）写进日志与 <code>window.__mpwWallpaperState</code>。</p>
 <blockquote>
 <p>细节、判据表与内存实测：<a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/TRANSCODE-RESOURCE.md" target="_blank" rel="noopener noreferrer"><code>docs/TRANSCODE-RESOURCE.md</code></a>；回退开关 <code>?mpwtranscode=legacy|aggressive</code>；回归 <code>node tools/transcode-limit-test.mjs</code>（43 断言，门禁第 5/12 步）。</p>
+</blockquote>
+<p><strong>②（2026-09-28）「切档 → 立刻切回 ⇒ 壁纸加载不出来，过一会儿又好了」+「关掉预缩档后感觉过曝」</strong></p>
+<p><strong>根因（两层，都已修）</strong>：①<strong>宿主</strong>——一次 <code>/transcode</code> 实际来<strong>两个</strong>请求（<code>&lt;video&gt;</code> 播放请求 + 客户端 <code>Range: bytes=0-0</code> 验活请求），旧实现两者命中<strong>同一份</strong> in-flight 转码 ⇒ 播放请求一断开（用户切档）就 <code>kill</code> 掉共享 ffmpeg，<strong>验活请求</strong>反而收到 <code>502 {ok:false,error:'cancelled'}</code> ⇒ 客户端把"被取消"读成"源不可用"⇒ 撤 <code>src</code> + 把壁纸层 <code>display:none</code>；②<strong>客户端</strong>——验活裁决<strong>没有代际</strong>（迟到的 <code>{ok:false}</code> 撤掉已经换好的原片），且否定答案被缓存 <strong>20s</strong> ⇒ 期间每次 apply（<strong>刷新壁纸 / 清空重选 / 无关设置落点</strong>）都复发，20s 过期后才自愈 ＝ 用户说的"过一会儿又能加载出来"（另：<code>refreshBg</code> 的 <code>&amp;_t=</code> 只击穿直读 URL ⇒ 转码档上"刷新壁纸"完全没动作，也一并修）。</p>
+<p><strong>修法</strong>：宿主侧 <code>TRANSCODE_INFLIGHT</code> 升级为 <strong>引用计数 + 代际</strong>（<code>acquire/releaseTranscodeRef</code>、<code>gen</code>、<code>killTranscodeProcs</code> 只杀本任务），验活请求走独立角色 <strong><code>player=verify</code></strong>（有产物给产物、没有回 <code>202 pending</code>，<strong>绝不为它起/续 ffmpeg</strong>），产物命中判据收紧为「最终名 + ≥1024B + ISO-BMFF <code>ftyp</code> 魔数」（0 字节/垃圾一律删掉重转），取消是<strong>独立终态</strong> <code>phase:'cancelled'</code>（写台账 + <code>/transcode-progress</code> 可读）；客户端侧裁决过 <code>mpwArmVerdictApplies</code>（URL + 挂载签名双闸门）、否定 TTL 收到 <strong>3s</strong>、换源即 <code>abort</code> 悬挂验活并清缓存、回退原片收敛到<strong>唯一落点</strong> <code>mpwFallbackToDirect</code>（内含清"源不可用"状态 ⇒ 换回来的原片看得见）。</p>
+<p><strong>色彩（"过曝"）实测</strong>：8bit 源<strong>不丢色彩</strong>——tv·bt709 标签逐字保留、YAVG Δ <strong>−0.05/255</strong>；全范围 <code>pc</code> 源产物仍 <code>pc</code>、Δ <strong>+0.21/255</strong>；未标注语料（4K→1920）Δ <strong>+0.02/255</strong>（阈值 1.0/255）。真问题是 <strong>&gt;8bit / HDR</strong>：旧 argv 不带 <code>-pix_fmt</code> ⇒ 产物<strong>仍是 <code>High 10 / yuv420p10le</code></strong>（多数浏览器无 High10 解码器 ⇒ 黑屏，而这条路的理由正是"浏览器吃不下才转"）；现按 <code>transcodeColorPlan</code> 显式降 8bit + 声明 <code>bt709/tv</code> 并<strong>记台账</strong>（8bit 源一个参数都不加 ⇒ 既有产物继续命中、与改动前逐字节相同）。回退口 <code>DSH_WE_TRANSCODE_COLOR=legacy|force8</code>。</p>
+<blockquote>
+<p>细节、链路图、逐条 ffmpeg 路径排查表与全部读数：<a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/TRANSCODE-LIFECYCLE.md" target="_blank" rel="noopener noreferrer"><code>docs/TRANSCODE-LIFECYCLE.md</code></a>；回归 <code>node tools/prescale-switch-race-test.mjs</code>（44 断言）+ <code>node tools/transcode-color-fidelity-test.mjs</code>（24 断言，含 7+4 组变异）。</p>
 </blockquote>
 <h3>选择文件夹 / 选择文件：行为契约与快捷键（2026-09-17）</h3>
 <p><strong>根因（判据式，详见 <a href="https://github.com/XHR666/dsh-mpkg-wallpaper/blob/HEAD/docs/DIR-PICKER-SCROLL.md" target="_blank" rel="noopener noreferrer"><code>docs/DIR-PICKER-SCROLL.md</code></a>）</strong>：旧实现里那段"事后补偿滚动位置"的代码是<strong>死代码</strong>——<code>dirScrollRef.current</code> 只被写成 <code>{anchorIdx, anchorOff}</code> 而<strong>从不写 <code>ratio</code></strong>，于是 <code>if (ratio === void 0 || ratio === null) return;</code> 恒真早退，其后的锚点补偿与按比例恢复<strong>一行都没执行过</strong>；同时容器没有 <code>overscroll-behavior: contain</code>（滚轮到边界会串联给宿主设置面板），且没有任何机制在 React 重建列表节点后把 <code>scrollTop</code> 补回来（新节点天然 <code>scrollTop = 0</code>）。三者叠加 = "自动弹跳 / 锁定在最顶"。</p>

@@ -642,9 +642,29 @@ and small metadata objects. Do not include raw scrape/parse outputs.</p>
 <li><code>effort</code>: Optional. <code>"low"</code>, <code>"medium"</code> or <code>"high"</code> reasoning budget for the agent task.</li>
 <li><code>maxCredits</code>: Optional positive integer. Spending limit in credits for this run. The API defaults to 2,500 when omitted, and caps a free request at 2,500.</li>
 <li><code>strictConstrainToURLs</code>: Optional boolean. If <code>true</code>, the agent only visits the URLs in <code>urls</code>.</li>
-<li><code>threadId</code>: Optional. Continue an existing thread: the <code>threadId</code> from an earlier <code>firecrawl_agent</code> or <code>firecrawl_agent_status</code> result. Omit to start a new thread. On a follow-up, omitted <code>mode</code>, <code>urls</code> and <code>schema</code> carry over from the previous turn.</li>
-<li><code>mode</code>: Optional. <code>"extract"</code> (default) returns the complete structured result every turn. <code>"chat"</code> lets a follow-up that asks for no new data get a short reply in <code>message</code> instead of a re-run.</li>
+<li><code>threadId</code>: Optional. Continue an existing thread: the <code>threadId</code> from an earlier <code>firecrawl_agent</code> or <code>firecrawl_agent_status</code> result. Omit to start a new thread. On a follow-up, omitted <code>mode</code>, <code>urls</code>, <code>schema</code> and <code>exchange</code> settings carry over from the previous turn.</li>
+<li><code>mode</code>: Optional. <code>"extract"</code> (default) returns the complete structured result every turn. <code>"chat"</code> lets a follow-up that asks for no new data get a short reply in <code>message</code> instead of a re-run; <code>exchange.requireApproval</code> needs it.</li>
+<li><code>exchange</code>: Optional. Alexandria provider settings for this turn, forwarded as-is to <code>POST /v2/agent</code>:<ul>
+<li><code>enabled</code>, <code>toolkits</code> (up to 5 provider slugs), <code>maxCalls</code> (1 to 30), <code>requireApproval</code> (paid calls end the turn with a <code>pendingApproval</code>; needs <code>mode: "chat"</code> on the same call, even on a follow-up)</li>
+<li><code>onTermsRequired</code>: what to do when an Alexandria provider the agent would use needs data terms your team has not accepted. Gated providers are never called in any mode. Omitted on a follow-up keeps the previous turn's value.<ul>
+<li><code>"skip"</code> (default): answer with accepted providers only. <code>exchange.skippedProviders</code> on the status result lists the gated providers that would have helped.</li>
+<li><code>"ask"</code>: the same, plus a terms <code>pendingApproval</code> and <code>exchange.requiresAction</code> with the exact <code>terms/show</code> and <code>terms/accept</code> calls for each provider. Each provider's <code>digest</code> is always present and is <code>string | null</code>; when it is <code>null</code>, <code>terms/show</code> returns the current digest to send.</li>
 </ul>
+</li>
+<li><code>approve</code>: <code>{ approvalId, callIds?, always? }</code> answers yes to the <code>pendingApproval</code> the previous turn ended on. <code>callIds</code> and <code>always</code> apply to paid-call approvals only.</li>
+<li><code>decline</code>: <code>{ approvalId }</code> answers no. A declined terms offer keeps those providers out of the rest of the thread.</li>
+<li><code>approve</code> and <code>decline</code> need <code>threadId</code>, and only one of them can be sent.</li>
+</ul>
+</li>
+</ul>
+<p><strong>Provider terms (ask mode):</strong> there is no auto-accept mode. When a turn ends on a terms offer, the status result carries <code>pendingApproval</code> (<code>kind: "terms"</code>) and <code>exchange.requiresAction</code> with the <code>approvalId</code> and the exact <code>terms/show</code> and <code>terms/accept</code> calls. To use the provider:</p>
+<ol>
+<li>Show the user the terms (<code>terms/show</code> through <code>firecrawl_scrape</code> with <code>alexandria</code>).</li>
+<li>Get the user's explicit consent to that provider's terms. A data request is not consent.</li>
+<li>Run the <code>terms/accept</code> call through <code>firecrawl_scrape</code>.</li>
+<li>Continue the same thread: call <code>firecrawl_agent</code> with the same <code>threadId</code> and <code>exchange.approve: { "approvalId": "..." }</code>.</li>
+</ol>
+<p>If the user says no, call <code>firecrawl_agent</code> with the same <code>threadId</code> and <code>exchange.decline: { "approvalId": "..." }</code> instead.</p>
 <p><strong>Prompt Example:</strong></p>
 <blockquote>
 <p>"Find the founders of Firecrawl and their backgrounds"</p>
@@ -689,6 +709,16 @@ and small metadata objects. Do not include raw scrape/parse outputs.</p>
   "arguments": {
     "prompt": "Only keep the startups based in Europe",
     "threadId": "0199a1b2-0000-7000-8000-000000000031"
+  }
+}
+</code></pre>
+<p><strong>Usage Example (continue the thread after the user accepted a provider's terms):</strong></p>
+<pre><code class="language-json">{
+  "name": "firecrawl_agent",
+  "arguments": {
+    "prompt": "I accepted the Apollo terms. Continue.",
+    "threadId": "0199a1b2-0000-7000-8000-000000000031",
+    "exchange": { "approve": { "approvalId": "0199a1b2-0000-7000-8000-000000000033" } }
   }
 }
 </code></pre>
@@ -957,6 +987,29 @@ tool again with the identical payload and <code>requestId</code>.</p>
 [INFO] Starting scrape for URL: https://example.com
 [ERROR] Rate limit exceeded
 </code></pre>
+<h2>API response hints</h2>
+<p>The MCP server explicitly enables Firecrawl API response hints on its outbound
+requests with <code>X-Firecrawl-Agent-Hints: true</code>; the API leaves them disabled for
+ordinary callers. When Firecrawl returns an optional <code>agent_hints</code> array of
+strings, JSON tool results preserve it in their existing text and
+<code>structuredContent</code> alongside the tool's other structured fields. Readable
+Developer and Research outputs keep their existing text and show hints in a
+separate, labeled text block. Empty results can include hints. Error hints
+remain visible with <code>isError: true</code>.
+Responses without hints keep their existing output format. Guidance is API
+metadata, separate from the scraped page's content; it is not generated or
+executed by the MCP adapter.</p>
+<p>The strings are passed through unchanged. An HTTP operation mentioned in a
+hint is not necessarily an MCP tool: Alexandria discovery is available through
+<code>firecrawl_find_tools</code>, and provider execution uses <code>firecrawl_scrape</code> with an
+<code>alexandria</code> body. The search-only profile exposes those paths and URL-mode
+Scrape, but does not expose feedback tools. Clients should use their advertised
+tool schemas and available capabilities. This change does not add tools,
+translate prose into tool calls, or submit feedback automatically.</p>
+<p>The pinned <code>firecrawl</code> 4.40.0 discards outer-envelope hints in high-level
+Scrape and Map responses and normalized SDK errors. The adapter captures hints
+from the SDK HTTP response while retaining the SDK's request and retry behavior.
+Authentication recovery retains its existing guidance.</p>
 <h2>Error Handling</h2>
 <p>The server provides robust error handling:</p>
 <ul>
