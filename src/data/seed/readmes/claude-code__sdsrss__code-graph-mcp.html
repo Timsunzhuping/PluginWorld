@@ -18,7 +18,7 @@
 <li><strong>Dead code detection</strong> — Find unreferenced symbols with smart Orphan/Exported-Unused classification</li>
 <li><strong>Impact analysis</strong> — Determine the blast radius of code changes by tracing all dependents</li>
 <li><strong>Incremental indexing</strong> — Merkle tree change detection with file system watcher for real-time updates. Smart event filtering skips metadata-only changes (chmod, xattr)</li>
-<li><strong>Context compression</strong> — Token-aware snippet extraction for LLM context windows (L0→full code, L1→summaries, L2→file groups, L3→directory overview). Compact JSON output saves 15-20% tokens</li>
+<li><strong>Context compression</strong> — Token-aware snippet extraction for LLM context windows (L0→full code, L1→summaries, L2→file groups, L3→directory overview). Every MCP tool except <code>ast_search</code> takes <code>compact: true</code>, which drops code bodies from the response; what else it trims is per-tool (<code>get_ast_node</code> keeps the signature, <code>module_overview</code> drops it), and how much it saves depends on the tool and the repo, so no fixed figure is quoted here</li>
 <li><strong>Embedding model</strong> — Optional local embedding via Candle (feature-gated <code>embed-model</code>). Context reordered to prioritize structural relations over code for better embedding quality</li>
 <li><strong>Self-healing</strong> — Automatic SQLite corruption recovery with rebuild. Startup repair for incomplete indexing (Phase 3 failures)</li>
 <li><strong>MCP protocol</strong> — JSON-RPC 2.0 over stdio, plug-and-play with Claude Code, Cursor, Windsurf, and other MCP clients</li>
@@ -40,35 +40,36 @@
 <p>Every design decision — from token-aware compression to node_id-based snippet expansion — is optimized for LLM context windows. Works out of the box with Claude Code, Cursor, Windsurf, and any MCP-compatible client.</p>
 <h2>Performance</h2>
 <p>Every row below is a line <code>code-graph-mcp benchmark</code> prints, measured on this
-repository (278 files, 5,065 nodes, 10,731 edges) with a release build. Run the
-same command on your own project — the numbers that matter are yours, and these
-scale with tree size and machine.</p>
+repository (283 files, 5,311 nodes, 11,215 edges) with a release build — median
+of three consecutive runs on an otherwise idle machine. Run the same command on
+your own project: the numbers that matter are yours, and these scale with tree
+size and machine.</p>
 <table>
 <thead>
 <tr>
 <th><code>benchmark</code> line</th>
-<th>This repo, v0.123.0</th>
+<th>This repo, v0.129.0</th>
 </tr>
 </thead>
 <tbody><tr>
 <td>Full index</td>
-<td><strong>~1.9s</strong> (≈145 files/second, single-threaded)</td>
+<td><strong>~2.0s</strong> (≈139 files/second, single-threaded)</td>
 </tr>
 <tr>
 <td>Incremental (noop)</td>
-<td><strong>~30ms</strong> no-change detection via BLAKE3 Merkle tree</td>
+<td><strong>~28ms</strong> no-change detection via BLAKE3 Merkle tree</td>
 </tr>
 <tr>
 <td>Query latency P50 / P99</td>
-<td><strong>~575us / ~1.9ms</strong></td>
+<td><strong>~655us / ~2.1ms</strong></td>
 </tr>
 <tr>
 <td>DB size</td>
-<td><strong>~21.8MB</strong> (≈4.4MB per 1,000 nodes)</td>
+<td><strong>~22.4MB</strong> (≈4.2MB per 1,000 nodes)</td>
 </tr>
 <tr>
 <td>Avg tokens/node</td>
-<td><strong>~239</strong></td>
+<td><strong>~242</strong></td>
 </tr>
 </tbody></table>
 <h2>Efficiency: code-graph vs Traditional Tools</h2>
@@ -176,6 +177,32 @@ rather than dressed up.</p>
 <td>Glob</td>
 </tr>
 </tbody></table>
+<h3>What the Graph Does Not See</h3>
+<p>Call edges are resolved by name, so a few spellings produce no edge. These are
+known boundaries, not bugs to report:</p>
+<ul>
+<li><strong>A method call reached through a module path.</strong> <code>module::Type::method()</code>
+produces no call edge — the same whether the path starts with the crate name,
+<code>crate::</code>, or a bare module. A bare <code>Type::method()</code> does resolve, and so does
+a <em>free function</em> through the same kind of path: <code>my_crate::cli::cmd_grep()</code>
+binds, which <code>path_qualifier_strips_own_crate_name</code> in
+<code>tests/integration_call_qualifier.rs</code> exists to keep true. It is the <code>Type::</code>
+segment in front of the method that drops the edge, not the length of the path.
+Measured on this repo at v0.132.0: <code>Database::open</code> has 173 caller edges and
+<strong>none</strong> of them come from the 53 call sites in <code>tests/cli_e2e.rs</code> spelled
+<code>code_graph_mcp::storage::db::Database::open(...)</code>.</li>
+<li><strong>A receiver call whose method name is shared by several types.</strong> <code>obj.method()</code>
+normally resolves: the receiver has no statically-known type, so the resolver
+binds it when exactly one same-language method carries that name
+(<code>receiver_call_resolves_unique_method</code>). When several types define the same
+name it is dropped rather than fanned out
+(<code>receiver_call_with_ambiguous_method_name_stays_unresolved</code>).</li>
+<li><strong>Cross-file constant and type-position uses, callbacks, and function
+pointers.</strong> None of these are call edges, but none are invisible either: they
+are carried as the <code>references</code> relation, which <code>find_references</code> returns and
+<code>impact</code> reports separately as <code>value reference(s) — callbacks / fn-pointers / type positions</code>. Together with the row above, this is why <code>include_dead</code>
+results are candidates to verify rather than a verdict.</li>
+</ul>
 <h2>Architecture</h2>
 <pre><code>src/
 ├── domain.rs     # Shared constants, relation types, env-var config
@@ -300,6 +327,14 @@ during <code>npm uninstall</code>. Doing it in the other order leaves the hook e
 left on disk to remove them.</p>
 <pre><code class="language-bash">code-graph-mcp uninstall     # restore statusline, strip hooks, drop the cache
 npm uninstall -g @sdsrs/code-graph
+</code></pre>
+<h3>Built from source (cargo)</h3>
+<p><code>uninstall</code> lives in the npm wrapper, so a <code>cargo install</code> / <code>cargo build</code> binary
+does not carry it — that binary tells you as much and points here. Run the
+teardown through npx without installing globally (npx still downloads the package
+and its platform binary into the npm cache), then remove your binary:</p>
+<pre><code class="language-bash">npx -y @sdsrs/code-graph uninstall   # statusline, hooks, cache
+cargo uninstall code-graph-mcp       # or delete the target/release binary
 </code></pre>
 <h2>MCP Tools</h2>
 <p><code>tools/list</code> advertises exactly these seven. Several older niche tools were folded into flags on them, so one call now covers what used to take a separate tool:</p>
@@ -501,6 +536,11 @@ npm uninstall -g @sdsrs/code-graph
 <td>Remove the steering block + detail doc</td>
 </tr>
 <tr>
+<td><code>uninstall</code></td>
+<td>—</td>
+<td>Full local teardown (statusline, hooks, cache). npm/npx installs only — a <code>cargo install</code> build prints where to get it</td>
+</tr>
+<tr>
 <td><code>serve</code></td>
 <td>—</td>
 <td>Start the MCP JSON-RPC server on stdio (the default with no subcommand)</td>
@@ -642,6 +682,7 @@ skill does is also runnable by hand.</p>
 <li><strong>Rust has no <code>inherits</code> edges</strong> — the language has no class inheritance, so <code>impl Trait for Type</code> is recorded as <code>implements</code> and an <code>inherits</code>-filtered query returns empty for Rust.</li>
 <li><strong>Kotlin/Swift interface conformance</strong> is recorded as <code>inherits</code> (both use a single <code>: Type</code> grammar for base classes and protocols/interfaces), so <code>implements</code>-filtered queries return empty for these two languages.</li>
 <li><strong>Cross-file dead-code detection</strong> may false-positive a type whose only cross-file reference sits beyond the 4096-byte stored-content cap per node (documented accepted limitation, v0.97.1).</li>
+<li><strong>A file tree-sitter cannot fully parse is indexed over a damaged parse.</strong> Symbols inside the damaged region can be missing or mis-scoped — e.g. a Swift class whose body holds <code>#if</code>/<code>#error</code> directives, or macro-heavy C++ headers. The index reports the damage rather than hiding it. A run prints <code>Syntax errors in &lt;file&gt; — symbols may be incomplete</code> per file plus an <code>N file(s) parsed with syntax errors</code> total, and the verdict is stored with the index, so it survives the run: <code>health-check</code> names the files (<code>Parse: N file(s) indexed over a damaged parse</code>, plus <code>files_with_parse_errors</code> / <code>parse_error_files</code> under <code>--json</code>), <code>doctor</code> shows a <code>Parse</code> row, and the MCP <code>get_index_status</code> carries the same two fields. An incremental run over unrelated files does not clear it — only re-parsing the offending file, or deleting it, does. Rust borrows of a binding named <code>raw</code> (<code>&amp;raw</code>, <code>&amp;raw[..]</code>, <code>&amp;raw.field</code>), which the old <code>tree-sitter-rust</code> 0.23 grammar misread as the <code>&amp;raw const</code> operator, parse cleanly since the tree-sitter 0.25 upgrade: this repo indexed fresh went from 9 damaged Rust files to 0.</li>
 </ul>
 <h2>Team-shared graph snapshot</h2>
 <p>Skip the full local index for team members and CI runners by publishing a
@@ -657,8 +698,13 @@ into your repo's <code>.github/workflows/</code>.</li>
 <pre><code class="language-bash">npx -y -p @sdsrs/code-graph code-graph-mcp snapshot inspect ./code-graph-snapshot-&lt;sha&gt;.db.zst
 </code></pre>
 <p>After setup, the auto-fetch is <strong>opt-in per consumer</strong>: an untrusted repo could
-otherwise seed a misleading graph, so an unconfigured clone prints a hint and
-skips the install. Enable it with one of the trust signals below. These live in
+otherwise seed a misleading graph, so an unconfigured clone silently skips the
+install — the explanation is logged at <code>debug</code> level (<code>RUST_LOG=debug</code>) rather
+than warned, because deciding whether this repo even publishes a snapshot would
+require the network call the gate is declining to make, and an unconditional
+warning would fire on every repository. A committed <code>[snapshot] url</code> override is
+louder: that one does warn, because the file is already asking for something.
+Enable the auto-fetch with one of the trust signals below. These live in
 the <em>environment</em> (never in <code>.code-graph.toml</code>) so a committed/PR-injected config
 file cannot set them.</p>
 <table>
@@ -764,6 +810,10 @@ defaults are what you get by doing nothing.</p>
 <td>Keep hand edits to the generated steering block — it is otherwise refreshed to the current template.</td>
 </tr>
 <tr>
+<td><code>CODE_GRAPH_NO_GITIGNORE=1</code></td>
+<td>Never touch <code>.gitignore</code> — not even to add the <code>.code-graph/</code> entry.</td>
+</tr>
+<tr>
 <td><code>CODE_GRAPH_QUIET_HOOKS=1</code></td>
 <td>Hooks inject a one-line pointer instead of the full decision table.</td>
 </tr>
@@ -794,6 +844,10 @@ defaults are what you get by doing nothing.</p>
 <tr>
 <td><code>CODE_GRAPH_DISABLE_MODEL_DOWNLOAD=1</code></td>
 <td>Never fetch the model; fail instead.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_REQUIRE_MODEL=1</code></td>
+<td>Test-only: make the embedding tests FAIL when no model can be loaded instead of self-skipping. Set by the release gate and the cache-warm cron, which supply pinned weights — without it those tests pass by doing nothing on any runner with no cached model.</td>
 </tr>
 <tr>
 <td><code>CODE_GRAPH_MAX_FILE_SIZE=&lt;bytes&gt;</code></td>
@@ -840,6 +894,52 @@ defaults are what you get by doing nothing.</p>
 <td>Make the PR impact comment fail the check on HIGH risk (CI).</td>
 </tr>
 </tbody></table>
+<h3>Sharing the statusline with another plugin</h3>
+<p>code-graph claims Claude Code's single <code>statusLine</code> slot and runs a <strong>composite</strong>
+that calls each registered provider in turn, so other plugins keep their segment
+instead of losing the slot. Whatever occupied it at install time is captured
+automatically as the <code>_previous</code> provider and restored on uninstall.</p>
+<p>A third-party plugin registers itself through the shipped CLI:</p>
+<pre><code class="language-bash"># Resolve the script through the installed package. NOT $CLAUDE_PLUGIN_ROOT:
+# Claude Code sets that per-plugin, so inside YOUR hook it points at YOUR
+# plugin's root, and in a plain shell it is unset.
+CG="$(npm root -g)/@sdsrs/code-graph/claude-plugin/scripts/statusline-chain.js"
+
+# &lt;id&gt; is a stable name (your plugin's, not a version); &lt;command&gt; is a shell
+# command that prints ONE line. Add --stdin if it expects Claude Code's status
+# JSON on stdin.
+node "$CG" register gsd "node /path/to/gsd-status.js" --stdin
+node "$CG" list
+node "$CG" unregister gsd
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Detail</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Registry (working copy)</td>
+<td><code>~/.cache/code-graph/statusline-registry.json</code></td>
+</tr>
+<tr>
+<td>Durable mirror</td>
+<td><code>~/.claude/statusline-providers.json</code> — survives a cache wipe</td>
+</tr>
+<tr>
+<td>Reserved ids</td>
+<td><code>code-graph</code>, <code>_previous</code></td>
+</tr>
+<tr>
+<td>Exit codes</td>
+<td><code>0</code> registered / unregistered / listed / already in that state · <code>1</code> usage · <code>2</code> reserved id, or a registry file that exists and cannot be read</td>
+</tr>
+</tbody></table>
+<p>Exit 2 on an unreadable registry is deliberate: the mutation refuses rather than
+rebuilding, because that file holds the user's previous statusline and other
+plugins' entries. An installer that reads exit codes must not treat it as
+"registered".</p>
 <details>
 <summary>Internal and test-only — set by the plugin's own processes, or by the test suite. Setting them by hand is not supported.</summary><table>
 <thead>
@@ -853,6 +953,11 @@ defaults are what you get by doing nothing.</p>
 <td><code>CODE_GRAPH_STATUSLINE_CWD</code></td>
 <td>statusline-composite</td>
 <td>Forwards Claude Code's authoritative cwd to each statusline provider.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_STATUSLINE_DEBUG</code></td>
+<td>test suite</td>
+<td>Makes statusline-composite print why it dropped a provider instead of swallowing the error. Off by default so a broken third-party provider stays silent in a real statusline.</td>
 </tr>
 <tr>
 <td><code>CODE_GRAPH_INSTALL_LOCK_HELD</code></td>

@@ -6,7 +6,7 @@
 <a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only" /></a></p>
 <p>Self-hosted homelab log intelligence over MCP, CLI, and REST with SQLite/FTS.</p>
 <p>It collects logs and operational evidence, stores them in SQLite with FTS5 search, and exposes one shared intelligence layer through CLI, REST, MCP, and a bundled browser workspace.</p>
-<p>Cortex began as a syslog receiver. It now covers network logs, Docker, managed files, OpenTelemetry logs, host heartbeats, fleet inventory, shell and agent activity, and Claude, Codex, and Gemini transcripts. It correlates those sources into timelines, incidents, and an evidence-backed topology graph without making the graph a second source of truth.</p>
+<p>Cortex began as a syslog receiver. It now covers network logs, Docker, managed files, OpenTelemetry logs, metrics, and traces, host heartbeats, fleet inventory, shell and agent activity, and Claude, Codex, Gemini CLI, and Antigravity transcripts. It correlates those sources into timelines, incidents, and an evidence-backed topology graph without making the graph a second source of truth.</p>
 <h2>At a glance</h2>
 <table>
 <thead>
@@ -17,11 +17,11 @@
 </thead>
 <tbody><tr>
 <td>Ingest</td>
-<td>UDP/TCP syslog, OTLP/HTTP logs, Docker logs and events, managed file tails, host heartbeats, AI transcripts, shell history, agent command records, and fleet inventory</td>
+<td>UDP/TCP syslog, OTLP/HTTP logs, metrics, and traces, Docker logs and events, managed file tails, host heartbeats, AI transcripts, shell history, agent command records, and fleet inventory</td>
 </tr>
 <tr>
 <td>Storage</td>
-<td>SQLite in WAL mode, FTS5 full-text search, bounded metadata, retention, storage budgets, maintenance jobs, checkpoints, and 43 sequential schema migrations</td>
+<td>SQLite in WAL mode, FTS5 full-text search, bounded metadata, retention, storage budgets, maintenance jobs, checkpoints, and 62 sequential schema migrations</td>
 </tr>
 <tr>
 <td>Investigation</td>
@@ -33,7 +33,7 @@
 </tr>
 <tr>
 <td>AI operations</td>
-<td>Claude, Codex, and Gemini session indexing; skill, MCP, and hook event extraction; incident clustering; and guarded local LLM assessments</td>
+<td>Claude, Codex, Gemini CLI, and Antigravity session indexing; skill, MCP, and hook event extraction where each provider exposes them; incident clustering; and guarded local LLM assessments</td>
 </tr>
 <tr>
 <td>Interfaces</td>
@@ -70,7 +70,11 @@ Cortex is designed for a trusted homelab or small private fleet. It is not a clu
 </ul>
 <h2>Quick start</h2>
 <h3>Install the CLI</h3>
-<p>The npm launcher is the fastest path for local CLI and stdio MCP use:</p>
+<p>The first-class guided path is:</p>
+<pre><code class="language-sh">npx skills add dinglebear-ai/cortex --skill install-cortex
+</code></pre>
+<p>Start a fresh agent task and invoke <code>$install-cortex</code>. It chooses server or client-only role, delegates to the canonical installer/setup engine, configures auth/network/storage, and verifies the live client connection.</p>
+<p>The npm launcher remains the fastest manual path for local CLI and stdio MCP use:</p>
 <pre><code class="language-bash">npx -y @dinglebear/cortex --help
 npx -y @dinglebear/cortex mcp
 </code></pre>
@@ -145,8 +149,8 @@ cortex tail --limit 10
 <p>Cortex is one Rust binary with multiple operating modes. The same application and service layer backs the CLI, REST handlers, and MCP handlers, so validation, limits, identity resolution, redaction, and business rules do not belong to one transport alone.</p>
 <pre><code class="language-text">                         INGESTION
 
-  Syslog UDP/TCP       OTLP logs          Docker agent / pull
-  Managed file tails  Heartbeats         Claude / Codex / Gemini
+  Syslog UDP/TCP       OTLP signals       Docker agent / pull
+  Managed file tails  Heartbeats         Claude / Codex / Gemini / Antigravity
   Shell history       Agent commands     Fleet inventory
           \               |                    /
            \              |                   /
@@ -168,7 +172,7 @@ cortex tail --limit 10
                               |
           CLI       REST       MCP       Web workspace
 </code></pre>
-<p>The daemon supervises its receivers and background services with cooperative cancellation. Shutdown drains HTTP requests, maintenance work, and ingest queues before checkpointing the WAL.</p>
+<p>The daemon supervises its receivers and background services with cooperative cancellation. Shutdown drains HTTP requests, gives maintenance tasks 10 seconds to finish before abort-and-join, gives ingest 5 seconds to flush, and then attempts a WAL checkpoint. Already-running blocking SQLite calls cannot be cancelled by Tokio.</p>
 <p>Background services include:</p>
 <ul>
 <li>Retention and storage-budget enforcement</li>
@@ -198,16 +202,14 @@ cortex tail --limit 10
 </ul>
 <p>Syslog has no application-layer authentication. Restrict senders with network controls and <code>CORTEX_ALLOWED_SOURCE_CIDRS</code> when the listener is reachable beyond a trusted network.</p>
 <p>Built-in enrichment recognizes useful signals from AdGuard, Authelia, Docker lifecycle events, fail2ban, Linux kernel and OOM events, SWAG, reverse-proxy logs, and host-local Cortex Docker agent metadata. Source gates can restrict enrichment that would otherwise trust a marker inside an unauthenticated syslog body.</p>
-<h3>OpenTelemetry logs</h3>
-<p>Cortex accepts OTLP/HTTP log export requests at <code>POST /v1/logs</code> on the shared HTTP listener. Requests are bounded to 4 MiB and flow into the normal Cortex writer.</p>
+<h3>OpenTelemetry ingestion</h3>
+<p>Cortex accepts protobuf OTLP/HTTP export requests on the shared HTTP listener. Logs use <code>POST /v1/logs</code> with a 4 MiB body limit and flow through the normal writer. Metrics use <code>POST /v1/metrics</code> and traces use <code>POST /v1/traces</code>, each with an 8 MiB body limit and dedicated storage. Metric requests admit at most 5,000 points and also enforce a bounded normalized payload budget.</p>
 <p>Current OTLP scope is intentionally narrow:</p>
 <ul>
-<li>Logs over HTTP are supported.</li>
-<li>OTLP traces are not accepted.</li>
-<li>OTLP metrics are not accepted.</li>
+<li>Logs, traces, and metrics over HTTP/protobuf are supported.</li>
 <li>OTLP/gRPC is not implemented.</li>
 </ul>
-<p><code>POST /v1/logs</code> authenticates with <strong><code>CORTEX_TOKEN</code></strong> — the same static MCP bearer token that guards <code>POST /mcp</code>, read from the managed <code>~/.cortex/.env</code> on a deployed host. It is <strong>not</strong> <code>CORTEX_API_TOKEN</code> (REST <code>/api/*</code>) and <strong>not</strong> <code>CORTEX_API_ADMIN_TOKEN</code>. Loopback and trusted-gateway policies skip the check. An OAuth-only deployment with no static token denies OTLP outright, because machine exporters have no OAuth flow — so a non-loopback OAuth-only <code>/v1/logs</code> exposure is rejected at startup unless <code>CORTEX_TOKEN</code> is set.</p>
+<p>All three OTLP endpoints authenticate with <strong><code>CORTEX_TOKEN</code></strong> — the same static MCP bearer token that guards <code>POST /mcp</code>, read from the managed <code>~/.cortex/.env</code> on a deployed host. It is <strong>not</strong> <code>CORTEX_API_TOKEN</code> (REST <code>/api/*</code>) and <strong>not</strong> <code>CORTEX_API_ADMIN_TOKEN</code>. Loopback and trusted-gateway policies skip the check. An OAuth-only deployment with no static token denies OTLP outright, because machine exporters have no OAuth flow — so a non-loopback OAuth-only OTLP exposure is rejected at startup unless <code>CORTEX_TOKEN</code> is set.</p>
 <h3>Docker logs and events</h3>
 <p>Cortex supports two Docker collection paths:</p>
 <ol>
@@ -226,9 +228,11 @@ cortex tail --limit 10
 <ul>
 <li>Claude Code projects under <code>~/.claude/projects</code></li>
 <li>Codex sessions and worktrees under <code>~/.codex/sessions</code> and <code>~/.codex/worktrees</code></li>
-<li>Gemini chat data under <code>~/.gemini/tmp</code></li>
+<li>Gemini CLI chat data under <code>~/.gemini/tmp</code></li>
+<li>Antigravity desktop's redacted transcript projections under <code>~/.gemini/antigravity/brain/&lt;session&gt;/.system_generated/logs/transcript.jsonl</code></li>
+<li>Antigravity CLI's redacted transcript projections under <code>~/.gemini/antigravity-cli/brain/&lt;session&gt;/.system_generated/logs/transcript.jsonl</code></li>
 </ul>
-<p>The scanner supports incremental checkpoints, parse-error records, bounded chunks, broad-path rejection, and safe recovery from changed files. It extracts normalized transcript rows plus dedicated skill, MCP tool-call, and hook events.</p>
+<p>The Antigravity adapter reads only the narrow redacted JSONL projections above; it does not scan conversation databases or other brain artifacts. The scanner supports incremental checkpoints, parse-error records, bounded chunks, broad-path rejection, and safe recovery from changed files. It extracts normalized transcript rows plus dedicated skill, MCP tool-call, and hook events where those lanes are represented by the provider schema, and reports unsupported lanes honestly.</p>
 <p>A satellite agent can send already-parsed records to <code>POST /v1/ai-transcripts</code>, which prevents transcript collection from depending on the database living on the same host as the AI client.</p>
 <h3>Shell and agent activity</h3>
 <p>Satellite agents can forward additional operational evidence to the shared server:</p>
@@ -324,7 +328,10 @@ cortex tail --limit 10
 </ul>
 <p>The deterministic query and incident workflows are available through CLI, REST, and MCP.</p>
 <h3>Guarded local assessments</h3>
-<p>LLM-backed assessments are deliberately local-only. They run through <code>cortex assess</code> and are not exposed as MCP actions or REST routes because they spawn a local Gemini subprocess.</p>
+<p>LLM-backed assessments are deliberately local-only. They run through <code>cortex assess</code> and are not exposed as MCP actions or REST routes because they spawn a local provider subprocess.</p>
+<p><code>CORTEX_LLM</code> selects the provider and optional model for <strong>every</strong> LLM operation: skill, MCP, hook, and abuse assessments, including dry-run audit metadata. Set <code>CORTEX_LLM=codex</code> (the default, using Codex app-server) or <code>CORTEX_LLM=gemini</code> (Gemini CLI). To pin the model globally, use <code>CORTEX_LLM=codex/gpt-5.5</code> or <code>CORTEX_LLM=gemini/gemini-3.1-flash-lite-preview</code>. An explicit model in <code>CORTEX_LLM</code> wins over <code>--model</code>; otherwise that existing flag can select a model for one invocation. Empty or unsupported selectors fail without provider fallback.</p>
+<p>The selector also works in managed <code>~/.cortex/.env</code>; process environment values take precedence. Settings are retained after config loading.</p>
+<p>The old <code>CORTEX_CODEX_MODEL</code> and <code>CORTEX_HEADLESS_GEMINI_MODEL</code> variables are ignored. Command and authentication-home overrides remain installation settings, not provider selectors. <code>--no-llm</code> needs no provider configuration or credentials.</p>
 <p>The shared LLM runner enforces:</p>
 <ul>
 <li>A global kill switch</li>
@@ -425,11 +432,11 @@ cortex doctor
 </code></pre>
 <p>The CLI supports direct/local operation and HTTP operation. REST-backed mode is the normal remote path and uses <code>CORTEX_URL</code> plus <code>CORTEX_API_TOKEN</code>.</p>
 <h3>MCP</h3>
-<p>Cortex exposes one MCP tool named <code>cortex</code>. Its required <code>action</code> field selects one of <strong>56 live actions</strong> from a single authoritative Rust registry.</p>
+<p>Cortex exposes one MCP tool named <code>cortex</code>. Its required <code>action</code> field selects an action from a single authoritative Rust registry. The mechanically generated current count is published in <a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/tests/TEST_COVERAGE.md" target="_blank" rel="noopener noreferrer">the live coverage inventory</a>.</p>
 <p>The current scope split is:</p>
 <ul>
-<li>50 read actions requiring <code>cortex:read</code></li>
-<li>5 admin actions requiring <code>cortex:admin</code>: <code>ack_error</code>, <code>unack_error</code>, <code>file_tails</code>, <code>notifications_test</code>, and <code>llm_invocations</code></li>
+<li>53 read actions requiring <code>cortex:read</code></li>
+<li>6 admin actions requiring <code>cortex:admin</code>: <code>artifact_evidence_record</code>, <code>ack_error</code>, <code>unack_error</code>, <code>file_tails</code>, <code>notifications_test</code>, and <code>llm_invocations</code></li>
 <li>1 informational action, <code>help</code>, which requires an authenticated context when authentication is mounted but no read/admin scope</li>
 </ul>
 <h4>Complete MCP action catalog</h4>
@@ -450,15 +457,15 @@ cortex doctor
 </tr>
 <tr>
 <td>Analytics and correlation</td>
-<td><code>timeline</code>, <code>patterns</code>, <code>anomalies</code>, <code>compare</code>, <code>correlate</code>, <code>topic_correlate</code>, <code>similar_incidents</code>, <code>incident_context</code></td>
+<td><code>timeline</code>, <code>patterns</code>, <code>anomalies</code>, <code>compare</code>, <code>correlate</code>, <code>topic_correlate</code>, <code>similar_incidents</code>, <code>recurring_error_comparison</code>, <code>incident_context</code></td>
 </tr>
 <tr>
 <td>Fleet and topology</td>
 <td><code>map</code>, <code>host_state</code>, <code>fleet_state</code>, <code>correlate_state</code>, <code>graph</code>, <code>compose_status</code>, <code>compose_doctor</code></td>
 </tr>
 <tr>
-<td>AI sessions</td>
-<td><code>sessions</code>, <code>search_sessions</code>, <code>abuse</code>, <code>abuse_incidents</code>, <code>abuse_investigate</code>, <code>ai_correlate</code>, <code>usage_blocks</code>, <code>project_context</code>, <code>list_ai_tools</code>, <code>list_ai_projects</code></td>
+<td>AI sessions and scoped evidence</td>
+<td><code>sessions</code>, <code>search_sessions</code>, <code>evidence_scope</code>, <code>abuse</code>, <code>abuse_incidents</code>, <code>abuse_investigate</code>, <code>ai_correlate</code>, <code>usage_blocks</code>, <code>project_context</code>, <code>list_ai_tools</code>, <code>list_ai_projects</code></td>
 </tr>
 <tr>
 <td>AI operational events</td>
@@ -466,7 +473,7 @@ cortex doctor
 </tr>
 <tr>
 <td>Errors and administration</td>
-<td><code>unaddressed_errors</code>, <code>ack_error</code>, <code>unack_error</code>, <code>notifications_recent</code>, <code>notifications_test</code>, <code>file_tails</code>, <code>llm_invocations</code></td>
+<td><code>unaddressed_errors</code>, <code>ack_error</code>, <code>unack_error</code>, <code>notifications_recent</code>, <code>notifications_test</code>, <code>file_tails</code>, <code>llm_invocations</code>, <code>artifact_evidence_record</code></td>
 </tr>
 <tr>
 <td>Reference</td>
@@ -558,9 +565,19 @@ cortex doctor
 <h3>Health endpoints</h3>
 <ul>
 <li><code>GET /health</code>: minimal unauthenticated liveness response for containers and proxies</li>
-<li><code>GET /health/full</code>: authenticated detailed health and ingest observability</li>
+<li><code>GET /health/full</code>: detailed health and ingest observability; mounted auth requires <code>CORTEX_TOKEN</code> (OAuth alone is insufficient). Explicit loopback and trusted-gateway policies bypass this check.</li>
 </ul>
 <h2>Configuration</h2>
+<h3>macOS heartbeat agent quick start</h3>
+<p>From an active desktop login:</p>
+<pre><code class="language-bash">cortex setup heartbeatagent install
+cortex setup heartbeatagent check
+</code></pre>
+<p>Set <code>CORTEX_HEARTBEAT_TARGET</code> and an ingest credential first.
+<code>CORTEX_API_TOKEN</code> is query-only and cannot authenticate agent ingest. See the
+authoritative <a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/docs/SETUP.md#10-macos-heartbeat-agent" target="_blank" rel="noopener noreferrer">macOS heartbeat-agent operator
+contract</a> for capabilities, paths,
+login semantics, migration, recovery, removal, and delivery proof.</p>
 <p>Cortex loads configuration in this order, with later layers winning:</p>
 <ol>
 <li>Built-in defaults</li>
@@ -726,6 +743,10 @@ cortex doctor
 <td>Enable notification services</td>
 </tr>
 <tr>
+<td><code>CORTEX_LLM</code></td>
+<td>Shared provider/model selector: <code>codex[/MODEL]</code> or <code>gemini[/MODEL]</code>; default <code>codex</code></td>
+</tr>
+<tr>
 <td><code>CORTEX_LLM_ENABLED</code></td>
 <td>Global local-assessment kill switch</td>
 </tr>
@@ -754,7 +775,7 @@ cortex doctor
 <h3>Ingest endpoints</h3>
 <ul>
 <li>Syslog itself is unauthenticated. Use CIDR and network controls.</li>
-<li>OTLP logs, heartbeats, AI transcripts, shell history, and agent-command forwarding use the Cortex bearer-token policy when configured.</li>
+<li>OTLP logs, metrics, and traces, plus heartbeats, AI transcripts, shell history, and agent-command forwarding, use the Cortex bearer-token policy when configured.</li>
 <li>Unauthenticated forwarding endpoints are loopback-only unless the operator explicitly establishes another trusted boundary.</li>
 </ul>
 <h3>Data handling</h3>
@@ -773,7 +794,7 @@ cortex doctor
 <ul>
 <li>WAL mode</li>
 <li>A bounded r2d2 connection pool</li>
-<li>FTS5 external-content indexing for log messages</li>
+<li>FTS5 external-content indexing with <code>logs_fts</code> for the complete log corpus and a transcript-only <code>ai_logs_fts</code> projection that indexes message text plus provider scope for AI session search</li>
 <li>Covering and composite indexes for common filters and timelines</li>
 <li>Transactional batch writes</li>
 <li>Durable source checkpoints and parse errors</li>
@@ -781,7 +802,7 @@ cortex doctor
 <li>Online backup support</li>
 <li>Integrity checks, checkpoints, and vacuum workflows</li>
 </ul>
-<p>The current schema history contains 43 sequential migrations.</p>
+<p>The current schema history contains 62 sequential migrations. CI derives this denominator from <code>KNOWN_SCHEMA_VERSION</code> and the migration registry. Migration 60 introduced the transcript-only <code>ai_logs_fts</code> projection. Migration 61 rebuilds that derived index with provider scope and adds an AI-only <code>(timestamp, ai_tool)</code> index so time-bounded session searches can derive a safe rowid floor before FTS walks common terms. On large transcript histories these one-time derived-index rebuilds can hold the startup write transaction while they populate. Subsequent transcript inserts and deletes maintain <code>ai_logs_fts</code> incrementally, while global <code>logs_fts</code> remains the full-corpus search index. Server forwarding receipts have a seven-day replay horizon and are removed when their canonical evidence is deleted. The sender spool is intentionally shorter and bounded: an individual source retains at most 1,024 records or 1 MiB and evicts records older than one day; the aggregate spool retains at most 4,096 records or 4 MiB. Eviction removes the original payload and retains a pending gap marker so evidence loss remains visible. A retry after the server receipt horizon is a new ingestion attempt.</p>
 <h3>Authoritative and derived data</h3>
 <p>Authoritative records include:</p>
 <ul>
@@ -813,7 +834,7 @@ cortex db checkpoint
 cortex db backup --help
 cortex db vacuum --help
 </code></pre>
-<p>Maintenance operations are single-flight and separately limited from heavy read queries.</p>
+<p>Maintenance operations, including synchronous and background integrity checks, share one process-wide single-flight gate and are separately limited from heavy read queries. Concurrent attempts return a retryable busy response.</p>
 <h2>Deployment and distribution</h2>
 <h3>Current identities</h3>
 <table>
@@ -862,9 +883,14 @@ cortex db vacuum --help
 <p>Manual Compose deployment expects an external Docker network named <code>cortex</code> unless <code>DOCKER_NETWORK</code> overrides it:</p>
 <pre><code class="language-bash">docker network inspect cortex &gt;/dev/null 2&gt;&amp;1 || docker network create cortex
 cp .env.example .env
+bash scripts/prepare-compose-dirs.sh
 docker compose up -d
 curl -fsS http://127.0.0.1:3100/health
 </code></pre>
+<p>The preflight resolves the <code>/backups</code> bind with Docker Compose's own parser and
+creates the default or <code>CORTEX_BACKUP_DIR</code> override at mode <code>0700</code>. Compose is
+configured not to create this host path implicitly, preventing root-owned or
+overly permissive backup directories.</p>
 <p>The Compose files:</p>
 <ul>
 <li>Publish syslog on UDP/TCP 1514</li>
@@ -957,7 +983,7 @@ just test-live
 just validate-plugin
 cargo xtask pre-push
 </code></pre>
-<p><code>just test-live</code> is the canonical end-to-end smoke harness. It exercises real HTTP JSON-RPC, UDP and TCP syslog ingest, MCP calls, CLI and REST parity, and managed file-tail behavior. Docker collection has separate agent-deployment tests and a mocked Docker HTTP fixture for central pull.</p>
+<p><code>just test-live</code> (also <code>just live-smoke</code>) is the canonical fail-closed pull-request subset. It exercises real HTTP JSON-RPC, UDP and TCP syslog ingest, CLI/REST behavior, browser routes, and managed file-tail behavior in a run-owned topology. Run <code>just live-mcp</code> for every registered MCP action; the scheduled aggregate combines all authoritative owner profiles. Specialist profiles are documented in <a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/docs/LIVE_QUALIFICATION.md" target="_blank" rel="noopener noreferrer">the live qualification guide</a>. Docker collection has separate agent-deployment tests and a mocked Docker HTTP fixture for central pull.</p>
 <p>CI gates include:</p>
 <ul>
 <li>Formatting</li>
@@ -982,8 +1008,24 @@ cargo xtask pre-push
 </tr>
 </thead>
 <tbody><tr>
+<td><a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/AGENTS.md" target="_blank" rel="noopener noreferrer">AGENTS.md</a></td>
+<td>Canonical cross-agent instructions; Claude/Gemini aliases are symlinks</td>
+</tr>
+<tr>
+<td><a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a></td>
+<td>Checkout, validation, and contribution workflow</td>
+</tr>
+<tr>
 <td><a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/docs/README.md" target="_blank" rel="noopener noreferrer">docs/README.md</a></td>
 <td>Documentation index and authority map</td>
+</tr>
+<tr>
+<td><a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/docs/ADDING_SOURCES.md" target="_blank" rel="noopener noreferrer">docs/ADDING_SOURCES.md</a></td>
+<td>Source/provider extension and coverage semantics</td>
+</tr>
+<tr>
+<td><a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/docs/repo/DOCUMENTATION.md" target="_blank" rel="noopener noreferrer">docs/repo/DOCUMENTATION.md</a></td>
+<td>Documentation ownership and drift prevention</td>
 </tr>
 <tr>
 <td><a href="https://github.com/dinglebear-ai/cortex/blob/HEAD/docs/SETUP.md" target="_blank" rel="noopener noreferrer">docs/SETUP.md</a></td>
@@ -1034,16 +1076,16 @@ cargo xtask pre-push
 <td>Release history</td>
 </tr>
 </tbody></table>
-<p>Design plans, runbooks, and session logs under <code>docs/plans</code>, <code>docs/runbooks</code>, and <code>docs/sessions</code> are valuable engineering history, but they are not the source of truth for the current public interface.</p>
+<p>Dated design plans and session logs preserve engineering history, not current public-interface authority. Runbooks are operational guidance unless explicitly marked historical; verify them against the current source and configuration.</p>
 <h2>Current boundaries</h2>
 <p>Cortex is intentionally opinionated:</p>
 <ul>
 <li>It is a single-node SQLite service, not a distributed ingestion cluster.</li>
-<li>OTLP support is logs-over-HTTP only. Traces, metrics, and OTLP/gRPC are outside the current implementation.</li>
+<li>OTLP logs, metrics, and traces are supported over HTTP/protobuf. OTLP/gRPC is outside the current implementation.</li>
 <li>Syslog does not authenticate senders. Network and CIDR controls matter.</li>
 <li>The graph is derived evidence, not authoritative configuration state.</li>
 <li>MCP and REST expose bounded operations, not arbitrary SQL or unaudited log mutation.</li>
-<li>LLM-backed assessments are local-only and require an operator-controlled Gemini environment.</li>
+<li>LLM-backed assessments are local-only and require an operator-controlled installation of the provider selected by <code>CORTEX_LLM</code>.</li>
 <li>Central Docker pull requires privileged read access to Docker endpoints and is disabled by default.</li>
 <li>Inventory quality depends on collector access, SSH trust, optional API credentials, and cache freshness.</li>
 <li>The bundled browser app is an investigation workspace preview, not a full monitoring dashboard.</li>

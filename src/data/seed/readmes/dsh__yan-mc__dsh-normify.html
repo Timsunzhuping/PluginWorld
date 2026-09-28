@@ -1,0 +1,682 @@
+<p>
+  <a href="https://github.com/yan-mc/dsh-normify/blob/HEAD/README_EN.md" target="_blank" rel="noopener noreferrer">English</a> · <strong>简体中文</strong>
+</p><p>
+  <img src="https://img.shields.io/badge/version-0.5.4-0891b2?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="License" />
+  <img src="https://img.shields.io/badge/DSH-Plugin-7C3AED?style=flat-square" alt="DSH Plugin" />
+  <img src="https://img.shields.io/badge/DSH-0.1.5--rc.2-7C3AED?style=flat-square" alt="DSH" />
+  <img src="https://img.shields.io/badge/node-%E2%89%A518-339933?style=flat-square" alt="Node" />
+  <img src="https://img.shields.io/badge/tools-31-0ea5e9?style=flat-square" alt="31 tools" />
+</p><h1>Normify · 归一化框架图构建器</h1><p>把整个项目描述成一棵"人机共读"的分形模块树：AI 负责分析与创作，确定性引擎负责校验、编译与渲染 —— 点开任意模块，就是一张更精细的子图。</p><hr />
+<h2>0. 一句话</h2>
+<p>Normify 是 <strong>DeepSeek Harness（DSH）插件</strong>，也是<strong>一套写给 AI 用的开发流程</strong>：</p>
+<ul>
+<li><strong>给 AI 的</strong>：<code>normify-gen</code> 技能 + <strong>31 个 <code>normify_*</code> 工具</strong> —— 让模型把仓库分析成模块树结构数据，
+并在后续开发中<strong>先建图后编程、伴随编程改图</strong>（计划态建树 → 逐个实现 → 关单收尾）。</li>
+<li><strong>给引擎的</strong>：零容忍校验（L1 写时 / L2 全项目 / L3 冻结）+ 确定性编译（<code>tree.json</code> 等四件产物，SHA-256 冻结）<ul>
+<li>渲染数据（<code>renders/</code>，决定"每一层怎么画"）。</li>
+</ul>
+</li>
+<li><strong>给人的</strong>：<strong>单文件交互式架构图</strong>（<code>normify.html</code>）—— 逐层下钻、悬停看介绍、一键中英切换、深链接、
+多树、<strong>API 直连箭头</strong>、跨层聚合、缩放与搜索。零依赖，双击即开。</li>
+</ul>
+<blockquote>
+<p>它不是"生成一张图就结束"的工具：结构数据与代码<strong>互为契约</strong>，每次改动都能被 <code>normify_sync</code> 检出漂移，
+并以 <code>normify_change_close</code>（<strong>0 error 强制</strong>）收尾，让"代码 → 架构图"永远同步。</p>
+</blockquote>
+<p>
+  <img src="https://raw.githubusercontent.com/yan-mc/dsh-normify/main/docs/screenshots/engine.png" alt="引擎层：API 直连箭头" width="100%" />
+  <br /><sub>引擎层：14 个模块、API 直连箭头（箭头锚定到具体 API 行）、带标签的子系统依赖、跨层聚合虚线</sub>
+</p><h2>1. 它解决什么问题</h2>
+<table>
+<thead>
+<tr>
+<th>痛点</th>
+<th>Normify 的做法</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>架构图一画完就过期</td>
+<td>结构数据是<strong>可校验的源数据</strong>：<code>normify_sync</code> 按 <code>fingerprint</code> 检出漂移，<code>normify_change_close</code> 强制 0 error 收尾</td>
+</tr>
+<tr>
+<td>图太粗，看不出接口契约</td>
+<td>粒度到<strong>单一功能单元</strong>，API 写在叶子上，箭头可锚定到具体 API（<code>from_api</code>/<code>to_api</code>）</td>
+</tr>
+<tr>
+<td>AI 改代码时"看不见全局"</td>
+<td><code>normify_brief</code> 给出目标模块契约、影响面（谁依赖我）、规则约束与验收清单</td>
+</tr>
+<tr>
+<td>设计先写代码后补文档，必然漂移</td>
+<td><strong>计划态先建树</strong>（<code>state: planned</code>）→ 实现后 <code>normify_module_refresh(activate)</code> 自动转 active</td>
+</tr>
+<tr>
+<td>结构规范靠人自觉</td>
+<td><code>policy.yml</code> 架构规则（依赖方向 / 禁依赖 / 无环 / 深度 / 跨树 / 命名）由 <code>validate</code> 强制执行</td>
+</tr>
+<tr>
+<td>大仓库一次生成太重</td>
+<td>增量再生成：只重建受影响子树，<code>layouts_to_review</code> 点名要复核的层</td>
+</tr>
+</tbody></table>
+<h2>2. 核心特性</h2>
+<h3>2.1 数据模型：分形 + 零冗余</h3>
+<ul>
+<li><strong>唯一元素</strong>：整个数据库由无数个结构完全相同的<strong>基本模块</strong>构成（每个模块 = 一个 Markdown 文件）。</li>
+<li><strong>只存 <code>parent</code></strong>：单方向引用，<code>children</code> 由索引导出 —— 不会出现"父子各说各话"。</li>
+<li><strong>API 只在叶子存一次</strong>：聚合、统计、索引全部是编译期派生数据（<code>tree.json</code> / <code>api-index.json</code>）。</li>
+<li><strong>两类边</strong>：containment（树边，导航骨架）+ dependency（箭头，可跨子树、跨树，按 <code>kind</code> 着色）。</li>
+<li><strong>路径式 id + 不变 uid</strong>：AI 沿 id 逐层定位（类二分查找）；<code>uid</code> 在改名/移动时保持不变，git diff 稳定。</li>
+<li><strong>深度不设上限</strong>（0.5.0 起）：想有多细就拆多细，深度不再成为"合并模块"的理由。</li>
+</ul>
+<h3>2.2 三层校验，fail-closed</h3>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>时机</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>L1</strong></td>
+<td>每次写入</td>
+<td>必填字段、id 文法、uid、parent 一致性、双语长度、source/apis/deps 形状、state/replacement</td>
+</tr>
+<tr>
+<td><strong>L2</strong></td>
+<td><code>normify_validate</code></td>
+<td>全项目：唯一性、文件↔id 映射、叶子/非叶子规则、API 键唯一、依赖目标、环、渲染数据交叉校验、架构规则、变更日志、（可选）仓库证据（source 存在性 + 指纹一致）</td>
+</tr>
+<tr>
+<td><strong>L3</strong></td>
+<td><code>normify_build</code></td>
+<td>任何 error 都不产出产物；产出即 SHA-256 冻结进 <code>receipt.json</code></td>
+</tr>
+</tbody></table>
+<p>每条诊断都带 <code>severity / code / message / subject / evidence / supportedFixes</code> —— <strong>AI 可自行修复</strong>。</p>
+<h3>2.3 渲染器：单文件、可下钻、API 直连</h3>
+<ul>
+<li>单文件 HTML（内联 CSS/JS，<strong>零外部依赖</strong>、零遥测），双击即开，可直接归档/发人。</li>
+<li>逐层下钻 + 面包屑 + 搜索（模块名/API）+ 大纲视图 + API 浏览器。</li>
+<li><strong>API 直连</strong>：叶子框内展示 API 明细行，箭头锚定到具体 API 行的端口；同一 API 行上的多条边自动扇形分离。</li>
+<li>跨层依赖聚合为虚线 <code>×N</code>（默认隐藏，工具栏或 <code>?agg=1</code> 开启，悬停看明细）。</li>
+<li>深链接：<code>#module=&lt;id&gt;</code>、<code>#api=&lt;rpc:key&gt;</code>、<code>#view=outline</code>、<code>?lang=zh|en</code>、<code>?agg=1</code>；缩放 / 悬停高亮 / 明暗主题。</li>
+<li><strong>几何自检</strong>：仓库自带 <code>check-geometry.mjs</code>，逐层断言"线不出界 / 不贴框 / 不穿框 / 不压线"。</li>
+</ul>
+<h3>2.4 伴随开发：先建图后编程</h3>
+<pre><code>change_open → brief → check → module_batch(state=planned) → 【写代码】
+   → module_refresh(activate) → change_close(0 error 强制) → verified + revision.after
+</code></pre>
+<ul>
+<li><strong>计划态</strong>：源码还不存在也能先建树（<code>fingerprint: pending</code>），<code>validate</code> 放行；</li>
+<li><strong>禁止假激活</strong>：源码没落地就 <code>activate</code> 直接被拒；</li>
+<li><strong>收尾即闭环</strong>：<code>change_close</code> 会刷新指纹 → 校验（0 error 强制）→ 编译（可选渲染）→ 标记 <code>verified</code>，
+任何一步失败都不关闭，变更保持原状态；</li>
+<li><strong>改图随代码</strong>：<code>normify_sync</code> 用 <code>git diff</code> + 未跟踪文件定位受影响模块与指纹漂移，<code>module_patch</code> 跟随更新。</li>
+</ul>
+<h3>2.5 架构规则先行（policy.yml）</h3>
+<table>
+<thead>
+<tr>
+<th>规则</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>dependency-direction</code></td>
+<td>层顺序即允许的依赖方向（如 plugin → tools → engine），可控制同层是否允许</td>
+</tr>
+<tr>
+<td><code>forbid-dependency</code></td>
+<td>禁止某些 from → to 的依赖（可按 kind / state 过滤）</td>
+</tr>
+<tr>
+<td><code>acyclic</code></td>
+<td>依赖图禁止成环（可含跨树）</td>
+</tr>
+<tr>
+<td><code>max-depth</code></td>
+<td>id 段数上限（<strong>可选</strong>：不写就是不限，0.5.0 起默认不限）</td>
+</tr>
+<tr>
+<td><code>cross-tree</code></td>
+<td>跨树依赖策略：<code>forbid</code> / <code>allow</code> / <code>require-to-api</code></td>
+</tr>
+<tr>
+<td><code>naming</code></td>
+<td>作用域内 id 段的命名正则</td>
+</tr>
+</tbody></table>
+<p>安装后 <code>normify_validate</code> / <code>normify_build</code> / <code>normify_check</code> 全部强制执行；<strong>违规先改设计，不能绕过</strong>。</p>
+<h2>3. 最新变化</h2>
+<h3>v0.5.4 · 把"第二轮 A/B 实测"暴露的 4 个工具缺陷修掉（当前版本）</h3>
+<p>第二轮 A/B 换了题目（<strong>表格公式引擎 + CLI</strong>，同一份规范、隐藏黑盒 88 项、外加<strong>差分模糊测试</strong>）。
+两组最终 B 88/88、A 87/88（差异只有一条 §5.2 语义）；这一版修的是<strong>工具侧</strong>新暴露的 4 个坑：</p>
+<ul>
+<li><strong><code>mode:"patch"</code> 的静默 no-op 被拦下</strong>：原来 <code>items:[{patch:{id, tags:[...]}}]</code>（少一层包装）会返回
+<code>ok:true, count:1</code> 却<strong>一个字段都没改</strong>——最危险的"假成功"。现在直接报 <code>args/invalid-patch</code>，
+evidence 里给出收到的键与正确形状 <code>{patch:{id, patch:{...}}}</code>；单模块 <code>normify_module_patch</code> 传空补丁
+同样报 <code>args/empty-patch</code>（只给 <code>expect_updated_at</code> 也不再静默通过）。</li>
+<li><strong><code>normify_module_refresh</code> 不再强依赖 git</strong>：<code>repoRoot</code> 不是 git 仓库时，以前直接
+<code>refresh/git-failed</code> 失败（实测中 AI 只能 <code>git init</code> 才能激活模块）。现在改成<strong>降级</strong>：指纹照常重算、
+<code>state</code> 照常激活，<code>revision</code> 保持模块原值，并给出 <code>refresh/git-unavailable</code> 警告与修法。</li>
+<li><strong><code>change_open</code> 的 <code>acceptance</code> 报错具体化</strong>：以前把 <code>{zh,en}</code> 写进 acceptance 只有一句笼统报错；
+现在明确写出"<strong>第 N 条不是非空字符串（收到 …）：验收标准只接受纯字符串</strong>"，并提示双语描述写进 <code>title</code>/<code>intent</code>。</li>
+<li><strong><code>normify_help</code> 支持 <code>topic:"tool:&lt;工具名&gt;"</code></strong>：<code>tools</code> 主题现在每个工具都带<strong>必填/可选</strong>摘要，
+新主题可按需打印<strong>完整参数树</strong>（类型 / 描述 / 必填，由注册表实时生成、与运行时校验同源）。
+实测里 AI 为确认 <code>mode=patch</code> 的嵌套形状去读了插件源码——这条主题正是为了消灭这种绕路。</li>
+</ul>
+<h3>v0.5.3 · 把「伴随编程实测」暴露的 4 个摩擦点修掉</h3>
+<p>这四个问题来自一次真实的 A/B 对照实验：两个 AI 用同一份规范写同一个后端，一个带插件走伴随流程、一个纯手写
+（最终代码在隐藏黑盒验收上都是 <strong>42/42</strong>）。插件组多交付了 41 模块 / 110 API / 10 层的结构数据，但也踩到了下面 4 个坑：</p>
+<ul>
+<li><strong><code>normify_help</code> 支持 <code>topic</code></strong>：此前它完全忽略入参，只返回同一份字段速查 —— 实测里 AI 为了拿准
+<code>change_open</code> / <code>layout_upsert</code> / <code>change_close</code> 的参数名，只能去读插件源码（多花约 4 分钟）。
+现在按主题返回：<code>fields</code>（默认）/ <code>deps</code>（箭头与 API 直连）/ <code>renders</code> / <code>flow</code>（伴随流程）/ <code>tools</code>（工具清单）/
+<code>policy</code> / <code>errors</code>（常见诊断码与修法）/ <code>all</code>；<strong>传错主题会直接报错并列出可用主题</strong>，不再静默忽略。</li>
+<li><strong>项目初始化通道</strong>：新增第 31 个工具 <code>normify_project_init</code> —— 建 <code>normify-&lt;slug&gt;/</code> + 默认架构规则，
+可选 <code>root</code> 一步创建"计划态根模块"（幂等）；同时 <code>normify_change_open</code> 现在也会<strong>自动建项目目录</strong>
+（此前报 <code>project/no-modules</code>，AI 只能用 <code>module_batch {items:[],dry_run:true}</code> 绕过去）；
+<code>normify_brief</code> 遇到不存在的模块会给出"先 init / 先建树 / 改用 task"的可执行提示。</li>
+<li><strong>批量诊断的因果链</strong>：一条 <code>label-too-long</code> 曾连带出 3 条 <code>dep/target-missing</code>（因为 L1 失败的模块会被移出批次工作集），
+AI 只能去读源码才能确认根因。现在连带错误改报 <code>dep/target-dropped</code> / <code>structure/parent-dropped</code>，
+在 message 与 evidence 里点明<strong>根因诊断码</strong>，并在失败响应的 <code>root_causes</code> 里直接列出被丢弃的模块（附 <code>hint</code>）。</li>
+<li><strong>「API 直连」引导</strong>：两端都声明了 API 却没写 <code>from_api</code> / <code>to_api</code> 的箭头，<code>normify_validate</code> 会给出<strong>聚合</strong>
+warning <code>dep/unanchored</code>（条数 + 前 3 条示例）。这正是实验里被浪费的能力：110 条 API 声明，54 条箭头 0 条锚定 ——
+不锚定，箭头就只能落在框边，钉不到 API 行上。<strong>引导≠放宽</strong>：锚错键仍然是 error。</li>
+</ul>
+<h3>v0.5.2 · 修掉三处会写坏数据的真实缺陷</h3>
+<ul>
+<li><strong><code>normify_module_upsert</code> 的必填表不再丢失</strong>：<code>parameters.required</code> 恢复为 <code>["frontmatter"]</code>，
+<code>frontmatter</code> 的 9 个必填字段（uid / id / parent / name / description / source / revision / updated_at / fingerprint）
+也重新出现在 schema 里。此前嵌套 schema 被二次编译，必填表被整段丢掉 —— 模型看到的约束与运行时实际校验不一致。</li>
+<li><strong><code>normify_module_move</code> 迁移渲染数据时重写内容</strong>：<code>id</code> / <code>order</code> / <code>groups.children</code> / <code>edge_hints</code> 全部改写到新 id，
+并同步维护<strong>旧父级</strong>（删掉已迁出子模块的引用）与<strong>新父级</strong>（把新 id 补进 <code>order</code>）。
+修复前：move 完之后项目立刻被 L2 判为 <code>layout/id-mismatch</code> + <code>layout/order-child</code> 等（实测 8–9 个 error，0.5.2 后为 0）。</li>
+<li><strong>晋升为容器时不再把 API 留在容器上</strong>：叶子被晋升（显式 <code>normify_module_promote</code>、写子模块自动晋升、move 到叶子底下）
+时，容器上残留的 <code>apis</code> 会被摘除，并回报 <code>structure/api-dropped-on-promote</code> 警告（附丢失的 API 键清单）——
+修复前项目会直接卡在 <code>api/non-leaf</code>。</li>
+<li><strong>API 默认全展开</strong>：渲染数据字段 <code>max_api_rows</code> 缺省 <strong>0 = 全部展开</strong>，叶子上的 API 一行不折叠；需要收窄时显式写 1..48。</li>
+<li>三处缺陷各自配了回归断言：<code>tests/regression-0.5.2.mjs</code>（34 项，全绿）。</li>
+</ul>
+<h3>v0.5.1 · 渲染器防重叠（线压线 12 → 0）</h3>
+<ul>
+<li><strong>修复连线共线重叠</strong>：28 层合计 <strong>12 处 → 0 处</strong>。四处根因：
+① 首选路由只判"不穿别人的框"，从不检查是否压到已画的线 → 改为只接受 <code>violations === 0</code> 的候选；
+② API 锚定端口没有端口分离（同一 API 行被多条边共用） → 行内 ±5.5px 扇形分离；
+③ API 端口落在上下边时被放进框内部 → 上下边退回按边均匀分离；
+④ <code>segClear</code> 整块跳过源/目标框 → 新增"进入自身框内部"检查（内缩 2px）。</li>
+<li>节点/分组间距 170 → 220，给密集层更多自由通道。</li>
+</ul>
+<h3>v0.5.0 · 取消模块数量上限</h3>
+<ul>
+<li><strong>删除 <code>MAX_DEPTH = 12</code></strong> 硬限制：树可以一直下钻到"单一功能单元"；需要限层时用 <code>policy.yml</code> 的
+<code>max-depth</code> 规则显式声明（<code>maxDepth</code> 放宽到 1..64）。</li>
+<li>SKILL：目标深度改为"不设上限"，单批上限 40 → 200，新增"每叶 API 尽量 3–5 条"的粒度指引。</li>
+</ul>
+<details>
+<summary>更早的版本（v0.4.x / v0.3 / v0.2 / v0.1）</summary><ul>
+<li><strong>v0.4.1</strong>：渲染器 v3 定稿（自由通道走线、viewBox 全几何自适应、API 直连、跨层聚合、缩放与悬停）；
+<code>normify_sync</code> 识别<strong>未跟踪的新文件</strong>（<code>git ls-files --others</code>）。</li>
+<li><strong>v0.4.0</strong>：伴随开发（<code>state: planned</code>/<code>deprecated</code>、<code>replacement</code>、<code>tags</code>）、架构规则 <code>policy.yml</code>、
+变更日志 <code>changes/</code> 与 <code>normify_change_close</code>（0 error 强制）、编辑算子 <code>module_patch/batch/move/refresh</code>、
+<code>normify_brief</code> / <code>normify_check</code>、<code>sync v2</code>、提醒钩子；工具 15 → 30。</li>
+<li><strong>v0.3.0</strong>：渲染数据集 <code>renders/</code>（<code>order</code>/<code>groups</code>/<code>mode</code>/<code>reading</code>/<code>edge_hints</code>）、id 段上限 8 → 12、下钻粒度放开。</li>
+<li><strong>v0.2.0</strong>：适配 DSH 0.1.5-rc.2；工具名 <code>normify.x.y</code> → <code>normify_x_y</code>；bundle 层 <code>cordis.patch.yml</code>；
+工具 <code>parameters</code> 编译为标准 JSON Schema；只读工具标记 <code>isConcurrencySafe</code>。</li>
+<li><strong>v0.1.0</strong>：初始版本（14 个工具、数据模型 v1、渲染器 v1）。</li>
+</ul>
+</details><h2>4. 截图</h2>
+<table>
+<thead>
+<tr>
+<th>总览层（129 模块）</th>
+<th>工具层（31 个工具、五族）</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><img src="https://raw.githubusercontent.com/yan-mc/dsh-normify/main/docs/screenshots/overview.png" alt="overview" /></td>
+<td><img src="https://raw.githubusercontent.com/yan-mc/dsh-normify/main/docs/screenshots/tools.png" alt="tools" /></td>
+</tr>
+</tbody></table>
+<table>
+<thead>
+<tr>
+<th>引擎层（API 直连箭头）</th>
+<th>模型层（修复后的干净走线）</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><img src="https://raw.githubusercontent.com/yan-mc/dsh-normify/main/docs/screenshots/engine.png" alt="engine" /></td>
+<td><img src="https://raw.githubusercontent.com/yan-mc/dsh-normify/main/docs/screenshots/model.png" alt="model" /></td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>上面几张都是 <strong>Normify 对自身源码</strong>生成的架构图（129 模块 / 214 API / 257 箭头 / 28 层渲染数据，<code>validate</code> 0 error）。</p>
+</blockquote>
+<h2>5. 安装</h2>
+<h3>方式 A：从压缩包安装（推荐，不依赖源码目录）</h3>
+<pre><code class="language-bash"># 1) 构建发行包（或直接使用仓库 Releases 里的 tgz）
+cd dsh-normify &amp;&amp; npm install &amp;&amp; npm run build &amp;&amp; npm pack
+
+# 2) 把包解到目标 profile 的 node_modules（DSHEAC AIO 6.9.x 的 profile 是 web-desktop）
+#    &lt;profile&gt;/node_modules/@dsh-external/dsh-normify/
+
+# 3) 编辑 &lt;profile&gt;/package.json：
+#    dependencies       增加  "@dsh-external/dsh-normify": "file:&lt;tgz 绝对路径&gt;"
+#    dsh.profile.bundles 增加  "@dsh-external/dsh-normify"
+
+# 4) 重启 DSH 桌面端（工具在会话启动时快照，需新会话）
+</code></pre>
+<p>插件行的注册<strong>由 bundle 自身完成</strong>：<code>package.json &gt; dsh.bundle.patch: ./cordis.patch.yml</code>，
+DSH 会把它插进 cordis 树，<strong>不需要手改 profile 的 <code>cordis.patch.yml</code></strong>。</p>
+<h3>方式 B：<code>dsh plugin</code>（自动登记 bundle）</h3>
+<pre><code class="language-bash">dsh plugin --profile web-desktop add &lt;dsh-normify 目录的绝对路径&gt;
+# 或：dsh plugin --profile web-desktop add link:F:/dsh-normify
+</code></pre>
+<h3>方式 C：开发模式（改源码 → 重启即生效）</h3>
+<p>把 profile 的依赖写成 <code>link:&lt;本仓库绝对路径&gt;</code>，并在 <code>node_modules</code> 里建立指向本仓库的
+目录联接（junction）。此时插件按<strong>真实路径</strong>解析依赖，因此本仓库需要 <code>node_modules/yaml</code>（<code>npm install</code> 即可）。</p>
+<blockquote>
+<p>⚠️ <strong>注意</strong>：DSHEAC AIO <strong>应用升级会按 <code>resources/profile-seed</code> 重播种 profile</strong>，
+已安装的插件登记会被抹掉；升级后请用方式 A/B 重装一次。</p>
+</blockquote>
+<h3>验证安装</h3>
+<pre><code class="language-bash"># 在 profile 目录下用裸包名导入，应打印 31 个工具 + 技能
+node -e "import('@dsh-external/dsh-normify').then(m=&gt;console.log(m.name))"
+# 或在 DSH 里直接问 AI：「列出你手上的 normify 工具」
+</code></pre>
+<h2>6. 快速开始</h2>
+<p>装好后，直接用自然语言指挥 AI 即可。最常用的三条：</p>
+<pre><code class="language-text"># ① 为仓库建架构图（首次全量生成 + 渲染）
+用 normify-gen 技能为 F:\my-project 建结构树并渲染架构图，粒度到单一功能单元。
+
+# ② 先建图后编程（推荐开发姿势）
+我要给 my-project 加一个「限流」模块：先 normify_brief 给我指引，建计划态模块，我实现完再 refresh 激活、change_close 收尾。
+
+# ③ 代码改了，同步结构图
+同步 my-project 的结构图（normify_sync），把受影响的模块与渲染数据更新掉，0 error 后重新 build + render。
+</code></pre>
+<p>AI 侧实际会跑：</p>
+<pre><code class="language-text">normify_tree_list → normify_module_upsert（根 + 一级子模块）
+  → normify_module_list（逐层下钻）→ normify_module_batch（批量建树，原子）
+  → normify_layout_upsert（每个容器一层渲染数据）
+  → normify_fingerprint（写 fingerprint 前必算）
+  → normify_validate（0 error 门禁）→ normify_build → normify_render
+</code></pre>
+<p>产物（默认写在结构数据目录 <code>normify-&lt;slug&gt;/</code> 下）：</p>
+<table>
+<thead>
+<tr>
+<th>产物</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>modules/**/*.md</code></td>
+<td>结构数据本体（frontmatter + 正文）</td>
+</tr>
+<tr>
+<td><code>renders/**/*.json</code></td>
+<td>每个容器一层的渲染数据</td>
+</tr>
+<tr>
+<td><code>policy.yml</code></td>
+<td>架构规则（项目创建时自动安装默认规则）</td>
+</tr>
+<tr>
+<td><code>changes/&lt;id&gt;.json</code></td>
+<td>开发变更日志（随结构目录一起回档）</td>
+</tr>
+<tr>
+<td><code>tree.json</code></td>
+<td>编译产物：模块字典 + API 索引 + 边 + 渲染数据 + 规则 + 变更统计</td>
+</tr>
+<tr>
+<td><code>outline.md</code> / <code>api-index.json</code></td>
+<td>人类可读大纲 / API 索引</td>
+</tr>
+<tr>
+<td><code>receipt.json</code></td>
+<td>产物 SHA-256 冻结回执（含 stats 与 warning 摘要）</td>
+</tr>
+<tr>
+<td><code>normify.html</code></td>
+<td>单文件交互式架构图</td>
+</tr>
+</tbody></table>
+<h2>7. 31 个工具</h2>
+<table>
+<thead>
+<tr>
+<th>族</th>
+<th>工具</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>参数</strong></td>
+<td><code>normify_help</code></td>
+<td><strong>分主题</strong>速查：<code>fields</code> 字段 / <code>deps</code> 箭头与 API 直连 / <code>renders</code> 渲染数据 / <code>flow</code> 伴随流程 / <code>tools</code> 工具清单 / <code>policy</code> 规则 / <code>errors</code> 诊断码 / <code>all</code>（0.5.3 起忽略入参会报错并列出主题）</td>
+</tr>
+<tr>
+<td><strong>读取</strong></td>
+<td><code>normify_tree_list</code></td>
+<td>列出项目与每棵树的根</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_module_get</code> / <code>normify_module_list</code></td>
+<td>读单个模块 / 按父级或树列模块（含统计）</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_search</code> / <code>normify_deps_find</code> / <code>normify_outline</code></td>
+<td>检索、反查"谁依赖我"、重建 <code>outline.md</code></td>
+</tr>
+<tr>
+<td><strong>写入</strong></td>
+<td><code>normify_project_init</code></td>
+<td>初始化结构数据项目（建目录 + 默认架构规则；可一步建"计划态根模块"）——<strong>开新项目的第 0 步</strong></td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_module_upsert</code></td>
+<td>创建/更新模块（写时 L1 校验、文件形态自动晋升/降级）</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_module_delete</code> / <code>normify_module_promote</code></td>
+<td>删子树（附悬空边预警）/ 叶子晋升容器</td>
+</tr>
+<tr>
+<td><strong>演进</strong></td>
+<td><code>normify_module_patch</code></td>
+<td>部分更新（<code>expect_updated_at</code> 并发保护 + <code>dry_run</code>）</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_module_batch</code></td>
+<td>原子批量 upsert/patch（失败整批回滚）</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_module_move</code></td>
+<td>改名/挪层（保 uid、级联 parent、重写全项目 deps）</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_module_refresh</code></td>
+<td>重算指纹/revision；<code>activate</code> 把已落地的 planned 转 active</td>
+</tr>
+<tr>
+<td><strong>渲染数据</strong></td>
+<td><code>normify_layout_get/upsert/delete</code></td>
+<td>维护"这一层怎么画"（顺序/分组/模式/导语/车道）</td>
+</tr>
+<tr>
+<td><strong>流水线</strong></td>
+<td><code>normify_validate</code></td>
+<td>全项目 L2 校验（0 error 门禁；可带 <code>repoRoot</code> 做证据校验）</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_build</code> / <code>normify_render</code></td>
+<td>编译并冻结产物 / 渲染单文件 HTML</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_fingerprint</code></td>
+<td>按引擎确定性算法计算 source 指纹（写 <code>fingerprint</code> 前必调）</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_sync</code></td>
+<td>增量再生成规划器（只读）：脏子树 / 新文件建议 / 指纹漂移 / 破坏性 API 变更</td>
+</tr>
+<tr>
+<td><strong>伴随开发</strong></td>
+<td><code>normify_brief</code></td>
+<td>开发指引：目标契约、影响面、规则约束、建议模块、验收清单</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_check</code></td>
+<td>动手前预检（拟建模块与依赖：parent、深度、环、规则）</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_change_open/update/list/close</code></td>
+<td>变更日志；<code>close</code> <strong>0 error 强制</strong>收尾</td>
+</tr>
+<tr>
+<td></td>
+<td><code>normify_policy_get/upsert</code></td>
+<td>读取/安装架构规则 <code>policy.yml</code></td>
+</tr>
+</tbody></table>
+<h2>8. 数据结构（模块 frontmatter）</h2>
+<pre><code class="language-yaml">---
+uid: 8c69b5a8                 # 8 位小写 hex，全项目唯一，改名/移动都不变
+id: dsh-normify.engine.ids    # 路径式 id，首段=树名；深度不设上限
+parent: dsh-normify.engine    # 必须等于 id 去尾段；根为 null
+name: {zh: "标识与路径", en: "Identifiers &amp; Paths"}
+description:                  # 双语，各 ≤500 字符，人机共读
+  zh: &gt;
+      模块 id 的文法、派生与 id ↔ 文件路径的双向映射。
+  en: &gt;
+      Module id grammar, derivations and the id ↔ file-path mapping.
+source:                       # 代码证据（仓库相对路径 + 可选行号）
+  - {path: src/engine/ids.ts, line: 6, end_line: 34}
+revision: 90df4a10…           # 生成时仓库的 40 位 git SHA
+updated_at: "2026-09-12T12:00:00Z"
+fingerprint: 630ac9020dba…    # source 的确定性指纹（用 normify_fingerprint 计算）
+state: active                 # active | planned（计划态）| deprecated（废弃）
+tags: [engine, ids]           # 可选，≤12 个
+apis:                         # 仅叶子；每叶建议 3–5 条
+  - protocol: rpc             # http|ws|rpc|amqp|kafka|mysql|redis|file|grpc|graphql
+    path: splitId
+    description: {zh: "解析 id 为段数组。", en: "Parses an id into segments."}
+deps:                         # 出向箭头（只存源端）；可跨树
+  - kind: call                # call|event|dataflow|reference
+    to: dsh-normify.engine.model.module
+    from_api: rpc:splitId     # 可选：锚定到本模块的某个 API（"API 直连"）
+    to_api: rpc:Module
+    label: {zh: "id 契约", en: "Id contract"}
+---
+（正文：给人类读者的展开介绍，可选）
+</code></pre>
+<p>文件布局：<code>modules/&lt;树名&gt;/&lt;路径段…&gt;/index.md</code>（容器）/ <code>&lt;最后一段&gt;.md</code>（叶子）—— 由工具自动维护形态。</p>
+<h2>9. 渲染数据（<code>renders/</code>，决定"这一层怎么画"）</h2>
+<p>每个<strong>容器模块</strong>一层，与模块一一对应：</p>
+<pre><code class="language-json">{
+  "schema_version": 1,
+  "id": "dsh-normify.engine.model",
+  "updated_at": "2026-09-12T12:00:00Z",
+  "mode": "grid",              // auto | layers | groups | grid
+  "max_columns": 3,            // 1..6
+  "max_api_rows": 0,           // 0 = 全部展开（缺省）；1..48 = 截断到该行数
+  "reading": {"zh": "本层 8 个子模块…", "en": "…"},
+  "order": ["dsh-normify.engine.model.text", "…"],
+  "groups": [{"id": "model", "title": {"zh": "模型与契约", "en": "Model"}, "children": ["…"]}],
+  "edge_hints": [{"from": "a", "to": "b", "lane": 2, "style": "curve"}]
+}
+</code></pre>
+<p>可读性配方：<strong>顺序 = 数据流</strong>、<strong>分组 = 领域边界</strong>、<strong>导语 = 阅读路径</strong>、长回边用 <code>edge_hints</code> 拉开车道。</p>
+<h2>10. 架构规则（<code>policy.yml</code>）</h2>
+<pre><code class="language-yaml">rules:
+  - id: core-acyclic                 # 依赖图禁止成环
+    type: acyclic
+    severity: error
+    includeCrossTree: true
+  - id: layer-direction              # 层顺序 = 允许的依赖方向
+    type: dependency-direction
+    severity: error
+    allowSameLayer: true
+    layers:
+      - {name: plugin, match: ["dsh-normify.plugin"]}
+      - {name: tools,  match: ["dsh-normify.tools", "dsh-normify.tools.**"]}
+      - {name: engine, match: ["dsh-normify.engine", "dsh-normify.engine.**"]}
+  - id: naming-kebab                 # 命名约束
+    type: naming
+    pattern: "^[a-z][a-z0-9-]*$"
+    scope: ["dsh-normify.**"]
+</code></pre>
+<p>项目创建时自动安装默认规则（无环 + 禁指向废弃模块），可随时用 <code>normify_policy_upsert</code> 覆盖。
+<strong>深度上限是可选项</strong>：不写 <code>max-depth</code> 就是不限层。</p>
+<h2>11. 伴随开发：先建图后编程 / 伴随编程改图</h2>
+<h3>11.1 先建图后编程（design-first）</h3>
+<pre><code class="language-text">① normify_change_open   开变更单（title / intent / modules / acceptance）
+② normify_brief          拿指引：目标模块与契约、影响面（谁依赖我）、规则约束、建议模块、验收清单
+③ normify_check          预检：拟建模块与依赖是否违反核心约束或 policy
+④ normify_module_batch   建「计划态」模块（state=planned, fingerprint=pending, 源码可以先不存在）
+                          同一轮用 normify_layout_upsert 写该层渲染数据
+⑤ 【人/AI 写代码】        实现对应模块
+⑥ normify_module_refresh 重算指纹与 revision，activate:true → planned 自动转 active
+⑦ normify_change_close   0 error 强制收尾：刷新 → 校验 → 编译 → 标记 verified + revision.after
+</code></pre>
+<ul>
+<li>计划态下 <code>normify_validate</code> <strong>0 error</strong>（源码未落地也合法，只记 warning）；</li>
+<li>源码没落地就 <code>activate</code> / <code>close</code> 会被<strong>拒绝</strong>（禁止"假激活"）；</li>
+<li>变更单存在结构目录内（<code>changes/&lt;id&gt;.json</code>），<strong>随工程一起回档</strong>。</li>
+</ul>
+<h3>11.2 伴随编程改图（companion update）</h3>
+<pre><code class="language-text">① 改代码（提交与否都行）
+② normify_sync            检出：changed_files / affected / drift_fingerprints / layouts_to_review
+                          新文件还会给出「建议模块」（含 id 与目标路径）
+③ normify_module_patch    跟随代码更新模块：补 API、改介绍、重算 fingerprint 与 revision
+④ normify_validate        0 error
+⑤ normify_change_close    收尾并重建产物（tree.json 会反映本次变更统计）
+</code></pre>
+<blockquote>
+<p>实测（本项目自身）：改完 <code>src/engine/layout.ts</code> + <code>CHANGELOG.md</code> 后，<code>sync</code> 报出 <strong>7 个 <code>evidence/fingerprint-drift</code></strong>，
+<code>refresh</code> 后回到 0 error —— 这正是"图与码不脱节"的日常形态。</p>
+</blockquote>
+<h2>12. 渲染器细节（v3 / 0.5.2）</h2>
+<ul>
+<li><strong>走线</strong>：连线只走"自由通道"（相邻列/行之间的空隙），节点框保持 ≥16px 净空；全局车道坐标注册表保证
+<strong>同一坐标不分配给两条边</strong>；候选路径做框体/组框碰撞检测，兜底用"自由行 × 自由列"总线。</li>
+<li><strong>防重叠（0.5.1）</strong>：路由首选只接受 <code>violations === 0</code> 的候选（不穿框 / 不压已画线 / 不横穿自身框 /
+端口法向正确）；API 锚定端口按到达顺序在 API 行内 ±5.5px 扇形分离。</li>
+<li><strong>全展开（0.5.2）</strong>：<code>max_api_rows</code> 缺省 0 → 每个叶子的 API 全部展开，箭头锚点与 API 行一一对应（不再 <code>+N</code> 折叠）。</li>
+<li><strong>API 直连</strong>：叶子框内展示 <code>max_api_rows</code> 行 API（0 = 全部，也是缺省），箭头锚定到具体 API 行的端口。</li>
+<li><strong>跨层聚合</strong>：跨层依赖默认聚合为虚线 <code>×N</code>（<code>?agg=1</code> 或工具栏开启，悬停看明细）。</li>
+<li><strong>viewBox 自适应</strong>：由全部几何包围盒动态计算（线不出视口）；缩放 / 适配 / 100%。</li>
+<li><strong>几何自检</strong>：<code>check-geometry.mjs</code> 逐层断言五项指标（越界 / 贴边 / 穿框 / 贴组框 / 线压线）。
+本项目自身 129 模块 / 28 层：<strong>线压线 0 处</strong>，27/28 层五项全 0。</li>
+</ul>
+<h2>13. 工程与测试</h2>
+<pre><code class="language-bash">npm install          # 安装 devDependencies（typescript / @types/node / cordis / schemastery / cosmokit）
+npm run build        # src/ → lib/（tsc；两条路径：本地 vendor-ts 或 npm）
+npm run typecheck    # tsc --noEmit
+npm test             # engine-e2e.mjs + companion-e2e.mjs（不依赖 DSH 的 node 端到端）
+node ci-contract-check.cjs   # 契约检查：bundle 声明 + 恰好 31 个工具 + provider 安全命名
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>目录</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>src/</code></td>
+<td>TypeScript 源码（16 个模块，7168 行）：<code>index.ts</code> / <code>tools.ts</code> / <code>engine/*</code></td>
+</tr>
+<tr>
+<td><code>lib/</code></td>
+<td>编译产物（<code>tsc</code> 输出，随包发布）</td>
+</tr>
+<tr>
+<td><code>skills/normify-gen/SKILL.md</code></td>
+<td>生成器技能（铁律、流程、粒度、可读性配方）</td>
+</tr>
+<tr>
+<td><code>tests/</code></td>
+<td>两个端到端：引擎链路 + 伴随开发闭环（8 个环节）</td>
+</tr>
+<tr>
+<td><code>docs/SPEC.zh-CN.md</code></td>
+<td>正式规范（数据模型 / 源格式 / 产物 / 校验 / 生成器 / 渲染器 / 插件工程）</td>
+</tr>
+<tr>
+<td><code>vendor/</code></td>
+<td>内联第三方（schemastery / cosmokit，按相对路径加载）</td>
+</tr>
+</tbody></table>
+<h2>14. 兼容性与排错</h2>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>要求</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DSH</td>
+<td><code>0.1.5-rc.2</code>（peer：<code>@deepseek-ai/cordis ^4</code>；<code>dsh-tools</code> / <code>dsh-skill</code> 可选）</td>
+</tr>
+<tr>
+<td>DSHEAC AIO</td>
+<td>6.9.x（profile <code>web-desktop</code>）</td>
+</tr>
+<tr>
+<td>Node.js</td>
+<td>≥ 18</td>
+</tr>
+</tbody></table>
+<p><strong>常见问题</strong></p>
+<ul>
+<li><strong>装了但工具不出现</strong> → 工具列表在<strong>会话启动时快照</strong>：请<strong>新开一个会话</strong>（或重启桌面端）。</li>
+<li><strong>升级 AIO 后插件消失</strong> → 应用升级会按 <code>resources/profile-seed</code> 重播种 profile，重装一次即可。</li>
+<li><strong><code>Cannot find package 'yaml'</code></strong> → <code>link:</code> 安装时按真实路径解析依赖，请在本仓库执行一次 <code>npm install</code>。</li>
+<li><strong><code>evidence/fingerprint-drift</code></strong> → 源码变了而结构数据没跟上：<code>normify_sync</code> 看漂移清单，<code>normify_module_refresh</code> 重算指纹。</li>
+<li><strong><code>structure/leaf-too-coarse</code></strong> → 不是错，是提示：该叶子还能继续拆（推荐拆到"单一功能单元"）。</li>
+</ul>
+<h2>15. 安全与隐私</h2>
+<ul>
+<li><strong>无遥测、无网络请求</strong>：结构数据与渲染产物全部在本地生成，<code>normify.html</code> 不加载任何外部资源。</li>
+<li><strong>不做凭据处理</strong>：插件不读取、不写入任何 token / 私钥 / password；<code>.gitignore</code> 已排除 <code>.env*</code>、<code>*.pem</code>、
+<code>*.credentials.yaml</code> 等；<strong>仓库内不存在任何凭据，也请不要提交</strong>。</li>
+<li><strong>只读仓库</strong>：生成器遵守"只读源码"铁律 —— 结构数据只写入 <code>normify-&lt;slug&gt;/</code>，绝不修改被分析的仓库。</li>
+<li><code>source</code> 字段只记录<strong>仓库相对路径</strong>与行号，不会把源码内容复制进结构数据。</li>
+</ul>
+<h2>16. 文档索引</h2>
+<table>
+<thead>
+<tr>
+<th>文档</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/yan-mc/dsh-normify/blob/HEAD/docs/SPEC.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>docs/SPEC.zh-CN.md</code></a></td>
+<td>正式规范 v1.0（含 v0.4.x/0.5.x 实现状态）</td>
+</tr>
+<tr>
+<td><a href="https://github.com/yan-mc/dsh-normify/blob/HEAD/skills/normify-gen/SKILL.md" target="_blank" rel="noopener noreferrer"><code>skills/normify-gen/SKILL.md</code></a></td>
+<td>生成器技能全文（AI 的工作手册）</td>
+</tr>
+<tr>
+<td><a href="https://github.com/yan-mc/dsh-normify/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer"><code>CHANGELOG.md</code></a></td>
+<td>版本变更记录（0.1.0 → 0.5.4）</td>
+</tr>
+<tr>
+<td><a href="https://github.com/yan-mc/dsh-normify/blob/HEAD/docs/VIDEO-SCRIPT.zh-CN.md" target="_blank" rel="noopener noreferrer"><code>docs/VIDEO-SCRIPT.zh-CN.md</code></a></td>
+<td><strong>视频文字稿</strong>（10 分钟完整版 + 60 秒速览 + 数字备忘卡 + 录制清单）</td>
+</tr>
+<tr>
+<td><a href="https://github.com/yan-mc/dsh-normify/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer"><code>CONTRIBUTING.md</code></a></td>
+<td>参与贡献</td>
+</tr>
+<tr>
+<td><a href="https://github.com/yan-mc/dsh-normify/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer"><code>SECURITY.md</code></a></td>
+<td>安全策略</td>
+</tr>
+</tbody></table>
+<h2>许可证</h2>
+<p><a href="https://github.com/yan-mc/dsh-normify/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a> © yan-mc</p>
+<hr />
+<p><sub>Normify —— 让架构图跟着代码一起生长。</sub></p>

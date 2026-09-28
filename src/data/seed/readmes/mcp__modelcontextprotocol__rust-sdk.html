@@ -81,10 +81,10 @@ async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
 the negotiated server information, and then sends <code>notifications/initialized</code>.
 Use <a href="https://github.com/modelcontextprotocol/rust-sdk/blob/HEAD/crates/rmcp/src/service/client.rs" target="_blank" rel="noopener noreferrer"><code>ClientServiceExt::serve_with_lifecycle</code></a> to
 select another lifecycle explicitly:</p>
-<pre><code class="language-rust,">use rmcp::{ClientInfo, ClientLifecycleMode, ClientServiceExt, ProtocolVersion};
+<pre><code class="language-rust,">use rmcp::{ClientLifecycleMode, ClientServiceExt, ProtocolVersion, model::ClientConfig};
 
 // Start directly with server/discover and include client metadata on every request.
-let client = ClientInfo::default()
+let client = ClientConfig::default()
     .serve_with_lifecycle(
         transport,
         ClientLifecycleMode::Discover {
@@ -95,7 +95,7 @@ let client = ClientInfo::default()
 
 // Or probe the discover lifecycle and fall back when a legacy server reports
 // that server/discover is not implemented or does not respond within 10 seconds.
-let client = ClientInfo::default()
+let client = ClientConfig::default()
     .serve_with_lifecycle(
         transport,
         ClientLifecycleMode::Auto {
@@ -289,8 +289,8 @@ use serde_json::json;
 struct MyServer;
 
 impl ServerHandler for MyServer {
-    fn get_info(&amp;self) -&gt; ServerInfo {
-        ServerInfo::new(
+    fn get_info(&amp;self) -&gt; ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_resources()
                 .build(),
@@ -483,8 +483,8 @@ impl MyServer {
 
 #[prompt_handler]
 impl ServerHandler for MyServer {
-    fn get_info(&amp;self) -&gt; ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_prompts().build())
+    fn get_info(&amp;self) -&gt; ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_prompts().build())
     }
 }
 </code></pre>
@@ -769,8 +769,8 @@ client.notify_roots_list_changed().await?;
 <pre><code class="language-rust">use rmcp::{ServerHandler, model::*, service::RequestContext};
 
 impl ServerHandler for MyServer {
-    fn get_info(&amp;self) -&gt; ServerInfo {
-        ServerInfo::new(
+    fn get_info(&amp;self) -&gt; ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_logging()
                 .build(),
@@ -826,8 +826,8 @@ context.peer.notify_logging_message(
 <pre><code class="language-rust">use rmcp::{ErrorData as McpError, ServerHandler, model::*, service::RequestContext, RoleServer};
 
 impl ServerHandler for MyServer {
-    fn get_info(&amp;self) -&gt; ServerInfo {
-        ServerInfo::new(
+    fn get_info(&amp;self) -&gt; ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_completions()
                 .enable_prompts()
@@ -1029,8 +1029,8 @@ and use the filter-enforcing subscription sink:</p>
 };
 
 impl ServerHandler for MyServer {
-    fn get_info(&amp;self) -&gt; ServerInfo {
-        ServerInfo::new(
+    fn get_info(&amp;self) -&gt; ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_tool_list_changed()
@@ -1124,12 +1124,22 @@ get a protocol error instead.</p>
 }
 </code></pre>
 <blockquote>
-<p><strong><code>requestState</code> is untrusted.</strong> The client echoes it back verbatim, so a
-stateless server that stores meaningful data in it MUST verify integrity
-first. Enable the <code>request-state</code> feature and use <code>RequestStateCodec</code> to seal
-and open it (HMAC-tagged), or keep state server-side and use <code>requestState</code>
-only as an opaque handle.</p>
+<p><strong><code>requestState</code> is untrusted.</strong> <a href="https://modelcontextprotocol.io/seps/2322-MRTR#protocol-requirements-for-ephemeral-workflow" target="_blank" rel="noopener noreferrer">SEP-2322 requires servers to validate
+it</a>
+because the client echoes it back verbatim. A stateless server that stores
+meaningful data in it MUST verify integrity first. Enable the <code>request-state</code>
+feature and use <code>RequestStateCodec</code> to seal and open it (HMAC-tagged), or keep
+state server-side and use <code>requestState</code> only as an opaque handle.</p>
 </blockquote>
+<p>For multi-replica deployments, use <code>RequestStateCodec::new_with_keyring</code> to
+rotate signing keys without invalidating in-flight requests:</p>
+<ol>
+<li>Deploy the old and new keys everywhere, continuing to emit <code>rs1</code> with the
+old key via <code>with_rs1_signing("old")</code>.</li>
+<li>Start emitting <code>rs2</code> with the new key while retaining the old key via
+<code>with_rs1_fallback("old")</code>.</li>
+<li>After the maximum <code>requestState</code> lifetime has elapsed, remove the old key.</li>
+</ol>
 <h3>Client-side</h3>
 <p>The high-level <code>call_tool</code>, <code>get_prompt</code>, and <code>read_resource</code> helpers drive MRTR
 automatically: they fulfill each embedded request through the local
@@ -1299,7 +1309,7 @@ server — it simply omits the session header when the server doesn't issue one:
 
 // Defaults are stateless-friendly.
 let transport = StreamableHttpClientTransport::from_uri("http://localhost:8000/mcp");
-let client = ClientInfo::default().serve(transport).await?;
+let client = ClientConfig::default().serve(transport).await?;
 </code></pre>
 <p><strong>Example:</strong> <a href="https://github.com/modelcontextprotocol/rust-sdk/blob/HEAD/examples/servers/src/counter_streamhttp.rs" target="_blank" rel="noopener noreferrer"><code>examples/servers/src/counter_streamhttp.rs</code></a> (server), <a href="https://github.com/modelcontextprotocol/rust-sdk/blob/HEAD/examples/clients/src/streamable_http.rs" target="_blank" rel="noopener noreferrer"><code>examples/clients/src/streamable_http.rs</code></a> (client)</p>
 <hr />
@@ -1365,7 +1375,7 @@ server example). The client transport connects with a single URI:</p>
 <pre><code class="language-rust,ignore">use rmcp::transport::StreamableHttpClientTransport;
 
 let transport = StreamableHttpClientTransport::from_uri("http://localhost:8000/mcp");
-let client = ClientInfo::default().serve(transport).await?;
+let client = ClientConfig::default().serve(transport).await?;
 </code></pre>
 <p>The client allows up to 16 ordinary http POSTs at once. Configure this with
 <code>StreamableHttpClientTransportConfig::with_uri(url).max_concurrent_requests(n)</code>;
@@ -1446,10 +1456,10 @@ remain (<code>None</code> when complete).</p>
 <p>At initialization, client and server exchange <strong>capabilities</strong> so each side
 knows what the other supports. Declare yours with the <code>ServerCapabilities</code>
 builder in <code>get_info()</code>:</p>
-<pre><code class="language-rust,ignore">use rmcp::model::{ServerCapabilities, ServerInfo};
+<pre><code class="language-rust,ignore">use rmcp::model::{ServerCapabilities, ServerConfig};
 
-fn get_info(&amp;self) -&gt; ServerInfo {
-    ServerInfo::new(
+fn get_info(&amp;self) -&gt; ServerConfig {
+    ServerConfig::new(
         ServerCapabilities::builder()
             .enable_tools()
             .enable_prompts()

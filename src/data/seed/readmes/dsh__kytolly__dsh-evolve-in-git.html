@@ -1,0 +1,348 @@
+<h1>dsh-evolve-in-git</h1>
+<p>
+  <a href="https://github.com/Kytolly/dsh-evolve-in-git" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/DeepSeek%20Harness-plugin-4D6BFE" alt="DeepSeek Harness plugin" /></a>
+  <img src="https://img.shields.io/badge/version-0.6.3-4D6BFE" alt="version 0.6.3" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license MIT" />
+</p><p>
+  <a href="https://github.com/Kytolly/dsh-evolve-in-git/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer">English</a> · <a href="https://github.com/Kytolly/dsh-evolve-in-git/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">中文</a>
+</p><p>Git-backed long-term memory and evolution plugin for DeepSeek Harness.</p>
+<h2>Contents</h2>
+<ul>
+<li><a href="#what-it-does" target="_blank" rel="noopener noreferrer">What it does</a></li>
+<li><a href="#install" target="_blank" rel="noopener noreferrer">Install</a></li>
+<li><a href="#usage" target="_blank" rel="noopener noreferrer">Usage</a></li>
+<li><a href="#architecture" target="_blank" rel="noopener noreferrer">Architecture</a></li>
+<li><a href="#data-layout" target="_blank" rel="noopener noreferrer">Data layout</a></li>
+<li><a href="#config" target="_blank" rel="noopener noreferrer">Config</a></li>
+<li><a href="#harness-entry-points" target="_blank" rel="noopener noreferrer">Harness entry points</a></li>
+<li><a href="#browser-half" target="_blank" rel="noopener noreferrer">Browser half</a></li>
+<li><a href="#development" target="_blank" rel="noopener noreferrer">Development</a></li>
+<li><a href="#delivery-notes" target="_blank" rel="noopener noreferrer">Delivery notes</a></li>
+<li><a href="#license" target="_blank" rel="noopener noreferrer">License</a></li>
+</ul>
+<h2>What it does</h2>
+<p>This plugin treats a user-chosen or preconfigured Git repository as the memory store.
+It can write session notes, branch-specific records, and reusable skill drafts into that repo, then commit them as ordinary Git history.</p>
+<h2>Install</h2>
+<pre><code class="language-sh"># example: install into the web profile
+ dsh plugin --profile web add github:Kytolly/dsh-evolve-in-git
+</code></pre>
+<p>The bundle inserts one <code>dsh-evolve-in-git</code> row with the plugin defaults.
+Later profile patches can override <code>repoPath</code>, <code>repoUrl</code>, <code>auth</code>, and the storage roots.</p>
+<h2>Usage</h2>
+<h3>Natural language</h3>
+<p>You do not need to remember tool names — describe the outcome and the model
+selects the right <code>evolve_*</code> / <code>memory_*</code> tool:</p>
+<table>
+<thead>
+<tr>
+<th>You say (or similar)</th>
+<th>The model uses</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>"Remember: whenever X happens, do Y"</td>
+<td><code>evolve_remember</code> / <code>memory_save</code></td>
+</tr>
+<tr>
+<td>"Any memory about the deploy flow?"</td>
+<td><code>evolve_recall</code> / <code>memory_search</code></td>
+</tr>
+<tr>
+<td>"Read my recent memory history"</td>
+<td><code>evolve_timeline</code></td>
+</tr>
+<tr>
+<td>"Turn this warning into a reusable skill"</td>
+<td><code>evolve_skill_draft</code> → <code>evolve_skill_promote</code></td>
+</tr>
+<tr>
+<td>"What is the memory repo's current state?"</td>
+<td><code>evolve_status</code> / <code>evolve_branches</code></td>
+</tr>
+<tr>
+<td>"Undo the last memory commit"</td>
+<td><code>evolve_rollback</code></td>
+</tr>
+</tbody></table>
+<h3>Commands (<code>/evolve</code>)</h3>
+<p>For explicit, deterministic control, type <code>/evolve &lt;subcommand&gt;</code>:</p>
+<pre><code class="language-sh">/evolve remember warning "pitfall" :: &lt;content&gt;
+/evolve search deploy
+/evolve skill list
+/evolve skill promote evolve-process
+/evolve status
+/evolve help
+</code></pre>
+<p>The full command reference is under <a href="#harness-entry-points" target="_blank" rel="noopener noreferrer">Harness entry points</a>.</p>
+<h2>Architecture</h2>
+<p>The package is split into a <strong>framework-free core</strong> and a thin <strong>DSH adapter</strong>:</p>
+<ul>
+<li><code>src/core.ts</code> (<code>GitMemoryCore</code>) is the portability boundary. It depends only on
+Node built-ins and sibling core modules — never on <code>@deepseek-ai/*</code> — and
+resolves config from the on-disk file over the host-provided base.</li>
+<li><code>src/index.ts</code> (<code>GitEvolutionService</code>) is the adapter: it registers Cordis
+tools, the <code>/evolve</code> command, the system-prompt section, the skill provider,
+and the config-file route, then maps every surface onto <code>GitMemoryCore</code>.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Module</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>src/git.ts</code></td>
+<td>Spawns <code>git</code>: clone/open, status, branch ops, push/fetch, commit, <code>git mv</code>, conflicts, rollback.</td>
+</tr>
+<tr>
+<td><code>src/memory.ts</code> + <code>src/memory-index.ts</code></td>
+<td>Markdown+YAML-frontmatter scanning, a metadata index cache (HEAD + mtime signature), budgeted recall, timeline.</td>
+</tr>
+<tr>
+<td><code>src/update.ts</code></td>
+<td>Versioned update: a new active record plus <code>supersedes</code>/<code>supersededBy</code>; the old file is never deleted.</td>
+</tr>
+<tr>
+<td><code>src/forget.ts</code></td>
+<td>Soft-delete (move to <code>archiveRoot</code>) and restore.</td>
+</tr>
+<tr>
+<td><code>src/privacy.ts</code></td>
+<td>Sensitive-content detection, sensitivity classification, redaction, export filtering.</td>
+</tr>
+<tr>
+<td><code>src/skill.ts</code></td>
+<td><code>drafts/</code> ↔ <code>enabled/</code> skill discovery; promote/demote via <code>git mv</code>; bundled-skill sync.</td>
+</tr>
+<tr>
+<td><code>src/strategy.ts</code></td>
+<td>Slug/sanitize, draft generation from a memory, evolution suggestion, preview.</td>
+</tr>
+<tr>
+<td><code>src/harness.ts</code></td>
+<td><code>/evolve</code> command normalization/parsing plus help/usage/safety text.</td>
+</tr>
+<tr>
+<td><code>src/config.ts</code> + <code>src/defaults.ts</code></td>
+<td>Config-file read/write/merge and the plugin defaults.</td>
+</tr>
+<tr>
+<td><code>src/invariant.ts</code></td>
+<td>No-op invariant companion (the source of truth is the configured Git repo).</td>
+</tr>
+<tr>
+<td><code>src/loopback.ts</code> + <code>src/config-route.ts</code></td>
+<td>Loopback-only <code>/api/evolve-git/config</code> route for the config-file editor.</td>
+</tr>
+<tr>
+<td><code>src/client/</code></td>
+<td>Browser settings section (<code>evolve-git</code> slot) and config-file editor.</td>
+</tr>
+</tbody></table>
+<h2>Data layout</h2>
+<ul>
+<li><strong>Memory</strong> — <code>&lt;repo&gt;/&lt;memoryRoot&gt;/&lt;kind&gt;/&lt;timestamp&gt;-&lt;slug&gt;-&lt;id&gt;.md</code>, one
+Markdown file per record with YAML frontmatter (<code>kind</code>, <code>title</code>, <code>branch</code>,
+<code>source</code>, <code>tags</code>, <code>createdAt</code>, <code>id</code>, <code>updatedAt</code>, <code>status</code>, <code>supersedes</code>,
+<code>supersededBy</code>, <code>expiresAt</code>, <code>sensitivity</code>) followed by the body.</li>
+<li><strong>Skills</strong> — <code>&lt;repo&gt;/&lt;skillsRoot&gt;/drafts/&lt;name&gt;/SKILL.md</code> (promotable) and
+<code>&lt;repo&gt;/&lt;skillsRoot&gt;/enabled/&lt;name&gt;/SKILL.md</code> (discoverable). Promotion is a
+<code>git mv</code> between the two, never a copy, so it stays reversible and in history.</li>
+<li><strong>Archive</strong> — <code>&lt;repo&gt;/&lt;archiveRoot&gt;/…</code> (same relative layout as memory);
+<code>evolve_forget</code> moves records here so they leave recall/timeline but stay
+recoverable. <code>archiveRoot</code> must remain outside <code>memoryRoot</code>.</li>
+</ul>
+<h2>Config</h2>
+<blockquote>
+<p><strong>Web settings UI (v0.1.4+).</strong> The plugin ships a browser half that registers a
+first-level <strong>Settings → 演进记忆</strong> section on the web profile's Settings page
+(via the <code>settings.section</code> slot). The form uses a <code>SettingsScope</code> adapter that
+reads and writes the per-user config file directly through the loopback-only
+<code>/api/evolve-git/config</code> route, so what the form shows is exactly what takes
+effect (defaults overlaid by the file) and saving writes the file immediately.
+Nested <code>auth</code> is written as one merged object, and the <code>auth.token</code> field is
+write-only (secret, redacted from read-back). Requires the profile to be
+restarted after install so the client manifest is rescanned.</p>
+</blockquote>
+<ul>
+<li><code>repoPath</code> - the local Git checkout that stores memory and skills. Defaults to <code>~/.dsh-evolve-in-git/remote-memory</code>.</li>
+<li><code>repoUrl</code> - the remote memory repository. <strong>No personal default ships with the plugin</strong>: the built-in default is the placeholder <code>https://github.com/&lt;your-github-username&gt;/&lt;your-memory-repo&gt;.git</code>, so configure your own repository (see "Per-user config file" below).</li>
+<li><code>auth</code> - Git auth settings for private access. The default profile is SSH-first and token-capable.</li>
+<li><code>memoryRoot</code> - where memory records are written, default <code>.dsh-evolve/memory</code>.</li>
+<li><code>skillsRoot</code> - where skill drafts are written, default <code>.dsh-evolve/skills</code>.</li>
+<li><code>defaultBranch</code> - branch to evolve from when creating new branches, default <code>main</code>.</li>
+<li><code>remoteName</code> - remote to fetch and push, default <code>origin</code>.</li>
+<li><code>autoCommit</code> - whether writes auto-commit, default <code>true</code>.</li>
+<li><code>archiveRoot</code> - where <code>evolve_forget</code> moves records, default <code>.dsh-evolve/archive</code>.</li>
+<li><code>recallTopK</code> - maximum results <code>evolve_recall</code> returns, default <code>10</code>.</li>
+<li><code>recallMinScore</code> - minimum relevance score to keep, default <code>0</code>.</li>
+<li><code>recallMaxChars</code> - cumulative character budget for returned recall content, default <code>8000</code>.</li>
+<li><code>privacyMode</code> - write-path privacy gate for sensitive content, default <code>ask</code>. <code>block</code> rejects the write when sensitive content is detected; <code>redact</code> stores the redacted content (never the plaintext); <code>ask</code> stores the content as-is and marks its <code>sensitivity</code> so it can be reviewed/confirmed.</li>
+<li><code>digestEnabled</code> - whether to inject the session-start <code>persona</code>+<code>warning</code> digest, default <code>true</code>.</li>
+<li><code>digestMaxRecords</code> - maximum <code>persona</code>/<code>warning</code> records in the session-start digest, default <code>5</code>.</li>
+<li><code>digestMaxChars</code> - maximum characters of the session-start digest, default <code>2000</code>.</li>
+</ul>
+<h3>Auth</h3>
+<ul>
+<li><code>auth.mode: "ssh"</code> - use <code>ssh</code> or a custom <code>sshCommand</code>.</li>
+<li><code>auth.mode: "token"</code> - use <code>token</code> or a token from <code>tokenEnv</code> and a GitHub-style <code>Authorization</code> header.</li>
+</ul>
+<h3>Privacy write gate</h3>
+<p>Every memory write passes through the privacy gate (emails, phones, ID cards,
+credit cards, AWS keys, GitHub tokens, private keys, and <code>password:</code>-style
+secrets). <code>privacyMode</code> controls the response:</p>
+<ul>
+<li><code>block</code> - reject the write when sensitive content is detected.</li>
+<li><code>redact</code> - replace detected fragments with <code>&lt;REDACTED&gt;</code> and store that instead of the plaintext.</li>
+<li><code>ask</code> (default) - store the content as-is and record its <code>sensitivity</code> so it can be reviewed and confirmed.</li>
+</ul>
+<p><code>evolve_show</code>/<code>evolve_export</code> respect the recorded <code>sensitivity</code> level, and
+exports exclude <code>secret</code> records by default. Records without a recorded
+<code>sensitivity</code> (written before the gate existed) are treated as <code>secret</code> so they
+are never accidentally exported.</p>
+<p>The gate covers <strong>memory writes only</strong> (<code>writeMemoryRecord</code>/<code>updateMemory</code>, i.e.
+<code>evolve_remember</code>/<code>memory_save</code>/<code>evolve_update</code>/<code>memory_update</code>). Skill-draft
+writes (<code>writeSkillDraft</code>/<code>saveSkillDraftFromRecord</code>) intentionally do <strong>not</strong> go
+through the privacy gate in this release; review drafts for secrets before
+promoting them.</p>
+<blockquote>
+<p><strong>Recall scoring.</strong> <code>evolve_recall</code>/<code>memory_search</code> score a query against record
+metadata (<code>title</code>, <code>kind</code>, <code>tags</code>, <code>branch</code>, <code>source</code>) only; the body is loaded
+lazily for the top matches but is not part of the relevance score. The human
+command <code>/evolve search &lt;q&gt;</code> uses the same metadata-indexed recall, so it
+returns the same ranked results rather than a different matcher.</p>
+<p><strong>Archive constraint.</strong> <code>archiveRoot</code> must stay outside <code>memoryRoot</code> (the
+default <code>.dsh-evolve/archive</code> does). If you point <code>archiveRoot</code> inside
+<code>memoryRoot</code>, forgotten records are still scanned and will not disappear.</p>
+</blockquote>
+<h3>Per-user config file</h3>
+<p>Each DSH user keeps one local config file at <code>$DSH_HOME/evolve-in-git.json</code>
+(<code>~/.dsh/evolve-in-git.json</code> by default). It is <strong>user-local and never part of any
+Git repository</strong> — do not commit it. The file is the <strong>single user configuration
+layer</strong>: the web Settings → 演进记忆 form reads and writes exactly this file
+(showing the defaults overlaid by your file values, and saving writes the file
+immediately), and the <code>/evolve config show|open|refresh|set &lt;key&gt; &lt;value&gt;</code>
+commands edit it too. The embedded config-file editor opens the raw JSON.</p>
+<p>Example:</p>
+<pre><code class="language-json">{
+  "repoPath": "/absolute/path/to/your/local-memory-checkout",
+  "repoUrl": "https://github.com/&lt;your-github-username&gt;/&lt;your-memory-repo&gt;.git"
+}
+</code></pre>
+<blockquote>
+<p><strong>Never put access tokens in this file</strong> — use <code>auth.tokenEnv</code> to name an
+environment variable, or the web settings token field (write-only).</p>
+</blockquote>
+<p>The web Settings → 演进记忆 section also embeds a <strong>config-file editor</strong> that
+opens this file directly, edits it as raw JSON, and saves it through the
+loopback-only <code>/api/evolve-git/config</code> route (saves apply immediately).</p>
+<h2>Harness entry points</h2>
+<p>The plugin targets the current Harness <code>0.1.1-rc.2</code> host contracts for commands,
+tools, system prompt, and invariants (peerDependencies are <code>^0.1.1-rc.2</code>). Install it
+into a profile, then restart that profile so the bundle layer is composed.</p>
+<p>Tools:</p>
+<ul>
+<li><code>evolve_connect</code></li>
+<li><code>evolve_status</code></li>
+<li><code>evolve_remember</code></li>
+<li><code>evolve_update</code></li>
+<li><code>evolve_forget</code></li>
+<li><code>evolve_restore</code></li>
+<li><code>evolve_show</code></li>
+<li><code>evolve_export</code></li>
+<li><code>evolve_branches</code></li>
+<li><code>evolve_branch_switch</code></li>
+<li><code>evolve_branch_diff</code></li>
+<li><code>evolve_skill_draft</code></li>
+<li><code>evolve_skill_list</code></li>
+<li><code>evolve_skill_promote</code></li>
+<li><code>evolve_skill_demote</code></li>
+<li><code>evolve_rollback</code></li>
+<li><code>evolve_conflicts</code></li>
+<li><code>evolve_resolve</code></li>
+<li><code>evolve_timeline</code></li>
+<li><code>evolve_recall</code></li>
+<li><code>evolve_help</code></li>
+<li><code>memory_search</code> (alias of <code>evolve_recall</code>)</li>
+<li><code>memory_save</code> (alias of <code>evolve_remember</code>)</li>
+<li><code>memory_update</code> (alias of <code>evolve_update</code>)</li>
+<li><code>memory_delete</code> (alias of <code>evolve_forget</code>)</li>
+</ul>
+<p>Human command:</p>
+<ul>
+<li><code>/evolve connect</code></li>
+<li><code>/evolve status</code></li>
+<li><code>/evolve branches</code></li>
+<li><code>/evolve remember &lt;kind&gt; &lt;title&gt; [--expires &lt;iso&gt;] :: &lt;content&gt;</code></li>
+<li><code>/evolve update &lt;id&gt; [--merge] :: &lt;content&gt;</code></li>
+<li><code>/evolve forget &lt;id&gt;</code></li>
+<li><code>/evolve restore &lt;id&gt;</code></li>
+<li><code>/evolve config show|open|refresh|set &lt;key&gt; &lt;value&gt;</code></li>
+<li><code>/evolve skill draft &lt;kind&gt; &lt;title&gt; :: &lt;content&gt;</code></li>
+<li><code>/evolve skill list</code></li>
+<li><code>/evolve skill promote &lt;name&gt;</code></li>
+<li><code>/evolve skill demote &lt;name&gt;</code></li>
+<li><code>/evolve skill sync</code></li>
+<li><code>/evolve rollback &lt;ref&gt; [--dry]</code></li>
+<li><code>/evolve conflicts</code></li>
+<li><code>/evolve resolve &lt;path&gt; &lt;ours|theirs|both&gt;</code></li>
+<li><code>/evolve timeline</code></li>
+<li><code>/evolve search &lt;q&gt; [--kind k] [--tag t]</code></li>
+<li><code>/evolve branch switch &lt;name&gt;</code> | <code>/evolve branch diff &lt;a&gt; [b]</code> | <code>/evolve branch revert &lt;ref&gt;</code></li>
+<li><code>/evolve help</code></li>
+</ul>
+<p>After installation, verify composition before starting a long-lived profile:</p>
+<pre><code class="language-sh">dsh --profile web --dump-config
+dsh --profile web
+</code></pre>
+<p>The first command should show the <code>evolve-git</code> row from the plugin bundle. The
+second command boots the profile; once loaded, the model sees the
+<code>evolve_*</code> tools and the UI command registry exposes <code>/evolve</code>.</p>
+<h3>Bundled skills</h3>
+<p>The package ships the <code>evolve-process</code> skill under <code>skills/</code>. On load the plugin
+materializes it into the repo's <code>&lt;skillsRoot&gt;/drafts/evolve-process/</code> (creating
+it only when missing); <code>/evolve skill sync</code> overwrites the bundled copy on
+demand. Promote it with <code>/evolve skill promote evolve-process</code>. The adapter
+registers the repo's <code>&lt;skillsRoot&gt;/enabled/</code> directory as a DSH skill provider,
+so promoted skills become callable without any copy into <code>~/.dsh/skills</code>.</p>
+<h2>Browser half</h2>
+<ul>
+<li><code>src/client/</code> - the browser bundle (<code>lib/client.js</code>) compiled by
+<code>tsc -p tsconfig.client.json &amp;&amp; tsdown</code> (see <code>tsdown.config.ts</code>); registered as
+a <code>settings.section</code> slot so the web Settings page renders the config form.</li>
+<li><code>package.json</code> - <code>exports["./client"]</code> + <code>dsh.client</code> (<code>platform: "web"</code>) are
+the manifest contract <code>dsh-client-modules</code> scans to include the bundle in
+<code>window.__DSH_BOOT__</code>.</li>
+</ul>
+<h2>Development</h2>
+<p>Requires Node.js and pnpm. The workspace sets <code>nodeLinker: hoisted</code> and allows
+the <code>esbuild</code> build.</p>
+<pre><code class="language-sh">pnpm install
+pnpm build            # tsc (server) + tsc (client) + tsdown browser bundle
+npx pnpm test         # regenerates the @deepseek-ai/dsh-tools stub, then runs tests
+npx pnpm typecheck    # tsc --noEmit for both projects
+npx pnpm check        # build + test (CI uses this)
+</code></pre>
+<p>The <code>prepack</code> script runs <code>pnpm build</code>, so published <code>lib/</code> artifacts are always
+current. Tests live under <code>tests/*.spec.ts</code> and run with <code>node --test</code> via <code>tsx</code>.</p>
+<h2>Delivery notes</h2>
+<p><code>v0.6.3</code> finalized the MVP: metadata-indexed recall with budgets, versioned
+update (<code>supersedes</code>/<code>supersededBy</code>), soft-delete/restore plus expiry, reversible
+skill drafts with the repo <code>enabled/</code> directory registered as a DSH skill
+provider, the <code>block</code>/<code>redact</code>/<code>ask</code> privacy write gate, and the <code>memory_*</code>
+aliases plus the session-start <code>persona</code>+<code>warning</code> digest.</p>
+<p>Verification: <code>npx pnpm check</code> (build + test; <code>build</code> also typechecks) is green.</p>
+<h3>Known non-blocking TODOs</h3>
+<ul>
+<li><code>getMemoryIndex</code> still re-walks the memory root on cache hits (correctness over
+speed); a watcher-based cheap signature is future work.</li>
+<li>The privacy gate covers memory writes (<code>writeMemoryRecord</code>/<code>updateMemory</code>);
+skill-draft writes (<code>writeSkillDraft</code>/<code>saveSkillDraftFromRecord</code>) are
+intentionally outside the gate (documented memory-only scope).</li>
+<li><code>classifySensitivity</code> never assigns <code>internal</code>; the <code>internal</code> export level is
+reachable only when a record is hand-authored with that frontmatter value.</li>
+</ul>
+<h2>License</h2>
+<p>MIT — see <a href="https://github.com/Kytolly/dsh-evolve-in-git/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>.</p>

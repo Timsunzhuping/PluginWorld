@@ -1,0 +1,541 @@
+<h1>AVCS — Agentic Version Control System</h1>
+<p><em>An AI-native version control system for humans and AI agents working concurrently.</em></p>
+<p><a href="https://github.com/izagood/avcs/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/izagood/avcs/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<img src="https://img.shields.io/badge/status-experimental-orange" alt="status" />
+<img src="https://img.shields.io/badge/node-%E2%89%A522.6-brightgreen" alt="node" />
+<img src="https://img.shields.io/badge/runtime%20deps-0-blue" alt="runtime deps" />
+<img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="license" /></p>
+<p><strong>An agent should not spend its context on version control.</strong> That is the whole design
+goal, and it is measured rather than asserted — here is what the same work costs an agent:</p>
+<table>
+<thead>
+<tr>
+<th>What an agent pays for</th>
+<th>git / the full surface</th>
+<th>AVCS</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Landing a change after someone else's PR merged first (30 KB module)</td>
+<td><strong>18,922</strong> tokens</td>
+<td><strong>279</strong> tokens — <em>99% less</em></td>
+</tr>
+<tr>
+<td>Round trips to finish that recovery</td>
+<td>7</td>
+<td>4</td>
+</tr>
+<tr>
+<td>Tool schema, paid on <strong>every</strong> session</td>
+<td>≈8.8k tokens (39 tools)</td>
+<td>≈3.5k tokens (13, <code>--profile core</code>)</td>
+</tr>
+<tr>
+<td>What a same-line collision hands the model</td>
+<td>the whole file, with conflict markers</td>
+<td>one object naming the two contending operations</td>
+</tr>
+</tbody></table>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/rebase-token-cost-dark.svg"></source>
+  <img alt="Agent tokens to land a change after another PR merged first: git costs 446, 5,249 and 18,922 tokens on 0.7 KB, 8 KB and 30 KB files, while AVCS stays flat at 279" src="https://raw.githubusercontent.com/izagood/avcs/HEAD/docs/assets/rebase-token-cost-light.svg" width="820" />
+</picture><p>git's recovery cost tracks the size of the <strong>file</strong> — a conflict is bytes inside it, so the
+agent reads the whole module and writes the whole module back to change one line. AVCS's
+tracks the size of the <strong>change</strong>: a conflict is an object naming the two contending
+operations, so it stays flat as the file grows. There is also no branch to rewrite and
+nothing to force-push, which is why the round trips differ — and that is <em>one</em> cycle,
+repeated for every PR that merges ahead of yours. Across the file sizes measured the saving
+is 37–99%.</p>
+<p>None of this is a compression trick bolted on afterwards. It falls out of storing the
+operation graph instead of snapshots: there is no rebase to perform, so there is nothing to
+re-read. Method, caveats and the harness that produced the rebase numbers:
+<a href="https://github.com/izagood/avcs-demo#what-it-costs-an-agent-in-tokens" target="_blank" rel="noopener noreferrer">avcs-demo → what it costs an agent in tokens</a>.
+The schema figures are the advertised MCP surface itself — 35 KB of JSON against 14 KB, at
+the usual ≈4 bytes per token.</p>
+<blockquote>
+<p>Git records <strong>when</strong> the code changed.
+AVCS records <strong>who changed it, with what intent, on what evidence, and through which conflict decisions</strong> the code reached its current state.</p>
+</blockquote>
+<p>AVCS is a new, deliberately Git-incompatible version control system built for a world where humans and <strong>many AI agents edit the same codebase concurrently</strong>. It drops the commit / branch / merge / conflict-marker model and instead stores <strong>intent</strong>, <strong>session</strong>, <strong>operation</strong>, <strong>evidence</strong>, and <strong>decision</strong> as first-class objects. The code tree is not the source of truth — it is a <strong>projection</strong> computed by deterministically <em>reducing</em> the operation graph:</p>
+<pre><code>state = reduce(base, operationDAG, decisions, policy, materializer)
+</code></pre>
+<p>The same objects + the same policy + the same materializer produce the same tree on any replica. Merging is not text selection; it is a pure, deterministic reduction.</p>
+<blockquote>
+<p><strong>Status:</strong> research prototype. The implementation is real and test-covered, but every phase is built to a <em>working-MVP depth</em> (language-neutral text 3-way merge, ed25519 signing). Structure-aware merge, semantic-break detection, multi-signature trust, and hardened distributed sync are tracked on the <a href="https://github.com/izagood/avcs/blob/HEAD/docs/07-roadmap.md" target="_blank" rel="noopener noreferrer">roadmap</a>.</p>
+</blockquote>
+<p><strong>Jump in:</strong> <a href="#install" target="_blank" rel="noopener noreferrer">install</a> · <a href="#your-first-five-minutes-no-server-no-git-required" target="_blank" rel="noopener noreferrer">your first five minutes</a> · <a href="#work-against-a-server" target="_blank" rel="noopener noreferrer">work against a server</a> · <a href="#connect-agents-mcp" target="_blank" rel="noopener noreferrer">connect an agent over MCP</a> · <a href="https://github.com/izagood/avcs/blob/HEAD/docs/25-agent-quickstart.md" target="_blank" rel="noopener noreferrer">agent quickstart walkthrough</a></p>
+<p><strong>See it run first:</strong> <a href="https://github.com/izagood/avcs-demo" target="_blank" rel="noopener noreferrer"><code>izagood/avcs-demo</code></a> — a runnable
+demo of the question this design answers: <em>what happens when two agents edit the same file at
+the same time?</em> One <code>./demo.sh</code> walks a stale-head land that is absorbed instead of rejected,
+a same-file auto-merge with no rebase, and a same-line collision that becomes a signed
+decision rather than conflict markers.</p>
+<h2>Why not a layer on top of git?</h2>
+<p>Every "AI + git" tool eventually stores the agent's context <em>beside</em> the history — commit
+trailers, PR comments, sidecar JSON. AVCS exists because these objects have to be
+<strong>load-bearing</strong> — consumed by the merge machinery itself — and bolted onto git they can't be:</p>
+<ul>
+<li><strong>Evidence must gate merging.</strong> git happily merges a behavior change with no passing
+test. In AVCS that change is graded <strong>L3 — blocked</strong> by the reducer until <em>trusted</em>
+evidence lands, and an operation's own author vouching for it does not count.</li>
+<li><strong>Decisions must outlive the merge.</strong> <code>git merge</code> resolves a conflict by emitting bytes;
+the choice and its rationale evaporate. An AVCS <code>decision</code> is a signed object —
+recallable later, and prior decisions bias future auto-resolution.</li>
+<li><strong>Concurrent edits must not degrade into conflict markers.</strong> Two agents editing one
+file meet a deterministic policy reduction (L0–L4 below), not <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code> in the tree
+plus a human holding the pieces.</li>
+<li><strong>Intent must travel with the work.</strong> A trailer is inert text. An <code>intent</code> (goal +
+constraints + allowed scope) is what sessions open against, what leases and contention
+checks are scoped by, and what <code>avcs.context.build</code> hands the next agent.</li>
+</ul>
+<p>git stores snapshots and leaves the merge to text selection; AVCS stores the operation
+graph and makes the merge a computation over intent, evidence, and decisions. That is why
+it is deliberately git-<strong>incompatible</strong> — these objects are the engine, not metadata.
+(git interop still exists, as a bridge: <a href="https://github.com/izagood/avcs/blob/HEAD/docs/14-git-bridge.md" target="_blank" rel="noopener noreferrer">docs/14</a>, <a href="https://github.com/izagood/avcs/blob/HEAD/docs/20-workspace-bridge.md" target="_blank" rel="noopener noreferrer">docs/20</a>.)</p>
+<h2>Core principles</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Principle</th>
+<th>Contrast with Git</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><strong>Operations are history</strong>, not commits</td>
+<td>A commit is merely a checkpoint over many operations</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>Identity is the entity ID</strong>, not the file path</td>
+<td>Rename + edit can auto-merge</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>Merge is a deterministic reduction</strong>, not text selection</td>
+<td>No conflict markers</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>A conflict is a first-class <code>decision</code> object</strong>, not a broken file</td>
+<td>The rationale stays in history</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>AI output is a proposed operation with attached evidence</strong>, not trusted code</td>
+<td>A behavior change with no test cannot be <code>accepted</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>Code never defaults to last-write-wins</strong></td>
+<td>Precedence is decided by policy</td>
+</tr>
+</tbody></table>
+<h2>How it works</h2>
+<p>Every meaningful thing is a content-addressed, append-only object. Code is a <em>projection</em> over the operation DAG, never stored as commits.</p>
+<table>
+<thead>
+<tr>
+<th>Object</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>intent</code></td>
+<td>Why a change is being made (goal + constraints + allowed scope)</td>
+</tr>
+<tr>
+<td><code>session</code></td>
+<td>An agent/human work episode against an intent</td>
+</tr>
+<tr>
+<td><code>operation</code></td>
+<td>A single semantic change unit — the real history</td>
+</tr>
+<tr>
+<td><code>evidence</code></td>
+<td>Machine-checkable proof (test / typecheck / lint / scan) attached to operations</td>
+</tr>
+<tr>
+<td><code>decision</code></td>
+<td>A recorded resolution of a conflict or design choice</td>
+</tr>
+<tr>
+<td><code>checkpoint</code></td>
+<td>A verified (ops + policy + materializer) state vector — replaces a commit</td>
+</tr>
+<tr>
+<td><code>view</code></td>
+<td>A declarative query over the operation graph — replaces a branch</td>
+</tr>
+<tr>
+<td><code>release</code></td>
+<td>A signed, provenance-bearing checkpoint — replaces a tag</td>
+</tr>
+<tr>
+<td><code>policy</code></td>
+<td>The deterministic merge rules the reducer is parameterized by</td>
+</tr>
+</tbody></table>
+<p>…plus <code>blob</code> for raw content and the governance objects (<code>lease</code>, <code>membership</code>, <code>protection</code>, <code>promotion</code>, <code>redaction</code>, <code>override</code>, <code>approval</code>, <code>line</code>, <code>integration</code>) used by the multi-machine and security phases.</p>
+<h2>Conflict resolution levels</h2>
+<p>AVCS never falls back to last-write-wins for code. Contending operations are graded and resolved with a recorded rationale:</p>
+<ul>
+<li><strong>L0 / L1</strong> — different entities, or <strong>disjoint line regions</strong> in the same file → <strong>auto-merge</strong></li>
+<li><strong>L2</strong> — concurrent edits that overlap the same line region → <strong>policy auto-decision</strong> (human-preferred, trust-weighted); the auto-decision is itself recorded in <code>autoDecisions</code></li>
+<li><strong>L3</strong> — a behavior change with no <em>trusted</em> evidence → <strong>blocked</strong></li>
+<li><strong>L4</strong> — a public-API break → <strong>requires a human decision</strong>, routed to the scope's owners</li>
+</ul>
+<p>Evidence trust matters: an operation's own author cannot vouch for it. Evidence-gating and the passing-test bonus only count evidence produced by a <em>non-authoring, trusted</em> actor (CI bot / human).</p>
+<h2>What works today</h2>
+<p>The reducer and policy engine are the foundation; the higher phases build distributed collaboration, security, and observability on top.</p>
+<p><strong>Foundation (Phases 1–6)</strong></p>
+<ul>
+<li><strong>Storage core</strong> — append-only, content-addressed object store (<code>.avcs/objects</code>)</li>
+<li><strong>Deterministic reducer + policy engine</strong> — the L0–L4 conflict grading above, with a priority ladder, bounded reliability nudges, and auditable auto-decisions</li>
+<li><strong>Language-neutral text merge</strong> (Phase 2) — a deterministic N-way line-level 3-way merge (<code>src/merge/merge3.ts</code>), so edits to disjoint regions of one file auto-merge regardless of language; overlapping edits become a policy-resolved conflict region. No language parsing in the core</li>
+<li><strong>Cryptographic trust</strong> (Phase 3) — ed25519-signed evidence/decision; forged signatures fail the trust gate. Real validation runner, <code>WorkLease</code>, <code>RepairContext</code></li>
+<li><strong>Decision memory</strong> (Phase 4) — recallable prior human decisions (<code>recallDecisions</code>) and distilled "learned policies" that bias future auto-resolution</li>
+<li><strong>Policy depth</strong> (Phase 5) — code-owner routing and bounded reliability learning</li>
+<li><strong>Release &amp; provenance</strong> (Phase 6) — verified checkpoints + CycloneDX SBOM + signed artifacts</li>
+</ul>
+<p><strong>Collaboration, scale &amp; security (Phases 7–12)</strong></p>
+<ul>
+<li><strong>Phase 7 — multi-machine:</strong> membership/roles (signed key federation), <code>pull</code> (object gossip; two replicas converge to the same <code>treeHash</code>), protection + <code>finalize</code> CAS (non-fast-forward rejected, so a stale push can't overwrite fresh history)</li>
+<li><strong>Phase 8 — lineage:</strong> long-lived divergent lines (e.g. v1.x ∥ v2.x, same path, different content, zero conflict), <code>portOp</code> (backport = cherry-pick)</li>
+<li><strong>Phase 9 — scale:</strong> entity index, <code>materializeAt</code> (time travel), chunked large-blob storage with dedup</li>
+<li><strong>Phase 10 — observability:</strong> <code>blame</code> (who/why), <code>logP</code>, deterministic <code>bisect</code>, <code>diff</code></li>
+<li><strong>Phase 11 — external contributions:</strong> quarantine tier + <code>promote</code> + untrusted-CI gate</li>
+<li><strong>Phase 12 — security:</strong> <code>redact</code> (byte-eviction of leaked secrets, oid preserved), break-glass <code>override</code>, forward-only rollback</li>
+<li><strong>Local undo</strong> (<a href="https://github.com/izagood/avcs/blob/HEAD/docs/23-local-undo.md" target="_blank" rel="noopener noreferrer">docs/23</a>) — <code>avcs undo [--last | &lt;op-oid&gt;…] [--purge] [--no-git]</code>: drop local ops from the view, and with <code>--purge</code> evict the bytes they uniquely reference. Refuses once the ops have been pushed, because that case belongs to admin-gated <code>redact</code>. In a git-bridged repo <code>--purge</code> clears the <strong>git</strong> copy too — but only where it can prove the rewrite is safe and local (nothing on a remote, the commits at the tip, no other work in them, a clean tree); anywhere else it still does the AVCS side and names precisely what is left and the one command that fits, up to and including "rotate the credential, it is already published"</li>
+<li><strong>The working tree is genuinely derived</strong> — <code>checkout</code> records what it projected
+(<code>.avcs/projection.json</code>, path → blob oid) and, on the next projection, removes the files
+the target view no longer contains. Files it never wrote — build output, ignored files,
+anything you just created — are untouched, and a projected file you have since edited is
+kept and named in a notice rather than silently overwritten. Switching views therefore
+yields <em>that view</em>, not the union of every view projected before it</li>
+</ul>
+<p>Branches become <strong>views</strong>, commits become <strong>checkpoints</strong>, tags become <strong>releases</strong>. Agents drive AVCS through a first-class <strong>MCP server</strong> (39 tools, or 13 with <code>--profile core</code>); humans use the <strong>CLI</strong>. Since Phase 14 the server runs an <strong>integration queue</strong> (<code>avcs submit</code>, <code>POST /integrate</code>): a stale submission is never told "head moved — pull first" — the server re-reduces the frontier union on the submitter's behalf, and the outcome is always a verdict (<code>advanced</code> | <code>conflict</code> repair packet | <code>needs_evidence</code> — one validation run, never a redo | <code>queued</code>). Since Phase 15 replicas converge <strong>live</strong> (<code>GET /events</code> long-poll, <code>avcs sync --watch</code>, contention early-warning), and Phase 16 completed the MCP surface: <code>avcs.sync.land</code> lands work in one call, <code>avcs.context.build</code> assembles bounded working context with deterministic truncation, and subscribable resources notify a client when the head moves — see <a href="https://github.com/izagood/avcs/blob/HEAD/docs/17-sync-convergence.md" target="_blank" rel="noopener noreferrer">docs/17</a> and <a href="https://github.com/izagood/avcs/blob/HEAD/docs/18-mcp-first-class.md" target="_blank" rel="noopener noreferrer">docs/18</a>. The behavior is pinned by an 827-test contract suite (<code>test/*.test.ts</code>, all green) and <code>tsc</code> is clean.</p>
+<h2>Install</h2>
+<p>Requires <strong>Node ≥ 22.6</strong> — AVCS runs TypeScript directly via type stripping, so there is <strong>no build step and zero runtime dependencies</strong>.</p>
+<p>AVCS is published on npm as <a href="https://www.npmjs.com/package/@izagood/avcs" target="_blank" rel="noopener noreferrer"><code>@izagood/avcs</code></a>. Install it globally to get the <code>avcs</code> command on your <code>PATH</code>:</p>
+<pre><code class="language-bash">npm install -g @izagood/avcs
+</code></pre>
+<p>Or run it without installing, straight from the registry:</p>
+<pre><code class="language-bash">npx @izagood/avcs version
+</code></pre>
+<h3>Your first five minutes (no server, no git required)</h3>
+<p>AVCS is local-first: a repo on your disk is a complete VCS — history, blame, undo,
+releases — with no server and no git anywhere. In an existing project directory:</p>
+<pre><code class="language-bash">avcs init .                        # create the repo (inside a git repo is fine — .avcs is git-ignored)
+avcs import . -m "initial import"  # bring the existing tree in as operations
+
+# …edit files as usual, then record the change:
+avcs commit -m "add mul()"         # authors operations for your working-tree changes
+
+avcs status                        # operation / conflict summary
+avcs log                           # operation history
+avcs blame file:src/math.js        # who owns this file and why (entity key = file:&lt;path&gt;)
+avcs conflicts                     # decisions a human still owes
+avcs decide &lt;conflict-id&gt; --choose &lt;op-oid&gt; --reason "…"   # …and pay one: a signed decision
+
+
+avcs undo --last                   # take the last operation back out of the view…
+avcs checkout                      # …and re-project the working tree from it
+</code></pre>
+<p>Two things to notice: <code>commit</code> is not a git commit — it authors semantic <em>operations</em>,
+the real history; and the working tree is a <em>projection</em> you re-materialize with
+<code>checkout</code>, not the source of truth. <code>avcs help</code> lists every command.</p>
+<h3>Signing identity</h3>
+<p>An avcs identity belongs to you and this machine, not to one checkout — the same scope as
+<code>~/.ssh</code> or <code>~/.gnupg</code>. Provision it once and every repo on the box can sign with it:</p>
+<pre><code class="language-bash">avcs key provision human:you    # writes ~/.avcs/private/human:you.json (0600, dir 0700)
+avcs key ls                     # who this machine can sign as, and which keystore each came from
+avcs key import &lt;key-file&gt;      # put an existing identity on a NEW machine
+</code></pre>
+<p>The keystore is <code>$AVCS_CONFIG_HOME</code>, else <code>$XDG_CONFIG_HOME/avcs</code>, else <code>~/.avcs</code>. A repo may
+keep its own key in <code>&lt;store&gt;/private/</code> to sign as a <em>different</em> actor (a CI checkout, a second
+identity); that override is read first. See <a href="https://github.com/izagood/avcs/blob/HEAD/docs/12-local-production.md#%EA%B0%9C%EC%9D%B8%ED%82%A4-%EB%B3%B4%EA%B4%80%EC%86%8C-machine-level-keystore" target="_blank" rel="noopener noreferrer">12 — Local production</a>.</p>
+<p>Your <strong>id</strong> is your identity — trust, keys and governance key on it. For attribution and
+contact, set a display name and email the git way; they ride in every operation you author
+(so blame and history can show and reach you) but never gate anything:</p>
+<pre><code class="language-bash">avcs config user.name  "Ada Lovelace"
+avcs config user.email "ada@example.com"
+avcs config actor      "human:ada"      # the id commits author as (else your sole key / AVCS_ACTOR)
+avcs config                              # show what is set
+</code></pre>
+<p>These live in <code>.avcs/config.json</code>; <code>AVCS_AUTHOR_NAME</code> / <code>AVCS_AUTHOR_EMAIL</code> / <code>AVCS_ACTOR</code>
+override per invocation.</p>
+<h3>Work against a server</h3>
+<p>A repo stays useful with no server at all. Once there is one — <a href="#build-your-own-server" target="_blank" rel="noopener noreferrer"><code>avcs serve</code></a>,
+<a href="https://github.com/izagood/avcs-server" target="_blank" rel="noopener noreferrer">avcs-server</a>, or any conforming implementation — the
+whole exchange is a handful of commands:</p>
+<pre><code class="language-bash">avcs clone https://your.server/acme/web .      # fetch the graph AND project a working tree
+avcs clone https://your.server/acme/web . --at &lt;checkpoint&gt;   # …at one exact checkpoint
+avcs sync                                      # pull + push against the remote it recorded
+avcs sync --watch                              # live convergence: long-poll + contention early warning
+avcs land -m "add mul()"                       # push + checkpoint + integrate, in one step
+</code></pre>
+<p><code>land</code> is the one to reach for. A stale head is absorbed by the server's integration queue
+rather than bounced back as "head moved — pull first", so the outcome is <code>landed</code> or a
+conflict packet for a human to decide — never a redo. <code>avcs remote add &lt;name&gt; &lt;url&gt;</code>
+registers additional servers; <code>avcs sync &lt;name&gt;</code> picks one.</p>
+<p><strong>Reading from CI, without handing out a signing key.</strong> The default credential is an
+<code>AVCS-Sig</code> signature over the canonical request, which covers the method and the body — a
+captured read credential cannot be replayed as a write. That is the right default, and a
+poor fit for an ephemeral reader. So a <em>read</em> also accepts a bearer token:</p>
+<pre><code class="language-bash">AVCS_HUB_TOKEN=… avcs clone https://your.server/acme/web .
+</code></pre>
+<p>The token is read-only by construction: the write path takes no token parameter at all, so
+a leaked variable can clone but can never push, finalize, or rewrite policy. A held signing
+key always wins over the token, so a signed reader is never silently downgraded. The token's
+format, lifetime and scope belong to the server — see <a href="https://github.com/izagood/avcs/blob/HEAD/docs/26-hub-protocol.md" target="_blank" rel="noopener noreferrer">docs/26</a>.</p>
+<h3>Connect agents (MCP)</h3>
+<p>Agents drive AVCS through its MCP server. Once <code>avcs</code> is installed, register it with the Claude Code CLI:</p>
+<pre><code class="language-bash">avcs mcp install            # runs `claude mcp add avcs -- avcs mcp` for you (scope: user)
+claude mcp list             # confirm "avcs" is Connected
+</code></pre>
+<p><code>avcs mcp</code> itself is the stdio server agents spawn (target repo = <code>$AVCS_REPO</code>, else the cwd). To register by hand — or for any other MCP client — point it at <code>avcs mcp</code>:</p>
+<pre><code class="language-bash">claude mcp add avcs -- avcs mcp
+</code></pre>
+<p>The MCP SDK ships as an optionalDependency, so a normal install includes it; no extra step needed.</p>
+<p>Every tool answers compactly by default — pretty-printing is an opt-in <code>verbose</code> flag on the
+call, because whitespace an agent never reads is still whitespace it pays for.</p>
+<p><strong>The loop an agent runs</strong> — five moves, and landing is one call:</p>
+<pre><code>avcs.guide                                  # the loop, the rules, error recovery
+avcs.context.build   { intentOid }          # provenance, prior decisions, live risks
+avcs.operation.propose { path, content }    # never write final files directly
+avcs.validate.run + avcs.evidence.attach    # a behaviour change needs passing evidence
+avcs.sync.land       { by }                 # push + checkpoint + integrate → landed | conflict
+</code></pre>
+<p><code>sync.land</code> is the point: a stale head is absorbed for you, so the outcome is either <code>landed</code> or a conflict packet for a human — never "pull and redo". Add <code>--profile core</code> to advertise only these 13 tools instead of all 39 — the schema an agent is handed drops from 35 KB to 14 KB, on every session:</p>
+<pre><code class="language-bash">claude mcp add avcs -- avcs mcp --profile core
+</code></pre>
+<p>To upgrade later, re-run <code>npm install -g @izagood/avcs@latest</code>; to remove it, <code>npm uninstall -g @izagood/avcs</code> (your repo data is left intact).</p>
+<h3>Install from source</h3>
+<p>Prefer to track the latest <code>main</code>, or hack on AVCS itself? The bundled <code>install.sh</code> clones the repo and wires up an <code>avcs</code> launcher that points back at the checkout, so updating is just <code>git pull</code> — no reinstall needed.</p>
+<pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/izagood/avcs/main/install.sh | bash
+</code></pre>
+<p>That one-liner clones the repo to <code>~/.local/share/avcs</code> (override with <code>--dir</code>/<code>AVCS_HOME</code>) and installs an <code>avcs</code> launcher to <code>~/.local/bin</code>. Re-running it updates the checkout in place. Already have a clone? Run the installer from inside it instead:</p>
+<pre><code class="language-bash">git clone https://github.com/izagood/avcs.git &amp;&amp; cd avcs
+./install.sh
+</code></pre>
+<p>The launcher lands in <code>~/.local/bin</code> (override with <code>--bin-dir &lt;dir&gt;</code> or <code>AVCS_BIN_DIR</code>). If <code>~/.local/bin</code> isn't on your <code>PATH</code> yet, the installer prints the line to add.</p>
+<p>Other install-from-source options:</p>
+<pre><code class="language-bash">./install.sh --bin-dir /usr/local/bin   # system-wide (may need sudo)
+./install.sh --name avcs-dev            # install under a different command name
+./install.sh --dir ~/src/avcs --ref v1  # one-liner mode: clone dir + ref to install
+./uninstall.sh                          # remove the launcher (data is left intact)
+</code></pre>
+<p>If <code>node</code> isn't on your <code>PATH</code> at runtime, point the launcher at one with <code>AVCS_NODE=/path/to/node</code>.</p>
+<h2>Use as a library (<code>@izagood/avcs</code>)</h2>
+<p>A hosting server (e.g. avcshub) can depend on the AVCS core as a versioned package. Development and tests run the raw <code>.ts</code> via type stripping, but <code>npm publish</code> ships a <code>tsc</code>-compiled <code>dist/</code> (JS + type declarations via <code>tsconfig.build.json</code>), so consumers import it with no build tooling of their own.</p>
+<pre><code class="language-bash">npm install @izagood/avcs
+</code></pre>
+<pre><code class="language-ts">import { startHub, type HubHandle } from "@izagood/avcs/hub";   // the hub server
+import { ObjectStore, CorruptObjectError } from "@izagood/avcs/store";
+import { verifyMessage, generateKeypair } from "@izagood/avcs/identity";
+import { Repo } from "@izagood/avcs";                            // root: primary public API
+
+const hub = await startHub({ repoDir: "./data", port: 8080, gated: true });
+</code></pre>
+<p>Entry points: <code>.</code> (root barrel) · <code>./hub</code> · <code>./hub/client</code> · <code>./store</code> · <code>./identity</code> · <code>./types</code>.</p>
+<p>Releasing: bump <code>package.json</code>'s <code>version</code> in a PR and merge it to <code>main</code> — <code>.github/workflows/release.yml</code> detects the new version, runs <code>npm publish</code> (with provenance), tags the commit <code>vX.Y.Z</code>, and cuts a GitHub Release. The publish steps are guarded by a registry check, so package.json edits that don't change the version are no-ops. Every PR also runs a release dry run (<code>npm run build</code> + <code>npm pack --dry-run</code>) in CI to catch packaging regressions before merge. Requires an <code>NPM_TOKEN</code> repository secret with publish rights to the <code>@izagood</code> scope.</p>
+<h2>Build your own server</h2>
+<p>AVCS is a protocol, not a service. <strong>A conforming server needs three endpoints:</strong></p>
+<pre><code>GET  /have            the oids you hold        → ["operation_ab12…", …]
+GET  /objects/:oid    one object as JSON       → { … }  (404 if absent)
+POST /objects         take one object          → { "oid": "operation_ab12…" }
+</code></pre>
+<p>Everything else is optional. The client reads capability flags from <code>GET /version</code>, and when a
+flag is absent — or an endpoint answers <code>404</code>/<code>405</code>/<code>501</code> — it falls back on its own. A
+read-only mirror serving only the first two is a legitimate server; so is one without the
+integration queue, without batching, without long-poll.</p>
+<p>That is deliberate: avcs is a public client against deployments it does not control.</p>
+<p>Two documents are the contract:</p>
+<ul>
+<li><strong><a href="https://github.com/izagood/avcs/blob/HEAD/docs/26-hub-protocol.md" target="_blank" rel="noopener noreferrer">26 — Server protocol</a></strong> — every endpoint's request/response shape,
+status codes, capability negotiation, the SSH-style request signature, and a table of the
+mistakes server authors actually make.</li>
+<li><strong><a href="https://github.com/izagood/avcs/blob/HEAD/docs/24-canonical-interop.md" target="_blank" rel="noopener noreferrer">24 — Canonical interop</a></strong> — how an oid is computed. Read
+this first if you are not writing JavaScript: an object's identity is the sha256 of its
+canonical JSON, and three parts of that canonicalization are easy to get subtly wrong.
+Diverge and you do not get an error — you get two honest implementations that never
+converge.</li>
+</ul>
+<p>Validate your canonicalizer against <a href="https://github.com/izagood/avcs/blob/HEAD/spec/canonical-vectors.json" target="_blank" rel="noopener noreferrer"><code>spec/canonical-vectors.json</code></a>
+(10 accepted, 4 rejected, each with the expected canonical bytes and oid) before anything else.</p>
+<p>Then point the conformance suite at your server:</p>
+<pre><code class="language-bash">AVCS_CONFORMANCE_URL=https://your.hub/acme/web npm run conformance
+</code></pre>
+<p>It reports which levels apply — <code>core</code> (the three endpoints, and a clone that reproduces the
+source treeHash), then <code>sync</code>, <code>governance</code>, <code>queue</code> as your capability flags allow. A level
+you do not advertise is <strong>skipped, not failed</strong>: a partial server is a legitimate one.</p>
+<p>What <code>core</code> checks is <strong>object replication and clone-ability</strong>, not server-side projection.
+The treeHash comparison runs between two <em>clients</em> — one that pushed, one that cloned — so it
+establishes that your server returned faithfully what it was given, not that your server can
+itself derive a tree from those objects. A server that stores and serves objects correctly but
+never materializes anything passes <code>core</code>, and that is intended: projection is a client
+concern, and a server that does it too is doing more than the level asks.</p>
+<p>Three implementations to start from:</p>
+<ul>
+<li><p><strong><a href="https://github.com/izagood/avcs/blob/HEAD/examples/server.py" target="_blank" rel="noopener noreferrer"><code>examples/server.py</code></a></strong> — a complete conforming core-level server in
+one stdlib-only Python file. No JS, no avcs library: its only dependencies are
+<a href="https://github.com/izagood/avcs/blob/HEAD/docs/24-canonical-interop.md" target="_blank" rel="noopener noreferrer">docs/24</a> and the golden vectors, which is the point — run
+<code>python3 examples/server.py --selftest</code> to see the vectors check its canonicalizer, then
+point the conformance suite at it.</p>
+</li>
+<li><p><strong><a href="https://github.com/izagood/avcs-server" target="_blank" rel="noopener noreferrer">avcs-server</a></strong> — a standalone, self-hostable,
+multi-repo server built on this library. Conformance-verified at <code>core</code>; run it, read it,
+or fork it as the starting point for your own deployment.</p>
+</li>
+<li><p><strong><code>startHub</code> in this repository</strong> — the reference: single-repo, no multi-tenancy, but it
+serves the whole protocol. Read it as the spec's executable form, or run it with <code>avcs serve</code>.</p>
+</li>
+</ul>
+<h2>Running from a checkout</h2>
+<p>Hacking on AVCS itself? Every command runs straight from the checkout with <code>node</code>:</p>
+<pre><code class="language-bash"># Walk all four merge scenarios end to end
+node --experimental-strip-types src/demo.ts
+
+# Run the behavior-contract test suite
+node --experimental-strip-types --test test/*.test.ts      # or: npm test
+
+# Human-facing CLI (or just `avcs &lt;command&gt;` once installed)
+node --experimental-strip-types src/cli.ts init .
+node --experimental-strip-types src/cli.ts status
+node --experimental-strip-types src/cli.ts conflicts
+node --experimental-strip-types src/cli.ts log
+
+# Agent-facing MCP server (`avcs mcp` once installed; ships the SDK as an optionalDependency)
+npm install
+AVCS_REPO=$(pwd) npm run mcp      # = node --experimental-strip-types src/mcp/server.ts
+</code></pre>
+<blockquote>
+<p>Type checking (<code>tsc --noEmit</code>) needs <code>npm install</code>; the runtime itself has no dependencies.</p>
+</blockquote>
+<h2>Code map</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>src/objects/types.ts</code></td>
+<td>Object model definitions (single source of truth)</td>
+</tr>
+<tr>
+<td><code>src/store/objectStore.ts</code></td>
+<td>Append-only, content-addressed store</td>
+</tr>
+<tr>
+<td><code>src/core/canonical.ts</code></td>
+<td>Canonical serialization + content addressing (oid)</td>
+</tr>
+<tr>
+<td><code>src/core/identity.ts</code></td>
+<td>ed25519 sign/verify + Keyring (Phase 3)</td>
+</tr>
+<tr>
+<td><code>src/reducer/reducer.ts</code></td>
+<td>Operation graph → code tree reduction + conflict grading</td>
+</tr>
+<tr>
+<td><code>src/reducer/policy.ts</code></td>
+<td>Policy engine (priority ladder, reliability nudge)</td>
+</tr>
+<tr>
+<td><code>src/reducer/incremental.ts</code></td>
+<td>Incremental re-reduce (reuse clean groups)</td>
+</tr>
+<tr>
+<td><code>src/merge/merge3.ts</code></td>
+<td>Language-neutral N-way line-level 3-way text merge (Phase 2)</td>
+</tr>
+<tr>
+<td><code>src/policy/owners.ts</code>, <code>reliability.ts</code></td>
+<td>Code-owner routing · reliability learning (Phase 5)</td>
+</tr>
+<tr>
+<td><code>src/validation/runner.ts</code>, <code>repair.ts</code></td>
+<td>Validation runner · RepairContext (Phase 3)</td>
+</tr>
+<tr>
+<td><code>src/concurrency/lease.ts</code></td>
+<td>WorkLease (Phase 3)</td>
+</tr>
+<tr>
+<td><code>src/release/sbom.ts</code></td>
+<td>SBOM generation (Phase 6)</td>
+</tr>
+<tr>
+<td><code>src/hub/hubServer.ts</code>, <code>hubClient.ts</code></td>
+<td>Multi-machine sync server (Phase 7; API names keep the legacy “hub” term)</td>
+</tr>
+<tr>
+<td><code>src/api/repo.ts</code></td>
+<td>High-level facade (shared by CLI, demo, MCP)</td>
+</tr>
+<tr>
+<td><code>src/api/keystore.ts</code></td>
+<td>Machine-level private keystore (<code>~/.avcs/private</code>)</td>
+</tr>
+<tr>
+<td><code>src/mcp/server.ts</code></td>
+<td>Agent-facing MCP interface (39 tools; <code>--profile core</code> advertises 13)</td>
+</tr>
+<tr>
+<td><code>src/cli.ts</code></td>
+<td>Human-facing inspection/release CLI</td>
+</tr>
+<tr>
+<td><code>src/demo.ts</code></td>
+<td>End-to-end scenario</td>
+</tr>
+</tbody></table>
+<h2>Design docs</h2>
+<ul>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/00-overview.md" target="_blank" rel="noopener noreferrer">00 — Overview &amp; principles</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/01-architecture.md" target="_blank" rel="noopener noreferrer">01 — Architecture</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/02-object-model.md" target="_blank" rel="noopener noreferrer">02 — Object model</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/03-reducer.md" target="_blank" rel="noopener noreferrer">03 — Reducer &amp; conflict levels</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/04-policy.md" target="_blank" rel="noopener noreferrer">04 — Policy engine</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/05-views-checkpoints.md" target="_blank" rel="noopener noreferrer">05 — Views · Checkpoints · Releases</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/06-mcp-interface.md" target="_blank" rel="noopener noreferrer">06 — MCP / Skill interface</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/07-roadmap.md" target="_blank" rel="noopener noreferrer">07 — Roadmap</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/08-governance.md" target="_blank" rel="noopener noreferrer">08 — Governance &amp; consensus (avcshub)</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/09-usecase-coverage.md" target="_blank" rel="noopener noreferrer">09 — Git/GitHub use-case coverage &amp; design evolution</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/10-production-plan.md" target="_blank" rel="noopener noreferrer">10 — Production design plan</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/11-incremental-reduce.md" target="_blank" rel="noopener noreferrer">11 — Incremental reduce</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/12-local-production.md" target="_blank" rel="noopener noreferrer">12 — Local production</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/13-hub-production.md" target="_blank" rel="noopener noreferrer">13 — Hub production</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/14-git-bridge.md" target="_blank" rel="noopener noreferrer">14 — Git bridge (real-world compatibility)</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/15-language-neutral-core.md" target="_blank" rel="noopener noreferrer">15 — Language-neutral core</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/16-workspace-scope.md" target="_blank" rel="noopener noreferrer">16 — Workspace scope</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/17-sync-convergence.md" target="_blank" rel="noopener noreferrer">17 — Sync convergence: integration queue &amp; live sync (design)</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/18-mcp-first-class.md" target="_blank" rel="noopener noreferrer">18 — MCP as the first-class connection</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/19-entity-identity.md" target="_blank" rel="noopener noreferrer">19 — Entity identity: rename × edit commutativity</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/20-workspace-bridge.md" target="_blank" rel="noopener noreferrer">20 — Workspace-first git bridge</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/21-shared-paths.md" target="_blank" rel="noopener noreferrer">21 — shared-paths: build environments shared across workspaces</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/22-region-arbitration.md" target="_blank" rel="noopener noreferrer">22 — Region policy arbitration (design)</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/23-local-undo.md" target="_blank" rel="noopener noreferrer">23 — Local undo: the pre-share escape hatch</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/24-canonical-interop.md" target="_blank" rel="noopener noreferrer">24 — Canonical interop: the language-neutral canonicalization subset</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/25-agent-quickstart.md" target="_blank" rel="noopener noreferrer">25 — Agent quickstart: driving AVCS from Claude Code (MCP)</a></li>
+<li><a href="https://github.com/izagood/avcs/blob/HEAD/docs/26-hub-protocol.md" target="_blank" rel="noopener noreferrer">26 — Server protocol: what a conforming server must serve</a></li>
+</ul>
+<h2>Contributing</h2>
+<p>This is an early-stage research prototype and the design is still moving. Issues and discussion are welcome — if you're proposing a change, the design docs above are the best starting point for the rationale behind the current model. Please run <code>npm test</code> and <code>npm run typecheck</code> before opening a pull request.</p>
+<h3>Filing an issue</h3>
+<p>Hit something you'd like changed while using AVCS? Please open an issue rather than sending free-form feedback — structured reports are far easier to act on. Two templates are provided under <a href="https://github.com/izagood/avcs/blob/HEAD/.github/ISSUE_TEMPLATE" target="_blank" rel="noopener noreferrer"><code>.github/ISSUE_TEMPLATE</code></a>:</p>
+<ul>
+<li><strong>🔧 Change request</strong> — propose a change to existing behavior, the CLI/MCP interface, defaults, or docs.</li>
+<li><strong>🐞 Bug report</strong> — something behaves incorrectly, crashes, or produces a non-deterministic result.</li>
+</ul>
+<blockquote>
+<p>🌐 <strong>Any language is welcome.</strong> File your issue in whatever language you're most comfortable with — English, 한국어, 日本語, etc. Maintainers will translate as needed; don't let language be a barrier to reporting.</p>
+</blockquote>
+<p>Every push and pull request to <code>main</code> runs CI (<a href="https://github.com/izagood/avcs/blob/HEAD/.github/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><code>.github/workflows/ci.yml</code></a>): <code>npm ci</code> → <code>npm run typecheck</code> → <code>npm test</code> on Node 22.x and 24.x. PRs are merged only when CI is green.</p>
+<h2>License</h2>
+<p>Licensed under the <a href="https://github.com/izagood/avcs/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a>. Copyright © 2026 jaebin lee. See <a href="https://github.com/izagood/avcs/blob/HEAD/NOTICE" target="_blank" rel="noopener noreferrer">NOTICE</a> for attribution.</p>

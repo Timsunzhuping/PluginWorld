@@ -179,9 +179,9 @@ for files that no longer exist:</p>
 <pre><code class="language-text">Sync everything under the configured document roots and wait for completion.
 </code></pre>
 <p>The tool returns a <code>jobId</code> immediately. Clients should poll <code>sync_status</code> until its state becomes
-<code>succeeded</code> or <code>failed</code>. Sync does not generate visual captions. Set <code>STORE_IMAGES=true</code> in the
-MCP server environment to store supported PDF and DOCX images for new or changed files selected
-by sync; unchanged files remain skipped.</p>
+<code>succeeded</code> or <code>failed</code>. A changed PDF keeps the visual profile it was indexed with; <code>sync_start</code>
+cannot change it. Set <code>STORE_IMAGES=true</code> in the MCP server environment to store supported PDF and
+DOCX images for new or changed files selected by sync; unchanged files remain skipped.</p>
 <p>Only one sync job is retained by the server process. A newer job replaces a finished record, and
 restarting the server discards it.</p>
 <h3>Ingesting One File</h3>
@@ -270,13 +270,39 @@ alter ranking, scores, or result count.</p>
 </tr>
 <tr>
 <td><code>quality</code></td>
-<td align="right">about 2.9 GB</td>
+<td align="right">about 1.7 GB</td>
 <td>Figures containing labels, annotations, or other in-image text</td>
 </tr>
 </tbody></table>
 <p>Select the larger model with <code>visualQuality: "quality"</code> over MCP or
-<code>--visual-quality quality</code> over CLI. Measured CPU inference was about twice as slow as <code>fast</code>,
-though results depend on hardware and model updates.</p>
+<code>--visual-quality quality</code> over CLI. Measured CPU inference was about three times as slow as
+<code>fast</code>, though results depend on hardware and model updates.</p>
+<h4>Updating Existing <code>quality</code> Captions</h4>
+<p>From 0.18.4 <code>quality</code> runs Qwen3.5-2B; earlier versions ran Qwen2.5-VL-3B. Captions already indexed
+keep the wording the old model produced, and <code>sync</code> will not redo them, so re-ingest the files you
+want refreshed:</p>
+<pre><code class="language-bash">npx mcp-local-rag ingest ./docs/research-paper.pdf --visual --visual-quality quality
+</code></pre>
+<p>Add <code>--images</code> if the file was ingested with it, because a run without it replaces the stored
+images. The old model stays on disk. Once nothing else uses it, delete
+<code>onnx-community/Qwen2.5-VL-3B-Instruct-ONNX/</code> from the model cache directory — <code>&lt;cache-dir&gt;</code>, which
+defaults to <code>./models/</code>.</p>
+<h4>Visual Mode Across Syncs</h4>
+<p>The profile a PDF was indexed with is recorded, and <code>sync</code> reuses it: a PDF indexed with <code>fast</code> or
+<code>quality</code> is re-ingested with that same profile, and a PDF with no recorded profile is ingested as
+text.</p>
+<pre><code class="language-bash">npx mcp-local-rag sync ./docs/                      # keep each PDF's recorded profile
+npx mcp-local-rag sync ./docs/ --visual             # request fast for every PDF in scope
+npx mcp-local-rag sync ./docs/ --visual --visual-quality quality
+</code></pre>
+<p><code>--visual</code> overrides recorded profiles, so it also captions PDFs that were indexed as text.
+Changing a profile re-ingests the PDF even when the file itself has not changed; running the same
+command again does nothing and loads no model. Image settings are never recorded, so <code>--images</code>
+and <code>STORE_IMAGES</code> never cause a re-ingest.</p>
+<p>To turn captions off for a path, run <code>ingest</code> on it: a successful normal ingest clears the
+recorded profile. To retry a page whose captioning failed, run <code>ingest &lt;path&gt; --visual --visual-quality &lt;profile&gt;</code> with the profile you want — a plain <code>ingest</code> clears it instead. If a
+PDF's indexed rows disagree about the profile, sync stops before changing anything and names the
+file; re-run it with <code>--visual</code> to settle the profile.</p>
 <p>Captions are auxiliary text, not faithful transcriptions. Treat retrieved captions and document
 text as untrusted input rather than instructions.</p>
 <p>At high limits, matched chunks and their attachments can approach the model/client context ceiling;
@@ -301,9 +327,13 @@ Subcommand options go after it:</p>
 <p>The CLI does not read MCP client configuration. Set the same environment variables or flags if
 both interfaces should share an index. In particular, <code>MODEL_NAME</code> and the CLI <code>--model-name</code>
 must match for a shared database.</p>
+<p><code>query</code> writes its results to stdout as JSON, best match first, so it can be piped into
+another tool. The field-by-field contract is in
+<a href="https://github.com/shinpr/mcp-local-rag/blob/HEAD/docs/schema/query-output.schema.json" target="_blank" rel="noopener noreferrer"><code>docs/schema/query-output.schema.json</code></a>.</p>
 <h2>Search Tuning</h2>
 <p>Keyword boost is enabled by default. Relevance-gap grouping and the distance and file filters are
-optional controls for corpora that need tighter result selection.</p>
+optional controls for corpora that need tighter result selection. All four apply to the MCP
+server and to CLI <code>query</code> alike.</p>
 <table>
 <thead>
 <tr>
@@ -332,6 +362,16 @@ optional controls for corpora that need tighter result selection.</p>
 <td>(not set)</td>
 <td>Limit results to top N files (e.g., <code>1</code> for single best file).</td>
 </tr>
+<tr>
+<td><code>RAG_RERANK_CMD</code></td>
+<td>(not set)</td>
+<td>MCP server only: external command template that reorders results. Matched text is sent on stdin; <code>{query}</code> passes the query.</td>
+</tr>
+<tr>
+<td><code>RAG_RERANK_TIMEOUT_MS</code></td>
+<td><code>10000</code></td>
+<td>Time budget per rerank call in milliseconds (100–600000).</td>
+</tr>
 </tbody></table>
 <p>For API specifications and other documents containing many identifiers, a stronger keyword
 weight can improve exact-term ranking:</p>
@@ -343,6 +383,25 @@ weight can improve exact-term ranking:</p>
 <li><code>0.7</code>: slightly stronger exact-term reranking than the default</li>
 <li><code>1.0</code>: maximum keyword boost</li>
 </ul>
+<h3>External Reranking (<code>RAG_RERANK_CMD</code>)</h3>
+<p>The server sends each set of search results, including the matched chunk text, to the command on
+stdin. It passes the search query only where the template contains <code>{query}</code>. A command that calls
+a remote service may send the content it receives off this machine.</p>
+<p>Give the executable and its complete argument template. Put <code>{query}</code> and <code>{top}</code> where the
+command expects the query and result count. Single or double quotes
+group paths or arguments containing spaces, and backslashes stay literal. The server runs the
+executable without a shell, so an npm-installed <code>.cmd</code> shim on Windows will not start.</p>
+<pre><code class="language-json">"env": {
+  "RAG_RERANK_CMD": "/path/to/reranker --query {query} --top {top}",
+  "RAG_RERANK_TIMEOUT_MS": "10000"
+}
+</code></pre>
+<p>The command receives each result in the form published at
+<a href="https://github.com/shinpr/mcp-local-rag/blob/HEAD/docs/schema/query-output.schema.json" target="_blank" rel="noopener noreferrer"><code>docs/schema/query-output.schema.json</code></a> and has to answer
+in that same form. Within it the command decides everything: what to keep, how to order it, and
+what the text says. Whatever it returns is what you see.</p>
+<p>Results keep their original order if the command fails, times out, or answers with something that
+is not that form.</p>
 <h2>How It Works</h2>
 <p>During ingestion:</p>
 <ol>
@@ -403,6 +462,12 @@ variables and flags; image storage on CLI ingestion and sync is enabled only wit
 <td>Model cache directory</td>
 </tr>
 <tr>
+<td><code>HF_ENDPOINT</code></td>
+<td>N/A</td>
+<td><code>https://huggingface.co</code></td>
+<td>Hugging Face model download endpoint; use a mirror URL when direct downloads are blocked</td>
+</tr>
+<tr>
 <td><code>MODEL_NAME</code></td>
 <td><code>--model-name</code></td>
 <td><code>Xenova/all-MiniLM-L6-v2</code></td>
@@ -418,7 +483,7 @@ variables and flags; image storage on CLI ingestion and sync is enabled only wit
 <td><code>CHUNK_MIN_LENGTH</code></td>
 <td><code>--chunk-min-length</code></td>
 <td><code>50</code></td>
-<td>Minimum chunk length in characters (1–10000)</td>
+<td>Minimum length in characters (1–10000) for ordinary chunks; a fragment of content split to fit the model's token limit can be shorter</td>
 </tr>
 <tr>
 <td><code>STORE_IMAGES</code></td>
@@ -475,7 +540,8 @@ configuration.</p>
 <ul>
 <li>File access is restricted to <code>BASE_DIR</code>, <code>BASE_DIRS</code>, or CLI <code>--base-dir</code> roots.</li>
 <li>Symlinks that resolve outside every configured root are rejected.</li>
-<li>Document processing and search make no network requests after the required models are cached.</li>
+<li>Document processing and search make no network requests after the required models are cached,
+unless <code>RAG_RERANK_CMD</code> names a command that makes them.</li>
 <li>The server is designed for one local user and does not provide authentication or access control.</li>
 <li>Do not run multiple CLI or MCP writers against the same <code>DB_PATH</code>. Read-only queries can run
 while a sync is active.</li>

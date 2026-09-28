@@ -118,8 +118,8 @@ put one tenant's credentials where another tenant's sessions read.</p>
 <code>gh auth login</code>, <code>aws configure sso</code>, and each agent's own login.</p>
 <h3>3. Each repository</h3>
 <pre><code class="language-bash">git clone … &amp;&amp; cd …
-npx -y @codyswann/lisa@latest apply    # lint, hooks, workflows, agent surfaces
-bun install                            # postinstall installs the agent plugins
+npx -y @codyswann/lisa@latest apply    # templates, hooks, workflows, agent plugins
+bun install                            # project dependencies
 npx -y @codyswann/lisa@latest sync     # then set secrets.namespace
 </code></pre>
 <p>A repository only needs to say <em>which tenant it belongs to</em>. The credentials are
@@ -141,28 +141,44 @@ the plugin they came from, so they have to be part of the clone.</p>
 <p>Install Lisa as a development dependency in each project that uses it:</p>
 <pre><code class="language-bash">bun add --dev --trust @codyswann/lisa
 </code></pre>
-<p>Lisa's dependency <code>postinstall</code> runs <code>lisa apply</code> for that project. A later
-<code>bun update @codyswann/lisa</code> reapplies the updated project-scoped artifacts.</p>
-<p>That bootstrap is <strong>loud but non-fatal</strong>: a failed apply prints the real error
-plus a warning naming the consequence, and still exits 0, because a postinstall
-that aborts would break <code>bun install</code> in every environment where apply
-legitimately cannot run. The durable signal is
-<code>lisa doctor</code> — a successful apply writes <code>.lisa/apply-receipt.json</code>, and doctor
-reports any repo whose receipt is missing or older than the installed Lisa
-("this repo has not successfully applied templates since <code>&lt;version&gt;</code>"). Run it
-whenever a project seems to have stopped tracking upstream changes; a repo can
-otherwise sit silently stale for months.</p>
-<p>The same check covers a second, quieter gap. A package install runs apply in
-<strong>postinstall-safe</strong> mode (<code>--skip-git-check</code>), which deliberately skips every
-agent emit — Codex, Claude, agy, Copilot, OpenCode — and the Sonar integration,
-because those rewrite host-owned files. So no <code>bun install</code> at any version can
-reconcile <code>.codex/config.toml</code>; only a full <code>lisa apply .</code> does. Doctor now says
-so instead of reporting such a repo as current.</p>
-<p>It covers a third. An unattended apply never replaces a managed file your
+<p>Installing or updating the dependency changes the package and lockfile, but
+leaves Lisa templates, migrations and agent configuration alone. Apply those
+updates explicitly, then review and commit the resulting project changes:</p>
+<pre><code class="language-bash">lisa apply .
+lisa doctor
+</code></pre>
+<p>An incompatible dependency override can stop Lisa, including <code>doctor</code>, from
+loading. For the known <code>minimatch</code> / <code>brace-expansion</code> import failure, the CLI
+reports the parent's declared range, the version Node actually resolves, and
+any direct override in the current directory's <code>package.json</code>. It preserves the
+original error and does not change dependencies. Nested selectors and unreadable
+manifests remain unverified; this diagnostic is not a full lockfile audit.</p>
+<p>When Lisa is invoked during installation it prints this next step. Package
+managers that do not run its lifecycle scripts cannot display that notice.</p>
+<p>Older Lisa releases can run apply from the outgoing version during an upgrade
+and restore the previous dependency pin. For that one-time upgrade, skip
+lifecycle scripts while replacing the dependency:</p>
+<pre><code class="language-bash">bun add --dev --exact --ignore-scripts @codyswann/lisa@latest
+</code></pre>
+<p>Then run <code>lisa apply .</code> and <code>lisa doctor</code> explicitly when you want to update
+project templates. This command avoids executing the older install hooks; it
+does not change the behavior of already-published releases.</p>
+<p>Existing host hooks using <code>LISA_POSTINSTALL=1</code>, <code>--postinstall-safe</code>, or the
+<code>postinstall</code> lifecycle also skip template writes, even with <code>LISA_BOOTSTRAP=1</code>.
+The existing <code>--full-apply</code> flag remains an explicit opt-in for operators who
+deliberately want a full apply inside a lifecycle script. Other project lifecycle
+scripts remain under the project's control.</p>
+<p>Bun omits the lifecycle name for both installation and direct binary calls such
+as <code>bun run lisa apply .</code>. Lisa conservatively skips that ambiguous form; use
+<code>lisa apply .</code>, <code>bunx lisa apply .</code>, a named package script, or <code>--full-apply</code>
+for intentional writes.</p>
+<p>A successful apply writes <code>.lisa/apply-receipt.json</code>. Doctor reports a missing
+or older receipt and incomplete reconciliation from an earlier postinstall-safe
+apply. Dependency installation alone does not mark templates current.</p>
+<p>An unattended apply never replaces a managed file your
 project may have customised — that is the point of the mode — so a release that
-changes <code>eslint.config.ts</code> leaves yours where it is and names it in the install
-output. That output scrolls away, and what remains is a file that has quietly
-stopped receiving upstream fixes, security fixes included. Apply now records
+changes <code>eslint.config.ts</code> leaves yours where it is and names it in the apply
+output. Apply records
 every such path in the receipt, and doctor names them back with the remedy:
 <code>lisa apply . --refresh-templates=&lt;path&gt;</code>, <strong>one path at a time</strong>. Do not reach
 for the bare <code>--refresh-templates</code> — it is repo-wide and reverts every
@@ -176,12 +192,39 @@ Lisa does not register user-wide Codex plugins, skills, hooks, rules, MCP
 servers, or configuration. Other harnesses retain their existing delivery
 behavior. For a new project, run the CLI ephemerally with
 <code>bunx @codyswann/lisa setup-project ...</code>.</p>
+<p>Successful starter creation records the repository, tracked branch and copied
+revision in <code>starter.templates</code>. Git clones record their own head before setup
+replaces the clone history; GitHub template creation checks the copied tree
+against the captured starter revision before recording it.</p>
+<p>For an existing project, run <code>lisa starter adopt owner/repository --path .</code>
+(optionally <code>--ref branch-or-tag</code>). Adoption records the chosen current revision
+as the baseline for future changes; it does not reconcile existing project files.
+Repeating adoption for an already tracked repository leaves its baseline intact,
+even if the remote has advanced. The command does not write to the starter or
+publish project changes. If setup's overlay application fails, finish repairing
+that project before deliberately adopting its baseline.</p>
+<p>Run <code>lisa starter sync --path .</code> after committing the starter configuration.
+The default opens a PR from an isolated worktree and preserves pending edits in
+the current checkout. <code>--base</code> selects the destination branch (default: the
+current branch). The PR stays open; the calling agent can use the existing
+<code>lisa-drive-pr-to-merge</code> workflow with <code>auto_merge=false</code> for review and checks.
+Set <code>starter.sync.strategy</code> to <code>direct-when-clean</code> to commit locally instead;
+this mode refuses tracked or untracked pending changes and does not push.
+Both modes run without prompts and honor normal Git hooks. Supply <code>--work-item</code>
+and <code>--co-author</code> when the project requires commit attribution. <code>--json</code> emits
+the result on stdout, with Git and hook output on stderr. Failed operations keep
+their worktree for inspection; retry creates a fresh isolated attempt or returns
+an already-open sync PR. No command writes to the starter repository.</p>
 <p>For Codex, apply emits a repository marketplace containing only the base Lisa
-plugin plus detected stacks and explicitly configured features. Codex loads
-native skills, hooks, and rules directly from those installed plugin bundles.
-Skill bodies are not copied into the project and unrelated Lisa stacks are not
-loaded. Project settings use <code>[features].hooks</code>; the deprecated <code>codex_hooks</code>
-key is removed during reconciliation.</p>
+plugin plus detected stacks and explicitly configured features. When Codex has
+those plugins installed, enabled, and trusted, it loads their native skills,
+hooks, and rules directly from the selected bundles. Independently, apply
+installs one tagged project hook in <code>.codex/hooks.json</code>; after Codex's standard
+project-hook trust step, that hook dispatches the repository enforcement
+fallback even when plugin hooks are unavailable. Skill bodies are not copied
+into the project and unrelated Lisa stacks are not loaded. Project settings use
+<code>[features].hooks</code>; the deprecated <code>codex_hooks</code> key is removed during
+reconciliation.</p>
 <p>Remote coding environments use one vendor-neutral AWS bootstrap rather than
 repository-specific or agent-specific IAM users. Run <code>/lisa:setup-remote-aws</code>
 to install the common setup script and native Cursor/Copilot adapters; Claude,
@@ -218,6 +261,47 @@ the same <code>LISA_AWS_BOOTSTRAP_JSON</code> bundle. See
 <blockquote>
 <p><strong>Prompt for your coding agent</strong>
 "Which commands let this Lisa scan a work queue, dispatch ready items, repair stuck ones, and report on scheduled-automation health? Show me how I'd point one at my queue and what it expects in configuration."</p>
+</blockquote>
+<h3>Running several agents on one machine</h3>
+<p>Test runners size themselves to the machine, not to what else is running on it. Left alone, each run claims roughly one worker per core, so <em>k</em> agents working at once claim <em>k</em> × cores. That is not merely slow: past a certain point the machine starts terminating processes, and a gate that was killed looks exactly like a gate that failed — so an agent "fixes" a phantom, retries, and adds the load that kills the next run.</p>
+<p>Lisa caps the pool for you, in three layers:</p>
+<table>
+<thead>
+<tr>
+<th>layer</th>
+<th>what it does</th>
+<th>when it applies</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Floor</strong></td>
+<td>Half the machine's cores</td>
+<td>Always, when this run is the only one</td>
+</tr>
+<tr>
+<td><strong>Divisor</strong></td>
+<td>Floor ÷ concurrent runs, never below 2 workers</td>
+<td>Whenever other Lisa runs are live</td>
+</tr>
+<tr>
+<td><strong>Override</strong></td>
+<td>Exactly the number you give it</td>
+<td>Whenever you set it</td>
+</tr>
+</tbody></table>
+<p>You do not have to configure any of this. A run discovers how many sibling runs are live by looking at the shared scratch namespace, so the divisor applies to a fleet nobody told it about. Two variables are available when you want to steer it:</p>
+<ul>
+<li><strong><code>LISA_FLEET_CONCURRENCY</code></strong> — state how many runs are coming, rather than letting the run count what has already started. Useful when you are about to launch six agents and want the first one sized for six.</li>
+<li><strong><code>LISA_VITEST_MAX_WORKERS</code></strong> — set the pool size outright. Wins over both other layers, in both directions: raise it above the floor as readily as you lower it.</li>
+</ul>
+<p>A smaller pool is not automatically safer, which is why the floor is a proportion rather than a small constant and why the divisor stops at two workers. Below that a suite serialises, every file waits behind every other file, and per-test time budgets start expiring even as machine load falls — trading a visible failure for a subtler one.</p>
+<p>Worker count is not the only thing several runs contend over. Coverage runs write their working files to disk while they measure, and a shared location means the second run to start wipes the first one's files out from under it — so the first run finishes having measured nothing, after paying the full cost of the attempt. Lisa gives every run its own directory under <code>coverage/</code>, named after the run, so no run can reach another's files and none of them has to negotiate for the space. Your finished coverage reports land in that per-run directory rather than directly in <code>coverage/</code>.</p>
+<ul>
+<li><strong><code>LISA_COVERAGE_REPORTS_DIR</code></strong> — put the reports at a fixed path instead. For somewhere only one run happens at a time and something downstream expects to find the report in a known place, such as a CI job that uploads <code>coverage/lcov.info</code>.</li>
+</ul>
+<blockquote>
+<p><strong>Prompt for your coding agent</strong>
+"Show me how this project's test worker pool is sized — find the resolver, tell me what each of the three layers would give on this machine right now, and how many sibling runs it currently detects."</p>
 </blockquote>
 <h2>Working across trackers and sources</h2>
 <p>Lisa is deliberately vendor-neutral. The lifecycle runs the same whether your tickets live in one tracker or another and whether your product specs originate in one document tool or another — a thin dispatch layer selects the right integration from configuration, so the workflow you learn transfers.</p>

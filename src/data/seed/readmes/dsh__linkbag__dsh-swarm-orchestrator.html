@@ -1,0 +1,304 @@
+<h1>dsh-swarm-orchestrator</h1>
+<p><a href="https://github.com/linkbag/dsh-swarm-orchestrator/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer">English</a> · <a href="https://github.com/linkbag/dsh-swarm-orchestrator/blob/main/docs/zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+<p>Role-based AI swarms for <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a>. Give it a goal, get a team: an architect breaks the work into a task graph, parallel builders execute it, reviewers hold the line, and an integrator ships the result — while you watch the whole thing move on a live kanban board.</p>
+<p>It runs <strong>inside</strong> your <code>dsh web</code> host. No daemon, no second process, no glue scripts. Task agents are ordinary DSH subagents with your tool access and your models; the orchestrator is just a well-behaved Cordis plugin.</p>
+<p>It has already shipped real work: the first production run reverse-engineered a biotech research dashboard and rebuilt it as a <strong>six-indication suite</strong> (680 curated clinical trials across six cancers) in a single afternoon — five data-curation agents working in parallel, every deliverable machine-verified.</p>
+<hr />
+<h2>At a glance</h2>
+<p><strong>dsh-swarm-orchestrator</strong> turns one goal into a supervised agent team inside DeepSeek Harness: an architect reviews your plan into <code>PLAN.md</code>, parallel builders execute it as a task DAG, reviewers gate quality, an integrator ships. Every role runs a model you pin from your live catalog, every deliverable can be machine-verified, and the whole pipeline is visible on a live kanban + flow chart.</p>
+<pre><code class="language-text">        you ── "spawn a swarm: ⟨goal⟩"
+         │
+         ▼
+   your chat agent            (free to plan/research on its own —
+         │  swarm_dispatch     its plan becomes the proposal)
+         ▼
+  ┌─────────────────┐
+  │ architect-review │  deep-reviews the proposal against the repo,
+  │  → PLAN.md       │  consolidates parallel workstreams (evidence-checked)
+  └────────┬────────┘
+    ┌──────┼──────┐
+    ▼      ▼      ▼
+ builder builder builder    ▸ parallel wave — one model per role,
+    │      │      │           fallback chains, exclusive write scopes
+    ▼      ▼      ▼
+ reviewer reviewer (human)   ▸ rejections loop back with feedback;
+    └──────┼──────┘            `reviewGate: "human"` parks it on you
+           ▼
+       integrator             ▸ merges, verifies, ships
+           ▼
+       📄 run report          ▸ per-task summaries · models used · stats
+</code></pre>
+<h2>Example Kanban View (real-time workflow)</h2>
+<img width="1045" height="507" alt="image" src="https://github.com/user-attachments/assets/ab727b4a-c75a-41fe-be3c-3f68e9499c88" /><h2>Optional hybrid workteam</h2>
+<img width="1057" height="541" alt="image" src="https://github.com/user-attachments/assets/9259d6f0-ea08-4aaa-9a5b-8f0302a839b4" /><h2>Why not just ask one agent?</h2>
+<p>Because one agent serializes. Long research tasks queue behind quick edits, context fills up, quality drifts, and nothing checks the output but the same model that wrote it.</p>
+<p>This plugin takes the coordination seriously so you don't have to:</p>
+<ul>
+<li><strong>Parallel by construction.</strong> Tasks declare dependencies (<code>blockedBy</code>); everything independent runs at once, bounded by a concurrency cap that adapts when the provider struggles.</li>
+<li><strong>Every role gets its own model.</strong> Pin DeepSeek, GLM, Kimi, Claude — any model configured in DSH — to any role, with an ordered fallback chain and a per-role reasoning-effort ladder. The picker reads your live model catalog, so new providers show up automatically.</li>
+<li><strong>Review before "done" means done.</strong> Tasks tagged <code>reviewBy</code> are judged by a reviewer agent against the task brief; a rejection loops back to the builder with the feedback attached. Want the last word yourself? Set <code>reviewGate: "human"</code> and approve from the dashboard.</li>
+<li><strong>Failure is a state, not a mystery.</strong> Provider timeouts, quota exhaustion, bad evidence — each is detected, reported plainly, and handled: retries with resume hints, run pause/resume instead of burn-down, automatic model rotation after repeated failures.</li>
+<li><strong>Scoped to where you are.</strong> Each chat's Swarm tab shows the runs for that chat's workspace; a persisted switch reveals everything on the machine when you want the full picture.</li>
+<li><strong>One run per goal, reviewed before built.</strong> Dispatching into a workspace with an active run raises a warning (or a block, your choice); and unless you opt out, an architect agent reviews the dispatcher's plan into PLAN.md before any builder starts.</li>
+<li><strong>Memory-safe concurrency.</strong> Swarm agents run in-process on the DSH host, sharing its Node.js heap. A global cap (<code>maxTotalConcurrentAgents</code>, default 8) ensures concurrent runs from different workspaces share the agent budget — preventing the heap exhaustion that can crash the host when too many agents run simultaneously.</li>
+<li><strong>Every agent stays on the board.</strong> Task agents cannot spawn hidden sub-agents of their own (<code>maxSubagentDepth</code>, default 1). Without that bound an agent could delegate to helpers the dispatcher cannot see or account for — not counted by the global cap, not tracked by the watchdog, not shown on the board, yet all sharing the host heap. Measured on a real machine: one task spawned 12 such hidden helpers while the board showed a single task.</li>
+<li><strong>Work outlives its agent.</strong> Every task agent writes a small completion report as its final action. If the host restarts and kills an agent between finishing the work and being recorded, the dispatcher adopts the on-disk report instead of throwing the finished work away and re-running the task. A task can also never sit <code>dispatching</code> forever: <code>spawnTimeoutSeconds</code> arms a sliding no-progress window — it runs from creation, then every heartbeat re-arms it, so a working child is never killed for elapsed time while a child that never starts or goes silent is reclaimed (per-role override in the Roster).</li>
+<li><strong>The right effort for the right model.</strong> Before a child is spawned, the pinned reasoning effort is validated against the deployment's declared model capabilities: a model whose <strong>declared</strong> levels exclude the pin has it stripped, and the candidate chain is never filtered. A model that declares no levels at all is left alone — absence is unknown, and the adapter may resolve such a model through its installed catalog — so since 2026-09-26 the trade-off is the visible way round: no silent downgrade. A pin that is genuinely refused dies fast with no output, and the dispatcher retries the <em>same</em> model at the next rung of the effort ladder (<code>max</code> → <code>high</code> → … → no pin) before any model rotation — without spending the task's retry budget. Reviewer pins are validated the same way, and the preflight's once-only log line reports how many models rest on that uncertainty.</li>
+</ul>
+<blockquote>
+<p>⚠️ <strong>Running multiple swarms from different workspaces in parallel</strong>: this is supported and safe with the global cap. However, be mindful that each swarm agent is an in-process session on the host. We recommend <strong>max 2 concurrent runs</strong> unless your host has headroom for more - the global cap defaults to 100 in-process agents, which suits a large machine. If you experience <code>ERR_CONNECTION_REFUSED</code> (host crash), lower <code>maxTotalConcurrentAgents</code> in the Runtime settings.</p>
+</blockquote>
+<h3>Reliability notes (v0.5.8 – v0.6.17)</h3>
+<p>Diagnosed from 47 recorded runs / 184 task failures plus the incidents below, then fixed and regression-tested:</p>
+<ul>
+<li><strong>Evidence commands run under PowerShell</strong> (bash elsewhere) from the workspace root, and the <code>evidence.commands</code> schema says so. Previously they were handed to <code>cmd.exe</code>, so a perfectly normal PowerShell gate (<code>if (Test-Path …) { exit 0 }</code>) failed the task — 32% of all recorded task failures. Prefer <code>evidence.files</code> where a file check can express the gate: it involves no shell at all.</li>
+<li><strong><code>modlens</code> is denied to swarm roles</strong> by default in the shipped roster guidance: it is an interactive tool that asks the user a question, and swarm children run non-interactively. Add it back per-role from the Roster if your deployment has a headless vision provider.</li>
+<li><strong>A task report that does not claim <code>"status": "completed"</code> is never adopted</strong> — adoption cannot mask unfinished work.</li>
+<li><strong>An adopted report must also have been written by the live attempt.</strong> <code>.dsh-swarm/task-&lt;id&gt;.json</code> is keyed by task id, not by run, so reusing an id silently shares the file across runs. A report older than the current attempt's <code>task/started</code> is now ignored (and logged) instead of being credited as this attempt's work.</li>
+<li><strong>Recovery is scoped to running runs.</strong> Orphan recovery only requeues tasks whose run is still running, so a terminal run's tasks stay frozen instead of being re-failed on every host restart.</li>
+<li><strong>Review verdicts are parsed from the complete final message</strong> — the parser used to read a 2,000-character summary and fail every thorough review open. A reviewer that omits the verdict line now gets one explicit re-ask before failing open.</li>
+<li><strong>Watchdog reclaims adopt finished work and arm the retry backoff.</strong> A child that wrote its report moments before being reclaimed is credited, not failed — the old path stranded a run in <code>retrying</code> for seven hours. Orphan recovery re-arms stranded <code>retrying</code> tasks, and every fresh attempt starts with a clean silence clock.</li>
+<li><strong>Liveness is progress-based, not elapsed-time.</strong> The spawn ceiling is a sliding no-progress window re-armed by every heartbeat, with a per-role <code>spawnTimeoutSeconds</code> override in the Roster — a healthy child is never killed for running long.</li>
+<li><strong>The web client holds exactly one <code>/swarm/events</code> connection</strong>, reference-counted and shared by the tab, the badge, the header popover and every dispatch card. It previously opened one stream per rendered dispatch card, exhausting the browser's ~6-connections-per-origin budget and freezing the whole UI while the host stayed healthy.</li>
+<li><strong>An evidence-only failure no longer re-runs the work.</strong> One command-only recheck, then the task parks for a human (<code>blocked</code> + human review). The recorded outcome carries the exit code, the timeout state, the elapsed time and an output tail — a green-but-nonzero suite is diagnosable from the event log.</li>
+</ul>
+<h2>The dashboard</h2>
+<p>A <strong>Swarm</strong> tab lives next to Chat in the web GUI, in three views:</p>
+<ul>
+<li><strong>Board</strong> — runs on the left, task columns (Queued / Running / Done / Failed) front and center. Click a task for its full brief, model, attempt count, interim agent notes, reviewer feedback, and retry. Completed runs fold into a report with per-task summaries and fallback/retry/review stats.</li>
+<li><strong>Flow</strong> — the task DAG as a living flow chart: the scheduler at the top, tasks fanned out into parallel waves (same wave = runs concurrently), dependency arrows turning green as blockers complete, reviewer and write-scope hints on each node, all converging into the run report. You can see at a glance what ran in parallel, what ran in sequence, and exactly how far the run has gotten.</li>
+<li><strong>Roster</strong> — the duty-table editor: per-role model pickers fed by your live catalog, fallback-chain ordering, effort ladder, concurrency caps, per-role spawn timeouts, tool filters, personas, custom roles, and an override lock for "hands off my table". The pickers list only providers you have configured in DSH (with API keys) and follow changes automatically — DSH 0.1.6+ required.</li>
+<li><strong>Everywhere else</strong> — a 🐝 status button in every session header, a small badge for active runs, and a live progress card right in chat where the run was dispatched.</li>
+<li><strong>Workspace-aware</strong> — each chat's Swarm tab shows the runs for that chat's workspace; an <strong>All</strong> switch reveals every run on the machine. The roster stays global (one table, all workspaces).</li>
+<li><strong>Language</strong> — the Swarm UI follows the DSH language preference (Settings → General → Language) automatically: English and 简体中文 ship in the box, switching re-renders in place.</li>
+</ul>
+<h2>How a run works</h2>
+<ol>
+<li><strong>Dispatch</strong> — tell your agent what you want; it calls <code>swarm_dispatch</code> with a task graph. Runs start gated: <em>planning</em>, zero agents spawned.</li>
+<li><strong>Execute</strong> — the architect reviews the proposal and produces <code>PLAN.md</code>; then parallel builders start.</li>
+<li><strong>Watch</strong> — <strong>Board</strong> shows the kanban; <strong>Flow</strong> shows the workflow chart; click any task for its drawer.</li>
+</ol>
+<h2>Getting started (~5 minutes)</h2>
+<h3>1 · Install</h3>
+<p>From this GitHub repo (pnpm will run the package's <code>prepare</code> script to build from source):</p>
+<pre><code class="language-sh">dsh plugin --profile web add github:linkbag/dsh-swarm-orchestrator
+</code></pre>
+<p>pnpm ≥ 10 asks you to allow that build first — add the exact key it prints to the profile's <code>pnpm-workspace.yaml</code>:</p>
+<pre><code class="language-yaml">allowBuilds:
+  dsh-swarm-orchestrator: true
+</code></pre>
+<p>and re-run the <code>add</code>. (That allowance executes this package's code on your machine at install time — the usual trust rule applies; pin a commit if you prefer: <code>github:linkbag/dsh-swarm-orchestrator#&lt;sha&gt;</code>.)</p>
+<p>Or install prebuilt from npm — no build allowance needed:</p>
+<pre><code class="language-sh">dsh plugin --profile web add dsh-swarm-orchestrator
+</code></pre>
+<p>Then restart <code>dsh web</code> (or reload the profile). You should see the <strong>Swarm</strong> tab next to Chat, a 🐝 button in every session header, and <strong>Settings → AI Swarm</strong> (the title shows the running version — a quick way to confirm the install).</p>
+<h3>2 · Assign models to roles</h3>
+<p>Open the <strong>Swarm</strong> tab in any chat and switch to <strong>Roster</strong> — or open <strong>Settings → AI Swarm</strong>, the same editor reachable from anywhere. The four built-in roles:</p>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>architect</strong></td>
+<td>Reviews the proposal, refines it into <code>PLAN.md</code></td>
+</tr>
+<tr>
+<td><strong>builder</strong></td>
+<td>Implements one task to completion, with verification</td>
+</tr>
+<tr>
+<td><strong>reviewer</strong></td>
+<td>Judges completed work against the task brief</td>
+</tr>
+<tr>
+<td><strong>integrator</strong></td>
+<td>Merges parallel work and ships the result</td>
+</tr>
+</tbody></table>
+<p>For each role, pick a model from the dropdown. It lists <strong>every provider configured in DSH</strong> (DeepSeek, GLM, Kimi, Claude, …), grouped by provider — the same live catalog as the Models settings page. Leave a role on <strong>inherit deployment default</strong> to use whatever model the dispatching chat runs on.</p>
+<p>Optional, per role (all have sane defaults):</p>
+<ul>
+<li><strong>Fallback chain</strong> — models tried in order if the primary is unavailable.</li>
+<li><strong>Effort + effort ladder</strong> — the role's pinned reasoning effort; rungs advance per attempt and always end unpinned, and a level a model's declared map excludes is stripped before spawning.</li>
+<li><strong>Concurrency cap</strong> — limit simultaneous agents of this role.</li>
+<li><strong>Spawn timeout</strong> — per-role override of the no-progress window that reclaims a silent child.</li>
+<li><strong>Tool filter</strong> — deny specific tools to this role's agents (e.g. a read-only reviewer).</li>
+<li><strong>Persona</strong> — the role's standing instructions.</li>
+</ul>
+<p>Missing a model? Add the provider in DSH <strong>Settings → Models</strong> first, then hit <strong>refresh catalog</strong> in the Roster.</p>
+<h3>3 · Dispatch your first swarm</h3>
+<p>In any chat, just ask:</p>
+<blockquote>
+<p><em>"Spawn a swarm: audit every package.json in this repo for stale deps, one task per package, then an integrator compiles a summary table. Review the integrator's output."</em></p>
+</blockquote>
+<p>or the one-shot form:</p>
+<pre><code class="language-text">/swarm build a landing page for this project
+</code></pre>
+<p>Your agent will call <code>swarm_dispatch</code> with a task DAG. (It may plan first itself — that's fine: an architect agent reviews and refines whatever plan it sends.)</p>
+<h3>4 · Watch the run</h3>
+<ul>
+<li><strong>Board</strong> shows the kanban; <strong>Flow</strong> shows the same run as a workflow chart (scheduler → parallel waves → report); click any task for its drawer — brief, model, interim notes, reviewer feedback, retry.</li>
+<li>Tasks with <code>reviewGate: "human"</code> park on the board for your Approve/Reject.</li>
+<li>The dispatching chat gets a live progress card; the 🐝 header button and the bottom-right badge track active runs from anywhere.</li>
+</ul>
+<h3>5 · Read the report</h3>
+<p>When the run finishes it folds into a report: per-task summaries, models used, fallback/retry/review stats. The whole history is an append-only event log you can replay.</p>
+<blockquote>
+<p><strong>Defaults worth knowing:</strong> every run starts with an architect review of the plan (skip per dispatch with <code>architectReview: false</code>); dispatching into a workspace that already has an active run raises a warning — parallel workstreams belong in one DAG; the roster, badge, and header button are global across workspaces.</p>
+</blockquote>
+<h2>Talking to it</h2>
+<p>Everything is driven from normal chat — no config files to hand-edit:</p>
+<blockquote>
+<p><em>"Spawn a swarm: audit every package.json in this repo for stale deps, one task per package, then an integrator compiles a summary table. Review the integrator's output."</em></p>
+</blockquote>
+<p>or the one-shot form: <code>/swarm build a landing page for this project</code> (plans it, then executes it).</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>swarm_dispatch</code></td>
+<td>Submit a run: title, objective, task DAG (id / subject / description / role / blockedBy / reviewBy / reviewGate / model / evidence / writes).</td>
+</tr>
+<tr>
+<td><code>swarm_status</code></td>
+<td>The board in text: runs, task states, models in use, latest notes.</td>
+</tr>
+<tr>
+<td><code>swarm_wait</code></td>
+<td>Block until the board changes or a timeout hits — supervision without sleep-polling.</td>
+</tr>
+<tr>
+<td><code>swarm_retry</code></td>
+<td>Requeue a failed/blocked task after you've fixed the cause (dispatching session only).</td>
+</tr>
+<tr>
+<td><code>swarm_interrupt</code></td>
+<td>Abort a stalled/running task and requeue it in the same run — no relief sibling needed (dispatching session only).</td>
+</tr>
+<tr>
+<td><code>swarm_complete</code></td>
+<td>Mark a task completed when its work was finished outside the swarm (dispatching session only) — keeps the run record in sync with reality.</td>
+</tr>
+<tr>
+<td><code>swarm_report</code></td>
+<td>Task agents post interim notes to the board (authenticated to their own task).</td>
+</tr>
+</tbody></table>
+<p>Tasks also accept an <strong>evidence contract</strong> — <code>evidence: { files: [...], commands: [...] }</code> — that is machine-checked before a task may close; a <strong>write scope</strong> — <code>writes: [files]</code> — that keeps concurrent builders out of each other's files (the dispatcher warns on overlap); and a <strong>human review gate</strong> that parks the verdict on the dashboard. A failing evidence command no longer re-runs the finished work: it gets one command-only recheck, and if the command still fails — non-zero exit or timeout (<code>evidenceTimeoutMs</code>, default 120 s) — the task parks on the board for a human verdict, with the exit code and an output tail recorded in the event log.</p>
+<h2>Configuration</h2>
+<p>Everything has a default; override in your profile's <code>cordis.patch.yml</code>:</p>
+<pre><code class="language-yaml">- id: swarm
+  require: dsh-swarm-orchestrator
+  config:
+    storageDir: !!js dshHomePath("storages/swarm")   # event log + duty table
+    maxConcurrent: 50           # simultaneous task agents per run
+    maxTotalConcurrentAgents: 100 # global cap across ALL runs (they share the budget)
+    adaptiveConcurrency: true   # shrink on provider pain, recover on success
+    spawnStaggerMs: 750         # pace launches within a wave
+    nudgeAfterMinutes: 20       # board marker for long-silent tasks (0 = off)
+    workspaceRunPolicy: warn      # one-run-per-goal guard: warn | block | off
+    requireArchitectReview: true  # architect reviews the dispatcher's plan into PLAN.md first
+    staleTimeoutSeconds: 14400  # watchdog: silent agents get reclaimed
+    maxRetries: 2               # per task
+    evidenceTimeoutMs: 120000   # per evidence command (1 s – 10 min)
+    reviewLoops: 3              # review rejections per task
+    notifyDispatchSession: true  # push completion notification to the dispatching chat
+    retryBackoffBaseMs: 5000    # retry backoff: base × 2^attempt before retrying
+    circuitBreakerThreshold: 3  # failures in 30s before pausing all retries (0 = off)
+    circuitBreakerCooldownMs: 60000  # circuit breaker pause duration
+    spawnTimeoutSeconds: 3600   # sliding no-progress window per child, re-armed by heartbeats (0 = off)
+    maxSubagentDepth: 1         # delegation-depth cap for task agents (1 = no delegation)
+    bootGraceSeconds: 3         # wait after plugin load before orphan recovery
+</code></pre>
+<h2>Runtime control</h2>
+<p>All concurrency, hardening, and watchdog parameters are <strong>tunable from the dashboard</strong> — no YAML editing or restart needed. Open <strong>Settings → AI Swarm → Runtime tuning</strong> (or the <strong>Roster tab → Runtime tuning</strong>) and adjust:</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Default</th>
+<th>What it controls</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Max concurrent agents</td>
+<td>50</td>
+<td>Simultaneously running task agents <strong>per run</strong></td>
+</tr>
+<tr>
+<td>Global agent cap</td>
+<td>100</td>
+<td>Max agents across <strong>all</strong> runs — concurrent runs share this budget (60+40, not 100+100). These agents run in-process and share the host Node heap: the high default suits a large machine, so lower it on a constrained one</td>
+</tr>
+<tr>
+<td>Spawn stagger (ms)</td>
+<td>750</td>
+<td>Delay between launches in one wave — softens simultaneous provider load</td>
+</tr>
+<tr>
+<td>Retry backoff base (ms)</td>
+<td>5000</td>
+<td>Failed tasks wait base × 2^attempt before retrying (5s → 10s → 20s) — prevents synchronized retry cascades when a provider outage kills all tasks at once</td>
+</tr>
+<tr>
+<td>Circuit breaker threshold</td>
+<td>3</td>
+<td>Failures within 30 seconds before pausing all retries (0 = off) — detects provider-wide outages</td>
+</tr>
+<tr>
+<td>Circuit breaker cooldown (ms)</td>
+<td>60000</td>
+<td>How long retries pause after the breaker trips</td>
+</tr>
+<tr>
+<td>Nudge after silence (min)</td>
+<td>20</td>
+<td>Board marker for silent tasks — 0 = off</td>
+</tr>
+<tr>
+<td>Stale timeout (sec)</td>
+<td>14400</td>
+<td>Last-resort reclaim for agents that go completely silent (4 hours)</td>
+</tr>
+<tr>
+<td>Spawn timeout (sec)</td>
+<td>3600</td>
+<td>Sliding no-progress window per child — re-armed by every heartbeat, so a working child is never killed for elapsed time; a child that never starts or goes silent is reclaimed (0 = off)</td>
+</tr>
+</tbody></table>
+<p>Changes are <strong>applied immediately</strong> (no restart) and <strong>persisted to <code>runtime.json</code></strong> in the swarm storage directory, overriding the profile's <code>cordis.patch.yml</code> values. They survive host restarts.</p>
+<blockquote>
+<p>💡 If you run multiple swarms from different workspaces in parallel, watch the global agent cap (default 100 in-process agents) and keep to max 2 concurrent runs. If you experience <code>ERR_CONNECTION_REFUSED</code> (host crash), lower the global cap in the Runtime settings.</p>
+</blockquote>
+<h2>Under the hood</h2>
+<ul>
+<li><strong>Host half</strong> (Node): a <code>SwarmService</code> — duty-table store, append-only JSONL event store, projection fold, the dispatcher (parallel one-shot subagents behind a service-owned anchor agent), review loop, watchdog, pause/resume, and <code>/swarm/*</code> HTTP + SSE routes.</li>
+<li><strong>Client half</strong> (browser): the Swarm tab, the chat progress card, the header popover, and the Settings section — all fed by board snapshots over a single reference-counted SSE connection. Model pickers use the same LLM RPCs as the Models settings page.</li>
+<li><strong>Per-role reasoning effort</strong> rides DSH's <code>agent/request</code> waterfall, scoped to tracked swarm children only — validated against the deployment's declared model capabilities before the child is spawned (dispatch and review pins alike), and recorded on <code>task/started</code>.</li>
+<li><strong>Deterministic replay</strong>: state is a fold over the event log, with legality guards — a hostile or duplicated event stream cannot resurrect an aborted run or complete a task twice.</li>
+</ul>
+<h2>Known limits</h2>
+<p>Written plainly, because a limit you discover in production costs far more than one you read here.</p>
+<ul>
+<li><strong>The board reports disk truth, and the disk can lag the model.</strong> A task agent may finish its work without performing every bookkeeping step the protocol asks of it (for example, writing its <code>.dsh-swarm/task-&lt;id&gt;.json</code> report). The board shows what was actually recorded, not what the agent claimed. Treat a task's summary as evidence of what was recorded, and verify deliverables yourself.</li>
+<li><strong>Evidence contracts are advisory for files, hard for commands.</strong> A missing or empty <code>evidence.files</code> entry becomes a board warning, not a closed task; only a failing <code>evidence.commands</code> entry blocks completion (after one command-only recheck, a persistent failure parks the task for a human rather than re-running the work). Scope control is therefore a completion-time audit, not write interception — nothing stops an agent from writing outside its declared <code>writes</code> scope; the dispatcher only warns about overlapping scopes at dispatch time.</li>
+<li><strong>State is file-backed and serialised within one DSH process.</strong> Concurrent processes editing the same workspace's swarm state are not coordinated. Run one host per workspace.</li>
+<li><strong>Member messaging is one-directional.</strong> Task agents can report progress to the dispatcher; they cannot message each other. Coordination happens through the DAG (dependencies and write scopes), not conversation.</li>
+<li><strong>One role may hold several concurrent tasks.</strong> The dispatcher bounds concurrency by role and globally, not one-open-task-per-agent, so a single role can own multiple in-flight tasks at once.</li>
+<li><strong>Recovery is bounded per boot, not globally.</strong> Orphan recovery requeues a stranded task at most once per host start. A host that restarts repeatedly will requeue the same unwilling task repeatedly — by design, so an unfinished task is not silently abandoned.</li>
+<li><strong>The version in the board header is the version loaded at boot</strong>, not the version on disk. Editing <code>duty-table.json</code> by hand also requires a host restart; changes made through the Roster UI apply live.</li>
+<li><strong><code>lib/</code> is built, not committed.</strong> Source changes to <code>client/</code> are invisible until <code>npm run build</code> runs; <code>tests/bundle-freshness.test.ts</code> fails if the bundle is stale.</li>
+</ul>
+<h2>Status</h2>
+<p>v0.6.30, running in daily use. The test suite covers the dispatcher end-to-end against a fake spawn provider (<strong>252 tests</strong>: dispatch, endorsement, architect injection, review loops, human gates, fallback rotation, circuit breaker, retry backoff, quota pause/resume, rescue paths, evidence contracts and the evidence-only recheck gate, write-scope warnings, event-log legality, delegation depth, tool filter, workspace scoping, notification containment, attempt accounting, tool-filter sanitisation, preflight effort validation, the effort ladder and its same-model rung retry, the deployment-declared effort preflight (dispatch and review pins), the duty-table tool-filter guard, human-review notifications, the host/client version-skew guard, the global status-badge label, stale task-report rejection, the model-catalog wire faces, interface localization, watchdog liveness and reclaim adoption, client-plugin hardening, the client connection budget, a live boot audit against the production event store, and a <strong>fault matrix</strong> of 10 adversarial tests over the dispatcher's invariants), plus live verification on a real deployment and an isolated end-to-end smoke run.</p>
+<h2>License</h2>
+<p>MIT © linkbag</p>
+<hr />
+<p>简体中文文档见 <a href="https://github.com/linkbag/dsh-swarm-orchestrator/blob/main/docs/zh-CN.md" target="_blank" rel="noopener noreferrer">docs/zh-CN.md</a>。</p>

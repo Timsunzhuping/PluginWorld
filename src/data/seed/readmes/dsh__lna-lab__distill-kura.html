@@ -1,0 +1,809 @@
+<h1>蒸留蔵 — distill-kura</h1>
+<p><strong>A long-term memory for agents that is distilled, not accumulated.</strong>
+Recall works by <em>meaning</em>, writing is gated by <em>evidence</em>, and one server can hold
+several separate memories — one per agent mode — so switching mode switches what the
+agent remembers.</p>
+<p>Ships as a <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a> plugin,
+an MCP server for any other host, an HTTP service, and a Python library. Standard
+library only; no vector database, no embeddings, no framework.</p>
+<pre><code>        ┌── recall ──────────────────────────────────────────────┐
+        │  question → names a memory? → deterministic hit   ~2 ms│
+        │      else → whole index in one prompt → picked slugs   │
+        │           → walk [[links]] → the neighbourhood   ~0.4 s│
+        └────────────────────────────────────────────────────────┘
+        ┌── distil ──────────────────────────────────────────────┐
+        │  journal → classed evidence → candidates → GATE        │
+        │  → new? → composed → draft → judged → poured           │
+        └────────────────────────────────────────────────────────┘
+</code></pre>
+<hr />
+<h2>Why this exists</h2>
+<p>Two failures kill an agent's long-term memory, and they kill it from opposite sides.</p>
+<p><strong>Retrieval by keyword misses the thing you needed.</strong> A question about <em>"SSD inference
+chips"</em> shares no word with a memory titled <em>"running the 2.6T model off an SSD tier"</em> —
+yet they are the same subject. Word search returns nothing; the agent answers from
+nowhere. The fix here is not embeddings but <em>recognition</em>: the entire index (one line
+per memory, written as a recognition trigger) goes into one prompt, and a small model
+names what bears on the question. An index of ~500 memories is around 6k tokens — a
+few percent of a modern context window, and it sits in the prefix cache.</p>
+<p><strong>Writing everything poisons the store.</strong> An agent asserts something; a naive distiller
+records the assertion as a fact; the next agent reads it back as ground truth and
+repeats it with more confidence. That loop is self-reinforcing, and prompt instructions
+do not stop it — measured, not assumed. So the write path is gated by deterministic
+Python: every candidate memory must carry quotes that exist <em>character-for-character</em>
+in the raw material, tagged with where they came from.</p>
+<table>
+<thead>
+<tr>
+<th>class</th>
+<th>what it is</th>
+<th>what it licenses</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>[USER]</code></td>
+<td>the human's own words</td>
+<td>"they decided", "they asked"</td>
+</tr>
+<tr>
+<td><code>[TOOL]</code></td>
+<td>machine output</td>
+<td><strong>numbers — the only source</strong></td>
+</tr>
+<tr>
+<td><code>[ACT]</code></td>
+<td>a tool that was invoked</td>
+<td>"this was done"</td>
+</tr>
+<tr>
+<td><code>[SELF]</code></td>
+<td>the agent's own prose</td>
+<td>a judgement, in the first person, never a bare fact</td>
+</tr>
+</tbody></table>
+<p>A quote that is not found verbatim is discarded. A candidate with no surviving quote is
+thrown away. A number with no <code>[TOOL]</code> behind it is stripped. Text crediting the human
+with a decision, when no <code>[USER]</code> quote survived, is refused at the last gate. Ideas are
+welcome — they go to a seed file, never to the store, and graduate only when later
+evidence confirms them.</p>
+<hr />
+<h2>Tier zero: recognition before intelligence</h2>
+<p>The recall above is the right tool for a question that shares no words with its
+memory. It is the wrong tool for a question that <em>names</em> what it wants — and in a
+working session, most questions do. A blind 40-question benchmark on a live
+317-memory store split exactly along that line: the direct questions needed no
+intelligence at all, and everything else needed all of it.</p>
+<p>So before the thinker runs, a deterministic recognizer gets one look. The design is
+transposed from the n-gram embedding table inside Qwen3.8-Flash-Next — many hash
+heads voting over one table, behind a gate — onto the index:</p>
+<ul>
+<li><strong>Five heads</strong>, each an independent recognition channel: exact name; IDF-weighted
+word tokens (identifiers, ports, katakana runs); character 3-grams with
+<strong>stop-grams</strong> (a gram present in over a fifth of the store drowns in its own
+collisions, so it is dropped); character 2-grams; and the head of each body.</li>
+<li><strong>Coverage scoring</strong> — each head's vote is normalized by what it could possibly
+have reached for <em>this</em> question, so one lucky rare gram cannot fake confidence.</li>
+<li><strong>An honesty gate</strong> — a hit is returned only when the top score clears an absolute
+bar <em>and</em> beats the runner-up by margin. Anything less and the fast path says
+nothing; the question falls through to the thinker, unchanged.</li>
+</ul>
+<p>Blind-tested — the examiner wrote the 40 questions from the index alone, never
+seeing the implementation — against the live store over HTTP:</p>
+<table>
+<thead>
+<tr>
+<th>question type</th>
+<th>tier zero</th>
+<th>thinker tier</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>direct (14)</td>
+<td><strong>14/14, median 2.3 ms</strong></td>
+<td>14/14, ~900 ms</td>
+</tr>
+<tr>
+<td>paraphrase (10)</td>
+<td>silent → falls through</td>
+<td>10/10</td>
+</tr>
+<tr>
+<td>semantic bridge (10)</td>
+<td>silent → falls through</td>
+<td>10/10</td>
+</tr>
+<tr>
+<td>not in the store (6)</td>
+<td><strong>6/6 refused</strong></td>
+<td>0/6 refused</td>
+</tr>
+<tr>
+<td>wrong answers, whole set</td>
+<td><strong>0</strong></td>
+<td>—</td>
+</tr>
+</tbody></table>
+<p>What that buys:</p>
+<ul>
+<li><strong>The everyday case stops paying the intelligent price for a lookup.</strong> Direct
+recall drops from ~900 ms to ~2 ms, and the fall-through tax on every other
+question is about 2 ms.</li>
+<li><strong>It knows what it does not know.</strong> Zero wrong answers across the set is the
+gate working, not the heads being clever — everything uncertain goes to the
+model. On the six questions whose answers were <em>not</em> in the store, tier zero
+refused all six; the thinker tier answered something every time. Refusal is a
+feature this project keeps having to buy back.</li>
+<li><strong>A direct question now survives the thinker being down.</strong> Recall used to
+degrade straight to word overlap; the named memory comes back regardless.</li>
+<li><strong>Every reply says which tier answered</strong> — <code>how: "fastpath"</code>,
+<code>fastpath_verdict</code>, <code>fastpath_ms</code> — so a slow answer is never a mystery.</li>
+</ul>
+<p>Configured under <code>[fastpath]</code> (<code>enabled</code>, on by default; <code>gate</code>), per-store
+overridable like everything else. The row it will never win: a question that
+shares no surface with its memory. That is the thinker's job, and the gate exists
+to hand it over rather than guess.</p>
+<hr />
+<h2>Quick start</h2>
+<pre><code class="language-bash">git clone https://github.com/lna-lab/distill-kura &amp;&amp; cd distill-kura
+pip install -e .                       # or just run: python3 -m distill_kura.cli
+
+cp kura.example.toml kura.toml         # edit: one model endpoint is enough to start
+kura init main --path ~/kura/main      # create an empty store
+kura serve                             # http://127.0.0.1:8085
+</code></pre>
+<pre><code class="language-bash">curl -s -X POST localhost:8085/recall -H 'content-type: application/json' \
+     -d '{"question":"what did we decide about the archive disk?","hops":1}'
+</code></pre>
+<p>Wear the index, so the agent always knows what is known:</p>
+<pre><code class="language-bash">kura weave                             # build the three-layer cloth
+kura prefill                           # the block to put in the system prompt
+</code></pre>
+<p>Feed it your agent transcripts:</p>
+<pre><code class="language-bash">kura distill run      # drink a batch → candidates → gate → drafts
+kura distill drafts   # look at what it wants to write
+kura distill drain    # the scribe re-reads each draft cold: pour / fix / toss
+kura distill night    # stay resident and do it whenever things go quiet
+</code></pre>
+<p>Nothing enters the store until <code>drain</code> (or a hand-run <code>pour</code>). Drafts carry their
+evidence in an HTML comment, so you can always see <em>why</em> a memory exists.</p>
+<hr />
+<h2>The resident map</h2>
+<p>Recall-by-tool answers <em>"what do you know about X?"</em> — but only once the agent has
+decided to ask. It never answers the question the agent does not think to ask: <strong>is
+there anything here at all?</strong> An agent that cannot see the map does not know what it is
+missing, so it guesses, and a confident guess about your household is precisely the
+failure this project exists to prevent.</p>
+<p>So the index is also worn: a standing block in the system prompt, on every turn.</p>
+<pre><code class="language-bash">kura weave      # re-weave the index into the three-layer cloth
+kura prefill    # print the block a host should inject
+</code></pre>
+<h3>Three layers, because detail only pays for recent things</h3>
+<p>A blind A/B test — 20 questions, fat index vs slimmed index, scored without knowing
+which was which — settled the shape:</p>
+<table>
+<thead>
+<tr>
+<th>band</th>
+<th>fat</th>
+<th>slim</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>overall</td>
+<td>9</td>
+<td>11</td>
+</tr>
+<tr>
+<td>recent events</td>
+<td><strong>4</strong></td>
+<td>1</td>
+</tr>
+<tr>
+<td>doctrine</td>
+<td>1</td>
+<td><strong>4</strong></td>
+</tr>
+<tr>
+<td>cross-domain leaps</td>
+<td>1</td>
+<td><strong>4</strong></td>
+</tr>
+</tbody></table>
+<p>The doctrine lines were byte-identical in both indexes, and the slim index still won
+that band: <strong>a lighter surround makes the standing lines work better.</strong> Detail is not
+the source of insight. It earns its place only where things are still moving.</p>
+<table>
+<thead>
+<tr>
+<th>layer</th>
+<th>rule</th>
+<th>line</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>pinned</td>
+<td>frontmatter <code>type</code> in <code>pinned_types</code></td>
+<td>kept in full</td>
+</tr>
+<tr>
+<td>fresh</td>
+<td>changed within <code>fresh_days</code></td>
+<td>kept in full</td>
+</tr>
+<tr>
+<td>trigger</td>
+<td>everything else</td>
+<td>compressed to ~<code>trigger_tokens</code></td>
+</tr>
+</tbody></table>
+<p>Trigger lines are written by the <code>scribe</code> model and cached in a ledger keyed on the
+description <em>and</em> the budget, so a re-weave in the steady state costs nothing. With no
+model reachable the loom trims mechanically instead — a memory system must not go blank
+because a GPU is down.</p>
+<p><strong>Age is not mtime.</strong> <code>cp -r</code>, a restore or a checkout resets every timestamp, the whole
+index turns "fresh", nothing is trimmed, and the mechanism has silently switched itself
+off. So the loom prefers a date written <em>inside</em> the memory, and distrusts any mtime
+that a fifth of the store shares with one calendar day.</p>
+<h3>Where it goes, and why that is a cache decision</h3>
+<pre><code class="language-yaml">- id: kura
+  name: distill-kura
+  config: { store: eq, promptOrder: -50 }   # before the persona
+</code></pre>
+<p>A prefix cache is lost from the first changed byte onward — measured on one local
+server: an identical 4,029-token preamble reprices from 0.68 s to 0.14 s, appending at
+the <strong>end</strong> stays 0.14 s, and <strong>one word added at the front costs the whole cache
+(0.66 s)</strong>. The persona commonly carries a clock, so it changes every minute; the map is
+the largest block in the prompt and changes a few times a day. The big stable thing goes
+in front of the thing that ticks.</p>
+<p>The block itself therefore contains no date, no clock, no counter — and <code>build()</code>
+refuses a header that does, at build time rather than through mysteriously slow turns
+three weeks later.</p>
+<h3>It never hands over half a map</h3>
+<table>
+<thead>
+<tr>
+<th>situation</th>
+<th>what the agent gets</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>all well</td>
+<td>the map, between <code>&lt;&lt;&lt;KURA-MAP&gt;&gt;&gt;</code> markers</td>
+</tr>
+<tr>
+<td>over <code>budget_fraction</code></td>
+<td>the <strong>whole</strong> map, and a warning in the JSON (never in the text — a banner is volatile content)</td>
+</tr>
+<tr>
+<td>over <code>hard_fraction</code></td>
+<td>a <strong>stub</strong> with no index lines, saying the map is missing rather than empty</td>
+</tr>
+<tr>
+<td>kura unreachable</td>
+<td>an explicit note that the map is missing, never an empty string</td>
+</tr>
+</tbody></table>
+<p>A truncated map is the worst artifact available: it looks complete, and every memory
+below the cut appears not to exist. <code>weave</code> will shorten the fresh window to fit, but it
+will never drop a line — and if no setting reaches the budget it says so, keeps the
+better map, and tells you where the weight is.</p>
+<h3>Getting it into a host</h3>
+<table>
+<thead>
+<tr>
+<th>host</th>
+<th>mechanism</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DSH</td>
+<td>native plugin — a <code>systemPrompt.section</code>, refreshed in the background</td>
+</tr>
+<tr>
+<td>Claude Code, VS Code, Goose</td>
+<td>MCP <code>instructions</code> carries a short pointer (<strong>2KB cap</strong>); the map itself comes from the <code>kura_map</code> tool or a session hook running <code>kura prefill</code></td>
+</tr>
+<tr>
+<td>Claude Desktop, claude.ai</td>
+<td>ignore <code>instructions</code> entirely — use <code>kura_map</code></td>
+</tr>
+<tr>
+<td>anything else</td>
+<td><code>GET /prefill?format=text</code>, or <code>kura prefill</code> in a shell hook</td>
+</tr>
+</tbody></table>
+<p>The MCP <code>instructions</code> field is a <code>MAY</code> in the spec, and a 9,000-token index cannot
+travel through a 2KB cap regardless, so this project does not pretend otherwise.</p>
+<h3>Pay it forward</h3>
+<p>Byte-stability makes a prefix cache <em>hold</em>; it does not make the first turn cheap.
+After a re-weave changes the map, the next turn pays the whole cold prefill — and on a
+slow mouth that is minutes, not milliseconds. A llama.cpp server started with
+<code>--slot-save-path</code> can save a slot's KV to disk and load it back, so the cold turn can
+be paid once, in the quiet hours, and kept across restarts:</p>
+<pre><code class="language-bash">kura pay-forward      # every [[payforward.mouths]] entry; -s / --mouth narrow, --force re-bakes
+</code></pre>
+<p>Measured on one machine (a 320B pure-CPU llama.cpp mouth, 16,444-token map): the bake
+796 s; the save 283 ms (1.5 GB on NVMe); the server killed, rebooted, and the restore
+655 ms — after which the first turn reprocessed 18 prompt tokens. A 13-minute cold
+turn became a 0.7-second restore. The name is the film's: the cold turn is paid
+forward, so the next turn — whoever's it is — receives it warm.</p>
+<p>The slot filename carries the map's etag (<code>kura-&lt;store&gt;-&lt;etag…&gt;.bin</code>), so the files are
+content-addressed: a fresh etag is <em>proven</em>, not assumed — a restore shows the file
+still exists, a one-token probe reads <code>timings.prompt_n</code>, small means warm — and exits
+2, nothing to do; a changed etag tries the restore first anyway (a file left by a lost
+state or a parallel runner is still the right bytes) and only then bakes, saves, and
+records <code>_still/payforward.json</code>. A mouth that cannot be reached is a loud, labeled
+skip, never a crash and never a state advance. Old slot files are not pruned — the
+slots API can save and restore a filename but cannot list the directory — and they are
+not small (KV width × map length: that 16k-token map was 1.5 GB), so sweep the
+directory by hand. <code>kura tend</code> runs this as a track after each weave; the recipe,
+including the systemd shape for mouth restarts, is in <code>docs/OPERATING.md</code>.</p>
+<hr />
+<h3>The shortest cue that still recognises (M4, shadow)</h3>
+<p>A trigger line is paid on every turn. The question is not how short it can be cut but
+how short it can be while the reader still thinks "ah, THAT one" — and not its
+neighbour. With</p>
+<pre><code class="language-toml">[prefill]
+trigger_tokens = 24            # the legacy budget, still what production wears
+adaptive_triggers = true       # generate and judge shorter candidates (shadow)
+adaptive_apply = false         # nothing enters the cloth until a benchmark earns it
+trigger_steps = [8, 12, 16, 24]
+</code></pre>
+<p><code>kura weave</code> also writes <code>_still/adaptive.json</code>: per memory, a candidate per rung,
+the shortest one that passes every floor the production trigger passes (plus the ones
+a shorter cue newly needs — a number tied to a different unit, a dropped negation or
+retirement word, a cut identifier) AND is recognised alone by the recognizer with the
+callsign pre-head and the body off, and <code>why_not_shorter</code> for each rung refused. A
+verified callsign is judged by its receipt, not by word overlap. Candidates are
+cached per memory; the verdicts are recomputed every time, because whether a cue is
+ambiguous depends on every neighbour. Falling back to 24, or to the line itself, is a
+measurement — that memory needs that many tokens.</p>
+<p>Promotion is a benchmark's decision, not a flag's: <code>kura bench worldline --resident canonical,woven --resident-file adaptive=&lt;rendered map&gt;</code> under <code>--routing agent-only</code>, read per category, with no increase in wrong or obsolete branches and
+no rise in <code>remembered_but_unreachable</code>. Until then the shadow only watches.</p>
+<h2>Modes: more than one kura</h2>
+<p>A single memory that serves both "help me build this" and "help me think this through"
+serves neither well: the recall that helps you debug is noise in a conversation about
+what to do next. So a store is a directory, and a mode maps to a store.</p>
+<pre><code class="language-toml">[stores.maker]
+path = "~/kura/maker"
+label = "maker mode — building things"
+
+[stores.eq]
+path = "~/kura/eq"
+label = "EQ mode — talking things through"
+
+[modes]
+maker = "maker"
+eq    = "eq"
+</code></pre>
+<p>Every route takes a selector, so one process serves them all:</p>
+<pre><code class="language-bash">curl -s -X POST localhost:8085/recall -d '{"question":"...","mode":"eq"}'
+curl -s localhost:8085/index?store=maker
+curl -s localhost:8085/s/eq/doctor          # path form, for clients that only vary a base URL
+</code></pre>
+<p>The stores share no memories, no index, and no distiller watermark. Switching mode
+genuinely changes what is remembered — not the same memory in a different voice.</p>
+<p><strong>The room is chosen before the conversation.</strong> A mode is what the host sends — a DSH
+preset, <code>KURA_STORE</code> in an MCP environment, <code>-s</code> on the CLI — and it is the whole
+session's home. Nothing in this project reads a message and decides which store it
+belongs to; a conversation that drifts from building into feeling stays where it
+started, and the host may offer another room for the <em>next</em> session. An unknown
+selector is an error at the door, never a quiet fall to the default.</p>
+<p><strong>One room, many tags.</strong> A memory lives in exactly one store and may carry several
+tags that describe its character (<code>decision</code>, <code>landmine</code>, <code>emotion-carried</code>, …). Tags
+are words, not weights: nothing ranks by them, nothing counts them, and a Develop
+memory tagged <code>emotion-carried</code> is still a Develop memory. There is no command that
+moves or copies a memory to another store, and a mode change affects only future
+sessions. The same topic raised in two rooms yields two memories, each distilled from
+that room's own evidence — Research's "what we learned" and Develop's "what we did"
+are different facts, and nothing crosses the boundary to deduplicate them.</p>
+<p><strong>A wide room recalls a little softer.</strong> Narrow stores with fixed charters recognise
+sharply. A store that accepts anything — a USER room that follows the person rather
+than a purpose — is expected to be looser, and in exchange is the one whose
+understanding may grow: a <code>profile.md</code> beside its charter, in sentences, read after
+the charter, drafted from its own memories and applied by a person. Five such rooms,
+with their charters and a config, are in <a href="https://github.com/lna-lab/distill-kura/blob/HEAD/examples/rooms/" target="_blank" rel="noopener noreferrer"><code>examples/rooms/</code></a>.</p>
+<p><strong>Independent as routing, not as confidentiality.</strong> The server has no authentication, so
+any process that can reach its port can name any store it holds. Binding an agent keeps
+a <em>model</em> in its lane; it does not keep a <em>process</em> out. One trust level per process —
+<a href="https://github.com/lna-lab/distill-kura/blob/HEAD/docs/TRUST.md" target="_blank" rel="noopener noreferrer"><code>docs/TRUST.md</code></a> is short and worth reading before a private store goes
+in. It also covers the two boundaries that are easy to miss: two stores drinking from
+one journal root, and two stores behind one model endpoint.</p>
+<h3>With DeepSeek Harness</h3>
+<p>DSH switches <strong>persona and tools</strong> by agent preset. distill-kura switches <strong>memory</strong> by
+store. Bind them and one preset change moves the whole self:</p>
+<pre><code class="language-yaml"># .agent-presets/eq/agent.cordis.yml
+- id: kura-eq
+  name: distill-kura
+  config:
+    url: http://127.0.0.1:8085
+    store: eq            # this preset's memory
+    readonly: true       # the CLIENT's own switch: do not even offer a write tool
+    # (the store's own `write_policy` is the authority; this just keeps the tool
+    #  out of the model's hands. Naming a store already binds the preset.)
+</code></pre>
+<p><strong>One dependency, and why it is a peer.</strong> The plugin imports <code>defineTool</code> from
+<code>@deepseek-ai/dsh-tools</code>. A profile-local second copy can split the package's
+module-local Symbol identity — even at the same version — and make the first tool
+call fail on <code>undefined.prepare</code>. The plugin therefore declares the package as a
+<code>"*"</code> peer so the profile supplies its copy without a version mismatch. A stale
+physical duplicate can still require deduplication; see the install checks in
+<a href="https://github.com/lna-lab/distill-kura/blob/HEAD/examples/dsh-presets/" target="_blank" rel="noopener noreferrer"><code>examples/dsh-presets/</code></a>.</p>
+<p><code>allowSwitch</code> has no fixed default: it follows <code>store</code>. A preset that names a store is
+bound to it — no <code>kura_use</code>, no drifting mid-conversation — and only an explicit
+<code>allowSwitch: true</code> reopens that door. Name no store and the session is free: every
+tool takes a <code>store</code> argument and <code>kura_use</code> switches for the session. Tools: <code>kura_recall</code>,
+<code>kura_read</code>, <code>kura_doctor</code>, and <code>kura_map</code> (while <code>prefill</code> is on — the default);
+<code>kura_list</code> unless the preset is bound; <code>kura_use</code> only when the session is switchable;
+and <code>kura_remember</code> only when the plugin's <code>readonly</code> is <code>false</code> — and even then the
+store's <code>write_policy</code> has the last word. Full wiring, including the MCP bridge and the <code>isolate</code> realm rule
+for service rows, is in <a href="https://github.com/lna-lab/distill-kura/blob/HEAD/examples/dsh-presets/" target="_blank" rel="noopener noreferrer"><code>examples/dsh-presets/</code></a>.</p>
+<p><strong>Persona is the host's business, not ours.</strong> This project never renders or injects a
+persona; it only records, per store, which persona file belongs with it, readable at
+<code>GET /profile?store=eq</code> so the two halves can be kept in step by whoever owns the
+preset. Agent instructions likewise stay with the host's <code>AGENTS.md</code> mechanism — see
+<a href="https://github.com/lna-lab/distill-kura/blob/HEAD/AGENTS.md" target="_blank" rel="noopener noreferrer"><code>AGENTS.md</code></a> in this repo for the conventions an agent working <em>on</em> this
+codebase should follow.</p>
+<h3>With any MCP host</h3>
+<pre><code class="language-jsonc">{ "mcpServers": { "kura": {
+    "command": "python3", "args": ["-m", "distill_kura.mcp"],
+    "env": { "KURA_URL": "http://127.0.0.1:8085", "KURA_STORE": "eq", "KURA_READONLY": "1" }
+}}}
+</code></pre>
+<p>Leave <code>KURA_STORE</code> unset for free mode: the tools take an optional <code>store</code> argument and
+<code>kura_use</code> switches for the session.</p>
+<p>The bridge reads five variables:</p>
+<table>
+<thead>
+<tr>
+<th>variable</th>
+<th>default</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>KURA_URL</code></td>
+<td><code>http://127.0.0.1:8085</code></td>
+<td>where the kura's HTTP mouth is listening</td>
+</tr>
+<tr>
+<td><code>KURA_STORE</code></td>
+<td>unset</td>
+<td>bind to one kura; unset = free mode (whitespace-only exits)</td>
+</tr>
+<tr>
+<td><code>KURA_LABEL</code></td>
+<td><code>the kura</code></td>
+<td>the name the tool descriptions use for this memory</td>
+</tr>
+<tr>
+<td><code>KURA_READONLY</code></td>
+<td><code>1</code></td>
+<td>anything but <code>""</code>/<code>0</code>/<code>false</code>/<code>no</code> hides <em>and</em> refuses <code>kura_remember</code></td>
+</tr>
+<tr>
+<td><code>KURA_WRITE_LOG</code></td>
+<td>unset</td>
+<td>path to a JSONL file that gets one <code>{ts, store, args, result}</code> line per direct write; the directory is created, and a failure to log never fails the write</td>
+</tr>
+</tbody></table>
+<p><code>KURA_WRITE_LOG</code> is a record, not a permission: it only sees writes that already
+happened, so it is only meaningful with <code>KURA_READONLY: '0'</code>.</p>
+<hr />
+<h2>Models: one by default, upgrade a role at a time</h2>
+<p>Three <strong>roles</strong>, not three machines:</p>
+<table>
+<thead>
+<tr>
+<th>role</th>
+<th>when it runs</th>
+<th>wants</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>thinker</code></td>
+<td>every recall</td>
+<td>small and fast; must judge relevance by meaning</td>
+</tr>
+<tr>
+<td><code>brain</code></td>
+<td>distilling: reads a whole batch of journal</td>
+<td>context length and patience</td>
+</tr>
+<tr>
+<td><code>scribe</code></td>
+<td>distilling: writes the memory, then judges drafts</td>
+<td>good prose in your language, judgement</td>
+</tr>
+</tbody></table>
+<p>Declare only <code>[models.thinker]</code> and one model does all three — <strong>the model you talk
+to is also the editor</strong> that writes and judges your memories. That is the default and
+it is a fair one: a capable GPU model does the editor's work well enough in its idle
+minutes, and <code>kura tend</code> stops it the moment you come back (see "Unattended" below).</p>
+<p>The upgrade path is to give the editor its own seat — a bigger model, an online API,
+or a <strong>CPU model that does not compete for the GPU at all</strong>, so maintenance can go on
+while you are talking. The house this was built in runs a 1-trillion-parameter MoE
+on CPU at about 3 tokens/second as the editor: slow, but it never touches the seat the
+conversation uses, and the memories it wrote over five days are a third of the store
+today. Upgrade either of the other roles independently — a bigger local model, or an online API (any OpenAI-compatible
+<code>/chat/completions</code>; the key is read from an environment variable you name, never
+stored in the config):</p>
+<pre><code class="language-toml">[models.thinker]                       # always-on, local, small
+url = "http://127.0.0.1:8000/v1"
+model = "local-small"
+
+[models.scribe]                        # upgrade just the writing
+url = "https://api.example.com/v1"
+model = "big-model"
+api_key_env = "EXAMPLE_API_KEY"
+</code></pre>
+<p>Two things this handles for you: reasoning-effort dialects differ per model family
+(<code>reasoning_effort</code>, <code>thinking_effort</code>, <code>enable_thinking</code>), so <strong>all</strong> of them are sent
+— an unknown one is ignored by the template, while a model left on deep-thinking by
+default can spend its whole budget reasoning and return nothing. And the charter text
+is placed byte-identically at the head of every role's prompt, so on a slow local model
+the three roles share one cached prefix instead of paying three prefills.</p>
+<p><strong>A slow editor needs the prefix.</strong> The charter sits byte-identically at the head of
+every call, so a 3 tok/s CPU editor pays its prefill once per silence, not once per
+draft; on llama.cpp, keep <code>--cache-reuse 0</code> off the table for recurrent models and let
+the server keep its slots warm (<code>--slot-save-path</code>). The editor's calls are the ones
+that wait an hour (<code>timeout=3600</code>) on purpose.</p>
+<p><strong>If the thinker is down, recall does not go silent</strong> — it falls back to word overlap
+and labels the answer <code>how=words(thinker unreachable)</code>, which the tools surface as
+<code>⚠ degraded</code>. Quiet
+degradation is worse than degradation. And before either tier runs, a deterministic
+recognizer (<code>[fastpath]</code>, on by default) answers DIRECT questions — ones that name a
+memory — in under a millisecond with <code>how=fastpath</code>, thinker up or not; anything it is
+not sure of falls through unchanged, and every reply says what it did in
+<code>fastpath_verdict</code> / <code>fastpath_ms</code>.</p>
+<h3>Unattended: <code>kura tend</code></h3>
+<p>The distiller, the pourer and the loom are meant to run in the quiet hours, and the
+watcher that decides when that is needs no model:</p>
+<pre><code class="language-bash">kura distill catchup -s maker   # first: start from today, do not drink a year of history
+kura tend -s maker              # stays resident; one process per store
+kura tend -s maker --once       # one tick, for a scheduler or a test
+</code></pre>
+<p>Run <code>catchup</code> once when you point a distiller at a journal it has never seen —
+otherwise its first act is to drink the whole history, which for a year-old journal
+is days of model time spent re-learning what the store may already know. It only
+moves the marks forward, so it can never lose progress.</p>
+<p>"Quiet" is the newest journal file's mtime. After <code>idle_min</code> (10) of silence it drains
+waiting drafts (the editor reads each one cold: pour / fix / toss), or runs one
+distilling pass when there are none; when something was poured it re-weaves the
+resident map once, then pays the fresh map forward into the registered mouths (a cheap
+verified skip when the weave changed nothing); and it tidies the index once per
+silence. A track that had nothing
+to do exits 2 and rests for <code>backoff_min</code> (20), so an empty journal does not spin. It
+counts work — poured, tossed, fixed, drafted — never launches. Every track's output is
+kept in <code>_still/tend.log</code>. And it writes a heartbeat that <code>kura doctor</code> reads
+(<code>tending.alive</code>), because a watcher that dies quietly is the one failure a watcher
+must not have.</p>
+<p>When the journal changes, a running track is stopped: the editor is usually the same
+GPU you are about to talk to. With the editor on a separate seat — a CPU model, another
+machine — set <code>yield_on_return = false</code> under <code>[distill]</code> and a verdict in flight is
+left to finish. This is the watcher the house ran its CPU editor with for five days,
+rebuilt with the lessons it taught; <code>docs/OPERATING.md</code> has the systemd unit.</p>
+<p>What this project does <strong>not</strong> ship: an autonomous research loop that reads papers and
+grows the store on its own. The house has one; it needs a model that can be left alone
+for an hour per question, and its results are not evidence in the sense the gate
+uses. It stays on the house side of the line.</p>
+<hr />
+<h2>What a memory looks like</h2>
+<p>One file, one fact.</p>
+<pre><code class="language-markdown">---
+name: archive-on-slow-disk
+description: the archive lives on the slow disk; the fast one stays scratch
+metadata:
+  type: project          # user | feedback | project | reference
+  tags: ["decision", "landmine"]
+  evidence_manifest: sha256:…
+belongs_because: this store keeps how the machine is laid out and why
+keep: which disk, and the reason
+may_fade: the df figures from that afternoon
+---
+
+The archive goes on the slow disk. The fast disk is scratch space.
+
+**Why:** the other way round burns write endurance for nothing.
+**How to apply:** check which disk a target directory is on before writing there.
+Related: [[disk-layout]]
+</code></pre>
+<p>And one line in <code>MEMORY.md</code>:</p>
+<pre><code class="language-markdown">- [Archive on the slow disk](archive-on-slow-disk.md) — the archive lives on the slow disk; the fast one stays scratch
+</code></pre>
+<p>That line is the only thing read <em>every single time</em>. It is a <strong>recognition trigger</strong>,
+not a summary: proper nouns, numbers, ⚠️ landmines, the conclusion reached. If a line
+could be swapped with another memory's line and still read fine, it is not doing its
+job — <code>kura distill tidy</code> finds the mechanically detectable cases and rewrites them.</p>
+<p>The four lines under <code>metadata</code>/at the top are <strong>curation, not facts</strong>: <code>tags</code> are
+words about the memory's character — several is normal, and a memory written before
+they existed simply has none — and the three sentences say why it belongs in <em>this</em>
+store, what meaning must outlive any later thinning, and what detail need not. The
+distiller proposes them against the store's charter; tags that claim something about
+the human (<code>entrusted</code>, <code>emotion-carried</code>, <code>recurred</code>) are checked against the quotes
+and the check is recorded in the manifest. <code>recurred</code> is written once, by the
+distiller, when the human brings a topic up again from another session — it is a
+property, not a counter, and there is no number behind it.</p>
+<p><code>kura doctor</code> reports counts, dead links, islands (memories nothing links to), index
+drift, tag lines it cannot read, manifests a memory points at that are gone, the state
+of the learned profile, and the store's <strong>capacity in four units side by side</strong> —
+memories, index tokens, body tokens, bytes — with <code>limit</code> and <code>pressure</code> left <code>None</code>.
+It is the eye the metabolism needs. What happens when a shelf is full is not decided
+yet: see <a href="https://github.com/lna-lab/distill-kura/blob/HEAD/docs/DESIGN.md" target="_blank" rel="noopener noreferrer"><code>docs/DESIGN.md</code></a> §8.</p>
+<hr />
+<h2>The HTTP surface</h2>
+<table>
+<thead>
+<tr>
+<th>route</th>
+<th>what it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>POST /recall</code></td>
+<td><code>{question, hops, top, chars, total_chars, store|mode}</code> → picked, walked, context. <code>chars</code> is per memory; <code>total_chars</code> is a hard ceiling on the whole context</td>
+</tr>
+<tr>
+<td><code>POST /remember</code></td>
+<td><code>{slug, description, body, type, title, tags, belongs_because, keep, may_fade}</code> — a DIRECT write, refused unless <code>write_policy = "direct-allowed"</code></td>
+</tr>
+<tr>
+<td><code>POST /annotate</code></td>
+<td><code>{slug, tags, belongs_because, keep, may_fade}</code> — merge tags / the three sentences onto an existing memory. The direct door: same refusal as <code>/remember</code>. A merge that adds nothing touches nothing</td>
+</tr>
+<tr>
+<td><code>GET /index</code></td>
+<td>the raw index</td>
+</tr>
+<tr>
+<td><code>GET /prefill</code></td>
+<td>the resident block, ready to inject (<code>&amp;format=text</code> for a hook; <code>&amp;window=N</code> / <code>&amp;fraction=F</code> override the store's <code>window_tokens</code> / <code>budget_fraction</code> for one request)</td>
+</tr>
+<tr>
+<td><code>GET /memory/&lt;slug&gt;</code></td>
+<td>one memory in full, with its <code>tags</code> and <code>annotations</code></td>
+</tr>
+<tr>
+<td><code>GET /doctor</code></td>
+<td>health of one store (<code>?all=1</code> for every store)</td>
+</tr>
+<tr>
+<td><code>GET /stores</code></td>
+<td>stores, modes, and which model fills each role</td>
+</tr>
+<tr>
+<td><code>GET /profile</code></td>
+<td>the store's charter, the learned profile with its state (absent / present / broken), and a pointer to its persona (never rendered here)</td>
+</tr>
+<tr>
+<td><code>GET /health</code></td>
+<td>liveness</td>
+</tr>
+</tbody></table>
+<p>Any route accepts <code>?store=</code> / <code>?mode=</code>, a <code>store</code>/<code>mode</code> field in the body, or the
+<code>/s/&lt;name&gt;/…</code> path prefix. No authentication: bind to loopback, or put something in
+front of it.</p>
+<hr />
+<h2>Design notes worth reading before you change things</h2>
+<ul>
+<li><strong><a href="https://github.com/lna-lab/distill-kura/blob/HEAD/docs/DESIGN.md" target="_blank" rel="noopener noreferrer">docs/DESIGN.md</a></strong> — why recognition beats search, what the gate
+buys, and the failure that motivated each mechanism.</li>
+<li><strong><a href="https://github.com/lna-lab/distill-kura/blob/HEAD/docs/OPERATING.md" target="_blank" rel="noopener noreferrer">docs/OPERATING.md</a></strong> — running it resident, schedulers and exit
+codes, backups, what to watch.</li>
+<li><strong><a href="https://github.com/lna-lab/distill-kura/blob/HEAD/docs/TRUST.md" target="_blank" rel="noopener noreferrer">docs/TRUST.md</a></strong> — what a store boundary is and is not, write
+policies, and the two boundaries that are easy to miss (shared journals, shared
+models). Read it before a private store goes in.</li>
+</ul>
+<p>A few decisions that look odd until you hit the thing they prevent:</p>
+<ul>
+<li><strong>Reserve before drinking.</strong> The distiller claims a stretch of journal <em>before</em>
+reading it, under a lock, and watermarks only ever move forward. Two distillers each
+writing back their own snapshot erased each other's progress and re-drank the same
+water a dozen times.</li>
+<li><strong>Watermarks are per-adapter units.</strong> Byte offsets for append-only transcripts,
+sequence numbers for archives that get rewritten (a byte offset into a recompressed
+file is a lie).</li>
+<li><strong>Echo suppression.</strong> A quote that already exists in the store is not new material —
+it is the store reading itself back through a tool result. Without this, a memory
+system rediscovers and re-records its own contents forever.</li>
+<li><strong>The last gate is a model, not a human.</strong> If a person must approve every draft, the
+system has quietly made that person its bottleneck, and drafts pile up forever.
+Nothing in the loop may require someone who is not always present.</li>
+<li><strong><code>kura distill run</code> exits 2 when there was nothing to do.</strong> A scheduler must be able
+to tell "did work" from "found nothing", or a watchdog spins on an empty queue and
+starves the steps that need the idle time.</li>
+</ul>
+<h2>Measuring it, instead of claiming it</h2>
+<p>Two questions get answered with one number and should not be.</p>
+<p><strong>How much smaller?</strong> <code>store_ratio</code> = tokens in the memories and index / tokens of raw
+journal actually consumed. <strong>What was lost?</strong> That is a different measurement, and a
+store that keeps one memory in a hundred scores beautifully on the first while being
+useless.</p>
+<pre><code class="language-bash">kura bench compress                       # what this store cost, from the distiller's own metrics
+kura bench compress --tokenizer-command "./count-tokens"   # exact, not estimated
+kura bench retention --questions bench/fixtures/questions.json
+</code></pre>
+<p>Measured here, with the shipped fixtures and the built-in estimator:</p>
+<table>
+<thead>
+<tr>
+<th>corpus</th>
+<th><code>store_ratio</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>scripts/demo-clean-room.sh</code> (ordinary chat, mostly filler)</td>
+<td><strong>0.18</strong></td>
+</tr>
+<tr>
+<td><code>bench/fixtures/corpus.jsonl</code> (dense: every line is signal)</td>
+<td><strong>1.14</strong></td>
+</tr>
+</tbody></table>
+<p>The second one is not a bug. On material where nothing is filler, distilling does not
+compress — each memory adds its <em>why</em> and <em>how to apply</em>, and the store comes out
+slightly larger than the transcript. <strong>The ratio is a property of the corpus, not of
+this tool</strong>, which is why there is no headline number here and why the command reports
+what it counted with.</p>
+<p>Retention is scored model-free: each planted fact carries a marker that must appear in
+what recall returns, so the score is reproducible on someone else's machine. Distractors
+invert — a fact marked <code>must_not_store</code> costs a point if the store kept it, because a
+memory system is judged by what it declines as much as by what it keeps.</p>
+<pre><code>score 1.0 (10/10)   decision 1/1  number 2/2  negation 1/1  reversal 1/1
+                    conditional 1/1  landmine 1/1  returning 1/1  distractor 2/2
+</code></pre>
+<p>That is ten planted facts in a synthetic fixture, distilled by a local Qwen3.8-27B
+(NVFP4) as brain and scribe with <code>max_items = 8, coverage_passes = 2</code>, and scored with
+the same model as thinker. A different model will give a different score: the score
+measures a <em>pipeline-plus-model</em>, and the fixture exists so the model is the only thing
+that varies. It measures whether a fact is <em>findable</em>, not whether the answer reads
+well — judging prose needs a model, and then the benchmark stops being reproducible.</p>
+<p><code>kura distill run</code> writes one line per batch to <code>_still/metrics.jsonl</code>, which is where
+the raw side comes from. The canonical side counts <strong>only memories whose evidence
+manifest points at a recorded batch</strong> — dividing a whole store by the raw material of a
+few batches is a number in the wrong direction by an order of magnitude, and the first
+version of this command did exactly that. Memories that predate manifests are reported
+as <code>unattributed</code>, not silently included. The raw side is always the distiller's
+estimate at drink time, so with <code>--tokenizer-command</code> the ratio is labelled <code>mixed</code>.</p>
+<h2>What this runs against</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>requirement</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Python</td>
+<td>3.11+ (no dependencies; <code>pip install -e ".[dev]"</code> only adds pytest)</td>
+</tr>
+<tr>
+<td>Node</td>
+<td>20+, for the DSH plugin only</td>
+</tr>
+<tr>
+<td><code>zstd</code></td>
+<td>only to read DSH session archives</td>
+</tr>
+<tr>
+<td>model endpoint</td>
+<td>anything answering <code>POST &lt;url&gt;/chat/completions</code> in the OpenAI shape</td>
+</tr>
+</tbody></table>
+<p><strong>"OpenAI-compatible" is narrower than "any provider."</strong> A vendor's native API needs an
+OpenAI-compatible gateway in front of it; its own URL will not do. A strict service also
+rejects unknown top-level fields, so set <code>dialect = "openai"</code> (or <code>"generic"</code>) — the
+default <code>"vllm"</code> sends <code>chat_template_kwargs</code>, which local servers want and a strict one
+400s on. The client retries once with a plain body and records <em>why</em> a call failed
+rather than collapsing every cause into a silent <code>None</code>.</p>
+<h2>Tests</h2>
+<pre><code class="language-bash">python3 -m pytest tests -q                              # no model required
+cd dsh-plugin &amp;&amp; npm test                               # the plugin suite; stubs the harness, no install
+</code></pre>
+<p>The gate is tested adversarially: every case is a way a real model actually tried to
+smuggle something past it. <code>test_containment.py</code> is written the same way — every case is
+an escape attempt, not a happy path — because it guards a hole that was real: a store
+used to answer for any file whose path you could spell. The end-to-end test runs a full
+distil→drain cycle against a scripted model server on a real socket.</p>
+<h2>License</h2>
+<p>MIT.</p>

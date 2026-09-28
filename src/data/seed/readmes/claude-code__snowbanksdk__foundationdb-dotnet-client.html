@@ -1,0 +1,248 @@
+<h1>FoundationDB .NET Client</h1>
+<p>C#/.NET binding for the <a href="https://www.foundationdb.org/" target="_blank" rel="noopener noreferrer">FoundationDB</a> client library.</p>
+<p><a href="https://github.com/SnowBankSDK/foundationdb-dotnet-client/blob/HEAD/LICENSE.md" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/license/SnowBankSDK/foundationdb-dotnet-client" alt="License" /></a>
+<a href="https://www.nuget.org/packages/FoundationDB.Client/" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/nuget/v/FoundationDB.Client.svg" alt="NuGet version" /></a>
+<img src="https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-blue" alt="Platform" />
+<a href="https://github.com/SnowBankSDK/foundationdb-dotnet-client/actions/workflows/dotnetcore.yml" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/actions/workflow/status/SnowBankSDK/foundationdb-dotnet-client/dotnetcore.yml" alt="Build" /></a>
+<a href="https://github.com/SnowBankSDK/foundationdb-dotnet-client/commits/master/" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/last-commit/SnowBankSDK/foundationdb-dotnet-client" alt="Last Commit" /></a></p>
+<blockquote>
+<p><strong>New to FoundationDB, or just trying it out?</strong> The <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/introduction.html" target="_blank" rel="noopener noreferrer">documentation</a> walks you through it end to end: <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/prerequisites.html" target="_blank" rel="noopener noreferrer">Prerequisites</a>, <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/foundationdb-101.html" target="_blank" rel="noopener noreferrer">How it connects</a>, <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/cluster-setup.html" target="_blank" rel="noopener noreferrer">Cluster setup</a>, then <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/getting-started.html" target="_blank" rel="noopener noreferrer">Getting Started</a>. It covers installing .NET and a local cluster, plus the one pitfall (matching the <code>FoundationDB.Client.Native</code> package to your cluster version) that otherwise shows up as mysterious timeouts.</p>
+<p>Already know FoundationDB? The steps below get you running, and <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/getting-started.html" target="_blank" rel="noopener noreferrer">Getting Started</a> has the first read and write.</p>
+</blockquote>
+<h1>How to use</h1>
+<p>Install the managed binding and the native client. Pin the native package to your cluster's <code>major.minor</code> version (see <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/cluster-setup.html" target="_blank" rel="noopener noreferrer">Cluster setup</a>); it is the piece that must match your cluster:</p>
+<pre><code class="language-console">dotnet add package FoundationDB.Client
+dotnet add package FoundationDB.Client.Native --version "7.4.*"   # match your cluster's version
+</code></pre>
+<p>Register FoundationDB with the dependency-injection container in your <code>Program.cs</code>. This adds an <code>IFdbDatabaseProvider</code> singleton. Point it at a cluster one of three ways, most-preferred first:</p>
+<pre><code class="language-csharp">// 1. Recommended: with the .NET Aspire integration, the AppHost supplies the connection.
+//    Reference the FoundationDB.Aspire package, then:
+builder.AddFoundationDb("fdb");
+
+// 2. Manual, from an fdb.cluster file on disk:
+builder.Services.AddFoundationDb(740, options =&gt;
+    options.ConnectionOptions.ClusterFile = "/etc/foundationdb/fdb.cluster");
+
+// 3. Manual, from the cluster's connection string:
+builder.Services.AddFoundationDb(740, options =&gt;
+    options.ConnectionOptions.ConnectionString = "docker:docker@127.0.0.1:4500");
+</code></pre>
+<p>The recommended path is <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/aspire/" target="_blank" rel="noopener noreferrer">.NET Aspire</a>, which provisions a local cluster and injects the connection for you.</p>
+<p>Inject that provider (it arrives as the <code>db</code> parameter below) and go through the retry loop. Here are two Minimal API endpoints: one lists every greeting, the other adds one.</p>
+<pre><code class="language-csharp">// GET /greetings : read them all back
+app.MapGet("/greetings", (IFdbDatabaseProvider db, CancellationToken ct) =&gt;
+    db.ReadAsync(async tr =&gt;
+    {
+        // resolve the subspace where the Greetings collection's keys are stored
+        var subspace = await db.Root["Examples"]["Greetings"].Resolve(tr);
+
+        // scan every key under that subspace and decode each value back to text
+        return await tr.GetRange(subspace.ToRange())
+            .Select(kv =&gt; kv.Value.ToStringUtf8())
+            .ToListAsync();
+    }, ct));
+
+// POST /greetings?text=... : add a new one
+app.MapPost("/greetings", async (IFdbDatabaseProvider db, string text, CancellationToken ct) =&gt;
+{
+    await db.WriteAsync(async tr =&gt;
+    {
+        // resolve the Greetings subspace, creating the directory the first time
+        // (a plain Resolve would only open one that already exists)
+        var subspace = await db.Root["Examples"]["Greetings"].CreateOrOpenAsync(tr);
+
+        // store the greeting under a fresh, unique key
+        tr.Set(subspace.Key(Guid.NewGuid()), FdbValue.ToTextUtf8(text));
+    }, ct);
+});
+</code></pre>
+<p>Keys are built with <code>subspace.Key(...)</code> and stay lazily tuple-encoded until the transaction runs, the retry loop handles FoundationDB's conflict-and-retry model, and the Directory layer (<code>db.Root[...]</code>) maps readable paths to short binary prefixes so your keyspace stays tidy.</p>
+<p><strong>Full walkthrough:</strong> the <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/introduction.html" target="_blank" rel="noopener noreferrer">documentation</a> takes you from zero (installing .NET, running a local cluster) to your first read and write, then into modeling data with the Directory layer and Layers, and running it all with <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/aspire/" target="_blank" rel="noopener noreferrer">.NET Aspire</a>.</p>
+<p><strong>Upgrading?</strong> The <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/releases/7.4.5.html" target="_blank" rel="noopener noreferrer">7.4.5 release notes</a> list every change from 7.4.4 and the breaking changes to review before you upgrade the package version.</p>
+<p>What you get:</p>
+<ul>
+<li><strong>Strongly-typed, lazy keys</strong>: <code>subspace.Key("user", 123)</code> tuple-encodes itself only when handed to a transaction. No manual byte wrangling.</li>
+<li><strong>A retry loop</strong>: <code>ReadAsync</code> / <code>WriteAsync</code> / <code>ReadWriteAsync</code> handle FoundationDB's conflict-and-retry model for you.</li>
+<li><strong>The Directory layer</strong>: map readable paths to short, dense key prefixes.</li>
+<li><strong>Layers</strong>: a small contract (<code>IFdbLayer&lt;TState&gt;</code>) for reusable, composable data access.</li>
+<li><strong>Allocation-consciousness</strong>: <code>Slice</code>, pooled buffers, and <code>struct</code> keys/values keep the hot path free of needless <code>byte[]</code>.</li>
+<li><strong>.NET Aspire</strong>: start a local cluster and inject the connection automatically. See <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/aspire/" target="_blank" rel="noopener noreferrer">Aspire</a>.</li>
+</ul>
+<h1>Deployment</h1>
+<h2>Docker containers</h2>
+<p>The easiest way to deploy is to use one of the <a href="https://hub.docker.com/r/microsoft/dotnet-aspnet/" target="_blank" rel="noopener noreferrer">ASP.NET Core Runtime docker images</a> provided by Microsoft, such as <code>mcr.microsoft.com/dotnet/aspnet:10.0</code> or newer.</p>
+<p>In order to function, the FoundationDB Native client library (<code>fdb_c.dll</code> on Windows, <code>libfdb_c.so</code>) needs to be present in the container image. The easiest way is to simply copy them from the <a href="https://hub.docker.com/r/foundationdb/foundationdb" target="_blank" rel="noopener noreferrer">FoundationDB Docker image</a> that contains these files.</p>
+<p>Example of a <code>Dockerfile</code> that will grab v7.4.x binaries and inject them into your application container:</p>
+<pre><code class="language-Dockerfile"># Version of the FoundationDB Client Library
+ARG FDB_VERSION=7.4.6
+
+# We will need the official fdb docker image to obtain the client binaries
+FROM foundationdb/foundationdb:${FDB_VERSION} as fdb
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+
+# copy the binary from the official fdb image into our target image.
+COPY --from=fdb /usr/lib/libfdb_c.so /usr/lib
+
+WORKDIR /App
+
+COPY . /App
+
+ENTRYPOINT ["dotnet", "MyWebApp.dll"]
+</code></pre>
+<h2>Manual deployment</h2>
+<p>The easiest solution is to install the <code>foundationdb-clients-X.Y.Z</code> packages from <code>https://apple.github.io/foundationdb/downloads.html</code>. Only the client packages should be installed, unless you also intend to run the cluster locally.</p>
+<p>If you are manually copying your application files to the destination, either by unzipping into a folder, or using a single-exe deployment, it is still necessary to also copy the <code>fdb_c.dll</code> or <code>libfdb_c.so</code> binaries to the destination.</p>
+<p>If, for any reason, you cannot copy the client binary to the default platform location (ex: <code>/usr/lib</code> on Linux), you can specify the full path to the library by setting the <code>NativeLibraryPath</code> option, or setting the <code>Aspire:FoundationDb:Client:NativeLibraryPath</code> key in the <code>appSettings.json</code> file (see the <code>FdbClientSettings</code> class for the other available settings).</p>
+<p>If you need to troubleshoot the connection to the FoundationDB cluster, from the point of view of your application, it is also recommended to install <code>fdbcli</code> (comes with the <code>foundationdb-clients</code> package, needs to be manually deployed if not).</p>
+<h1>AI-assisted development (Claude Code / Agent Skills)</h1>
+<p>This repository ships a set of <strong>Agent Skills</strong> that teach AI coding agents how to use this library <em>correctly</em>, the parts that are easy to get wrong when "vibe-coded": key/value encoding, subspaces and the Directory layer, writing custom Layers, the transaction retry loop, advanced/distributed patterns (change feeds, leases, retention, fencing), and the <code>Slice</code> binary toolkit. They live under <a href="https://github.com/SnowBankSDK/foundationdb-dotnet-client/blob/HEAD/.claude/skills/" target="_blank" rel="noopener noreferrer"><code>.claude/skills/</code></a> and follow the open <a href="https://agentskills.io" target="_blank" rel="noopener noreferrer">Agent Skills</a> <code>SKILL.md</code> format, so they also work with other agents that support it.</p>
+<p>The skills are <strong>not</strong> included in the NuGet packages. The easiest way to get them into your own projects (whether you consume this library via NuGet or as a submodule) is to install them as a <strong>Claude Code plugin</strong> from this repository, which doubles as a plugin marketplace:</p>
+<pre><code class="language-text">/plugin marketplace add SnowBankSDK/foundationdb-dotnet-client
+/plugin install foundationdb-dotnet-skills@snowbank
+</code></pre>
+<p>Update later with <code>/plugin update foundationdb-dotnet-skills@snowbank</code>.</p>
+<h2>Which version of the skills you get</h2>
+<p>The skills describe the version of the library they were written against, and they are versioned by <strong>git tag</strong>, the same tag that produced the NuGet packages. Every feature added in a given release is marked in the text, for example <em>(7.4.3+)</em>.</p>
+<p><code>/plugin marketplace add</code> with no ref tracks this repository's <strong>default branch</strong>, so it gives you the skills for the version under development, which is ahead of the latest published package. That is the right default while you are following the library, and the wrong one if you are pinned to an older release: the skills will describe APIs your package does not have.</p>
+<p>To get the skills that match the package version you actually reference, pin the marketplace to that tag in your <code>.claude/settings.json</code>:</p>
+<pre><code class="language-json">{
+  "extraKnownMarketplaces": {
+    "snowbank": {
+      "source": {
+        "source": "github",
+        "repo": "SnowBankSDK/foundationdb-dotnet-client",
+        "ref": "7.4.2"
+      }
+    }
+  }
+}
+</code></pre>
+<p>Change <code>ref</code> to the tag matching your package (<code>7.4.2</code>, <code>7.4.1</code>, ...) and run <code>/plugin install foundationdb-dotnet-skills@snowbank</code>. A marketplace source accepts a branch or a tag; it does not accept a commit SHA. When you upgrade the package, move the <code>ref</code> in the same commit, so the skills and the package never disagree.</p>
+<p>Alternatives, if you'd rather not use the plugin system (all of them work at a tag: check the repository out at that tag first):</p>
+<ul>
+<li><strong>Personal (all your projects):</strong> copy the skill folders into <code>~/.claude/skills/</code>.</li>
+<li><strong>Per-project:</strong> copy them into your app's <code>.claude/skills/</code> and commit them.</li>
+<li><strong>Submodule users:</strong> point Claude at the checked-out submodule with <code>claude --add-dir path/to/foundationdb-dotnet-client</code> (or <code>/add-dir</code>), which loads its <code>.claude/skills/</code>. A submodule is already pinned to a commit, so this matches your version by construction.</li>
+</ul>
+<p>The same material is available as human-readable documentation in <a href="https://snowbanksdk.github.io/foundationdb-dotnet-client/fdb/guide/" target="_blank" rel="noopener noreferrer">the guide</a> for developers (and agents that don't support Agent Skills).</p>
+<h1>How to build</h1>
+<h2>Visual Studio Solution</h2>
+<p>You will need Visual Studio 2022 version 17.14 or above to build the solution (C# 14 and .NET 10.0 support is required).</p>
+<h3>From the Command Line</h3>
+<p>You can also build, test and compile the NuGet packages from the command line using the <code>dotnet</code> CLI:</p>
+<ul>
+<li><code>dotnet build</code> to build (in DEBUG) all the projects in the solution</li>
+<li><code>dotnet test</code> to run the unit tests (requires a working local FoundationDB cluster).</li>
+</ul>
+<p>The <code>scripts/</code> folder contains helpers for common tasks:</p>
+<ul>
+<li><code>scripts/build.ps1</code> / <code>scripts/build.sh</code>: run a fully isolated <strong>standalone</strong> restore, clean and build (this repo's complete target set), even when it is checked out as a sub-module (see the <em>As a sub-module</em> section below). Add <code>Release</code> for a Release build.</li>
+<li><code>scripts/pack.ps1</code> / <code>scripts/pack.sh</code>: build and validate the NuGet packages (they do not push to any feed).</li>
+</ul>
+<h3>As a sub-module</h3>
+<p>Most projects in this repository are targeting multiple frameworks, meaning that each project will be built several times, one for each target.</p>
+<p>When consuming this repository as a sub-module inside another repository, all the included projects will still want to build for all these targets, even if your parent solution only targets one framework (or a different subset).</p>
+<p>This can also cause issues if your application is targeting an older .NET runtime and SDK (for example <code>net10.0</code> using the .NET 10.0.x SDK), which do not support more recent targets from this repo (ex: <code>net11.0</code>).</p>
+<p>By default, the <code>Directory.Build.props</code> will attempt to detect when it is inside a git sub-module, and import any <code>Directory.Build.props</code> in the parent directory.</p>
+<blockquote>
+<p><strong>Note:</strong> Some CI build environments may check out sub-modules in a non-standard way. If this happens, you can set the environment variable <code>FDB_BUILD_PROPS_OVERRIDE</code> to <code>1</code> in order to bypass the check.</p>
+</blockquote>
+<p>This parent props file can then override a series of msbuild variables that are injected in the <code>TargetFrameworks</code> property of all <code>.csproj</code> in this repo:</p>
+<ul>
+<li><code>CoreSdkVersions</code>: overrides the value of all the other variables at once. Use this if you are single-targeting.</li>
+</ul>
+<p>If you are multi-targeting and need more fine-grained precision, you can use the following variables:</p>
+<ul>
+<li><code>CoreSdkRuntimeVersions</code>: targets for all the core libraries (FoundationDB.Client.dll, ...) that are redistributed</li>
+<li><code>CoreSdkToolsVersions</code>: targets for all the tools and executables (FdbShell, FdbTop, ...) that are redistributed</li>
+<li><code>CoreSdkUtilityVersions</code>: targets for all the internal tools and executables that are only used for building and testing, and are not expected to be redistributed.</li>
+<li><code>CloudSdkRuntimeVersions</code>: targets for all libraries that reference .NET Aspire (which only supports .NET 8 or later).</li>
+</ul>
+<p>If your parent repository is also multi-targeting, you can specify several targets, like for example <code>net10.0;net11.0</code>. Note that if you target a more recent framework that this repo does not support, the build may fail.</p>
+<p>An example of a parent <code>Directory.Build.props</code> that overrides the build to only target <code>net10.0</code>:</p>
+<pre><code class="language-xml">&lt;Project&gt;
+	&lt;PropertyGroup&gt;
+
+		&lt;!-- Force all projects in the FoundationDB sub-module to target net10.0 --&gt;
+		&lt;CoreSdkVersions&gt;net10.0&lt;/CoreSdkVersions&gt;
+
+	&lt;/PropertyGroup&gt;
+&lt;/Project&gt;
+</code></pre>
+<p>An example of a parent <code>Directory.Build.props</code> that multi-targets <code>net10.0</code> and <code>net11.0</code>, but only wants to build the tools for <code>net11.0</code>:</p>
+<pre><code class="language-xml">&lt;Project&gt;
+	&lt;PropertyGroup&gt;
+
+		&lt;!-- If you are using FoundationDB.Client, SnowBank.Core, etc... --&gt;
+		&lt;CoreSdkRuntimeVersions&gt;net10.0;net11.0&lt;/CoreSdkRuntimeVersions&gt;
+
+		&lt;!-- If you are using the FoundationDB .NET Aspire Integration --&gt;
+		&lt;CloudSdkRuntimeVersions&gt;net10.0;net11.0&lt;/CloudSdkRuntimeVersions&gt;
+
+		&lt;!-- If you are using any of the tools (FdbShell, FdbTop) --&gt;
+		&lt;CoreSdkToolsVersions&gt;net11.0&lt;/CoreSdkToolsVersions&gt;
+
+	&lt;/PropertyGroup&gt;
+&lt;/Project&gt;
+</code></pre>
+<h3>Building this repository on its own (standalone)</h3>
+<p>When you want to build, test, or package <strong>this repository on its own</strong> while it is still checked out inside such a parent (for example to validate the <code>net8.0</code> or <code>netstandard2.0</code> targets that a target-trimming parent would otherwise hide, or to produce a complete NuGet package), force a <strong>standalone</strong> build with the <code>CORESDK_STANDALONE_BUILD</code> property set to <code>true</code>. This makes the <code>Directory.Build.props</code> ignore the parent overrides entirely and restore this repo's own complete target set.</p>
+<p>Pass it as an MSBuild property, not as an environment variable, so that it stays scoped to a single command and does not leak into your shell:</p>
+<pre><code>dotnet build FoundationDB.Client.slnx -p:CORESDK_STANDALONE_BUILD=true
+</code></pre>
+<p>Or use the helper scripts, which run a consistent <code>restore</code>, <code>clean</code> and <code>build</code> in standalone mode (add <code>Release</code> for a Release configuration):</p>
+<pre><code>./scripts/build.ps1
+./scripts/build.sh
+</code></pre>
+<blockquote>
+<p><strong>Important:</strong> the restore step writes the shared <code>artifacts/obj/**/project.assets.json</code> files for the standalone (complete) target set, which is a superset of what the parent restores. Because the restore state is shared, the next build <strong>from the parent</strong> must re-run <code>dotnet restore</code> first, otherwise it fails with <code>NETSDK1005</code> (the assets file has no target for the parent's framework). Keep <code>restore</code>, <code>build</code> and <code>clean</code> on the same mode; when you switch modes, re-run <code>dotnet restore</code>.</p>
+</blockquote>
+<h1>How to test</h1>
+<p>The test projects are using NUnit 4, and the test runner must run as a 64-bit process (32-bit is not supported).</p>
+<blockquote>
+<p>In order to run the tests, you will also need to obtain the <code>fdb_c.dll</code>/<code>libfdb_c.so</code> native library.</p>
+</blockquote>
+<p>You can either run the tests from Visual Studio or Visual Studio Code, using any extension (like ReSharper), or from the command line via <code>dotnet test</code>.</p>
+<blockquote>
+<p>WARNING: All the tests try to run in a dedicated subspace, but there is a possibility of data corruption if they are running against a test or staging cluster! You should run the tests against a local cluster where all the data is considered expendable!</p>
+</blockquote>
+<h1>Implementation Notes</h1>
+<p>Please refer to <a href="https://apple.github.io/foundationdb/" target="_blank" rel="noopener noreferrer">https://apple.github.io/foundationdb/</a> to get an overview of the FoundationDB API, if you haven't already.</p>
+<p>This .NET binding has been modeled to be as close as possible to the other bindings (Python especially), while still having a '.NET' style API. </p>
+<p>There were a few design goals that you may agree with or not:</p>
+<ul>
+<li>Reducing the need to allocate <code>byte[]</code> as much as possible. To achieve that, I'm using a <code>Slice</code> struct that is the logical equivalent of <code>ReadOnlyMemory&lt;byte&gt;</code>, but more versatile.</li>
+<li>Mapping FoundationDB's Future into <code>Task&lt;T&gt;</code> to be able to use <code>async</code>/<code>await</code>. </li>
+<li>Reducing the risks of memory leaks in long running server processes by wrapping all FDB_xxx handles with .NET <code>SafeHandle</code>. This adds a little overhead when P/Invoking into native code, but will guarantee that all handles get released at some time (during the next GC).</li>
+<li>The Tuple layer has also been optimized to reduce the number of allocations required, and cache the packed bytes of often used tuples (in subspaces, for example).</li>
+</ul>
+<p>However, there are some key differences between Python and .NET that may cause problems:</p>
+<ul>
+<li>Python's dynamic types and auto casting of Tuple values are difficult to model in .NET (without relying on the DLR). The Tuple implementation tries to be as dynamic as possible, but if you want to be safe, please try to only use strings, longs, bools and byte[] to be 100% compatible with other bindings. You should refrain from using the untyped <code>tuple[index]</code> indexer (that returns an object), and instead use the generic <code>tuple.Get&lt;T&gt;(index)</code> that will try to adapt the underlying type into a T.</li>
+<li>The Tuple layer uses ASCII and Unicode strings, while .NET only has Unicode strings. That means that all strings in .NET will be packed with prefix type 0x02 and byte arrays with prefix type 0x01. An ASCII string packed in Python will be seen as a byte[] unless you use <code>ITuple.Get&lt;string&gt;()</code> that will automatically convert it to Unicode.</li>
+<li>There is no dedicated 'UUID' type prefix, so that means that <code>System.Guid</code> would be serialized as byte arrays, and all instances of byte 0 would need to be escaped. Since <code>System.Guid</code> is frequently used as primary keys, I added a new custom type prefix (0x30) for 128-bit UUIDs and (0x31) for 64-bit UUIDs. This simplifies packing/unpacking and speeds up writing/reading/comparing Guid keys.</li>
+</ul>
+<p>The following files will be required by your application</p>
+<ul>
+<li><code>FoundationDB.Client.dll</code> : Contains the core types (FdbDatabase, FdbTransaction, ...) and infrastructure to connect to a FoundationDB cluster and execute basic queries, as well as the Tuple and Subspace layers.</li>
+<li><code>FoundationDB.Layers.Common.dll</code> : Contains common Layers that emulate Tables, Indexes, Document Collections, Blobs, ...</li>
+<li><code>fdb_c.dll</code>/<code>libfdb_c.so</code> : The native C client that you will need to obtain from the official FoundationDB Windows setup or Linux client packages.</li>
+</ul>
+<h1>Known Limitations</h1>
+<ul>
+<li>Since the native FoundationDB client is 64-bit only, this .NET library is also for 64-bit only applications! Even though it targets AnyCPU, it would fail at runtime. <em>Don't forget to disable the <code>Prefer 32-bit</code> option in your project Build properties, which is enabled by default!</em> </li>
+<li>You cannot unload the fdb C native client from the process once the network thread has started. You can stop the network thread once, but it does not support being restarted. This can cause problems when running under ASP.NET.</li>
+<li>FoundationDB does not support long-running batch or range queries if they take too much time. Such queries will fail with a 'past_version' error. The current maximum duration for read transactions is 5 seconds.</li>
+<li>FoundationDB has a maximum allowed size of 100,000 bytes for values, and 10,000 bytes for keys. Larger values must be split into multiple keys.</li>
+<li>FoundationDB has a maximum allowed size of 10,000,000 bytes for writes per transaction (sum of all keys and values that are mutated). You need multiple transactions if you need to store more data. There is a Bulk API (<code>Fdb.Bulk.*</code>) to help with the most common cases (import, export, backup/restore, ...)</li>
+<li>See <a href="https://apple.github.io/foundationdb/known-limitations.html" target="_blank" rel="noopener noreferrer">https://apple.github.io/foundationdb/known-limitations.html</a> for other known limitations of the FoundationDB database.</li>
+</ul>
+<h1>License</h1>
+<p>This code is licensed under the 3-clause BSD License.</p>
+<h1>Contributing</h1>
+<ul>
+<li>Yes, we use tabs! Get over it.</li>
+<li>Style rules are encoded in <code>.editorconfig</code> which is supported by most IDEs (or via extensions).</li>
+<li>You can visit the FoundationDB forums for generic questions (not .NET): <a href="https://forums.foundationdb.org/" target="_blank" rel="noopener noreferrer">https://forums.foundationdb.org/</a></li>
+</ul>

@@ -1,0 +1,532 @@
+<h1>pxpipe</h1>
+<p><strong>Cut Claude Code's input tokens by rendering bulky context as images — the same system prompt, tool docs, and history, in a fraction of the tokens.</strong></p>
+<p>An image's token cost is fixed by its pixel dimensions, not by how much text
+is inside it. Dense content (code, JSON, tool output) packs ~3.1 chars per
+image-token vs ~1 char per text-token on real Claude Code traffic. The
+reader is the same vision channel that Anthropic's computer use already
+relies on for screenshots. pxpipe is a local proxy that uses that channel
+for context: it rewrites the bulky parts of each request into compact PNGs
+before it leaves your machine. At current Fable
+list prices that lands as a <strong>~59–70% lower end-to-end bill</strong> — but prices
+move and workloads differ, so the durable number is the token cut itself,
+measured per-request against a free <code>count_tokens</code> counterfactual in
+<code>~/.pxpipe/events.jsonl</code>.</p>
+<p>This is what the model sees instead of text:</p>
+<p><img src="https://raw.githubusercontent.com/teamchong/pxpipe/main/docs/assets/example-render.png" alt="example: a real transformRequest output: system prompt + tool docs reflowed into one dense page, instruction banner on top, ↵ marking original newlines" /></p>
+<p><em>~48k chars of system prompt + tool docs: ≈25k tokens as text, ≈2.7k image
+tokens as this page. Real pipeline output; the model reads renders like this
+at 100/100 (see benchmarks).</em></p>
+<p><img src="https://raw.githubusercontent.com/teamchong/pxpipe/HEAD/docs/assets/context-window-chars.png" alt="chart: characters a frontier context window holds, 2018–2026 — vendor text series including Grok 4.5; orange measured overlays are Fable 5 [1m] + pxpipe ~19.0M (4.8×) and Gemini 3.6 Flash + pxpipe ~21.3M (5.3×)" /></p>
+<p>*Eight years of context growth, in characters. Every text line tops out near
+~4M chars (a 1M-token window at ~4 chars/token); <strong>Grok 4.5</strong> is shown as a
+text-window point only (500K). The orange overlays are the <strong>same 1M
+windows</strong> read through pxpipe images — ~19.0M chars for Fable 5 (<strong>4.8×</strong>) and ~21.3M chars for Gemini 3.6 Flash (<strong>5.3×</strong> text capacity). Density is measured from a live render at
+generation time, not hand-typed: regenerate with
+<code>npx tsx scripts/gen-context-chart.ts</code>
+(<a href="https://github.com/teamchong/pxpipe/blob/HEAD/scripts/gen-context-chart.ts" target="_blank" rel="noopener noreferrer">source</a>).*</p>
+<h2>Demo</h2>
+<p><strong>Fable 5 (the default, 100/100 reader) — plain left, pxpipe right:</strong></p>
+<p><a href="https://github.com/user-attachments/assets/1c8ee63a-fcd7-4958-917b-da788d718349" target="_blank" rel="noopener noreferrer">https://github.com/user-attachments/assets/1c8ee63a-fcd7-4958-917b-da788d718349</a></p>
+<p>pxpipe counts an exact token <strong>10/10</strong> across 39 imaged filler files
+(matches <code>grep</code> line-for-line), gets the multi-step ledger arithmetic right,
+and ends the session at <strong>$6.06</strong> with context to spare (73.5k/1M) vs
+<strong>$42.21</strong> at 96% full. One caveat visible in the clip: the pxpipe arm
+needed a nudge to match the requested one-line output format.</p>
+<h2>Try it (30 seconds)</h2>
+<pre><code class="language-bash">npx pxpipe-proxy                                  # proxy on 127.0.0.1:47821
+ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude  # point Claude Code at it
+</code></pre>
+<p>Dashboard at <a href="http://127.0.0.1:47821/" target="_blank" rel="noopener noreferrer">http://127.0.0.1:47821/</a>: tokens saved, every text→image
+conversion side by side, kill switch, live model chips. Responses stream
+normally — pxpipe compresses the <em>request</em> only, never the model's output.
+Recent turns stay text; the system prompt, tool docs, and older bulk history
+are imaged.</p>
+<h3><code>pxpipe warp</code></h3>
+<pre><code class="language-bash">pxpipe warp -- claude          # also: cursor-agent, codex, or a shell alias
+</code></pre>
+<p>Same thing without <code>ANTHROPIC_BASE_URL</code>, so <code>/remote-control</code>, claude.ai
+connectors, and first-party gates keep working. Full instructions in the
+dashboard.</p>
+<p><code>api.anthropic.com/v1/messages</code> is routed by default. Agents that reach their
+provider over some other base URL need a rule for it, and a rule that names a
+port matches only that port:</p>
+<pre><code class="language-bash">pxpipe warp --route '127.0.0.1:9090/v1/*=http://127.0.0.1:47821' -- codex
+</code></pre>
+<h2>Offline export (no proxy)</h2>
+<p>You can render text, files, or diffs to PNG pages without running the proxy or
+connecting Claude Code:</p>
+<pre><code class="language-bash">npx pxpipe-proxy export src/
+cat prompt.txt | npx pxpipe-proxy export --stdin
+npx pxpipe-proxy export --git
+</code></pre>
+<p>If the package is installed, use <code>pxpipe export</code> instead of
+<code>npx pxpipe-proxy export</code>.</p>
+<p>Each run writes a fresh <code>pxpipe-export-XXXXXX/</code> output folder (the exact path
+is printed when the command finishes) containing <code>page-*.png</code>, <code>factsheet.txt</code>,
+<code>manifest.json</code>, and <code>prompt.txt</code>. Upload the PNG pages and paste the prompt
+into image-upload clients such as Cursor when you want dense visual context
+without running the proxy.</p>
+<h2>The honest part</h2>
+<ul>
+<li><strong>It is lossy.</strong> Exact 12-char hex strings in dense imaged content:
+<strong>13/15</strong> on Fable 5 and <strong>0/15</strong> on Sol — misses are <em>silent
+confabulations</em>, not errors. Byte-exact values (IDs, hashes, secrets)
+must stay text; recent turns do. The factsheet selectively preserves up to
+96 recognized precision-critical tokens, not every identifier. A dedicated
+verbatim-risk guard is not built yet.</li>
+<li><strong>Escape hatch:</strong> subagents on non-allowlisted models pass through as
+text — route byte-exact work there
+(<code>CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-4-6</code>, or <code>model: sonnet</code> in
+agent frontmatter).</li>
+<li><strong>Real work:</strong> SWE-bench Lite pilot <strong>10/10 both arms</strong> at −65% request
+size; SWE-bench Pro <strong>14/19 ON vs 15/19 OFF</strong> at −60%, verdicts agree
+18/19, and the single split re-resolved 3/3 on replication — run-to-run
+variance, not compression. Small n; receipts in <code>eval/</code>.</li>
+<li><strong>Workload-dependent.</strong> Wins on token-dense content (~1 char/token),
+loses money on sparse prose (~3.5 chars/token); a profitability gate
+(calibrated on N=391 production rows) images only where the math wins.</li>
+<li><strong>Client-dependent.</strong> Savings track uncached bulk the client still
+re-sends as text. Claude Code re-sends system + tools + history on
+<code>/anthropic/messages</code> and typically lands ~60–70%. Details and measured
+splits: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/docs/CACHING_AND_SAVINGS.md" target="_blank" rel="noopener noreferrer">docs/CACHING_AND_SAVINGS.md</a>.</li>
+</ul>
+<details>
+<summary><strong>Model support and rendering details</strong></summary><ul>
+<li><strong><code>claude-opus-5</code>:</strong> weaker recall than Fable 5 (verbatim <strong>2/15 vs 13/15</strong>), good
+enough otherwise (100/100 arithmetic, 0/16 never-stated), <strong>~4.7×</strong> context before
+<code>/compact</code>. Suggested effort: <strong>medium</strong>. Details: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/FINDINGS.md" target="_blank" rel="noopener noreferrer">FINDINGS.md</a>.</li>
+<li><strong><code>claude-opus-5-5</code>:</strong> on by default. Uses 5×8 with 2px extra row height
+(~25% more image tokens than Fable's layout, still ~50%+ live savings).
+Exact hex recall is weak (3/15); re-fetch exact ids.</li>
+<li><strong>Model scope:</strong> default <code>PXPIPE_MODELS=claude-fable-5,claude-opus-5-5,gemini</code>. The <code>gemini</code>
+base covers every Gemini id (3.6/3.7/3.8 Flash, Pro, 4, 5, and future
+versions); to opt Gemini out, drop <code>gemini</code> from <code>PXPIPE_MODELS</code> or click the
+chip off. Opus 5, Sol, GPT 5.5, and <strong>Grok</strong> are opt-in only (dashboard chips or
+<code>PXPIPE_MODELS</code>). The exact Sol id still matters. Sibling variants such as
+<code>gpt-5.6-terra</code> do not
+inherit Sol's allowlist or render profile. <code>PXPIPE_MODELS=off</code> disables
+imaging. Everything else passes through byte-identical. On the GPT path,
+tool definitions stay native JSON and no Anthropic <code>cache_control</code>
+markers are used. Responses history compression recognizes completed
+<code>function_call</code>/<code>function_call_output</code> pairs, including OpenCode's parallel
+calls-then-outputs rounds: only old closed rounds are imaged atomically;
+every open call and malformed/orphan state remains native. The base profile
+keeps the newest six completed pairs and allows 32 images; Sol keeps one pair
+and allows 64 images, while Grok allows 24 images. Opt-in long-session
+coverage can be changed (defensive cap 100) with
+<code>PXPIPE_GPT_HISTORY_MAX_IMAGES=48</code> after validating the provider's request cap.</li>
+<li><strong>Per-model rendering:</strong> opt-in <code>gpt-5.6-sol</code> and Grok use native 14px
+JetBrains Mono glyphs in a 9×16 cell, 84 columns, and a 764px full-width
+strip; Claude keeps its 312-column, 1568×728 5×8 Spleen profile. These
+are selected by exact model id, including history pages and profitability
+math. Recognized IDs can ride in the bounded factsheet, and
+recent/open tool state stays native.
+<a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/sol-profile/QUALITY_RESULTS.md" target="_blank" rel="noopener noreferrer">Sol receipts</a> and
+<a href="https://github.com/teamchong/pxpipe/blob/HEAD/docs/MODEL_RENDER_PROFILES.md" target="_blank" rel="noopener noreferrer">profile evidence</a>.</li>
+<li><strong>Grok 4.5 / 4.6 (opt-in):</strong> native 14px / 84 cols / maxH 512 (100/100 arith, 97/98 gist).
+Off by default (dense hex still 0/15). History uses mixed collapse so Codex
+assistant messages between tool rounds still image. Enable with
+<code>PXPIPE_MODELS=claude-fable-5,grok-4.6</code> or the dashboard chip.
+<a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/grok-density/QUALITY_RESULTS.md" target="_blank" rel="noopener noreferrer">eval/grok-density/QUALITY_RESULTS.md</a>.</li>
+</ul>
+</details><h2>Benchmark results and receipts</h2>
+<h3>Model quality</h3>
+<p>This matrix shows coverage as well as scores. <code>—</code> means the model was not run
+on that test; it does not mean zero. Arithmetic uses novel random-number
+problems. Gist, state, and never-stated probes share one corpus. Never-stated
+is confabulations, so lower is better. The <strong>numbers at</strong> column is the render
+geometry the row's scores were measured at; a model's shipped profile can
+differ (Sol and Qwen ship the measured 14px/84 geometry, but their broad-suite
+numbers predate it).</p>
+<table>
+<thead>
+<tr>
+<th>model</th>
+<th>numbers at</th>
+<th align="right">arithmetic (N=100)</th>
+<th align="right">gist (N=98)</th>
+<th align="right">state (N=18)</th>
+<th align="right">never-stated (N=16)</th>
+<th align="right">dense hex (N=15)</th>
+<th>profile provenance and receipts</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>claude-fable-5</code></td>
+<td>Spleen 5×8, 312 cols (shipped)</td>
+<td align="right"><strong>100/100</strong></td>
+<td align="right"><strong>98/98</strong></td>
+<td align="right"><strong>18/18</strong></td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">13/15</td>
+<td>June 2026 production profiles: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/FINDINGS.md" target="_blank" rel="noopener noreferrer">arithmetic + hex</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gist-recall/" target="_blank" rel="noopener noreferrer">gist/state/guards</a></td>
+</tr>
+<tr>
+<td><code>claude-fable-5-1</code></td>
+<td>Spleen 5×8, 312 cols (Fable 5 profile)</td>
+<td align="right"><strong>100/100</strong></td>
+<td align="right">95/98</td>
+<td align="right"><strong>18/18</strong></td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">6/15</td>
+<td>Fable 5 profile, no geometry of its own; 3 gist misses are image-arm negation flags answered UNKNOWN (0 confabs). Same-day Fable 5 control on the identical harness/PNGs reproduced 100/100 arithmetic and 30/30 tier-2 gist, so the gist/hex gap is the model, not the harness (hex control not rerun): <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/sol-profile/" target="_blank" rel="noopener noreferrer">arithmetic</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/verbatim-15/" target="_blank" rel="noopener noreferrer">dense hex</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gist-recall/" target="_blank" rel="noopener noreferrer">gist/state/guards</a></td>
+</tr>
+<tr>
+<td><code>google/gemini-3.6-flash</code>, <code>3.7-flash</code></td>
+<td>Spleen 5×8, 312 cols (shipped)</td>
+<td align="right"><strong>100/100</strong></td>
+<td align="right"><strong>98/98</strong></td>
+<td align="right"><strong>18/18</strong></td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right"><strong>14/15</strong></td>
+<td>current shipped profile: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gemini-profile/QUALITY_RESULTS.md" target="_blank" rel="noopener noreferrer">quality results</a></td>
+</tr>
+<tr>
+<td><code>claude-opus-5</code></td>
+<td>Spleen 5×8, 312 cols (shipped)</td>
+<td align="right"><strong>100/100</strong></td>
+<td align="right">94/98</td>
+<td align="right">17/18</td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">2/15</td>
+<td>current profile: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gsm8k/" target="_blank" rel="noopener noreferrer">arithmetic</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gist-recall/" target="_blank" rel="noopener noreferrer">gist/state/guards</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/verbatim-15/" target="_blank" rel="noopener noreferrer">dense hex</a></td>
+</tr>
+<tr>
+<td><code>claude-opus-5-5</code> (default)</td>
+<td>Spleen 5×8, 312 cols, +2px rows</td>
+<td align="right"><strong>100/100</strong></td>
+<td align="right">94/98</td>
+<td align="right">17/18</td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">3/15</td>
+<td>spaced profile (Opus 5.5+); hex measured at dense geometry: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/sol-profile/" target="_blank" rel="noopener noreferrer">arithmetic</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gist-recall/" target="_blank" rel="noopener noreferrer">gist/state/guards</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/verbatim-15/" target="_blank" rel="noopener noreferrer">dense hex</a></td>
+</tr>
+<tr>
+<td><code>gpt-5.6-sol</code></td>
+<td>Spleen 5×8, 152 cols; <strong>ships 14px/84</strong></td>
+<td align="right">98/100</td>
+<td align="right">83/98</td>
+<td align="right">17/18</td>
+<td align="right">4/16</td>
+<td align="right">0/15</td>
+<td>broad suite predates the shipped 14px profile; 14px pilot: 7/8 exact, 0 inventions, gist/guard pass: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/sol-profile/README.md" target="_blank" rel="noopener noreferrer">pilot</a></td>
+</tr>
+<tr>
+<td><code>claude-opus-4-8</code></td>
+<td>Spleen 5×8, 312 cols (historical)</td>
+<td align="right">93/100</td>
+<td align="right">77/98</td>
+<td align="right"><strong>18/18</strong></td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">0/15</td>
+<td>historical profile: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gsm8k/" target="_blank" rel="noopener noreferrer">arithmetic</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gist-recall/" target="_blank" rel="noopener noreferrer">gist/state/guards</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/needle-haystack/" target="_blank" rel="noopener noreferrer">dense hex</a></td>
+</tr>
+<tr>
+<td><code>grok-4.5</code></td>
+<td>JetBrains Mono 14px, 84 cols (shipped)</td>
+<td align="right"><strong>100/100</strong></td>
+<td align="right"><strong>97/98</strong></td>
+<td align="right">17/18</td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">0/15</td>
+<td>native 14px/84 quality suite (live profile); <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/grok-density/QUALITY_RESULTS.md" target="_blank" rel="noopener noreferrer">quality</a>, <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/grok-density/native-sweep/RESULTS.md" target="_blank" rel="noopener noreferrer">native-sweep</a></td>
+</tr>
+<tr>
+<td><code>grok-4.6</code> high</td>
+<td>JetBrains Mono 14px, 84 cols (shipped)</td>
+<td align="right"><strong>100/100</strong></td>
+<td align="right"><strong>97/98</strong></td>
+<td align="right">17/18</td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">0/15</td>
+<td>native 14px/84, reasoning high; <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/grok-profile/QUALITY_RESULTS.md" target="_blank" rel="noopener noreferrer">quality</a></td>
+</tr>
+<tr>
+<td><code>moonshotai/kimi-k3</code></td>
+<td>Spleen 5×8, 152 cols (generic default)</td>
+<td align="right">79/100</td>
+<td align="right">84/98</td>
+<td align="right">15/18</td>
+<td align="right">1/16</td>
+<td align="right">0/15</td>
+<td>generic GPT profile, no measured geometry of its own: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/sol-profile/KIMI_K3_QUALITY_RESULTS.md" target="_blank" rel="noopener noreferrer">quality results</a></td>
+</tr>
+<tr>
+<td><code>qwen-3.8</code> (<code>@cf/qwen/qwen3.8-27b</code>)</td>
+<td>Spleen 5×8, 152 cols; <strong>ships 14px/84</strong></td>
+<td align="right">98/100</td>
+<td align="right">72/98</td>
+<td align="right">11/18</td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">0/15</td>
+<td>broad suite predates the shipped 14px profile; 14px pilot: 8/8 exact, 0 inventions, 11/15 hex: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/qwen-profile/QUALITY_RESULTS.md" target="_blank" rel="noopener noreferrer">pilot &amp; quality</a></td>
+</tr>
+<tr>
+<td><code>glm-5.3-flash</code> (<code>@cf/zai-org/glm-5.3-flash</code>)</td>
+<td>Spleen 5×8, 152 cols (default fallback, nothing shipped)</td>
+<td align="right">36/100</td>
+<td align="right">57/98</td>
+<td align="right">6/18</td>
+<td align="right"><strong>0/16</strong></td>
+<td align="right">0/15</td>
+<td>5×8 is illegible to GLM (0/15 hex); 14px pilot: 10/15 hex, all misses single-glyph confabs, guards 0/16: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/glm-profile/QUALITY_RESULTS.md" target="_blank" rel="noopener noreferrer">pilot &amp; quality</a></td>
+</tr>
+</tbody></table>
+<h3>Native-profile cost check</h3>
+<p>Offline export of the same deterministic 454,045-character dense record corpus
+through each complete profile produced:</p>
+<table>
+<thead>
+<tr>
+<th>model profile</th>
+<th align="right">pages</th>
+<th align="right">text estimate</th>
+<th align="right">image tokens</th>
+<th align="right">savings</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Claude, Spleen 5×8</td>
+<td align="right">17</td>
+<td align="right">122,715</td>
+<td align="right">23,856</td>
+<td align="right">80.6%</td>
+</tr>
+<tr>
+<td>Sol, JetBrains Mono 14px</td>
+<td align="right">45</td>
+<td align="right">122,715</td>
+<td align="right">65,424</td>
+<td align="right">46.7%</td>
+</tr>
+</tbody></table>
+<p>The text estimate uses 3.7 characters/token; image tokens use each model's
+provider formula and actual rendered page dimensions. These figures establish
+profile cost on this corpus, not a universal workload savings rate. Sol's paid
+fixtures estimated 42% while reading 7/8 exact with no unsupported inventions.</p>
+<p>The runs use different transports and profile generations, not one identical
+image geometry. Fable and Opus use Claude; Gemini uses Google AI Studio; Sol
+and Grok use Codex Responses; Kimi K3 uses Cloudflare's OpenAI-compatible
+transport. Current production profiles include the adjacent bounded factsheet;
+historical or pure-image exceptions are identified in the linked evaluation.</p>
+<h3>Model-specific evaluations</h3>
+<p>These are not cross-model comparisons. Every unlisted model is <strong>not run</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>test</th>
+<th>model</th>
+<th>result</th>
+<th>evaluation and receipts</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>SWE-bench Lite</td>
+<td><code>claude-fable-5</code></td>
+<td>pxpipe 10/10; text 10/10; −65% request size</td>
+<td><a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/swe-bench/" target="_blank" rel="noopener noreferrer">paired pilot</a></td>
+</tr>
+<tr>
+<td>SWE-bench Pro</td>
+<td><code>claude-fable-5</code></td>
+<td>pxpipe 14/19; text 15/19; −60% request size</td>
+<td><a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/swe-bench-pro/" target="_blank" rel="noopener noreferrer">paired pilot</a></td>
+</tr>
+<tr>
+<td>production-history row localization</td>
+<td><code>google/gemini-3.6-flash</code></td>
+<td>text 17/30; pxpipe 18/30</td>
+<td><a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gemini-profile/QUALITY_RESULTS.md#production-history-positional-retrieval" target="_blank" rel="noopener noreferrer">positional retrieval</a></td>
+</tr>
+<tr>
+<td>production-history exact row</td>
+<td><code>google/gemini-3.6-flash</code></td>
+<td>text 3/30; pxpipe 3/30</td>
+<td><a href="https://github.com/teamchong/pxpipe/blob/HEAD/eval/gemini-profile/QUALITY_RESULTS.md#production-history-positional-retrieval" target="_blank" rel="noopener noreferrer">positional retrieval</a></td>
+</tr>
+</tbody></table>
+<p>The SWE-bench runner is Claude Code/Fable-specific; no other model has an ON/OFF
+run. Gemini's positional-retrieval sweep is directional evidence, not a general
+Lost-in-the-Middle result.</p>
+<h3>Capacity / density (how many chars per vision-token?)</h3>
+<p>Measured by rendering this repo’s dense fixture through the real pipeline and
+pricing pixels at each family’s vision rate. Multiplier = measured
+chars/vision-token ÷ 4 (prose text baseline). Not a model-quality score.</p>
+<table>
+<thead>
+<tr>
+<th>family</th>
+<th align="right">window</th>
+<th align="right">as text (@4 c/tok)</th>
+<th align="right">as pxpipe images</th>
+<th align="right">density</th>
+<th align="right">multiplier</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong><code>claude-fable-5[1m]</code></strong> (default)</td>
+<td align="right">1M</td>
+<td align="right">~4.0M</td>
+<td align="right"><strong>~18.9M</strong></td>
+<td align="right">~18.9 c/vt (exact 28px patches)</td>
+<td align="right"><strong>~4.7×</strong></td>
+</tr>
+<tr>
+<td><strong><code>google/gemini-3.6-flash</code></strong></td>
+<td align="right">1M</td>
+<td align="right">~4.0M</td>
+<td align="right"><strong>~20.1M</strong></td>
+<td align="right">~20.1 c/vt (1,078 tok/page)</td>
+<td align="right"><strong>~5.0×</strong></td>
+</tr>
+<tr>
+<td><strong><code>claude-opus-5</code></strong></td>
+<td align="right">1M</td>
+<td align="right">~4.0M</td>
+<td align="right"><strong>~18.9M</strong></td>
+<td align="right">~18.9 c/vt (resolves to Fable 5’s geometry)</td>
+<td align="right"><strong>~4.7×</strong></td>
+</tr>
+</tbody></table>
+<p>Regenerate: <code>npx tsx scripts/gen-context-chart.ts</code> · chart PNG
+<a href="https://github.com/teamchong/pxpipe/blob/HEAD/docs/assets/context-window-chars.png" target="_blank" rel="noopener noreferrer"><code>docs/assets/context-window-chars.png</code></a>.</p>
+<p>The older GSM8K result is omitted because its training-data contamination can
+hide image misreads; the linked arithmetic evaluations use novel numbers.</p>
+<h2>How it works</h2>
+<pre><code>model id ──► render profile ──► wrap/reflow bulk context ──► PNG[] + bounded factsheet
+</code></pre>
+<p>The proxy handles Anthropic Messages, OpenAI Responses and Chat Completions,
+and Google <code>generateContent</code> requests. It rewrites eligible bulk into image
+blocks and forwards the provider-native request, or bridges Anthropic Messages
+to a configured OpenAI-compatible provider. On Anthropic, the static prefix and
+prompt-cache boundary are preserved. Model-specific profiles control geometry,
+factsheets, history retention, and profitability, so sparse prose stays text.
+Events log to <code>~/.pxpipe/events.jsonl</code>.</p>
+<h2>Library use (no proxy)</h2>
+<pre><code class="language-ts">import { renderTextToImages, transformAnthropicMessages } from "pxpipe-proxy";
+
+const { pages } = await renderTextToImages(toolResultText);     // pages[i].png: Uint8Array
+const { body, applied, info } = await transformAnthropicMessages({
+  body: requestBytes,
+  model: "claude-fable-5",
+});
+</code></pre>
+<p><code>options.keepSharp(block)</code> pins blocks as text; <code>options.emitRecoverable</code>
+returns the originals of imaged blocks. Pure-JS runtime (Node and
+edge/Workers); <code>@napi-rs/canvas</code> is build-time only. Full API:
+<code>src/core/index.ts</code>.</p>
+<details>
+<summary><strong>Offline stats (no proxy): <code>pxpipe stats</code></strong></summary><p>The live dashboard shows savings while the proxy is running. To read the same
+event log <strong>after the fact</strong> — with no server up — summarize it straight from
+disk:</p>
+<pre><code class="language-bash">pxpipe stats                   # human report from ~/.pxpipe/events.jsonl
+pxpipe stats --json            # same aggregate as machine-readable JSON
+pxpipe stats --file /path/to/events.jsonl
+</code></pre>
+<p>Alongside request counts, compression ratios, latency percentiles, and
+cache-hit rates, the report prints a <strong>measured savings</strong> headline —
+<code>count_tokens</code> of the original body versus real usage, over probe-measured rows
+only (unmeasured requests are excluded, never counted as zero). This is a
+<strong>raw-token</strong> figure (cache reads at face value, not cost-weighted), so it is
+deliberately a different quantity from the dashboard's cost-weighted saved %.
+Point it at a non-default log with <code>--file</code>, or set <code>PXPIPE_LOG</code>.</p>
+<p>Exit codes: <code>0</code> report printed, <code>1</code> events file not found, <code>2</code> file present but
+no valid events. <code>pxpipe stats --help</code> prints usage.</p>
+</details><h2>Development</h2>
+<pre><code class="language-bash">pnpm install &amp;&amp; pnpm test
+pnpm run build                # regenerates dist/
+</code></pre>
+<p>Windows is community-supported: primary development targets macOS/Linux, and Windows-specific fixes rely on contributor PRs (thanks @makoribrian).</p>
+<h2>FAQ</h2>
+<details>
+<summary><strong>Is the headline end-to-end, or only on the requests you touched?</strong></summary><p>End-to-end, the whole bill. Most compression tools report savings only on
+the input slice they touched, which flatters the number. The end-to-end
+denominator is <em>every</em> production request: the small ones pxpipe correctly
+left untouched, all cache writes and reads, and all output tokens (which the
+proxy never compresses). On a 13,709-request snapshot that was 59% ($100 →
+~$41); a later 8,904-compressed-request trace measured ~70%. Compressed-only
+runs higher (~72–74%) and is quoted separately, never as the headline. The
+exact figure is workload-dependent — reproduce it on your own log.</p>
+</details><details>
+<summary><strong>How is the math measured?</strong></summary><p>Both sides of the same request, at the same moment. For every <code>/v1/messages</code>
+POST the proxy fires a free <code>count_tokens</code> probe on the original uncompressed
+body (the counterfactual) in parallel with the real forward, and reads
+Anthropic's actually-billed usage block off the response. Both land in the
+same row of <code>~/.pxpipe/events.jsonl</code>, so there is no turn-count or
+run-to-run confound. Dollar conversion uses Fable 5 list ratios: input ×1.0,
+cache write ×1.25, cache read ×0.1, output ×5. Cache pricing is applied
+identically to both sides, so the caching discount cancels and cannot be
+double-counted as "savings". Re-derive it yourself from the events log: the
+formula and field names are documented in <code>src/core/baseline.ts</code>.</p>
+</details><details>
+<summary><strong>What does it actually compress?</strong></summary><p>Three kinds of <em>input</em> blocks, each behind a profitability gate:</p>
+<ol>
+<li>large <code>tool_result</code> bodies (file reads, command output, logs) above
+~6k chars of token-dense content</li>
+<li>older collapsed history: turns behind the live tail get re-rendered as
+image pages, recent turns always stay text</li>
+<li>the static cacheable system prompt + tool docs slab; appended non-cacheable
+system blocks stay live text so host custom instructions keep system-level
+salience</li>
+</ol>
+<p>Everything else passes through byte-identical: your messages, recent turns,
+the model's output (it is the response, the proxy never touches it), sparse
+prose, and anything too small to win. Model defaults and detailed results are
+listed under <a href="#the-honest-part" target="_blank" rel="noopener noreferrer">model support</a> and
+<a href="#benchmark-results-and-receipts" target="_blank" rel="noopener noreferrer">benchmarks</a>.</p>
+</details><details>
+<summary><strong>Has it ever failed for real, outside the benchmarks?</strong></summary><p>Yes, once in weeks of daily use: the model recalled a person's name from
+imaged chat history and got it confidently wrong. No error, just a
+plausible wrong name. That is the documented failure mode: exact strings
+in imaged content are not byte-safe. Coding sessions tolerate this because
+the agent re-reads files before editing; pure chat recall has no such check.
+This failure mode is measured, not anecdotal:
+<a href="https://github.com/teamchong/pxpipe/blob/HEAD/docs/LEGIBILITY-AUDIT-2026-07-01.md" target="_blank" rel="noopener noreferrer">the legibility audit</a> quantifies
+exact-string recall off rendered pages (blind reads top out at 63% on dense
+identifiers, with every miss predicted by a glyph-confusability matrix) and
+documents the shipped mitigations — page geometry clamped to the API's
+resample cap so billed pixels actually reach the vision encoder, and selected
+identifiers (SHAs, numbers) riding alongside as text.</p>
+</details><details>
+<summary><strong>Why are misses silent confabulations instead of read errors?</strong></summary><p>Because model vision is not OCR: the image becomes patch embeddings, never
+discrete characters, so there is no per-glyph confidence to fail loudly
+on. When pixels underdetermine a glyph, the language prior fills the gap
+with something plausible. Mechanism and receipts:
+<a href="https://github.com/teamchong/pxpipe/blob/HEAD/docs/NOT-OCR.md" target="_blank" rel="noopener noreferrer">docs/NOT-OCR.md</a>.</p>
+</details><details>
+<summary><strong>Didn't DeepSeek-OCR show this doesn't hold up in practice?</strong></summary><p>No: it proved the channel works, using an encoder/decoder pair trained for
+the job. The skepticism dates from October 2025, when no stock production
+model could read dense renders; that changed with Fable 5 (0/15 verbatim
+hex on the prior Opus generation vs 13/15 on Fable 5, same pages). Timeline and per-model
+numbers: <a href="https://github.com/teamchong/pxpipe/blob/HEAD/docs/NOT-OCR.md" target="_blank" rel="noopener noreferrer">docs/NOT-OCR.md</a>.</p>
+</details><details>
+<summary><strong>Why does the README read like an AI wrote it?</strong></summary><p>Because one did. Most of this repo's commits — the code and the docs — were
+authored by Opus/Fable agent sessions running behind pxpipe itself, reading
+their own collapsed history as image pages while they worked.</p>
+</details><h2>Additional limitations</h2>
+<ul>
+<li>PNG encoding adds latency to large requests before they leave.</li>
+<li>ASCII/Latin-1 well tested; CJK works but conservatively.</li>
+</ul>
+<h2>Research status</h2>
+<p>Current as of 2026-07-22. The broad conclusion from the 2026-07-05 pass still
+holds: exact recall is limited by pixels per glyph, so rendering changes do not
+eliminate errors at profitable density. A later glyph-style A/B did find a
+useful local improvement: repainting <code>K</code> reduced Fable's H/K error from 47.2%
+to 18.7% without changing geometry or token cost. It shipped, but exact control
+IDs did not improve. See <a href="https://github.com/teamchong/pxpipe/blob/HEAD/FINDINGS.md" target="_blank" rel="noopener noreferrer">FINDINGS.md</a>, 2026-07-19 entry.</p>
+<p>Runtime canary + text re-fetch and surrogate-reader pre-flight remain untested.
+The release tripwire remains a resolution sweep for each new model; a model
+that reads production cells near 100% would permit higher density.</p>
+<p>Effective-context benefits remain unproven. The production-history results
+above are directional evidence, not a general context-window or long-task
+accuracy claim.</p>
+<h2>Community projects</h2>
+<p>Third-party projects listed here are not maintained or supported by pxpipe.</p>
+<ul>
+<li><a href="https://github.com/DivyeshPatro/pxpipe-windows" target="_blank" rel="noopener noreferrer">pxpipe-windows</a> — Windows support for <code>pxpipe mitm</code> (node-forge CA in place of openssl, Task Scheduler autostart).</li>
+<li><a href="https://github.com/diegosouzapw/OmniGlyph" target="_blank" rel="noopener noreferrer">OmniGlyph</a> — A community-maintained project derived from pxpipe and used by <a href="https://github.com/diegosouzapw/OmniRoute" target="_blank" rel="noopener noreferrer">OmniRoute</a>.</li>
+<li><a href="https://github.com/evan-choi/pxpipe-go" target="_blank" rel="noopener noreferrer">pxpipe-go</a> — A Go port of pxpipe's core with a CLI wrapper, standalone proxy, and embeddable library for Anthropic Messages and OpenAI Chat/Responses.</li>
+</ul>
+<h2>License</h2>
+<p>MIT.</p>

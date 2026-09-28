@@ -30,11 +30,33 @@ ChatGPT or Codex?</strong> Start with <a href="https://github.com/openai/tunnel-
 <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/troubleshooting.md" target="_blank" rel="noopener noreferrer"><code>docs/troubleshooting.md</code></a>.</li>
 <li><strong>Building a compatible client in another language?</strong> Read
 <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/protocol.md" target="_blank" rel="noopener noreferrer"><code>docs/protocol.md</code></a> and use
-<a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/openapi.json" target="_blank" rel="noopener noreferrer"><code>docs/openapi.json</code></a>.</li>
+<a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/openapi.json" target="_blank" rel="noopener noreferrer"><code>docs/openapi.json</code></a>. Optional client features use the
+common <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/protocol.md#tunnel-client-capabilities" target="_blank" rel="noopener noreferrer"><code>X-Tunnel-Client-Capabilities</code> header</a>.</li>
+<li><strong>Upgrading for server-directed polling placement?</strong> Read the
+<a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/routing-correction.md" target="_blank" rel="noopener noreferrer">routing correction and activation notes</a>.
+Supporting clients work with existing services immediately; corrections are
+enabled separately after client release. No configuration change is needed.</li>
 <li><strong>Embedding an MCP server directly in a Go process?</strong> Use the Go SDK with
 the MCP SDK's in-memory transport; see
 <a href="https://github.com/openai/tunnel-client/blob/HEAD/examples/go-sdk-inmemory" target="_blank" rel="noopener noreferrer"><code>examples/go-sdk-inmemory</code></a>.</li>
 </ul>
+<h2>Try the embedded demo</h2>
+<p>With a runtime API key and tunnel ID, run the built-in <code>server_info</code>, <code>echo</code>,
+and <code>uppercase</code> tools without a separate MCP server:</p>
+<pre><code class="language-bash">export CONTROL_PLANE_API_KEY="sk-..."
+export CONTROL_PLANE_TUNNEL_ID="tunnel_0123456789abcdef0123456789abcdef"
+tunnel-client run --embedded-stateless-mcp-stub --health.listen-addr 127.0.0.1:0
+</code></pre>
+<p><code>--embedded-stateless-mcp-stub</code> uses stateless MCP handling even when a client
+sends <code>initialize</code> and <code>notifications/initialized</code>. It issues no MCP session
+ID, and these demo tools do not require MCP session affinity between processes.
+OAuth and application state have separate requirements.</p>
+<p><code>--embedded-mcp-stub</code> keeps its existing compatibility behavior: legacy
+initialization and session requests use stateful handling; self-contained
+modern discovery and tool requests use stateless handling. Choose one embedded
+mode per run. Both share the embedded listen-address, Unix-socket, server-name, and
+server-version options; see <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/configuration.md#embedded-demo-mcp-modes" target="_blank" rel="noopener noreferrer">embedded demo configuration</a>
+for defaults and target conflicts.</p>
 <h2>Embed as a Go SDK</h2>
 <p>The module can run in the same process as a Go MCP server. The MCP server does
 not need to bind a port or use stdio: give the server side of an in-memory MCP
@@ -88,7 +110,11 @@ tool and connects it to the OpenAI Tunnel control plane.</p>
 <li><strong>Roadmap / design notes</strong>: <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/roadmap.md" target="_blank" rel="noopener noreferrer"><code>docs/roadmap.md</code></a></li>
 </ul>
 <h2>Install with Homebrew</h2>
-<p>Install <code>tunnel-client</code> from the official OpenAI tap:</p>
+<p>On macOS, Homebrew is the supported installation path. Directly downloaded
+release ZIPs are not currently notarized and can be blocked by Gatekeeper. If
+a manually downloaded archive is blocked, do not use <code>xattr</code>, <code>spctl</code>, or
+<strong>Open Anyway</strong> to bypass the check; install from the official OpenAI tap
+instead:</p>
 <pre><code class="language-bash">brew install openai/tools/tunnel-client
 </code></pre>
 <p>Verify the installed version, then start with the guided setup:</p>
@@ -161,6 +187,19 @@ tunnel-client doctor --profile local-stdio --explain
 tunnel-client run --profile local-stdio
 tunnel-client run --profile-file ./profiles/local-stdio.yaml
 </code></pre>
+<p><strong>Stdio deployment limit:</strong> run only one active <code>tunnel-client</code> instance per
+tunnel ID when using <code>--mcp.command</code> / <code>MCP_COMMAND</code>. Multiple active instances
+sharing that tunnel ID are <strong>not supported</strong>, including overlap during a
+restart. Each instance launches a separate MCP child, and initialization and
+later requests can reach different children. Stop the old instance before
+starting its replacement, or use distinct tunnel IDs for independent instances.
+See <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/configuration.md#stdio-deployment-limits" target="_blank" rel="noopener noreferrer">stdio deployment limits</a>.</p>
+<p>Stdio initialization is checked automatically. Legacy calls require a successful
+<code>initialize</code> exchange followed by <code>notifications/initialized</code>; premature calls
+return <code>mcp_initialization_required</code> immediately. Self-contained MCP requests
+using protocol version <code>2026-07-28</code> or later pass through without a handshake.
+The caller owns initialization, including after child replacement. See
+<a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/configuration.md#mcp-server" target="_blank" rel="noopener noreferrer">configuration</a> for lifecycle behavior.</p>
 <p>If you need the tunnel id or runtime/admin keys first, open the matching URL
 above before running <code>init</code>. If your rollout has self-serve tunnel access,
 create the tunnel yourself in Tunnels management or with
@@ -177,6 +216,16 @@ alongside the release handoff.</p>
 <pre><code class="language-bash">go build ./...
 go test ./...
 </code></pre>
+<p>Independent tests, subtests, and fuzz seed cases use <code>t.Parallel()</code>. Give each
+case its own mutable fixtures, and use <code>t.Cleanup</code> for resources shared by
+parallel children. Keep dependent state transitions in one test. Keep tests
+that mutate process-wide globals, environment variables, signals, or stdio
+serial.</p>
+<p>Check concurrent execution with the race detector and shuffled test order:</p>
+<pre><code class="language-bash">go test -race -shuffle=on -count=3 ./...
+</code></pre>
+<p>The E2E and mock-server packages default to two concurrent tests to bound
+resource use. An explicit <code>-parallel=N</code> overrides that default.</p>
 <h2>SBOMs</h2>
 <p>The public repository includes deterministic six-platform dependency baselines
 for the
@@ -200,9 +249,30 @@ scanner:</p>
 prove that any release archive contains those bytes.</p>
 <h3>Validate a downloaded release</h3>
 <p>Releases produced by the current release workflow publish a matching SPDX 2.3
-sidecar for each ZIP, embed the same sidecar in the ZIP, and cover both files
-in <code>SHA256SUMS.txt</code>. Older releases without <code>.spdx.json</code> sidecars cannot be
-artifact-validated this way. Use the release sidecar, not a checked-in
+sidecar for each ZIP, embed the same sidecar in the ZIP, cover both files in
+<code>SHA256SUMS.txt</code>, and publish the workflow's signed Sigstore provenance bundle.
+They also publish:</p>
+<ul>
+<li><code>tunnel-client-vX.Y.Z-vulnerability-report.json</code>, generated by a
+checksum-pinned Grype binary from exactly 18 release-specific SPDX sidecars:
+three flavors across six platforms, each bound to its matching ZIP and
+license-report SHA256, with the exact vulnerability-database SHA256 recorded;</li>
+<li><code>tunnel-client-vX.Y.Z.openvex.json</code> only when the scan has findings, with
+every automated statement set to <code>under_investigation</code> rather than claiming
+that a finding is fixed, exploitable, or not affected; and</li>
+<li><code>tunnel-client-vX.Y.Z-enterprise-evidence.json</code>, which inventories the
+release evidence bytes, scanner/database identity, scan scope, and
+provenance boundary.</li>
+</ul>
+<p>The vulnerability report explicitly records OCI images as <code>not_scanned</code>:
+the release contract has multi-architecture OCI index digests, not exact
+per-platform OCI manifest scan inputs. Every pre-bundle release artifact is
+covered by <code>SHA256SUMS.txt</code>, <code>PUBLIC_URLS.txt</code>, and the signed provenance
+bundle. The bundle is intentionally excluded from its own checksum and
+signature subject set.
+Older releases without <code>.spdx.json</code> sidecars cannot be archive/SBOM-validated
+this way; releases without a <code>*-provenance.sigstore.json</code> bundle cannot be
+provenance-validated this way. Use the release sidecar, not a checked-in
 baseline, to validate downloaded bytes.</p>
 <p>From a checkout of this public repository at the matching release tag, replace
 the example tag and choose one of <code>client</code>, <code>runtime</code>, or
@@ -214,23 +284,51 @@ flavor=runtime
 prefix=tunnel-client-runtime
 stem="${prefix}-${release}-${platform}"
 base="https://github.com/openai/tunnel-client/releases/download/${release}"
+bundle="tunnel-client-${release}-provenance.sigstore.json"
+source_digest="$(git rev-parse HEAD)"
 
 curl -fLO "${base}/${stem}.zip"
 curl -fLO "${base}/${stem}.spdx.json"
+curl -fLO "${base}/${stem}-licenses.txt"
 curl -fLO "${base}/SHA256SUMS.txt"
+curl -fLO "${base}/${bundle}"
 
 gh attestation verify "${stem}.zip" \
+  --bundle "${bundle}" \
   --repo openai/tunnel-client \
   --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
-  --source-ref "refs/tags/${release}"
+  --source-ref "refs/tags/${release}" \
+  --source-digest "${source_digest}" \
+  --signer-digest "${source_digest}" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
 gh attestation verify "${stem}.spdx.json" \
+  --bundle "${bundle}" \
   --repo openai/tunnel-client \
   --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
-  --source-ref "refs/tags/${release}"
+  --source-ref "refs/tags/${release}" \
+  --source-digest "${source_digest}" \
+  --signer-digest "${source_digest}" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
+gh attestation verify "${stem}-licenses.txt" \
+  --bundle "${bundle}" \
+  --repo openai/tunnel-client \
+  --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
+  --source-ref "refs/tags/${release}" \
+  --source-digest "${source_digest}" \
+  --signer-digest "${source_digest}" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
 gh attestation verify SHA256SUMS.txt \
+  --bundle "${bundle}" \
   --repo openai/tunnel-client \
   --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
-  --source-ref "refs/tags/${release}"
+  --source-ref "refs/tags/${release}" \
+  --source-digest "${source_digest}" \
+  --signer-digest "${source_digest}" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
 
 ./scripts/verify_release_archive.sh \
   --flavor "${flavor}" \
@@ -238,17 +336,47 @@ gh attestation verify SHA256SUMS.txt \
   --sbom "${stem}.spdx.json" \
   --checksums SHA256SUMS.txt
 </code></pre>
+<p>To verify the complete release evidence set, download every asset into a clean
+directory and run both fail-closed contract verifiers:</p>
+<pre><code class="language-bash">mkdir release-evidence
+gh release download "${release}" \
+  --repo openai/tunnel-client \
+  --dir release-evidence
+
+./scripts/verify_release_provenance.sh \
+  --bundle "release-evidence/${bundle}" \
+  --artifact-dir release-evidence \
+  --release "${release}" \
+  --source-digest "${source_digest}"
+./scripts/verify_release_evidence.sh \
+  --artifact-dir release-evidence \
+  --release "${release}" \
+  --source-digest "${source_digest}"
+</code></pre>
 <p>Use <code>prefix=tunnel-client</code> with <code>flavor=client</code>, or
 <code>prefix=tunnel-client-runtime-cloudflared</code> with
-<code>flavor=runtime-cloudflared</code>. The attestation checks establish that the ZIP,
-sidecar, and checksum file came from this repository's release workflow. The
-archive verifier then fails closed when the published checksums do not match,
-the ZIP is too large or has unsafe, duplicate, or non-regular members, its
-embedded sidecar differs from the downloaded sidecar, or the SPDX SHA256
-inventory does not match the extracted payload. After it passes, import the
-matching <code>.spdx.json</code> file into the dependency scanner of your choice. Runtime
-releases also publish a matching <code>*-scan-manifest.json</code> that binds scanner
-scope, source archives, license evidence, and the release sidecars.</p>
+<code>flavor=runtime-cloudflared</code>. The bundle is the release workflow's signed
+Sigstore evidence and supports verification without GitHub attestation lookup.
+It is emitted after <code>SHA256SUMS.txt</code> is attested, so it is intentionally not
+listed in that checksum file; <code>gh attestation verify</code> checks the bundle's
+signature, transparency-log material, signer workflow, source ref, source
+digest, and subject digest. The archive verifier then fails closed when the
+published checksums do not match, the ZIP is too large or has unsafe,
+duplicate, or non-regular members, its embedded sidecar differs from the
+downloaded sidecar, or the SPDX SHA256 inventory does not match the extracted
+payload. After it passes, import the matching <code>.spdx.json</code> file into the
+dependency scanner of your choice. Runtime releases also publish a matching
+<code>*-scan-manifest.json</code> that binds scanner scope, source archives, license
+evidence, and the release sidecars.</p>
+<p>For a fully disconnected verification environment, capture a trusted root from
+an independently trusted online environment before disconnecting:</p>
+<pre><code class="language-sh">gh attestation trusted-root &gt; trusted_root.jsonl
+</code></pre>
+<p>Transfer that file with the release evidence and add
+<code>--custom-trusted-root trusted_root.jsonl</code> to each <code>gh attestation verify</code>
+command above. The release bundle removes the GitHub attestation API
+dependency; the trusted-root file removes the remaining online trust-root
+lookup.</p>
 <p>Build the CLI binary from a source checkout. The Make target stamps the
 checkout Git SHA into the version sent in <code>User-Agent</code> and
 <code>X-Tunnel-Client-Version</code>:</p>
@@ -322,7 +450,7 @@ therefore reports the tag semantic version through <code>tunnel-client --version
 <code>User-Agent</code>, and the explicit control-plane version headers. Source-checkout
 builds made with the Make target or explicit linker flag above append the Git
 SHA to that semantic version.</p>
-<p>Supported release archives also bundle pinned <code>cloudflared</code> <code>2026.7.2</code> beside
+<p>Supported release archives also bundle pinned <code>cloudflared</code> <code>2026.8.2</code> beside
 the CLI for Linux <code>amd64</code>/<code>arm64</code>, macOS <code>amd64</code>/<code>arm64</code>, and Windows
 <code>amd64</code>/<code>arm64</code>.
 Official release images are published at <code>ghcr.io/openai/tunnel-client</code> for
@@ -410,18 +538,36 @@ Streamable HTTP session termination requests when the control plane receives
 additional configured channels can target their own MCP bindings, and
 <code>harpoon</code> is routable only when Harpoon has registered targets.</li>
 <li>On startup, it fetches OAuth Protected Resource Metadata from the MCP server
-for diagnostics.</li>
+for diagnostics. Timeout-only startup failures keep readiness pending and
+retry with bounded exponential backoff until discovery succeeds or the
+process stops; non-timeout discovery failures still settle readiness.</li>
+<li>After configured and startup OAuth-discovered Harpoon targets settle, it
+emits one privacy-safe <code>harpoon startup catalog digest</code> INFO log. Compare
+replicas only when they use the same tunnel ID and control-plane runtime API
+key; the startup-only digest is a comparison aid, not convergence
+enforcement.</li>
 <li>For sidecar deployments whose local MCP listener may bind after
 <code>tunnel-client</code> starts, the optional <code>MCP_STARTUP_WAIT_TIMEOUT</code> gate delays
 the first control-plane poll and OAuth discovery until the main MCP listener
 is reachable.</li>
 <li>For OAuth auth-server handling, <code>authorization_servers[0]</code> from PRMD is the
 only source of truth and metadata fetch target.</li>
+<li>OAuth discovery trusts the configured MCP origin by default. Before upgrading
+deployments with separate metadata or authorization hosts, explicitly list
+those origins with <code>--mcp.oauth-trusted-origin</code>, <code>MCP_OAUTH_TRUSTED_ORIGINS</code>, or
+<code>mcp.oauth_trusted_origins</code>. See the <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/configuration.md#mcp-server" target="_blank" rel="noopener noreferrer">configuration reference</a>
+for trust boundaries and staged upgrade guidance. Full-client profile editing
+also requires a <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/profile-editor.md" target="_blank" rel="noopener noreferrer">supported editor command</a>.</li>
 <li>Metadata is accepted even when <code>issuer</code> differs from
 <code>authorization_servers[0]</code> (external IdP issuer URLs are supported), with
 mismatch diagnostics preserved in logs/state.</li>
 <li>It exposes an <strong>admin/health server</strong> (<code>/healthz</code>, <code>/readyz</code>, <code>/metrics</code>) and
 a lightweight <strong>admin UI</strong> (<code>/ui</code>) for operational status.</li>
+<li>Local <code>GET /health?details=true</code> and <code>GET /health/mcp</code> expose bounded
+observations of MCP discovery, polling, response delivery, queues, and active
+work. Plain <code>/health</code> stays compact unless <code>--health.show-details=true</code> is
+set (default false). See the <a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/health.md" target="_blank" rel="noopener noreferrer">health reference</a> for examples,
+Unix sockets, and the difference between readiness and observed discovery.</li>
 <li>The admin UI Overview reports the process-scoped <code>client_instance_id</code>,
 channel availability, and reasons when channels are disabled.</li>
 <li>The admin UI Logs tab can switch the live runtime log level between <code>debug</code>,
@@ -433,6 +579,24 @@ config, and effective config.</li>
 <li>It embeds the <strong>Harpoon MCP server</strong> to provide a labeled, allowlisted
 outbound HTTP client for internal tooling.</li>
 </ul>
+<h3>Harpoon target templates</h3>
+<p>Opt-in Harpoon templates let callers provide bounded identifiers for an
+operator-configured HTTPS GET, POST, or PUT operation, such as <code>/cases/{case_id}</code> or
+<code>/profiles?session-id={session_id}</code>. The client fixes the destination, method,
+query names, and authentication headers, validates each identifier, and never
+follows redirects. POST/PUT require an explicit body policy for content types,
+byte limits, required or optional bodies, and validation. GET remains bodyless;
+DELETE is unsupported. Existing exact-URL targets continue to work.</p>
+<p>Templates use YAML <code>config_version: 2</code> and <code>template.version: 1</code>, and execute
+through the shared <code>call_target</code> MCP tool without a caller-supplied method.
+Exact targets keep their required method argument. <code>list_targets</code> publishes
+each template's complete invocation schema, public parameter descriptions, and
+validated examples when available. Writes require the advertised <code>operation</code>
+constant and never automatically replay after an ambiguous failure. Upgrade all
+eligible clients before enabling writes or adding parameter metadata. See the
+<a href="https://github.com/openai/tunnel-client/blob/HEAD/docs/harpoon-target-templates.md" target="_blank" rel="noopener noreferrer">target template guide</a> for complete
+configuration, discovery and invocation examples, authorization requirements,
+limits, and upgrade behavior.</p>
 <h2>Admin UI build notes</h2>
 <p>The admin UI assets under <code>pkg/adminui/assets</code> are generated from the TypeScript/Svelte
 source in <code>adminui/</code>. To rebuild them locally:</p>
@@ -471,6 +635,18 @@ startup.</li>
 <li><code>tunnel-client profiles samples list|show</code> exposes built-in sample profiles.</li>
 <li><code>sample_mcp_enterprise_proxy</code> is the built-in starter for outbound proxies
 and private PKI, with env-backed proxy and CA bundle references.</li>
+<li>The first control-plane poll attempt requests the shorter of
+<code>--control-plane.initial-poll-timeout</code> (default <code>30s</code>) and the configured
+wait, while retaining its normal client deadline. Both wait settings default
+to <code>30s</code>. A lower initial-poll timeout can shorten the first requested wait.
+Subsequent polls use <code>--control-plane.poll-timeout</code> /
+<code>CONTROL_PLANE_POLL_TIMEOUT</code>, including after an initial failure.
+If an HTTP-proxied poll loses its connection
+before response headers with an EOF-style error while neither deadline has
+fired, tunnel-client automatically learns a shorter
+process-local timeout for future polls. The learned timeout only decreases,
+never below 5 seconds, while the configured poll timeout remains its ceiling.
+Subsequent direct and Unix-socket polls keep the configured timeout.</li>
 <li><code>tunnel-client admin-profiles list|set|delete</code> manages saved admin-key
 profiles for native runtime workflows.</li>
 <li><code>tunnel-client runtimes create|connect|list|status|stop|rm</code> manages native

@@ -1,5 +1,5 @@
 <h1>dev-agent-skills</h1>
-<p>Agent skills and hooks for development workflows - Git, GitHub, skill authoring, safety guardrails, and public-repo privacy.</p>
+<p>Agent skills and hooks for development workflows - Git, GitHub, skill authoring, safety guardrails, public-repo privacy, and decision records.</p>
 <p>These skills are designed for <a href="https://claude.com/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a>, the CLI tool by Anthropic.</p>
 <h2>Why these skills?</h2>
 <p>Claude Code already knows how to commit, create PRs, and review code. But without structured guidance it tends to:</p>
@@ -24,6 +24,7 @@
 /plugin install skill-authoring@dev-agent-skills
 /plugin install guardrails@dev-agent-skills
 /plugin install privacy-guard@dev-agent-skills
+/plugin install decision-records@dev-agent-skills
 </code></pre>
 <h2>How skills work</h2>
 <p>Skills are <strong>model-invoked</strong> - Claude automatically activates them based on your request:</p>
@@ -34,6 +35,7 @@
 <li>"Address review comments" -&gt; activates <code>github-pr-review</code></li>
 <li>"Help me create a skill" -&gt; activates <code>creating-skills</code></li>
 <li>"Set up the privacy guard on this public repo" -&gt; activates <code>privacy-guard</code></li>
+<li>"Record this decision" / "check our ADRs" -&gt; activates <code>decision-records</code></li>
 </ul>
 <h2>Plugin: github-workflow</h2>
 <p>Skills for Git and GitHub workflows following <a href="https://www.conventionalcommits.org/" target="_blank" rel="noopener noreferrer">Conventional Commits</a>.</p>
@@ -345,15 +347,59 @@
 </tbody></table>
 <p>Setup is per-repo and scripted by the skill: copy <code>check_privacy.sh</code> into <code>scripts/</code>, fill <code>.local/privacy-denylist.txt</code> from the shipped placeholder template, add the gitleaks + denylist blocks to <code>.pre-commit-config.yaml</code>, then arm-check it with a throwaway file containing a known token. A repo that already sets <code>core.hooksPath</code> cannot run <code>pre-commit install</code>; the skill documents the variant that calls the script from the existing hook instead.</p>
 <p>Note the deliberate trade-offs: the guard is client-side and only protects commits made from a machine that has the denylist; it scans what a commit adds, so it stops new leaks and does not audit history; and it does not cover pastes into the GitHub web UI. That is what the behavioral rules are for.</p>
+<h2>Plugin: decision-records</h2>
+<p>For a repo that already keeps decision records (ADRs) and has stopped trusting them: numbers that collide, an index that no longer matches the directory, a record that says it was superseded and does not say by what. The skill writes records, and mainly holds a collection to <strong>its own</strong> convention.</p>
+<h3>decision-records</h3>
+<p><strong>What it adds over Claude's default behavior:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Without this skill</th>
+<th>With this skill</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>A record gets written in whatever shape Claude reaches for</td>
+<td>The filename scheme, section set and status form are read off the records already there, and reported before anything is written</td>
+</tr>
+<tr>
+<td>A draft gets written to disk and then discussed</td>
+<td>Propose first, write only after explicit approval, write nothing at all if you decline</td>
+</tr>
+<tr>
+<td>Changing your mind means editing the old record</td>
+<td>An accepted record is never rewritten: a new one is created and the old status becomes <code>superseded by &lt;ref&gt;</code></td>
+</tr>
+<tr>
+<td>The index drifts from the directory in silence</td>
+<td>Both directions are checked: a record absent from the index, and an index row pointing at a file that is not there</td>
+</tr>
+<tr>
+<td>"The ADRs look fine" is an impression</td>
+<td><code>check-decisions.sh</code> exits 0, 1 or 2, with a stable code per violation (<code>NAME</code>, <code>SECTION</code>, <code>STATUS</code>, <code>DRIFT</code>, <code>SUPERSEDE</code>, <code>DUPLICATE</code>, <code>INDEX</code>, <code>PORTABLE</code>)</td>
+</tr>
+<tr>
+<td>A collection with a house convention gets flagged for having one</td>
+<td>The convention is deduced, not imposed; <code>--require</code> and <code>--status</code> are the only way a rule enters that the collection is not already following</td>
+</tr>
+</tbody></table>
+<pre><code class="language-sh">check-decisions.sh [--require "A,B"] [--status "a,b"] [--portable] DIR
+# 0 clean, 1 violations, 2 usage error or nothing to check
+</code></pre>
+<p>Where this sits next to what already exists. ADR linters are not new and some are much more capable: <a href="https://joshrotenberg.com/mdbook-lint/rules/adr/index.html" target="_blank" rel="noopener noreferrer">mdbook-lint</a> ships 17 ADR rules, <a href="https://github.com/knktkc/madr-lint" target="_blank" rel="noopener noreferrer">madr-lint</a> covers MADR v2 to v4 and ships its own Claude skills, <a href="https://github.com/mbeacom/adrkit" target="_blank" rel="noopener noreferrer">adrkit</a> finds supersession cycles and contradicting decisions. They all validate against a <strong>published spec</strong>, Nygard or MADR, chosen by auto-detecting between those. A collection whose convention is neither, say date-prefixed filenames with a house section set, has its own convention reported to it as violations. That case is what this one is for, and it needs no toolchain: it is one bash script.</p>
+<p>Deliberate limits. It ships <strong>no template file</strong> into your repo, because a template beside the records is a second home for the convention and the two diverge in silence. It does <strong>not</strong> scan for private tokens: hostnames, instance names and identity are <code>privacy-guard</code>'s denylist, and a second copy of that list here would be the same mistake with worse consequences. <code>--portable</code> covers only what breaks when a record is <em>copied</em>: absolute paths, and links that climb out of the collection directory.</p>
 <h2>Development</h2>
-<p>Two plugins ship executable logic, and each has a regression suite:</p>
+<p>Three plugins ship executable logic, and each has a regression suite:</p>
 <pre><code class="language-sh">bash plugins/guardrails/tests/run.sh        # guard-destructive.sh
 bash plugins/privacy-guard/tests/run.sh     # check_privacy.sh, check-sync.sh
+bash plugins/decision-records/tests/run.sh  # check-decisions.sh
 </code></pre>
-<p>Both exit non-zero on failure and run on macOS and Linux. Each accepts an override
-(<code>GUARD_HOOK=</code>, <code>PRIVACY_SCRIPT=</code>, <code>SYNC_SCRIPT=</code>) that points it at a candidate script:
-point it at the version from before a fix and the suite must go red. A bench nobody has
-seen fail says nothing.</p>
+<p>All exit non-zero on failure and run on macOS and Linux. Each accepts an override
+(<code>GUARD_HOOK=</code>, <code>PRIVACY_SCRIPT=</code>, <code>SYNC_SCRIPT=</code>, <code>CHECK_SCRIPT=</code>) that points it at a
+candidate script: point it at the version from before a fix and the suite must go red. A
+bench nobody has seen fail says nothing. Stronger where a suite claims to hold one guard
+down: remove that guard from the real script and check that its case goes red and the
+others do not, because a case can pass beside the guard it names.</p>
 <p>After cloning the repo to work on either, enable the shared git hooks (they live in the
 versioned <code>.githooks/</code>, not in <code>.git/hooks/</code>):</p>
 <pre><code class="language-sh">git config core.hooksPath .githooks      # one-time, per clone

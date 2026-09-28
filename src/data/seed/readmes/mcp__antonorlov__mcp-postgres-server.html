@@ -1,0 +1,530 @@
+<h1>MCP PostgreSQL Server</h1>
+<p><a href="https://www.npmjs.com/package/mcp-postgres-server" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/mcp-postgres-server.svg" alt="npm version" /></a>
+<a href="https://github.com/antonorlov/mcp-postgres-server/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/antonorlov/mcp-postgres-server/actions/workflows/ci.yml/badge.svg" alt="CI" /></a></p>
+<p>A Model Context Protocol (MCP) server for PostgreSQL: local, Docker, RDS, Neon,
+and Supabase databases.</p>
+<p>The server is small and auditable, with four runtime dependencies: the MCP SDK,
+<code>pg</code>, <code>pg-connection-string</code>, and <code>zod</code> (plus <code>ssh2</code>, an optional dependency used
+only for SSH tunneling).</p>
+<p>Requires Node.js 20 or newer.</p>
+<h2>Quick start</h2>
+<p>The preferred way to configure the server is a single <code>DATABASE_URL</code>:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-postgres-server"],
+      "env": {
+        "DATABASE_URL": "postgres://user:password@localhost:5432/mydb",
+        "PG_ALLOW_WRITE": "false"
+      }
+    }
+  }
+}
+</code></pre>
+<p>With <code>PG_ALLOW_WRITE</code> set to <code>"false"</code> the server has <strong>read-only access</strong> to the
+database. This is the default; set it to <code>"true"</code> only if the model must write.</p>
+<p>The same JSON works in any MCP client that speaks stdio: VS Code, Cursor, Claude Code, Codex, Windsurf.</p>
+<p>Alternatively, set the individual <code>PG_*</code> variables; they are used when
+<code>DATABASE_URL</code> is not set:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-postgres-server"],
+      "env": {
+        "PG_HOST": "your_host",
+        "PG_PORT": "5432",
+        "PG_USER": "your_user",
+        "PG_PASSWORD": "your_password",
+        "PG_DATABASE": "your_database",
+        "PG_ALLOW_WRITE": "false"
+      }
+    }
+  }
+}
+</code></pre>
+<h3>Manual Installation</h3>
+<pre><code class="language-bash">npm install mcp-postgres-server
+</code></pre>
+<p>Or run directly with:</p>
+<pre><code class="language-bash">npx mcp-postgres-server
+</code></pre>
+<h2>Connect to your database</h2>
+<p><strong>Local Postgres:</strong></p>
+<pre><code>DATABASE_URL=postgres://mcp_readonly:secret@localhost:5432/mydb
+</code></pre>
+<p><strong>Postgres in Docker:</strong> if the database runs in a container with a published
+port, connect to <code>localhost:&lt;published-port&gt;</code> as usual. If the <em>MCP server
+itself</em> runs inside a container and the database runs on your host machine,
+use <code>host.docker.internal</code> instead of <code>localhost</code>:</p>
+<pre><code>DATABASE_URL=postgres://mcp_readonly:secret@host.docker.internal:5432/mydb
+</code></pre>
+<p><strong>Amazon RDS:</strong></p>
+<pre><code>DATABASE_URL=postgres://mcp_readonly:secret@mydb.xxxxxx.us-east-1.rds.amazonaws.com:5432/mydb?sslmode=require
+</code></pre>
+<p><strong>Neon:</strong></p>
+<pre><code>DATABASE_URL=postgres://mcp_readonly:secret@ep-xxx-xxx.us-east-2.aws.neon.tech/mydb?sslmode=require
+</code></pre>
+<p><strong>Supabase:</strong></p>
+<pre><code>DATABASE_URL=postgres://postgres.xxxxxxxx:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require
+</code></pre>
+<h2>Tools</h2>
+<p>Tool availability depends on configuration:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Available</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>query</code>, <code>list_schemas</code>, <code>list_tables</code>, <code>describe_table</code></td>
+<td>Always</td>
+</tr>
+<tr>
+<td><code>execute</code></td>
+<td>Always (refuses writes unless <code>PG_ALLOW_WRITE=true</code>)</td>
+</tr>
+<tr>
+<td><code>connect_db</code></td>
+<td>Only when <code>PG_ENABLE_RUNTIME_CONNECT=true</code></td>
+</tr>
+</tbody></table>
+<h3>1. query</h3>
+<p>Execute a read-only SQL statement. Accepts <code>SELECT</code>, <code>WITH ... SELECT</code>,
+<code>EXPLAIN</code>, and <code>SHOW</code>. One statement per call - multi-statement input is rejected
+by the extended query protocol. In read-only mode (the default) the statement runs
+as <code>BEGIN READ ONLY</code>, the query, and <code>ROLLBACK</code> - three commands, roughly two
+network round trips with pipelining - so the database itself refuses any write.
+With <code>PG_ALLOW_WRITE=true</code> the statement is sent directly, without that wrapper, so a
+write run through <code>query</code> would execute - use <code>execute</code> for writes.
+Supports PostgreSQL-style <code>$1, $2</code> prepared-statement parameters; values are bound
+by the driver and never spliced into the SQL text.</p>
+<pre><code class="language-javascript">use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "query",
+  arguments: {
+    sql: "SELECT * FROM users WHERE id = $1",
+    params: [1]
+  }
+});
+</code></pre>
+<p>Returns compact JSON: <code>{"rows": [...], "rowCount": n, "returnedRows": n, "truncated": false}</code>.
+When the serialized rows exceed <code>PG_MAX_RESULT_BYTES</code>, only the rows that fit are returned
+(<code>returnedRows &lt; rowCount</code>), <code>truncated</code> is <code>true</code>, and a hint suggests adding <code>LIMIT</code>/<code>WHERE</code>
+or selecting fewer columns.</p>
+<h3>2. list_schemas</h3>
+<p>List all schemas in the connected database.</p>
+<pre><code class="language-javascript">use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "list_schemas",
+  arguments: {}
+});
+</code></pre>
+<h3>3. list_tables</h3>
+<p>List tables in the connected database. Accepts an optional schema parameter
+(defaults to 'public').</p>
+<pre><code class="language-javascript">// List tables in the 'public' schema (default)
+use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "list_tables",
+  arguments: {}
+});
+
+// List tables in a specific schema
+use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "list_tables",
+  arguments: {
+    schema: "my_schema"
+  }
+});
+</code></pre>
+<h3>4. describe_table</h3>
+<p>Get the structure of a specific table (columns, types, nullability, defaults,
+primary keys). Accepts an optional schema parameter (defaults to 'public').</p>
+<pre><code class="language-javascript">use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "describe_table",
+  arguments: {
+    table: "users",
+    schema: "my_schema"  // optional
+  }
+});
+</code></pre>
+<h3>5. execute - requires <code>PG_ALLOW_WRITE=true</code></h3>
+<p>Execute an <code>INSERT</code>, <code>UPDATE</code>, <code>DELETE</code>, or DDL statement. Always registered, but
+in read-only mode (the default) it refuses with an error naming <code>PG_ALLOW_WRITE</code>
+and changes nothing - the statement never reaches the database. With
+<code>PG_ALLOW_WRITE=true</code> it runs: same <code>$1, $2</code> parameter handling as <code>query</code>, one
+complete statement per call, and the connecting role governs what it may do.
+Returns <code>{"rowCount": n, "command": "INSERT"}</code>.</p>
+<pre><code class="language-javascript">use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "execute",
+  arguments: {
+    sql: "INSERT INTO users (name, email) VALUES ($1, $2)",
+    params: ["John Doe", "john@example.com"]
+  }
+});
+</code></pre>
+<h3>6. connect_db - requires <code>PG_ENABLE_RUNTIME_CONNECT=true</code></h3>
+<p>Connect to a different PostgreSQL database at runtime using provided
+credentials. Not registered by default - prefer configuring credentials
+through the environment so they never pass through model-visible arguments.
+Session limits (<code>statement_timeout</code>, <code>idle_in_transaction_session_timeout</code>) are
+re-applied after every reconnect; read-only reads enforce read-only in their own
+<code>BEGIN READ ONLY</code> transaction.</p>
+<pre><code class="language-javascript">use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "connect_db",
+  arguments: {
+    host: "localhost",
+    port: 5432,
+    user: "your_user",
+    password: "your_password",
+    database: "your_database"
+  }
+});
+</code></pre>
+<h2>Configuration reference</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DATABASE_URL</code></td>
+<td>-</td>
+<td>Full connection string (preferred). Supports <code>?sslmode=</code> in the URL.</td>
+</tr>
+<tr>
+<td><code>PG_HOST</code></td>
+<td>-</td>
+<td>Database host (fallback when <code>DATABASE_URL</code> is not set)</td>
+</tr>
+<tr>
+<td><code>PG_PORT</code></td>
+<td><code>5432</code></td>
+<td>Database port</td>
+</tr>
+<tr>
+<td><code>PG_USER</code></td>
+<td>-</td>
+<td>Database user</td>
+</tr>
+<tr>
+<td><code>PG_PASSWORD</code></td>
+<td>-</td>
+<td>Database password</td>
+</tr>
+<tr>
+<td><code>PG_DATABASE</code></td>
+<td>-</td>
+<td>Database name</td>
+</tr>
+<tr>
+<td><code>PG_ALLOW_WRITE</code></td>
+<td><code>false</code></td>
+<td>When <code>true</code>, <code>execute</code> performs writes and reads are sent directly. Off (default) is read-only: <code>execute</code> refuses writes and each read runs in a <code>READ ONLY</code> transaction</td>
+</tr>
+<tr>
+<td><code>PG_SSLMODE</code></td>
+<td>-</td>
+<td><code>disable</code> | <code>allow</code> | <code>prefer</code> | <code>require</code> | <code>verify-ca</code> | <code>verify-full</code>. <code>require</code>/<code>allow</code>/<code>prefer</code> encrypt without verifying the certificate; <code>verify-ca</code>/<code>verify-full</code> verify (supply a CA via <code>PG_SSL_CA</code>). Unrecognized values fail at startup. <strong>Limitation:</strong> unlike libpq, <code>allow</code>/<code>prefer</code> do not fall back to plaintext (node-postgres has no opportunistic SSL), so a server without TLS needs <code>disable</code>.</td>
+</tr>
+<tr>
+<td><code>PG_SSL_CA</code></td>
+<td>-</td>
+<td>Path to a CA certificate file. Setting it by itself implies <code>verify-full</code></td>
+</tr>
+<tr>
+<td><code>PG_ENABLE_RUNTIME_CONNECT</code></td>
+<td><code>false</code></td>
+<td>Register the <code>connect_db</code> tool (runtime credential switching)</td>
+</tr>
+<tr>
+<td><code>PG_MAX_RESULT_BYTES</code></td>
+<td><code>32768</code></td>
+<td>Byte budget for a <code>query</code> result sent to the model. Whole rows are kept while they fit; over the budget <code>returnedRows &lt; rowCount</code> and <code>truncated: true</code> (if not even the first row fits, <code>returnedRows</code> is 0 with a hint). ~32 KiB ≈ 8k tokens; lower it for strict clients, raise it if your client allows more.</td>
+</tr>
+<tr>
+<td><code>PG_STATEMENT_TIMEOUT</code></td>
+<td><code>30000</code></td>
+<td>Statement timeout in milliseconds, applied to every session</td>
+</tr>
+<tr>
+<td><code>PG_CONNECT_TIMEOUT</code></td>
+<td><code>10000</code></td>
+<td>Timeout in milliseconds for a single connect attempt (raise it for slow links or SSH tunnels)</td>
+</tr>
+</tbody></table>
+<p>To reach a database only accessible through a bastion, see <a href="#ssh-tunneling" target="_blank" rel="noopener noreferrer">SSH tunneling</a> (adds <code>PG_SSH_*</code> variables).</p>
+<h2>Features</h2>
+<ul>
+<li>Read-only by default; writes are an explicit opt-in (<code>PG_ALLOW_WRITE=true</code>)</li>
+<li>Read-only enforced by the engine (<code>BEGIN READ ONLY</code>), never by client-side SQL parsing</li>
+<li>Data access behind a small typed interface; the <code>pg</code> driver never leaks past it</li>
+<li><code>DATABASE_URL</code> support with SSL (<code>sslmode=disable|allow|prefer|require|verify-ca|verify-full</code>, custom CA)</li>
+<li>Prepared-statement parameters: <code>$1</code>-style placeholders, bound by the driver</li>
+<li>Result size cap (byte budget) with an explicit <code>truncated</code> flag instead of flooding the model's context</li>
+<li>Session statement timeout plus a client deadline; transaction poolers may not preserve session settings</li>
+<li>Errors returned as readable tool results with SQLSTATE-based hints, so the model can self-correct</li>
+<li>Survives dropped connections - reconnects lazily instead of crashing</li>
+<li>Optional SSH tunneling (<code>PG_SSH_*</code>) with mandatory host-key verification, loaded only when configured</li>
+<li>MCP tool annotations (read-only / destructive hints) per spec 2025-11-25</li>
+<li>Multi-schema support for database operations</li>
+</ul>
+<h2>Security</h2>
+<p>Full details, including the threat model and disclosure process, are in
+<a href="https://github.com/antonorlov/mcp-postgres-server/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a>. The short version:</p>
+<ol>
+<li><p><strong>A least-privilege database role is the real boundary.</strong> The MCP works with
+existing credentials; creating or changing roles is not required. A dedicated
+role is what actually guarantees writes are impossible.
+On PostgreSQL 14+, the following is a starting point:</p>
+<pre><code class="language-sql">CREATE ROLE mcp_readonly LOGIN PASSWORD 'change-me';
+GRANT CONNECT ON DATABASE your_database TO mcp_readonly;
+GRANT pg_read_all_data TO mcp_readonly;                          -- adds read privileges
+ALTER ROLE mcp_readonly SET default_transaction_read_only = on;  -- read-only by default
+</code></pre>
+<p>(On PostgreSQL 13 or older, grant <code>SELECT</code> explicitly instead of
+<code>pg_read_all_data</code> - see <a href="https://github.com/antonorlov/mcp-postgres-server/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a>.) The server warns on
+stderr if you connect as a superuser. Read grants do not revoke existing
+privileges, and defaults remain mutable; available functions, ownership and
+inherited privileges also matter.</p>
+</li>
+<li><p><strong>The engine enforces read-only.</strong> There is no client-side SQL parsing. In
+read-only mode every read runs in a rolled-back <code>BEGIN READ ONLY</code> transaction,
+so PostgreSQL itself - which alone knows what a function, view, or rule does -
+refuses any write with SQLSTATE 25006 and reverts any session change the
+statement made. The extended protocol rejects multi-command strings.</p>
+</li>
+</ol>
+<p><strong>Honest framing:</strong> the read-only transaction is defense-in-depth on top of the
+role, not a replacement for it. Read-only mode stops a confused or prompt-injected
+model from <em>writing</em> to your database; it does not stop prompt injection carried in
+the row data a query returns. Don't point this server at production - use a replica,
+a snapshot, or a tightly scoped role. See <a href="https://github.com/antonorlov/mcp-postgres-server/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a>.</p>
+<h2>SSH tunneling</h2>
+<p>Set <code>PG_SSH_HOST</code> (plus auth and host-key verification) to reach a database that is only accessible
+through a bastion (an SSH jump host). The connection string / <code>PG_*</code> fields then describe the
+database <strong>as seen from the bastion</strong>:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-postgres-server"],
+      "env": {
+        "DATABASE_URL": "postgres://mcp_readonly:secret@db.internal:5432/mydb?sslmode=verify-full",
+        "PG_SSH_HOST": "bastion.example.com",
+        "PG_SSH_USER": "jump",
+        "PG_SSH_PRIVATE_KEY": "/home/me/.ssh/id_ed25519",
+        "PG_SSH_FINGERPRINT": "SHA256:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    }
+  }
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>PG_SSH_HOST</code></td>
+<td>-</td>
+<td>SSH bastion host. <strong>Setting it enables tunneling</strong>: the server reaches the database only through an SSH tunnel to this host (see below). Optional feature; needs the <code>ssh2</code> optional dependency.</td>
+</tr>
+<tr>
+<td><code>PG_SSH_PORT</code></td>
+<td><code>22</code></td>
+<td>SSH bastion port</td>
+</tr>
+<tr>
+<td><code>PG_SSH_USER</code></td>
+<td>-</td>
+<td>SSH username</td>
+</tr>
+<tr>
+<td><code>PG_SSH_PRIVATE_KEY</code></td>
+<td>-</td>
+<td>Path to a private key file. If unset, auth falls back like <code>ssh</code>: a running agent (<code>SSH_AUTH_SOCK</code>), then a default key (<code>~/.ssh/id_ed25519</code>, <code>id_rsa</code>, <code>id_ecdsa</code>)</td>
+</tr>
+<tr>
+<td><code>PG_SSH_PASSPHRASE</code></td>
+<td>-</td>
+<td>Passphrase for the private key, if encrypted</td>
+</tr>
+<tr>
+<td><code>PG_SSH_AGENT</code></td>
+<td>-</td>
+<td><code>true</code> to use the ambient agent (<code>SSH_AUTH_SOCK</code>), or an explicit socket path / Windows named pipe (<code>\\.\pipe\openssh-ssh-agent</code>)</td>
+</tr>
+<tr>
+<td><code>PG_SSH_PASSWORD</code></td>
+<td>-</td>
+<td>SSH login password. Opt-in; a key or agent takes precedence. Prefer keys - a bastion often disables password auth.</td>
+</tr>
+<tr>
+<td><code>PG_SSH_FINGERPRINT</code></td>
+<td>-</td>
+<td>Pinned host-key fingerprint (<code>SHA256:...</code>). <strong>Host-key verification is mandatory and set only this way</strong>: without it the tunnel refuses to connect (fail-closed). Get it with <code>ssh-keygen -lF host</code> (reads your <code>known_hosts</code>) or <code>ssh-keyscan host | ssh-keygen -lf -</code> (see the trust note below)</td>
+</tr>
+<tr>
+<td><code>PG_SSH_KEEPALIVE_INTERVAL</code></td>
+<td><code>15000</code></td>
+<td>SSH keepalive interval in ms; the tunnel drops after 3 unanswered keepalives, and the next call reconnects</td>
+</tr>
+</tbody></table>
+<ul>
+<li><strong>SSH changes only the transport.</strong> Read-only enforcement, the result size cap, timeouts, and
+<code>connect_db</code> behave exactly as on a direct connection, and no extra SQL is sent per query.</li>
+<li><strong>Host-key verification is mandatory</strong> via a pinned <code>PG_SSH_FINGERPRINT</code> - the tunnel will not
+connect without it, so a man-in-the-middle bastion is refused. Get the fingerprint over a channel
+you trust, most trustworthy first:<ul>
+<li>on the bastion itself, or from its admin: <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>
+(no network involved);</li>
+<li>from your existing <code>~/.ssh/known_hosts</code>, if you already reach the host over <code>ssh</code>:
+<code>ssh-keygen -lF bastion.example.com</code>;</li>
+<li>fetched from the host: <code>ssh-keyscan bastion.example.com | ssh-keygen -lf -</code> (trust this only
+when run from a network position you trust - it accepts whatever the host returns).</li>
+</ul>
+</li>
+<li><strong>TLS validates the real database hostname.</strong> With <code>verify-full</code>, the certificate is checked against
+the database's own hostname (e.g. <code>db.internal</code>), not the loopback the tunnel binds locally, and
+<code>rejectUnauthorized</code> is pinned on so an inherited <code>NODE_TLS_REJECT_UNAUTHORIZED=0</code> cannot disable it.</li>
+<li><strong><code>ssh2</code> is an optional dependency</strong>, loaded only when <code>PG_SSH_HOST</code> is set, so a direct connection
+never initializes it. npm installs optional dependencies by default; run
+<code>npm install --omit=optional</code> to skip it entirely (a direct connection does not need it).</li>
+</ul>
+<p>A tunneled connection that fails reports a stable <code>SSH_*</code> code - see <a href="#error-handling" target="_blank" rel="noopener noreferrer">Error Handling</a>.</p>
+<h2>Error Handling</h2>
+<p>SQL and connection failures are returned as tool results (<code>isError: true</code>)
+with a message, the SQLSTATE code, and a hint. PostgreSQL's own server hint is
+used when present; otherwise these fallbacks apply:</p>
+<table>
+<thead>
+<tr>
+<th>code</th>
+<th>meaning</th>
+<th>first thing to check</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>28P01</code></td>
+<td>authentication failed</td>
+<td><code>PG_USER</code> / <code>PG_PASSWORD</code></td>
+</tr>
+<tr>
+<td><code>3D000</code></td>
+<td>database does not exist</td>
+<td><code>PG_DATABASE</code></td>
+</tr>
+<tr>
+<td><code>42P01</code></td>
+<td>relation not found</td>
+<td>call <code>list_tables</code></td>
+</tr>
+<tr>
+<td><code>42703</code></td>
+<td>column not found</td>
+<td>call <code>describe_table</code></td>
+</tr>
+<tr>
+<td><code>57014</code></td>
+<td>the query was canceled (a timeout or a cancel request)</td>
+<td>if timing out, add a <code>LIMIT</code> / simplify it, or raise <code>PG_STATEMENT_TIMEOUT</code></td>
+</tr>
+<tr>
+<td><code>25006</code></td>
+<td>the transaction is read-only</td>
+<td>source may be a read-only role, a replica, a server default, or (for <code>query</code>) the read-only wrapper; <code>execute</code> writes need <code>PG_ALLOW_WRITE=true</code></td>
+</tr>
+<tr>
+<td><code>ECONNREFUSED</code> / <code>ENOTFOUND</code></td>
+<td>cannot reach or resolve the database host</td>
+<td><code>PG_HOST</code> / <code>PG_PORT</code> / <code>DATABASE_URL</code></td>
+</tr>
+</tbody></table>
+<p>Over an <a href="#ssh-tunneling" target="_blank" rel="noopener noreferrer">SSH tunnel</a>, a failure carries a stable <code>code</code> (and, where
+the cause is determinate, a hint naming the setting to fix), so the failing phase is unambiguous:</p>
+<table>
+<thead>
+<tr>
+<th>code</th>
+<th>meaning</th>
+<th>first thing to check</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SSH_CONFIG_INVALID</code></td>
+<td>invalid SSH config, incl. a malformed <code>PG_SSH_FINGERPRINT</code></td>
+<td>the <code>PG_SSH_*</code> values</td>
+</tr>
+<tr>
+<td><code>SSH_KEY_INVALID</code></td>
+<td>key unreadable, unparseable, a public key, or encrypted without the right passphrase (an encrypted key with the correct <code>PG_SSH_PASSPHRASE</code> works)</td>
+<td><code>PG_SSH_PRIVATE_KEY</code>, <code>PG_SSH_PASSPHRASE</code></td>
+</tr>
+<tr>
+<td><code>SSH_CONNECT_FAILED</code></td>
+<td>the bastion is unreachable, or SSH setup failed for an unclassified reason</td>
+<td><code>PG_SSH_HOST</code>, <code>PG_SSH_PORT</code>, reachability</td>
+</tr>
+<tr>
+<td><code>SSH_TIMEOUT</code></td>
+<td>the bastion did not respond in time</td>
+<td>network/firewall, <code>PG_CONNECT_TIMEOUT</code></td>
+</tr>
+<tr>
+<td><code>SSH_AUTH_FAILED</code></td>
+<td>the bastion rejected authentication</td>
+<td><code>PG_SSH_USER</code> and the key/agent/password in use</td>
+</tr>
+<tr>
+<td><code>SSH_HOST_KEY_MISMATCH</code></td>
+<td>host key does not match <code>PG_SSH_FINGERPRINT</code> (stale value or MITM)</td>
+<td>re-fetch the fingerprint</td>
+</tr>
+<tr>
+<td><code>SSH_FORWARD_FAILED</code></td>
+<td>tunnel is up, but the bastion could not reach the database</td>
+<td>the DB host and port as seen from the bastion</td>
+</tr>
+<tr>
+<td><code>SSH_CONNECTION_LOST</code></td>
+<td>an established tunnel dropped mid-session</td>
+<td>transient; the next call reconnects</td>
+</tr>
+</tbody></table>
+<p>A genuine PostgreSQL error through a healthy tunnel keeps its own code (e.g. <code>28P01</code> for wrong
+database credentials), not an SSH code.</p>
+<h2>Migrating from 0.1.x</h2>
+<p>Not needed for new installs. Two behavior changes since 0.1.x:</p>
+<ol>
+<li><strong>Read-only by default.</strong> The <code>execute</code> tool is always visible but refuses
+writes (with an error naming the flag) unless <code>PG_ALLOW_WRITE=true</code>, and every
+read runs inside an engine-enforced <code>READ ONLY</code> transaction. If your workflow
+writes to the database, set <code>"PG_ALLOW_WRITE": "true"</code> to restore 0.1.x behavior.</li>
+<li><strong><code>connect_db</code> is disabled by default.</strong> Runtime connection switching (passing
+credentials through tool arguments) requires <code>PG_ENABLE_RUNTIME_CONNECT=true</code>;
+otherwise connection details come only from the environment.</li>
+</ol>
+<p>Tool names, parameter names, and <code>PG_*</code> variables are unchanged. Result payloads
+are now structured compact JSON for <strong>every</strong> tool (e.g. <code>query</code> returns
+<code>{rows, rowCount, returnedRows, truncated}</code> instead of a bare row array) - see
+<a href="https://github.com/antonorlov/mcp-postgres-server/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a> for the exact shapes before updating anything that
+parses tool output.</p>
+<h2>License</h2>
+<p>MIT</p>

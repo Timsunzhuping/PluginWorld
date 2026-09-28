@@ -14,7 +14,7 @@
 <li><strong>No system-cursor movement:</strong> the helper contains no cursor-warp path.</li>
 <li><strong>No global pointer injection:</strong> click, scroll, and drag fallback use a pid/window-targeted SkyLight route, not the global HID event stream.</li>
 <li><strong>No pointer-triggered activation:</strong> semantic Accessibility, process-targeted pointer input, and <code>keyboardPolicy: preserve</code> run without activation; <code>keyboardPolicy: activate</code> (Bundle default) brings the target app forward before keyboard fallback, matching Codex Computer Use.</li>
-<li><strong>A separate Agent cursor:</strong> click, scroll, and drag actions animate a click-through, nonactivating software cursor while the macOS system cursor remains untouched. It is visible by default and stays at the action position until the bound window changes or a hide command; <code>cursorAutoHideMs</code> can opt into timed auto-hide.</li>
+<li><strong>A separate Agent cursor:</strong> click, scroll, and drag actions animate a click-through, nonactivating software cursor while the macOS system cursor remains untouched. It appears only while the exact target application is frontmost and follows a speed/acceleration-shaped curved path. Click and scroll wait for arrival before input; drag reaches and presses at the start point, then tracks the destination while the native drag runs.</li>
 <li><strong>No blind replay:</strong> every action is tied to an exact, unexpired observation and returns fresh state.</li>
 </ul>
 <p>The result is a native action layer that can operate many background applications while the user continues working in the current foreground application.</p>
@@ -74,8 +74,10 @@ dsh --profile headless --dump-config | grep computer-use
 <p>For local development, replace the package name with an absolute checkout path.</p>
 <p>Restart a running <code>dsh web</code> host after changing the installed plugin, then start a new Session so the host reloads the Bundle and Skill catalog.</p>
 <p>Load the Skill in that Session:</p>
-<pre><code class="language-text">/computer-use
+<pre><code class="language-text">/dsh-computer-use
 </code></pre>
+<p>The existing <code>/computer-use</code> Skill remains available for older sessions. If another
+installed Skill uses that name, load <code>/dsh-computer-use</code> to activate this plugin.</p>
 <p>Then try:</p>
 <blockquote>
 <p>Use Computer Use to inspect the running DSH Computer Use Fixture, enable its deterministic option, and report the fresh status. Prefer Accessibility elements and do not reuse an old observation.</p>
@@ -104,11 +106,13 @@ dsh --profile headless --dump-config | grep computer-use
   keyboardPolicy: activate
   pointerInputPolicy: targeted
   cursorVisualization: visible
-  cursorMotionMs: 180
+  cursorSpeedPxPerSecond: 1600
+  cursorAccelerationPxPerSecondSquared: 6000
+  cursorClickDelayMs: 90
   cursorAutoHideMs: 0
 </code></pre>
-<p><code>cursorVisualization: visible</code> displays the Agent's own non-interactive cursor for click, scroll, and drag. It never replaces or moves the macOS system cursor. Set it to <code>hidden</code> when visual feedback is unwanted. <code>pointerInputPolicy: deny</code> disables coordinate click/fallback, scroll, and drag. <code>keyboardPolicy: activate</code> (Bundle default) makes <code>type-text</code> keyboard fallback and <code>press-key</code> reliable by activating the target app first; <code>focusPolicy: activate</code> is the broader compatibility mode that also activates before pointer input. After activation, the helper re-observes and revalidates the exact target before input.</p>
-<p>The cursor is a 28x28 transparent whole-image cursor (Cursor arrow plus DeepSeek whale, <code>assets/cursor.png</code>) with the hotspot at the image's top-left corner. It is a separate process, click-through, nonactivating, and bound to the exact observed pid, window, and frame so it disappears if the target window closes, moves, resizes, or is minimized.</p>
+<p><code>cursorVisualization: visible</code> displays the Agent's own non-interactive cursor for click, scroll, and drag only while the selected application is frontmost. It never replaces or moves the macOS system cursor. Set it to <code>hidden</code> when visual feedback is unwanted. <code>pointerInputPolicy: deny</code> disables coordinate click/fallback, scroll, and drag. <code>keyboardPolicy: activate</code> (Bundle default) makes <code>type-text</code> keyboard fallback and <code>press-key</code> reliable by activating the target app first; <code>focusPolicy: activate</code> is the broader compatibility mode that also activates and freshly revalidates before pointer cursor movement and input.</p>
+<p>The cursor is a 28x28 transparent whole-image cursor (Cursor arrow plus DeepSeek whale, <code>assets/cursor.png</code>) with the hotspot at the image's top-left corner. It is a separate process, click-through, nonactivating, and bound to the exact observed pid, window, frame, and current frontmost application. It disappears when that binding stops matching. Travel time is derived from distance, maximum speed, and acceleration; a short curved path plus symmetric acceleration/deceleration keeps the default motion legible, while high values reduce it to a few visible frames. Click input is sent only after native arrival and the configured dwell. For drag, that same sequence reaches the start point before the targeted native drag and endpoint cursor travel begin together.</p>
 <p>The helper executable is an internal DSH transport rather than a public authorization API. It requires an isolated process group plus parent-owned standard transports, so ordinary shell redirection fails closed before command parsing. This is defense in depth, not authentication against arbitrary code running as the same macOS user: a deliberately constructed detached parent can reproduce that transport topology. Use the registered Tools so application leases, sensitive-action confirmation, and host policy checks remain in force; <code>danger-full-access</code> must not be treated as protection against direct native invocation.</p>
 <p>Successful action results include:</p>
 <pre><code class="language-ts">activation: 'not-requested' | 'already-frontmost' | 'activated'
@@ -120,7 +124,14 @@ resolution?: {
   candidateCount: number
   targetChanged: boolean
 }
+agentCursor?: { visible: false; reason?: string }
+effect: {
+  observedStateChanged: boolean
+  observedForMs: number
+  note?: string
+}
 </code></pre>
+<p><code>effect.observedStateChanged</code> compares the window title, id and frame plus the Accessibility element tree. It does not prove causation and cannot see pixel-only, transient, remote, or otherwise external effects. <code>agentCursor</code> appears only when the separate Agent cursor was expected but could not be shown or validated.</p>
 <p>The model cannot override these host policies through Tool arguments.</p>
 <h2>Model Tools</h2>
 <p>The Bundle initially contributes only <code>computer_use_activate</code>. Loading the Skill exposes the focused execution vocabulary for that Agent.</p>
@@ -259,12 +270,20 @@ resolution?: {
 <td><code>visible</code> (default) shows the separate Agent cursor; <code>hidden</code> disables only the overlay</td>
 </tr>
 <tr>
-<td><code>interaction.cursorMotionMs</code></td>
-<td>Animated Agent-cursor travel duration, default <code>180</code> ms</td>
+<td><code>interaction.cursorSpeedPxPerSecond</code></td>
+<td>Requested maximum Agent-cursor speed; default <code>1600</code>, range <code>100</code> to <code>50000</code> pixels per second; the 48 to 2000 ms motion safety bound takes priority at extreme distance/value combinations</td>
+</tr>
+<tr>
+<td><code>interaction.cursorAccelerationPxPerSecondSquared</code></td>
+<td>Agent-cursor acceleration and deceleration; default <code>6000</code>, range <code>100</code> to <code>500000</code> pixels per second squared</td>
+</tr>
+<tr>
+<td><code>interaction.cursorClickDelayMs</code></td>
+<td>Dwell after arrival and before click/drag press feedback and native input; default <code>90</code>, range <code>0</code> to <code>1000</code> ms</td>
 </tr>
 <tr>
 <td><code>interaction.cursorAutoHideMs</code></td>
-<td>Idle time before the Agent cursor hides; default <code>0</code> keeps it visible until the bound window changes or a hide command, or set a finite value up to <code>30000</code> ms</td>
+<td>Idle time before the Agent cursor hides; default <code>0</code> keeps it visible while the target remains frontmost and bound, or set a finite value up to <code>30000</code> ms</td>
 </tr>
 <tr>
 <td><code>allowAllApps</code></td>
@@ -275,10 +294,11 @@ resolution?: {
 <td>Exact non-wildcard bundle-id read/control policy; <code>control: true</code> implies read</td>
 </tr>
 </tbody></table>
-</details><p>Settings updates replace the active provider generation only after validation and health checks pass. Replacement invalidates existing observations and pending confirmations.</p>
+</details><p>The deprecated 0.2.x <code>interaction.cursorMotionMs</code> field remains accepted so existing Settings documents load, but it is ignored at runtime and removed the next time Web Settings saves the configuration.</p>
+<p>Settings updates replace the active provider generation only after validation and health checks pass. Replacement invalidates existing observations and pending confirmations.</p>
 <h2>Status and limitations</h2>
 <ul>
-<li>Status: early <code>0.1.0</code>; model-facing and provider behavior may change before a stable release.</li>
+<li>Status: early <code>0.3.0</code>; model-facing and provider behavior may change before a stable release.</li>
 <li>The current provider is macOS-only. Windows UI Automation and Linux providers are not implemented.</li>
 <li>On non-macOS hosts the plugin degrades gracefully: the DSH profile starts normally, Computer Use Tools and the Skill are not registered, and Web Settings reports <code>COMPUTER_UNSUPPORTED_PLATFORM</code> instead of failing startup.</li>
 <li>Target-process pointer delivery uses dynamically resolved SkyLight SPI. If it is unavailable, pointer fallback fails closed rather than switching to global input.</li>

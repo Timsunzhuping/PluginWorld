@@ -1,0 +1,342 @@
+<h1>tilth</h1>
+<p><a href="https://scorecard.dev/viewer/?uri=github.com/jahala/tilth" target="_blank" rel="noopener noreferrer"><img src="https://api.scorecard.dev/projects/github.com/jahala/tilth/badge" alt="OpenSSF Scorecard" /></a></p>
+<p><strong>Smart code reading for humans and AI agents.</strong> tilth parses your code with tree-sitter and answers questions that text search can't. It shows where a symbol is defined, who calls it, what it calls, what depends on a file, and what changed at function level.</p>
+<p>tilth is one binary. It works as a command-line tool and as an MCP server, which is how most agent hosts connect to tools. It builds no index and needs no setup.</p>
+<pre><code>$ tilth fastapi/dependencies/utils.py
+# fastapi/dependencies/utils.py (1027 lines, ~9.6k tokens)
+
+[1-]   imports: dataclasses, inspect, sys
+[86-110]     fn ensure_multipart_is_installed
+           def ensure_multipart_is_installed() -&gt; None
+[113-125]    fn get_parameterless_sub_dependant
+           def get_parameterless_sub_dependant(*, depends: params.Depends, path: str) -&gt; Dependant
+[128-179]    fn get_flat_dependant
+           def get_flat_dependant(
+...
+[203-215]    fn _get_signature
+           def _get_signature(call: Callable[..., Any]) -&gt; inspect.Signature
+[218-232]    fn get_typed_signature
+           def get_typed_signature(call: Callable[..., Any]) -&gt; inspect.Signature
+...
+</code></pre>
+<p>Small files come back whole. Large files come back as an outline with line ranges. Ask for the part you need with <code>--section</code>:</p>
+<pre><code class="language-bash">tilth fastapi/dependencies/utils.py --section 218-232
+tilth docs/guide.md --section "## Installation"
+</code></pre>
+<p>The examples in this README are real output from the <a href="https://github.com/fastapi/fastapi" target="_blank" rel="noopener noreferrer">FastAPI</a> and <a href="https://github.com/gin-gonic/gin" target="_blank" rel="noopener noreferrer">Gin</a> repositories. Lines marked <code>...</code> are cut for length.</p>
+<h2>Search finds definitions first</h2>
+<pre><code>$ tilth get_typed_signature --scope fastapi --expand=1
+# Search: "get_typed_signature" in fastapi — 2 matches (1 definitions, 1 usages)
+
+### dependencies/utils.py:218-232 [definition]
+  [203-215]    fn _get_signature
+             def _get_signature(call: Callable[..., Any]) -&gt; inspect.Signature
+-&gt; [218-232]    fn get_typed_signature
+             def get_typed_signature(call: Callable[..., Any]) -&gt; inspect.Signature
+  [235-241]    fn get_typed_annotation
+
+```dependencies/utils.py:218-232
+ 218 | def get_typed_signature(call: Callable[..., Any]) -&gt; inspect.Signature:
+ 219 |     signature = _get_signature(call)
+ 220 |     unwrapped = inspect.unwrap(call)
+ ...
+ 232 |     return typed_signature
+```
+
+-- calls --
+  _get_signature  dependencies/utils.py:203-215  def _get_signature(call: Callable[..., Any]) -&gt; inspect.Signature
+  get_typed_annotation  dependencies/utils.py:235-241  def get_typed_annotation(annotation: Any, globalns: dict[str, Any]) -&gt; Any
+
+### dependencies/utils.py:277 [usage in function get_dependant]
+  [244-253]    fn get_typed_return_annotation
+             def get_typed_return_annotation(call: Callable[..., Any]) -&gt; Any
+-&gt; [256-328]    fn get_dependant
+             def get_dependant(
+  [331-352]    fn add_non_field_param_to_dependency
+
+(~439 tokens)
+</code></pre>
+<p>tilth uses the syntax tree to tell a definition from a mention, and it lists definitions first. Each match is shown with the symbols around it, so you can see where you are without reading the file.</p>
+<p>An expanded definition ends with a <code>-- calls --</code> footer. It lists the functions the definition calls, each with its file, line range and signature. An agent can follow a call chain from there without searching again.</p>
+<p>When a search finds more than it shows, the header says so, for example <code>10 of 43 matches</code>. Add <code>--full</code> to raise the limit from 10 to 100.</p>
+<h3>Expanded search</h3>
+<p>On the command line, search returns compact results. <code>--expand</code> adds the source of the top matches:</p>
+<pre><code class="language-bash">tilth ServeHTTP --scope . --expand       # top 2
+tilth ServeHTTP --scope . --expand=5     # top 5
+</code></pre>
+<p>In MCP mode, <code>expand</code> defaults to 2.</p>
+<h3>Multi-symbol search</h3>
+<p>Look up several symbols in one call:</p>
+<pre><code class="language-bash">tilth "ServeHTTP, HandlersChain, Next" --scope .
+</code></pre>
+<p>Each symbol gets its own block of results. The expand budget is shared across them, with at least one expansion per symbol.</p>
+<h3>Callers</h3>
+<p>Find every call site of a symbol. tilth matches calls on the syntax tree, so comments and strings that mention the name are left out.</p>
+<pre><code>$ tilth isTrustedProxy --callers --scope .
+# Callers of "isTrustedProxy" in ~/gin — 5 call sites
+
+## context.go:1011 [caller: ClientIP]
+-&gt; trusted = c.engine.isTrustedProxy(remoteIP)
+...
+## gin.go:496 [caller: validateHeader]
+-&gt; if (i == 0) || (!engine.isTrustedProxy(ip)) {
+</code></pre>
+<p>In MCP mode, use <code>kind: "callers"</code> on <code>tilth_search</code>.</p>
+<h3>File dependencies</h3>
+<p>See what a file uses and what uses it. This is worth a look before you rename or remove an export.</p>
+<pre><code>$ tilth recovery.go --deps
+# Deps: recovery.go — 5 local, 0 external, 3 dependents
+
+## Uses (local)
+context.go                     Abort, AbortWithStatus, Error, Next
+debug.go                       IsDebugging
+fs.go                          Open
+gin.go                         New
+routergroup.go                 handle
+
+## Used by
+benchmarks_test.go:22          BenchmarkRecoveryMiddleware → Recovery
+benchmarks_test.go:36          BenchmarkManyHandlers → Recovery
+gin.go:239                     Default              → Recovery
+recovery_test.go:22            TestPanicClean       → RecoveryWithWriter
+...
+</code></pre>
+<p>In MCP mode, use the <code>tilth_deps</code> tool.</p>
+<h3>Grok a symbol</h3>
+<p><code>grok</code> returns everything about one symbol in a single call: signature, doc comment, body, callees, callers, siblings and tests.</p>
+<pre><code>$ tilth grok get_typed_signature --scope fastapi
+# grok: get_typed_signature [dependencies/utils.py:218]
+
+## signature
+def get_typed_signature(call: Callable[..., Any]) -&gt; inspect.Signature
+
+## body
+...
+
+## callees (2 internal, 5 extern)
+  dependencies/utils.py
+    _get_signature       [203-215]   def _get_signature(call: Callable[..., Any]) -&gt; inspect.Signature
+    get_typed_annotation [235-241]   def get_typed_annotation(annotation: Any, globalns: dict[str, Any]) -&gt; Any
+...
+
+## callers (1)
+  dependencies/utils.py
+    [277]   in get_dependant()
+</code></pre>
+<p>In MCP mode, use the <code>tilth_grok</code> tool.</p>
+<h3>Session memory</h3>
+<p>In MCP mode, a definition that was already expanded comes back as <code>[shown earlier]</code> in later searches. The agent does not receive the same body twice.</p>
+<h2>Structural diff</h2>
+<pre><code>$ tilth diff HEAD~1
+# Diff: HEAD~1 — 10 files, 10 modified, 9 added (~447 tokens)
+...
+## binding/bson.go (3 symbols)
+  [+]      Name                                     L16  (new, 3 lines)
+  [+]      Bind                                     L20  (new, 7 lines)
+  [+]      BindBody                                 L28  (new, 3 lines)
+
+## context.go (3 symbols)
+  [~]      &lt;const&gt;                                  L31  (body, 13→14 lines)
+  [~]      Negotiate                                L1357  (body, 30→34 lines)
+  [+]      BSON                                     L1242
+...
+</code></pre>
+<p>The diff reports changes per function: what was added, what was removed, and whether a signature or only a body changed. Narrow it with <code>--scope</code>, or summarise a range of commits with <code>--log</code>.</p>
+<h2>Why</h2>
+<p>I built tilth after watching AI agents make 6 tool calls to find one function: glob, read, "too big", grep, read again, read another file.</p>
+<p>An agent with grep can find where a piece of text appears. To find out who calls a function, it has to read files and work out the answer, and that answer can be wrong without anyone noticing. tilth parses the code and computes the answer. The outline shows what is in a file, search shows where things are defined, and <code>--section</code> returns the lines you asked for.</p>
+<h2>What it doesn't do</h2>
+<ul>
+<li>tilth parses syntax. It does not resolve types.</li>
+<li>Callers and dependencies are matched by name. tilth cannot tell apart two functions with the same name in different modules, and it cannot follow dynamic dispatch.</li>
+<li>A language without a tree-sitter grammar in tilth gets text search and plain file reading only.</li>
+</ul>
+<h2>Install</h2>
+<pre><code class="language-bash">cargo install tilth
+# or
+npx tilth
+</code></pre>
+<p>Prebuilt binaries are on the <a href="https://github.com/jahala/tilth/releases" target="_blank" rel="noopener noreferrer">releases page</a>.</p>
+<h3>MCP server</h3>
+<pre><code class="language-bash">tilth install claude-code      # ~/.claude.json
+tilth install cursor           # ~/.cursor/mcp.json
+tilth install windsurf         # ~/.codeium/windsurf/mcp_config.json
+tilth install vscode           # .vscode/mcp.json (project scope)
+tilth install claude-desktop
+tilth install opencode         # ~/.config/opencode/opencode.json
+tilth install gemini           # ~/.gemini/settings.json
+tilth install codex            # ~/.codex/config.toml
+tilth install amp              # ~/.config/amp/settings.json
+tilth install droid            # ~/.factory/mcp.json
+tilth install antigravity      # ~/.gemini/antigravity/mcp_config.json
+tilth install zed              # ~/.config/zed/settings.json
+tilth install copilot-cli      # ~/.copilot/mcp-config.json
+tilth install augment          # ~/.augment/settings.json
+tilth install kiro             # ~/.kiro/settings/mcp.json
+tilth install kilo-code        # VS Code globalStorage (extension)
+tilth install cline            # VS Code globalStorage (extension)
+tilth install roo-code         # VS Code globalStorage (extension)
+tilth install trae             # .trae/mcp.json (project scope)
+tilth install qwen-code        # ~/.qwen/settings.json
+tilth install crush            # ~/.config/crush/crush.json
+tilth install pi               # ~/.pi/agent/mcp.json
+</code></pre>
+<p>Add <code>--edit</code> to turn on hash-anchored file editing (see <a href="#edit-mode" target="_blank" rel="noopener noreferrer">Edit mode</a>):</p>
+<pre><code class="language-bash">tilth install claude-code --edit
+</code></pre>
+<p>For an MCP client that is not in the list, the server entry is the same everywhere. Only the config file location and the top-level key vary (<code>mcpServers</code> for most hosts, <code>amp.mcpServers</code> for Amp, TOML syntax for Codex):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "tilth": {
+      "command": "tilth",
+      "args": ["--mcp"]
+    }
+  }
+}
+</code></pre>
+<p>For edit mode, use <code>"args": ["--mcp", "--edit"]</code>.</p>
+<p>You can also call tilth from a shell. See <a href="https://github.com/jahala/tilth/blob/HEAD/AGENTS.md" target="_blank" rel="noopener noreferrer">AGENTS.md</a> for the MCP agent prompt, or <a href="https://github.com/jahala/tilth/blob/HEAD/skills/SKILL.md" target="_blank" rel="noopener noreferrer">skills/SKILL.md</a> for a Claude Code skill.</p>
+<h3>Smaller models</h3>
+<p>Smaller models sometimes reach for their built-in Bash and Grep tools even when tilth is available. To make tilth the only route, turn off the tools it overlaps with:</p>
+<pre><code class="language-bash">claude --disallowedTools "Bash,Grep,Glob"
+</code></pre>
+<h2>How it decides what to show</h2>
+<table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0 bytes</td>
+<td><code>[empty]</code></td>
+</tr>
+<tr>
+<td>Binary</td>
+<td><code>[skipped]</code> with mime type</td>
+</tr>
+<tr>
+<td>Generated (lockfiles, .min.js)</td>
+<td><code>[generated]</code></td>
+</tr>
+<tr>
+<td>Up to ~6,000 tokens</td>
+<td>Full content with line numbers</td>
+</tr>
+<tr>
+<td>Over ~6,000 tokens</td>
+<td>Structural outline with line ranges</td>
+</tr>
+</tbody></table>
+<p>The rule counts tokens, so a 1-line minified bundle gets outlined and a 120-line module prints whole.</p>
+<p>When the output is piped to another program, the command-line tool prints the full file, the way <code>cat</code> would. MCP reads and terminal reads follow the table.</p>
+<h2>Edit mode</h2>
+<p>Install with <code>--edit</code> to add <code>tilth_write</code> and switch <code>tilth_read</code> to hashline output:</p>
+<pre><code>42:a3f|  let x = compute();
+43:f1b|  return x;
+</code></pre>
+<p><code>tilth_write</code> takes one or more files in a single call. Each file uses one of three modes: <code>hash</code> (the default, which replaces lines at the hash anchors shown above), <code>overwrite</code> (the whole file, and create-only unless <code>overwrite: true</code>), and <code>append</code>. In hash mode the anchors must match the last read. If the file changed in the meantime, the hashes no longer match, and tilth rejects the edit and shows the current content:</p>
+<pre><code class="language-json">{
+  "files": [
+    {
+      "path": "src/auth.ts",
+      "edits": [
+        { "start": "42:a3f", "content": "  let x = recompute();" },
+        { "start": "44:b2c", "end": "46:e1d", "content": "" }
+      ]
+    }
+  ]
+}
+</code></pre>
+<p>Large files still come back as an outline first. Use <code>section</code> to get hashlined content for the part you need.</p>
+<p>Inspired by <a href="https://blog.can.ac/2026/02/12/the-harness-problem/" target="_blank" rel="noopener noreferrer">The Harness Problem</a>.</p>
+<h2>Usage</h2>
+<pre><code class="language-bash">tilth &lt;path&gt;                      # read file (outline if large)
+tilth &lt;path&gt; --section 45-89      # exact line range
+tilth &lt;path&gt; --section "## Foo"   # markdown heading
+tilth &lt;path&gt; --full               # force full content
+tilth &lt;symbol&gt; --scope &lt;dir&gt;      # definitions + usages
+tilth &lt;symbol&gt; --expand=5         # inline source for top 5 matches
+tilth &lt;symbol&gt; --full             # up to 100 matches instead of 10
+tilth &lt;symbol&gt; --callers          # find call sites (structural)
+tilth grok &lt;symbol&gt;               # everything about one symbol
+tilth &lt;path&gt; --deps               # what a file uses, and what uses it
+tilth "TODO: fix" --scope &lt;dir&gt;   # content search
+tilth "/&lt;regex&gt;/" --scope &lt;dir&gt;   # regex search
+tilth "*.test.ts" --scope &lt;dir&gt;   # glob files
+tilth diff HEAD~1                 # structural diff (function-level)
+tilth --map --scope &lt;dir&gt;         # codebase skeleton (CLI only)
+</code></pre>
+<p><code>--map</code> is a command-line feature only. It is not offered as an MCP tool, because in testing agents called it far more often than it helped.</p>
+<h2>Speed</h2>
+<p>Median of 15 runs of the release build (main after v0.10.1) on an Apple M5 Pro. Each time includes process startup. MCP mode pays startup once.</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Gin (130 files)</th>
+<th>FastAPI (2,700 files)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>File read</td>
+<td>3 ms</td>
+<td>3 ms</td>
+</tr>
+<tr>
+<td>Glob</td>
+<td>5 ms</td>
+<td>9 ms</td>
+</tr>
+<tr>
+<td>Callers</td>
+<td>13 ms</td>
+<td>64 ms</td>
+</tr>
+<tr>
+<td>Deps</td>
+<td>17 ms</td>
+<td>28 ms</td>
+</tr>
+<tr>
+<td>Symbol search</td>
+<td>20 ms</td>
+<td>77 ms</td>
+</tr>
+<tr>
+<td>Content search</td>
+<td>37 ms</td>
+<td>80 ms</td>
+</tr>
+<tr>
+<td>Grok</td>
+<td>37 ms</td>
+<td>91 ms</td>
+</tr>
+<tr>
+<td>Map</td>
+<td>52 ms</td>
+<td>184 ms</td>
+</tr>
+</tbody></table>
+<p>Search walks the whole tree, so time grows with the size of the repository.</p>
+<h2>What's inside</h2>
+<p>tilth is about 35,000 lines of Rust with no runtime dependencies.</p>
+<ul>
+<li><strong>tree-sitter</strong> parses 17 languages: Rust, TypeScript, TSX, JavaScript, Python, Go, Java, Scala, C, C++, Ruby, PHP, C#, Swift, Kotlin, Elixir and Bash. tilth uses it for definitions, callees, callers and outlines. Dockerfile and Make files are recognised but not parsed.</li>
+<li><strong>ripgrep's crates</strong> (<code>grep-regex</code>, <code>grep-searcher</code>) run content search.</li>
+<li>The <strong>ignore</strong> crate walks directories in parallel. tilth searches every file, including gitignored ones, and skips common build and dependency folders such as <code>node_modules</code>, <code>target</code> and <code>.venv</code>.</li>
+<li><strong>memmap2</strong> reads files through memory maps.</li>
+<li><strong>DashMap</strong> holds the outline cache, which is invalidated when a file's modified time changes.</li>
+</ul>
+<p>Definitions and usages are searched in parallel through <code>rayon::join</code>. Callees are resolved when a definition is expanded. tilth extracts the callee names with tree-sitter queries and looks them up in the file's own outline and in the files it imports. The callers query runs the same patterns in reverse across the codebase, with a <code>memchr</code> pre-filter to skip files that cannot match.</p>
+<p>tilth makes no network calls, so your code stays on your machine.</p>
+<h2>A note on benchmarks</h2>
+<p>Earlier versions of this README carried a cost benchmark. It was measured on v0.5.0 with early-2026 models, and it no longer describes the tool or the models people use today. We have retired it and have not replaced it, so tilth makes no cost claim. The harness and its task definitions are preserved under the <code>benchmark-archive</code> tag.</p>
+<h2>Name</h2>
+<p><strong>tilth</strong> is the state of soil that has been prepared for planting. Your codebase is the soil, and tilth gives it structure so you can find where to dig.</p>
+<h2>Support</h2>
+<p><a href="https://buymeacoffee.com/jahala" target="_blank" rel="noopener noreferrer"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="&quot;Buy Me A Coffee&quot;" /></a></p>
+<h2>License</h2>
+<p>MIT</p>

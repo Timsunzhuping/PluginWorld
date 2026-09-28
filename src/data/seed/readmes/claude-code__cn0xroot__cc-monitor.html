@@ -1,0 +1,990 @@
+<h1>CC-Monitor</h1>
+<p>English | <a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+<p>Ever let an AI agent write code for you and had no idea what it actually did to your machine
+along the way? Give this a try. It monitors what Claude Code does on your machine — file
+reads/writes, shell command execution, network access — and blocks or asks for confirmation
+on high-risk operations, so an AI coding agent can't quietly damage your system or leak data.
+Everything is audit-logged. The technical design doc is available in
+<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/DESIGN.en.md" target="_blank" rel="noopener noreferrer">English</a> and <a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/DESIGN.md" target="_blank" rel="noopener noreferrer">Chinese</a>. For what risks installing this actually
+carries, what third-party modules it depends on, and where your data actually goes, see
+<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/SECURITY.en.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a> (<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">Chinese</a>).</p>
+<p>Every release — what was added, changed and fixed — is recorded in
+<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/CHANGELOG.en.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a> (<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">Chinese</a>); the current release is
+<strong>v2.0</strong>.</p>
+<blockquote>
+<p><strong>🧪 Experimental features (<code>dev</code> branch)</strong>: <code>master</code> monitors Claude Code only. The <code>dev</code> branch
+is extending the detection surface to other AI coding agents — Codex CLI, Gemini CLI, Cursor,
+OpenCode, ZCode, Antigravity CLI and Grok CLI plug into the same rules, approval desk and audit
+log through their own hooks / plugin; the system-layer eBPF probe recognises every agent's process
+tree via an "agent registry" and gains file-level syscalls (write / delete / rename / mkdir),
+listening-port observation, directory-fd tracking (relative paths from <code>rm -r</code> / <code>mkdir -p</code>
+resolved to absolute ones), session attribution for kernel events and explicit
+<code>CC-Monitor run --</code> binding; AI Tap parses Claude Code / Antigravity CLI / Codex session files.
+<strong>Everything except Claude Code is in an experimental / testing stage</strong> (implemented from each
+vendor's docs or source; Antigravity CLI has had one real-machine round, the rest have not been
+verified on real installs) — not recommended for production. See the
+<a href="https://github.com/cn0xroot/CC-Monitor/blob/dev/README.md#ai-agent-integration-status" target="_blank" rel="noopener noreferrer">dev branch README</a>,
+<a href="https://github.com/cn0xroot/CC-Monitor/blob/dev/MULTI-AGENT.md" target="_blank" rel="noopener noreferrer">MULTI-AGENT.md</a> (usage and
+internals) and <a href="https://github.com/cn0xroot/CC-Monitor/blob/dev/DESIGN-multi-agent.md" target="_blank" rel="noopener noreferrer">DESIGN-multi-agent.md</a>
+(design), both in Chinese. To try it: <code>git checkout dev</code>, or <code>git worktree add ../CC-Monitor-dev dev</code>
+and run it with a separate <code>CC_MONITOR_HOME</code> and port so the master install is untouched.</p>
+</blockquote>
+<h2>Core capabilities at a glance</h2>
+<ul>
+<li><strong>Two independent layers of monitoring</strong>: Claude Code hooks capture semantic detail; a
+Linux eBPF / macOS nettop probe cross-verifies at the kernel/system level, independent of
+the hooks — so a bypassed or tampered hook config doesn't mean monitoring silently stops.</li>
+<li><strong>86 built-in detection rules, auto-triaged by risk</strong>: high-risk operations get blocked
+outright (<code>rm -rf</code>, reverse shells, writing SSH keys…), medium-risk ones pop a confirmation
+prompt, low-risk ones are logged silently — you're not babysitting every single action.</li>
+<li><strong>Full audit trail</strong>: every tool call's command, path, arguments, and decision are logged to
+SQLite in full. <code>CC-Monitor tail</code> gives you a live, syntax-highlighted view (command name,
+arguments, strings, pipes each get their own color) with one command.</li>
+<li><strong>Bypass detection</strong>: cross-checks commands the system-layer probe actually observed against
+what the application-layer hooks recorded, specifically to catch the harder-to-notice case of
+monitoring being silently disabled.</li>
+<li><strong>Cross-workdir behavior detection</strong>: regex rules can't see the cwd, so this layer fills the
+gap — every path a tool call is about to touch (file tools' <code>file_path</code>; Bash commands split
+into sub-commands with paths resolved, <code>cd</code> tracked, and redirects / <code>rm</code>/<code>cp</code>/<code>tee</code>-style
+writes recognized) is resolved to an absolute path and compared against the current project
+directory. Anything outside is tiered by location (hidden home-dir config/credentials, other
+users' homes, system directories, other project directories) × read/write: writes to sensitive
+locations prompt for confirmation, everything else is logged. Review them with <code>CC-Monitor workdir</code> or
+the "Cross-workdir operations" home-page card.</li>
+<li><strong>Network visibility</strong>: eBPF captures the destination IP:port of every <code>connect()</code> call
+directly — no TLS termination, no CA certificate to install — with a connection detail table,
+GeoIP lookups, and a WebGL2 world map in the Web UI.</li>
+<li><strong>A full Web UI dashboard</strong>: home-page stat cards, an AI approval desk (confirm from the web
+page, the terminal, or a desktop notification — whichever answers first wins), Claude Tap
+(reconstructs full conversations without packet capture), and live account quota display, all
+in one page.</li>
+<li><strong>Cross-platform</strong>: works on both Linux and macOS (including real Apple Silicon M4 hardware
+verification), with the core feature set consistent across both.</li>
+</ul>
+<h2>Screenshots</h2>
+<table>
+<thead>
+<tr>
+<th>Home overview</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><img src="https://raw.githubusercontent.com/cn0xroot/CC-Monitor/HEAD/pic/home-en.png" alt="Home" /></td>
+</tr>
+</tbody></table>
+<table>
+<thead>
+<tr>
+<th>Session list drilldown</th>
+<th>Event type breakdown</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><img src="https://raw.githubusercontent.com/cn0xroot/CC-Monitor/HEAD/pic/home-sessions-en.png" alt="Session list" /></td>
+<td><img src="https://raw.githubusercontent.com/cn0xroot/CC-Monitor/HEAD/pic/home-events-en.png" alt="Event type breakdown" /></td>
+</tr>
+</tbody></table>
+<table>
+<thead>
+<tr>
+<th>Blocked high-risk operations</th>
+<th>Audit log</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><img src="https://raw.githubusercontent.com/cn0xroot/CC-Monitor/HEAD/pic/home-blocked-en.png" alt="Blocked operations" /></td>
+<td><img src="https://raw.githubusercontent.com/cn0xroot/CC-Monitor/HEAD/pic/audit-log-en.png" alt="Audit log" /></td>
+</tr>
+</tbody></table>
+<h2>Quick Install</h2>
+<pre><code class="language-bash">git clone https://github.com/cn0xroot/CC-Monitor.git
+cd CC-Monitor
+./install.sh
+</code></pre>
+<p><code>install.sh</code> runs 5 steps in order: the ccstatusline terminal statusline, hook
+registration, Web UI dependencies, a system-layer probe check, and the GeoIP database —
+each one idempotent and independently skippable (<code>--skip-ccstatusline</code> / <code>--skip-geoip</code>),
+never overwriting anything you already have configured. Then run <code>./start.sh</code> to launch
+the Web UI.</p>
+<p>If you only want the core interception/audit capability and don't need the Web UI or
+any of that, this one step is enough on its own:</p>
+<pre><code class="language-bash">python3 install.py
+</code></pre>
+<p>It does exactly one thing — registers the hooks into Claude Code's
+<code>~/.claude/settings.json</code>. No npm or Python dependencies get installed (<code>cc_monitor/</code>
+itself is standard-library-only Python). Once that's done, the <code>CC-Monitor tail</code>/<code>rules</code>/<code>stats</code>/<code>verify</code> CLI commands already work; the Web UI is an entirely
+optional, separate add-on you can install later whenever you want it. For the exact
+flags each script takes, what <code>install.sh</code>'s 5 steps actually do, and installing to a
+system path (<code>make install</code>), see the <a href="#installation" target="_blank" rel="noopener noreferrer">Installation</a> section below.</p>
+<h2>Intervention levels: picking one</h2>
+<p>Once installed, you decide how strict the tool is. There are three levels, and exactly one
+is active at any time.</p>
+<p>Think of it as a guard at the door:</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>What the guard does</th>
+<th>Color</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Enforcing</strong></td>
+<td>Stops anyone suspicious outright, asks you about the borderline cases, notes down the rest</td>
+<td>Purple</td>
+</tr>
+<tr>
+<td><strong>Permissive</strong></td>
+<td>Writes everyone down, but stops nobody and never interrupts you</td>
+<td>Green</td>
+</tr>
+<tr>
+<td><strong>Off</strong></td>
+<td>The guard went home and took the notebook with them</td>
+<td>Yellow</td>
+</tr>
+</tbody></table>
+<p>In concrete terms:</p>
+<ul>
+<li><strong>Enforcing</strong> is the default; it's what you get if you change nothing after installing.
+Operations matching a high-risk rule are blocked outright, things like <code>rm -rf /</code>, reverse
+shells, or writing into <code>~/.ssh</code>. Medium-risk matches pop a confirmation and only proceed
+if you say so. Everything else is logged silently.</li>
+<li><strong>Permissive</strong> records without stopping. Rules are still evaluated and the risk level and
+matched rule still land in the audit log, it just <strong>never blocks and never prompts</strong>. Two
+situations call for it: you're heads-down and don't want confirmation dialogs interrupting
+you but do want to know afterwards what the agent did; or you just installed the tool and
+don't yet know which rules your normal workflow trips, so you run it this way for a couple
+of days and read the log before tightening anything.</li>
+<li><strong>Off</strong> is the only level that genuinely stops auditing. Nothing is evaluated, nothing is
+recorded, exactly as if the tool weren't installed. Its use is narrow: you suspect
+CC-Monitor itself is causing a problem and want to compare with it out of the picture.</li>
+</ul>
+<p><strong>Permissive and Off are the easy pair to confuse.</strong> Neither one will stop you. The
+difference is whether there's anything to look at afterwards. Permissive keeps the log
+filling; Off leaves a blank stretch you can never go back and inspect. So if you just want
+fewer interruptions, pick Permissive, not Off.</p>
+<p>You can switch from the command line:</p>
+<pre><code class="language-bash">CC-Monitor audit start        # Enforcing
+CC-Monitor audit permissive   # Permissive (the old name, pause, still works)
+CC-Monitor audit stop         # Off
+CC-Monitor audit status       # Show the current level
+</code></pre>
+<p>Or in the browser, on the left of the home page toolbar: three levels side by side, click one
+to switch, and the active one is highlighted in its color. Switching to Off asks once more
+first, because that's the level that leaves a gap in the audit trail. A matching status pill
+also sits permanently in the top bar, so you can tell the current level without going back
+to the home page.</p>
+<p>One thing to know: <strong>the system-layer probe is not controlled by this switch</strong>. As long as
+the probe is running it keeps recording command execution and network connections at the
+kernel level, whichever level you pick. That's deliberate. The probe's whole value is
+observing independently of the hooks, so shutting it off alongside them would defeat the point.</p>
+<h2>Web UI</h2>
+<p><code>webui/</code> is a standalone Node.js service that provides a browser UI:</p>
+<pre><code class="language-bash">cd webui
+npm install
+node server.js          # listens on http://127.0.0.1:9999 by default, localhost-only
+</code></pre>
+<ul>
+<li><strong>Home</strong>:<ul>
+<li><strong>Intervention level</strong>: Enforcing / Permissive / Off as a segmented control, so all
+three are visible at once and clicking one switches straight to it, with the active one
+highlighted in its color (purple / green / yellow). A line below the control explains
+whichever level is active. Switching to Off asks for confirmation. A matching status pill
+sits permanently in the top bar. See <a href="#intervention-levels-picking-one" target="_blank" rel="noopener noreferrer">Intervention levels</a>
+above for what each level means.</li>
+<li><strong>Claude Code identity check</strong>: detects which OS user every running <code>claude</code> process
+belongs to (cross-platform, implemented via <code>ps</code>), and flags it prominently when that
+differs from the Web UI's own user — the Web UI and the hooks each resolve
+<code>~/.cc-monitor/</code> from their own process's <code>$HOME</code>, so a mismatch means the two sides
+silently write to completely different databases; this card makes that otherwise-
+invisible situation visible. Click through for each process's PID/user/working directory.</li>
+<li><strong>Overview stats</strong>: live terminal session count, total Claude Code sessions detected,
+total audit events (<code>hook_pre</code> + <code>hook_post</code> + system-layer events combined),
+blocked/suspected-bypass counts, <strong>tool calls</strong> (counts <code>hook_pre</code> only — a more direct
+"how many tool invocations actually happened" number than the raw event total), <strong>MCP
+calls</strong> (identified via the <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> naming convention, click through for
+a per-server breakdown), and <strong>AI trajectory</strong> (domains/IPs Claude Code has visited,
+backed by the same data as the Network tab — a blend of two kinds of evidence: real
+connections the system-layer probe (eBPF/nettop) actually observed, plus targets inferred
+from the text of wget/curl/git clone/ssh/scp/… commands Claude ran, tagged "inferred" so
+they're never mistaken for confirmed probe data. Many people never start the system-layer
+probe by hand, so this card used to sit empty even when Claude had clearly run a pile of
+networked commands — now both kinds of evidence show up here, and on the world map too).
+The "total sessions" / "total events" / "blocked operations" / "tool calls" / "MCP calls" /
+"AI trajectory" cards are all clickable for drilldown detail.</li>
+<li><strong>File operation stats</strong>: read/write/edit/delete counts, each clickable for detail.</li>
+<li><strong>Install operation stats</strong>: grouped by which install-type rule matched — pip / system
+package manager (apt/yum/dnf/pacman/brew/port) / npm installs / other. The npm card combines
+two rules' totals: local (<code>npm install</code>/<code>npm i</code> without <code>-g</code>, log-level, never intrusive)
+and global (with <code>-g</code>/<code>--global</code>, confirm-level). Both run the same lifecycle scripts
+(<code>preinstall</code>/<code>postinstall</code>) with the same privileges, and both are a real supply-chain
+attack surface, but a global install sticks around on <code>$PATH</code> across every project, so only
+the global case asks for confirmation. Clicking the card splits the drilldown into separate
+"Global installs"/"Local installs" groups instead of flattening them together.</li>
+<li><strong>Command-based operation stats</strong> (GitHub/SSH/Download/Docker/Archive/Network
+Diagnostics/Process Management — seven groups): each group's home page footprint is a single
+summary card (the number is the sum across that group's categories); clicking it expands into
+a category breakdown table plus the full command list with syntax highlighting — avoiding a
+home page wall-papered with 33 sub-category cards across the seven groups (that's what it used
+to be, one full row per group). The drilldown interaction matches the existing MCP/Skill/
+Subagent call cards:<ul>
+<li><strong>GitHub operations</strong>: git push / git clone / git commit / git pull-fetch / gh CLI
+(PR/Issue/API…) / other git operations, classified from the Bash command text itself (most
+git/gh commands don't violate any policy rule, so they never get a <code>matched_rule</code> and
+couldn't reuse the install-ops trick).</li>
+<li><strong>SSH operations</strong>: ssh (remote login/exec) / scp (file copy) / sftp (file transfer) / key
+management (<code>ssh-keygen</code>/<code>ssh-copy-id</code>/<code>ssh-add</code>/<code>ssh-agent</code>) / other (<code>autossh</code>/<code>sshpass</code>),
+classified the same way as GitHub operations (only the start of each sub-command, never a
+substring match against the whole text, so an <code>echo</code>'d string can't be misread as a real
+invocation).</li>
+<li><strong>Downloads</strong>: wget / curl (only counted when it writes to a file via <code>-o</code>/<code>-O</code>/<code>--output</code> —
+a bare curl call to an API isn't a "download") / aria2 / other (<code>axel</code>/<code>lftp</code>/<code>ftp</code>/<code>http</code>).</li>
+<li><strong>Docker operations</strong>: run (start a container) / build (build an image) / exec (run inside a
+running container) / compose (<code>docker compose</code> or the standalone <code>docker-compose</code>) / other
+(read-only inspection like <code>ps</code>/<code>logs</code>/<code>images</code>). run/build/exec are broken out separately
+since they can execute arbitrary code from an external image, Dockerfile, or a running
+container — a different risk tier than read-only inspection.</li>
+<li><strong>Archive/compression operations</strong>: tar / zip (incl. unzip) / 7z / gzip (incl. gunzip/zcat)
+/ other (bzip2/xz/zstd/rar, etc.).</li>
+<li><strong>Network diagnostic tools</strong>: nc (incl. the ncat/netcat aliases) / nmap / telnet / other
+(socat) — purely a "was this tool used" visibility stat; an ordinary port probe like
+<code>nc -zv example.com 443</code> is still counted here without implying danger — an actual reverse
+shell is blocked separately by the policy rule below.</li>
+<li><strong>Process management / backgrounding</strong>: nohup / disown / background job (a bare trailing
+<code>&amp;</code>) / other (setsid). "Background job" detection is deliberately narrow (requires the <code>&amp;</code>
+not be part of <code>&amp;&amp;</code>/<code>2&gt;&amp;1</code>/<code>&amp;&gt;</code> syntax, and be immediately followed by the end of the
+command or a <code>;</code>), to avoid false-positiving on the <code>&amp;</code> inside a URL query string like
+<code>curl 'http://x.com/a&amp;b=c'</code>.</li>
+</ul>
+</li>
+<li><strong>Subagent spawn stats</strong>: same approach as the MCP/Skill call stats, grouped by
+<code>subagent_type</code> (e.g. <code>general-purpose</code>/<code>Explore</code>/<code>Plan</code>/<code>fork</code>) — subagents consume
+independent resources and have their own full trail of operations, so they shouldn't be
+buried inside the generic "tool calls" count.</li>
+<li><strong>Screenshot audit</strong>: Claude Code has no built-in "screenshot" tool, so this is identified
+from three independent signals — a Bash command invoking a screenshot CLI (<code>scrot</code>,
+<code>gnome-screenshot</code>, <code>import</code>, <code>spectacle</code>, <code>flameshot</code>, <code>maim</code>, <code>grim</code>, <code>xwd</code>, macOS's
+<code>screencapture</code>, or the Wayland-typical <code>gdbus</code>/<code>dbus-send</code> call to
+<code>org.freedesktop.portal.Screenshot</code>); the <code>Read</code> tool opening a file that's itself an image
+(<code>.png</code>/<code>.jpg</code>/<code>.gif</code>/<code>.webp</code>/<code>.bmp</code> — deliberately broader than "screenshot," since viewing
+an existing image counts too); or an MCP/"computer use" tool's screenshot action (a tool
+name containing "screenshot," or a <code>computer</code> tool whose <code>action</code> field is <code>"screenshot"</code>).
+Click through for the exact session, timestamp, and the command run or file opened —
+<strong>only that basic info is shown, the screenshot's own image content is never read or
+rendered</strong>, to avoid exposing potentially sensitive desktop content through the web page.</li>
+<li><strong>Anthropic account info</strong>: name, email, organization, org role, plan type, rate-limit
+tier, billing type, and account/subscription creation dates, read straight from Claude
+Code's own local global config file (<code>~/.claude.json</code>'s <code>oauthAccount</code> field) — no
+network call, same source <a href="https://github.com/sirmalloc/ccstatusline" target="_blank" rel="noopener noreferrer">ccstatusline</a>'s
+"Claude Account Email" widget uses. Plus account-level usage/quota (same data source as
+the Status tab — the session quota shows "remaining %" with a conky-style stepped
+palette, weekly quotas show "used %" with a continuous red→yellow→green gradient, and
+per-model quotas like Fable are detected dynamically rather than hardcoded), the
+<code>limits[]</code> breakdown (a progress bar, plus a purple "how far through this window" bar
+next to the reset time) and <code>spend</code> (whether pay-as-you-go usage credits are enabled, and
+how much has been used).</li>
+<li><strong>Data management</strong>: archive the current event data (a full SQLite <code>backup()</code> snapshot)
+or clear it to start counting from zero; breakdowns by log type and risk level.</li>
+</ul>
+</li>
+<li><strong>Log Audit</strong>: a full-width, live-updating audit log view (filterable by session — the session dropdown shows "folder · model · short ID" instead of an opaque ID string), reusing the same human-readable event-translation logic as the CLI. The data comes from <code>events.db</code> (what CC-Monitor's hooks captured and the policy engine judged), and the content is <strong>deliberately redacted</strong> per the project's privacy principle — Write/Edit show only "path (N bytes)", TodoWrite shows only an item count, screenshots show only metadata, never the actual content read or written. It answers "what operation happened, what was its risk level, was it allowed or blocked" — a security-audit question. For "what did this session actually say", see <strong>Claude Tap</strong> below.</li>
+<li><strong>Terminal Sessions</strong>: open a Claude Code terminal directly in the browser (a PTY spawned via <code>node-pty</code>) instead of switching to a local terminal app; rendered with <code>xterm.js</code> + the WebGL addon, GPU-accelerated when available and falling back to Canvas otherwise. The sidebar can switch to a <strong>grid view</strong> (herdr-style) showing every live session on one screen at once; clicking a pane routes keyboard input to it.</li>
+<li><strong>Claude Tap</strong>: view the <strong>full conversation content</strong> sent to/received from the model for a given session (not just "which tool was called") — text, thinking, tool calls, tool results, token usage, each field color-coded, and shown <strong>unredacted</strong>, including the model's thinking process that Log Audit can never show at all (hooks only see the world at the <code>PreToolUse</code>/<code>PostToolUse</code> boundary — thinking never crosses it; only the transcript file has it). You must pick one specific session first (there's no merged "all sessions" view here). It answers "what did this session actually say, what was Claude thinking" — a debugging/recap question, using a completely separate data source from Log Audit with a very different level of restraint, not two views onto the same data. The data source is Claude Code's own local transcript JSONL file (the <code>transcript_path</code> field in the hook payload) — not packet capture or MITM. CLI equivalent: <code>CC-Monitor tap [--session ID] [-f]</code>.</li>
+<li><strong>AI Approvals</strong>: mirrors Claude Code's "allow this action?" confirmation into the Web UI
+— similar in spirit to <a href="https://vibeisland.app/" target="_blank" rel="noopener noreferrer">Vibe Island</a> popping an Allow/Deny card in
+the Mac notch, except cross-platform (a web page instead of a Mac-only UI). Two kinds of
+prompts land here:<ul>
+<li>operations our own rule table flags as <code>confirm</code> (decided by our rules at <code>PreToolUse</code>);</li>
+<li><strong>Claude Code's own native "Do you want to proceed?" dialog</strong> (the <code>PermissionRequest</code>
+hook event — calls that matched no rule but that Claude Code's permission system wants
+a human to approve). An answer from the web page or the terminal is returned via
+<code>decision.behavior</code>; if nobody answers (90s timeout) or you press Enter at the terminal,
+the request is handed back untouched to the native dialog — installing CC-Monitor never
+removes that safety net.</li>
+<li>The same request can be answered either at the terminal that triggered it (y/N) or from
+this page — whichever answers first wins. Choosing "allow" on the web page makes Claude
+Code skip its own native popup entirely, via the hook's <code>permissionDecision: allow</code>
+output, instead of asking twice.</li>
+<li>Options: allow once, deny once, allow and don't ask again for 10/30 minutes, or always
+allow (scoped to this session only).</li>
+<li><strong>Desktop app (Electron)</strong> does not use the browser path (in an Electron renderer
+<code>Notification.permission</code> is always "granted", yet macOS silently refuses notifications
+from an app that isn't properly signed): the main process polls the pending list itself
+and on a new request plays the system alert sound + bounces the Dock icon + sets a badge
+count, plus a system notification when the OS allows one (click → approvals tab).
+<code>npm run electron</code> runs the ad-hoc-signed Electron.app from node_modules, so on macOS the
+system notification always fails (<code>UNErrorDomain error 1</code>) — you get sound/Dock/badge only;
+a Developer-ID-signed build is needed for real notifications. The hook side additionally
+sends one <code>osascript</code> notification per request (attributed to "Script Editor"); macOS asks
+once whether to allow it — if declined, re-enable it under System Settings → Notifications
+→ Script Editor.</li>
+<li>Supports browser desktop notifications (the Notification API) — new requests raise a
+system notification even when this tab isn't open, click it to jump straight back in.</li>
+<li><strong>History table</strong>: every resolved request stays on record (the underlying table is never
+purged by "clear current data"), with time, session, tool, matched rule, matched value,
+outcome, and resolved-via. For <code>notify</code>-kind records (<code>AskUserQuestion</code> and friends), it
+also captures the user's actual answer from the terminal.</li>
+</ul>
+</li>
+<li><strong>Status</strong>:<ul>
+<li>The same Anthropic account info (name/email/organization/plan) as the Home page, plus
+account-level usage (the 5-hour session window / weekly quota / per-model weekly quota +
+reset times, queried from the same <code>api.anthropic.com/api/oauth/usage</code> endpoint and OAuth
+credentials as <a href="https://github.com/sirmalloc/ccstatusline" target="_blank" rel="noopener noreferrer">ccstatusline</a>).</li>
+<li><strong>Model Usage table</strong>: token usage summed by model (Sonnet/Opus/…) across every
+monitored session.</li>
+<li>Per-session model, token usage, throughput (tok/s, estimated from the transcript), and a
+<code>ccstatusline</code>-compatible <code>Σ Total / Cached</code> token summary (same accounting: total =
+input+output+cached, cached = cache-read+cache-creation).</li>
+<li><strong>Context window usage %</strong>: estimated against a standard 200K context window (Claude
+Code doesn't report the exact window size to our hooks, so this is an approximation).</li>
+<li><strong>Context compaction count</strong>: a real detection of <code>compact_boundary</code> events in the
+transcript, not an estimate.</li>
+<li>cwd, git branch, uptime, and blocked-operation counts.</li>
+</ul>
+</li>
+<li><strong>Network</strong>: the actual network connections the Claude Code process tree has made —
+destination IP/port, hostname, upload/download byte counts, connection count, plus a world
+map plotting roughly where those destinations are. All of this comes from the system-layer
+probe (<code>cc_monitor/probe_linux.bt</code>, Linux + eBPF) — not packet capture or MITM.<ul>
+<li><strong>Domain capture</strong>: a <code>uprobe:libc:getaddrinfo</code> records the hostname the moment the
+application resolves it, instead of reverse-DNS-ing the IP afterward — many cloud/CDN
+egress IPs never had a PTR record configured, so reverse DNS can't recover a domain that
+was never registered in reverse; this method isn't affected.</li>
+<li><strong>Byte counts</strong>: <code>tcp_sendmsg</code>/<code>tcp_cleanup_rbuf</code> kernel probes, since the probe
+previously only knew "connected to this IP:port," not how much data moved.</li>
+<li><strong>IP geolocation</strong>: a local database (no per-IP third-party API calls) — either MaxMind
+GeoLite2 or the no-signup-needed DB-IP Lite both work, see Requirements below; without
+one, the map and location column are simply empty and the page honestly says "no GeoIP
+database configured" instead of faking data.</li>
+<li><strong>World map</strong>: drawn entirely in WebGL2 (equirectangular projection + a bundled low-res
+coastline outline), following the approach from
+<a href="https://github.com/cn0xroot/BeeEye" target="_blank" rel="noopener noreferrer">BeeEye</a>'s <code>WorldMap.jsx</code> — no map-tile service
+dependency.</li>
+<li><strong>Connection detail</strong>: "Connections" is clickable both per target row and on the two
+summary cards ("Total connections" / "Distinct IPs") — opens every connection's time,
+originating process, and PID.</li>
+<li>With the probe not installed or not running, this page just shows empty data.</li>
+</ul>
+</li>
+<li><strong>Appearance settings</strong>: a ⚙ button in the top bar opens a settings dialog.<ul>
+<li><strong>Color theme</strong>: a visual swatch grid — each of the 10 themes (Brand/Dark/Light/Dracula/
+Nord/Midnight/Ocean/Forest/Sunset/Rose, the last five ported from
+<a href="https://github.com/cn0xroot/AI_Web_Search" target="_blank" rel="noopener noreferrer">AI_Web_Search</a>'s color scheme) shown as its
+own accent-color dot with an active highlight; the original top-bar theme dropdown still
+works too and stays in sync.</li>
+<li><strong>Interface font</strong> (system default / monospace / serif / rounded / Kaiti / Heiti
+(Source Han Sans) / Songti (Source Han Serif)) and <strong>interface font size</strong> (12–18px
+slider, applied at the root element with every <code>font-size</code> in the stylesheet in <code>rem</code>,
+so one change scales the whole app proportionally) — new settings, with a live
+preview, persisted to <code>localStorage</code>. The Chinese font options aren't bundled as font
+files (a full CJK glyph set is 17–21MB each, which would make the first font switch
+painfully slow) — they're plain font-name references that only render correctly where
+the visitor's system already has a matching font installed.</li>
+<li><strong>Language toggle</strong>: translation covers UI chrome (nav, buttons, titles, empty-state
+hints, risk/operation/status labels) but not the data itself (raw command text, tool
+output, transcript content). The risk/operation-type/status badges in the audit log use
+fixed, highly saturated colors that don't change with the theme; high-risk rows are shown
+in bold red.</li>
+</ul>
+</li>
+</ul>
+<p>Static assets are served with <code>Cache-Control: no-store</code> since this UI is still iterating fast — refresh the page after a code change and you'll see the latest version, no stale browser cache to worry about.</p>
+<p>Binds to <code>127.0.0.1</code> only by default: this tool can spawn terminal processes directly and has
+no authentication. The Home tab has an "Allow access from other devices" switch, but it only
+sets a flag — the actual security boundary is the address the process was bound to at startup,
+which a web page can't change at runtime. To really listen on all interfaces, an admin has to
+explicitly set <code>CC_MONITOR_WEBUI_HOST=0.0.0.0</code> and restart the service; only then does the
+switch actually do anything (it defaults to off even when bound to <code>0.0.0.0</code>, rejecting every
+non-local request until turned on).</p>
+<h2>Desktop app (Electron)</h2>
+<p>If you'd rather not open a browser and run <code>node server.js</code> by hand, <code>webui/</code> also has an
+Electron wrapper — it directly <code>require</code>s the existing <code>server.js</code> (Express + ws + node-pty +
+better-sqlite3) with zero server-side code changes, and runs as a standalone windowed app.</p>
+<pre><code class="language-bash">cd webui
+npm install
+npm run electron          # dev mode: runs directly, no packaging needed
+</code></pre>
+<p>Binds to <code>127.0.0.1:9998</code> (distinct from the web version's default 9999, so both can run at
+the same time).</p>
+<p>To build a distributable installer:</p>
+<pre><code class="language-bash">npm run dist:linux   # AppImage (x64 + arm64)
+npm run dist:mac     # universal dmg (Intel + Apple Silicon)
+</code></pre>
+<p>Both scripts run <code>electron-rebuild</code> first to recompile <code>node-pty</code>/<code>better-sqlite3</code> against
+Electron's bundled Node ABI — these packages ship prebuilt binaries that don't match
+Electron's Node version out of the box, so this rebuild step is required, not an optional
+optimization.</p>
+<p><strong>Known status</strong>: the Electron version pinned in <code>devDependencies</code> (<code>^44.0.0</code>) isn't
+arbitrary — an earlier build on the default 33.x reproducibly segfaulted on startup on a
+recent AMD CPU (Zen 5), and switching to 44.x fixed it; this looks like a Chromium/CPU
+compatibility bug in that older Electron release, so don't roll the version back. So far only
+the "packaged app starts and its embedded server listens correctly" path has been verified
+end-to-end on Linux x64; the macOS and Linux ARM64 builds haven't been validated end-to-end
+yet.</p>
+<h2>Overview</h2>
+<p>CC-Monitor has a two-layer architecture:</p>
+<ul>
+<li><strong>Application layer (Claude Code Hooks)</strong>: registers <code>PreToolUse</code>/<code>PostToolUse</code> hooks to get
+semantic info on every tool call (tool name, command, file path), then allows/blocks/asks based
+on configurable rules. This is the primary layer — cheap and broad coverage.</li>
+<li><strong>System layer (eBPF on Linux, nettop on macOS)</strong>: <code>CC-Monitor-probe</code> uses <code>bpftrace</code> to
+independently trace, at the kernel level, every <code>execve</code>/<code>connect</code> made by the entire process
+subtree spawned by the <code>claude</code> process — completely independent of Claude Code's own
+cooperation. This is the second line of defense: it can still catch anomalies even if the
+hooks config itself gets tampered with or bypassed.<ul>
+<li><strong>macOS</strong>: the same <code>CC-Monitor-probe</code> command switches to <code>cc_monitor/probe_darwin.py</code>, which
+samples the claude process tree's connections and byte counts every 2s with the built-in
+<code>nettop</code> — <strong>no root needed</strong>. Network only (traffic page / world map / AI trajectory): there
+is no <code>execve</code> observation (the bypass detection behind <code>CC-Monitor verify</code> stays Linux-only)
+and hostnames fall back to reverse DNS.</li>
+</ul>
+</li>
+</ul>
+<p>Capabilities:</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Block high-risk operations</td>
+<td>Operations matching a rule (<code>Bash</code>/<code>Write</code>/<code>Edit</code>/...) can be denied outright (e.g. <code>rm -rf /</code>, writing to <code>~/.ssh/</code>)</td>
+</tr>
+<tr>
+<td>Interactive confirmation</td>
+<td>Medium-risk operations prompt for confirmation in the terminal + a desktop notification; times out to "deny" if there's no tty</td>
+</tr>
+<tr>
+<td>Audit log</td>
+<td>Every event is persisted to SQLite, with the full <code>tool_input</code>/<code>tool_response</code> payload</td>
+</tr>
+<tr>
+<td>Human-readable live log</td>
+<td><code>CC-Monitor tail</code> turns raw JSON into "event type + summary + result", auto-colored in a real terminal, with Bash commands syntax-highlighted (command name / flags / strings / variables / pipes)</td>
+</tr>
+<tr>
+<td>Bypass detection</td>
+<td><code>CC-Monitor verify</code> cross-checks what the system probe observed against what the hooks recorded, and flags commands the probe saw but the hooks never logged</td>
+</tr>
+<tr>
+<td>Network visibility</td>
+<td>eBPF captures the destination IP:port of every <code>connect()</code> call directly — no TLS termination, no CA certificate to install</td>
+</tr>
+</tbody></table>
+<h2>How It Works</h2>
+<p>The Overview above is <em>what</em> it does; this is <em>how</em>, and every mechanism maps directly onto the
+source (full depth in <a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/DESIGN.en.md" target="_blank" rel="noopener noreferrer">DESIGN.en.md</a>):</p>
+<ul>
+<li><strong>Hook interception</strong>: before and after every tool call, Claude Code writes a JSON payload to the
+configured hook command's stdin and waits synchronously for it to exit. <code>CC-Monitor-hook</code> exiting
+with code 2 means "deny" — whatever it printed to stderr gets surfaced back to Claude Code. It's a
+one-shot subprocess spawned per call, not a long-running daemon, so there's no "the monitor process
+died and now nothing is enforced" failure mode (and also no need to restart anything after editing
+rules — the next call picks them up immediately).</li>
+<li><strong>Rule engine</strong>: <code>default_rules.json</code> is an ordered rule list; <code>policy.evaluate()</code> walks it in order
+and the first match wins, so more specific rules need to come before more general catch-alls. Each
+rule declares <code>tools</code> (which tools it applies to), <code>field</code> (which key to read out of <code>tool_input</code> —
+e.g. <code>command</code>/<code>file_path</code>/<code>url</code>), a regex <code>pattern</code>, and a <code>risk</code>/<code>action</code>. The rule file is copied
+from <code>default_rules.json</code> into <code>~/.cc-monitor/rules.json</code> on first use, and can be edited from there.
+Rules added to <code>default_rules.json</code> by later versions are merged into that file automatically by id
+(a rule you edited or deleted is never touched; see <code>rules.defaults_snapshot.json</code>).</li>
+<li><strong>System-layer eBPF probe</strong>: <code>probe_linux.bt</code> attaches to kernel tracepoints like <code>execve</code>/<code>connect</code>.
+It first recognizes Claude Code's own process via <code>comm=="claude"</code>, then listens for
+<code>sched_process_fork</code> events to propagate a "being monitored" flag down through every descendant
+process it spawns — tracking continues even if a child process renames itself. <code>CC-Monitor verify</code>
+matches commands the probe observed against what the hooks logged in the same time window (with
+quote-normalization to handle how zsh's snapshot wrapper escapes quotes), and flags anything the
+probe saw that the hooks never recorded.</li>
+<li><strong>Claude Tap</strong>: the hook's JSON payload includes a <code>transcript_path</code> field pointing at Claude Code's
+own local conversation transcript JSONL file. Reading that file and parsing its <code>user</code>/<code>assistant</code>/
+<code>tool_use</code>/<code>tool_result</code> entries reconstructs the full conversation — no packet capture, no CA
+certificate, no MITM proxy involved.</li>
+<li><strong>Account usage display</strong>: reads the OAuth token Claude Code itself stores (Linux:
+<code>~/.claude/.credentials.json</code>; macOS: no file — it lives in the login Keychain as the
+generic-password item <code>Claude Code-credentials</code>, read via <code>security find-generic-password</code>),
+then calls Anthropic's own
+<code>api.anthropic.com/api/oauth/usage</code> endpoint with that token (adding the
+<code>anthropic-beta: oauth-2025-04-20</code> header) — the exact same credential and endpoint
+<a href="https://github.com/sirmalloc/ccstatusline" target="_blank" rel="noopener noreferrer">ccstatusline</a> uses, not a separately maintained usage
+tracker.</li>
+<li><strong>Web terminal</strong>: <code>node-pty</code> spawns a real pseudo-terminal (PTY) — no different from opening a
+terminal window locally — then types <code>claude\r</code> into it automatically to launch Claude Code. The
+first time Claude Code opens a directory it hasn't seen before, it shows a "do you trust this
+folder?" prompt defaulting to "No, exit"; this is detected by watching for that exact banner text
+and answered automatically (down-arrow + enter, selecting "Yes, I trust this folder") — otherwise
+the very next stray Enter keypress would silently exit Claude Code back to a bare shell while the
+terminal still looked perfectly functional.<ul>
+<li><strong>New Window</strong>: shares the same working-directory picker modal as "New Session," the only
+difference being it never types <code>claude\r</code> — for when you just want a terminal (running a
+script, poking around files) without being dropped straight into a Claude Code session.
+Backend-wise it's just <code>POST /api/sessions</code> with <code>launchClaude: false</code>.</li>
+</ul>
+</li>
+<li><strong>Data persistence/archiving</strong>: "Archive current data" on the Home tab uses SQLite's own <code>backup()</code>
+API to take a full snapshot of the current <code>events.db</code> (not a plain file copy — <code>backup()</code> correctly
+handles data that hasn't been checkpointed out of the WAL journal yet), saved under
+<code>~/.cc-monitor/archives/</code>; "Clear current data" runs <code>DELETE</code> against the same database and resets
+the autoincrement counter.</li>
+</ul>
+<h2>Installation</h2>
+<h3>Requirements</h3>
+<ul>
+<li><p><strong>Hooks (<code>cc_monitor/</code>)</strong>: Python 3.8+, standard library only, no third-party packages. The
+system-layer probe additionally needs <code>bpftrace</code> on Linux (optional — the hooks work fine
+without it).</p>
+</li>
+<li><p><strong>Web UI (<code>webui/</code>)</strong>: Node.js <strong>≥ 22</strong> — not an arbitrary floor, it's what <code>better-sqlite3</code>
+itself declares in its <code>package.json</code> <code>engines</code> field (<code>express</code> only needs Node ≥ 18, but
+<code>better-sqlite3</code> requires 22; an older Node will likely fail during install or at startup).
+Check <code>node --version</code> before installing, e.g. via <a href="https://github.com/nvm-sh/nvm" target="_blank" rel="noopener noreferrer">nvm</a>.</p>
+</li>
+<li><p><strong>Terminal statusline <a href="https://github.com/sirmalloc/ccstatusline" target="_blank" rel="noopener noreferrer">ccstatusline</a> (optional)</strong>:
+reads the same OAuth credential and calls the same Anthropic endpoint as CC-Monitor's own
+usage display (see "Account usage display" above), but it's an independently maintained
+third-party npm package — CC-Monitor never calls into it or bundles its code. Step 1 of
+<code>install.sh</code> checks whether it's already installed (<code>command -v ccstatusline</code>) and runs
+<code>npm install -g ccstatusline</code> if not; once installed, if <code>~/.claude/settings.json</code> has no
+<code>statusLine</code> entry yet, it wires one in automatically (never overwriting any existing
+<code>statusLine</code> config, whether it's ccstatusline or something else). <code>--skip-ccstatusline</code> or
+<code>CC_MONITOR_SKIP_CCSTATUSLINE=1</code> skips both the install and the wiring.</p>
+</li>
+<li><p><strong>GeoIP location on the Network tab (optional)</strong>: uses the <code>maxmind</code> npm package to read a
+local database file, which isn't shipped in this repo. Without one, the Network tab still
+works — the location column and map just have no data, and the page says so honestly
+rather than affecting the connection/byte-count stats. Two ways to get a database:</p>
+<ul>
+<li><strong>No account needed (recommended — this is what <code>./install.sh</code> does by default)</strong>:
+<a href="https://github.com/sapics/ip-location-db" target="_blank" rel="noopener noreferrer">sapics/ip-location-db</a>
+republishes DB-IP Lite data (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>,
+city-level accuracy) as ready-to-use <code>.mmdb</code> files, updated automatically. Step 5 of
+<code>install.sh</code> downloads it to <code>~/.cc-monitor/dbip-city.mmdb</code> (skipped if any <code>.mmdb</code> is
+already there; a failed download only warns; set <code>CC_MONITOR_GEOIP_URL</code> to use a mirror).
+Manual download works too:<pre><code class="language-bash">curl -L -o ~/.cc-monitor/dbip-city.mmdb \
+  https://github.com/sapics/ip-location-db/releases/download/latest/dbip-city-ipv4.mmdb
+</code></pre>
+</li>
+<li><strong>Official MaxMind GeoLite2</strong>: usually more accurate, but requires signing up for a free
+account at <a href="https://www.maxmind.com/en/geolite2/signup" target="_blank" rel="noopener noreferrer">MaxMind</a>, generating a license
+key, and manually downloading <code>GeoLite2-City.mmdb</code> to
+<code>~/.cc-monitor/GeoLite2-City.mmdb</code>.</li>
+</ul>
+<p>The two databases use different field layouts (MaxMind nests fields, DB-IP Lite is flat) —
+<code>geoip.js</code> recognizes both, no extra configuration needed either way. <code>CC_MONITOR_GEOIP_DB</code>
+can point at a different path than the defaults above.</p>
+</li>
+</ul>
+<p><strong>Verified working environment</strong> (not the only one that works — just the one this has
+actually been tested and confirmed on): Ubuntu 24.04 LTS (kernel 7.0, x86_64), AMD Ryzen 9
+9950X (Zen 5), Node.js v22.17.1, npm 10.9.2, Python 3.13.5. The desktop (Electron) build was
+additionally verified to crash on startup on this CPU with the originally-pinned Electron
+33.x, and to run correctly after upgrading to 44.x (see the Desktop app section below) — which
+is why that version isn't pinned back down.</p>
+<p><strong>In a hurry?</strong> <code>./install.sh</code> runs these 5 steps in order:</p>
+<ol>
+<li><strong>ccstatusline</strong> (optional terminal statusline): installs it globally via npm if missing,
+then wires it into <code>~/.claude/settings.json</code>'s <code>statusLine</code> field if that key isn't already
+set — <code>--skip-ccstatusline</code> / <code>CC_MONITOR_SKIP_CCSTATUSLINE=1</code> skips both</li>
+<li><strong>Registers hooks</strong> into Claude Code's <code>settings.json</code> (<code>python3 install.py</code>, see the manual
+steps below for details)</li>
+<li><strong>Installs Web UI dependencies</strong> (<code>cd webui &amp;&amp; npm install</code>; skipped, Web UI only, if npm
+isn't found)</li>
+<li><strong>Checks whether the system-layer probe can run</strong>: on Linux, whether <code>bpftrace</code> is
+installed; on macOS, nothing extra is needed (uses the built-in <code>nettop</code>) — this step only
+detects and prints a hint, missing <code>bpftrace</code> never aborts the install</li>
+<li><strong>GeoIP database</strong> (optional, for the Network tab's location column): downloads DB-IP Lite
+to <code>~/.cc-monitor/dbip-city.mmdb</code> by default — <code>--skip-geoip</code> / <code>CC_MONITOR_SKIP_GEOIP=1</code>
+skips it</li>
+</ol>
+<p>Then run <code>./start.sh</code> to launch the Web UI (it installs dependencies on first run if needed).
+For more control, the manual steps are below.</p>
+<p>There are two ways to install it, with identical end results — pick whichever fits:</p>
+<h3>Option 1: run it in place (touches nothing outside this directory)</h3>
+<pre><code class="language-bash"># 1. Put the whole CC-Monitor directory wherever you want it (assumed here: ~/Tools/CC-Monitor)
+cd ~/Tools/CC-Monitor
+
+# 2. Install the hooks into your Claude Code config (also chmod +x's everything under bin/)
+python3 install.py                              # global install: writes ~/.claude/settings.json
+python3 install.py --project /path/to/project    # project-scoped install
+python3 install.py --target /path/to/settings.json  # explicit settings.json path (for cross-user installs)
+
+# 3. (optional) install bpftrace if you want the system-layer probe
+sudo apt install bpftrace        # Debian/Ubuntu
+# see bpftrace's own docs for other distros; macOS needs nothing extra (the probe uses the built-in nettop)
+</code></pre>
+<p>The installer merges into the <code>PreToolUse</code>/<code>PostToolUse</code>/<code>PermissionRequest</code> hook arrays and de-duplicates by exact
+<code>command</code> string, so it <strong>never overwrites</strong> any hooks you already have configured; a corrupted
+<code>settings.json</code> gets backed up to <code>.json.bak</code> before being rebuilt. <strong>Restart Claude Code</strong> —
+only new sessions pick up the updated config.</p>
+<h3>Option 2: <code>make install</code> onto the system path</h3>
+<p>If you'd rather have a global command and not have to remember where this checkout lives:</p>
+<pre><code class="language-bash">sudo make install                          # defaults to /usr/local/lib/cc-monitor + /usr/local/bin
+sudo make install PREFIX=/opt/cc-monitor   # or pick your own prefix
+
+# afterwards, the commands work from any directory; still do step 2 from Option 1 to
+# register the hooks (using the path make install prints out):
+CC-Monitor tail -v
+python3 /usr/local/lib/cc-monitor/install.py
+</code></pre>
+<p><code>make install</code> only copies the code onto the system and sets up the command-line symlinks — it
+<strong>does not</strong> touch your <code>~/.claude/settings.json</code> on its own; registering the hooks is a separate,
+explicit <code>install.py</code> run (the exact path is printed at the end of <code>make install</code>). <code>sudo make uninstall</code> reverses it (again, code and symlinks only — any hooks already registered in
+<code>settings.json</code> need to be removed by hand).</p>
+<h2>Build</h2>
+<p>CC-Monitor is pure Python (standard library only: <code>sqlite3</code>, <code>json</code>, <code>argparse</code>, <code>re</code>, ...) —
+<strong>there is no build/compile step</strong>:</p>
+<ul>
+<li><code>bin/CC-Monitor</code>, <code>bin/CC-Monitor-hook</code>, and <code>bin/CC-Monitor-probe</code> are executable scripts with a
+<code>#!/usr/bin/env python3</code> shebang; <code>install.py</code> chmod's them automatically.</li>
+<li>The system-layer probe depends on <code>bpftrace</code>, which is a prebuilt binary from your system's
+package manager — nothing to compile. <code>cc_monitor/probe_linux.bt</code> is a bpftrace script, interpreted
+at runtime by <code>bpftrace</code> itself.</li>
+<li><code>make install</code> in the <code>Makefile</code> isn't a build step either — it just copies files under <code>PREFIX</code>
+and creates command-line symlinks; see "Installation" above.</li>
+<li>It is <strong>not</strong> currently packaged as a single-file executable (e.g. via PyInstaller/Nuitka) —
+that's on the TODO list below.</li>
+</ul>
+<h2>Usage</h2>
+<pre><code class="language-bash"># Live-tail monitored events (Ctrl+C to quit)
+./bin/CC-Monitor tail
+./bin/CC-Monitor tail -v          # also print the raw JSON
+
+# Show the currently active rules
+./bin/CC-Monitor rules
+
+# Show stats (counts by risk level / decision)
+./bin/CC-Monitor stats
+
+# System-layer probe (needs root; cross-checks whether hooks are being bypassed)
+sudo ./bin/CC-Monitor-probe
+
+# Show records the probe flagged as "possibly bypassing the hooks"
+./bin/CC-Monitor verify
+</code></pre>
+<p><strong>Environment variables</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CC_MONITOR_HOME</code></td>
+<td>Overrides the event DB / rules file directory (default <code>~/.cc-monitor/</code>)</td>
+</tr>
+<tr>
+<td><code>CC_MONITOR_COLOR</code></td>
+<td><code>always</code>/<code>never</code> to force terminal color on/off (default: auto-detect a real tty)</td>
+</tr>
+<tr>
+<td><code>NO_COLOR</code></td>
+<td>Forces color off when set (standard convention)</td>
+</tr>
+</tbody></table>
+<p>Events and rules live under <code>~/.cc-monitor/</code>: <code>events.db</code> (SQLite audit log) and <code>rules.json</code>
+(editable rules — edits apply immediately, no restart needed; new default rules from later
+versions are merged in automatically, tracked via <code>rules.defaults_snapshot.json</code>). Whenever the
+effective rule set changes, the next hook invocation re-evaluates every historical <code>PreToolUse</code>
+event against the new rules in a background process (only <code>risk</code>/<code>matched_rule</code> are rewritten,
+never the original allow/block decision), so the home-page stat cards catch up instead of carrying
+stale hits forever; <code>CC-Monitor rematch</code> previews that pass and <code>CC-Monitor rematch --apply</code> runs
+it by hand.</p>
+<p><strong>Rule format</strong> (<code>rules.json</code> is an array of rules):</p>
+<pre><code class="language-json">{
+  "id": "rule_name",
+  "risk": "high | medium | low",
+  "action": "block | confirm | log",
+  "tools": ["Bash"],
+  "field": "command | file_path | url",
+  "pattern": "regular expression",
+  "match": "search | segment"
+}
+</code></pre>
+<ul>
+<li><p><code>match</code> (optional, default <code>search</code>): <code>search</code> runs the regex over the whole field value;
+<code>segment</code> splits a Bash command into top-level sub-commands (quotes and heredoc bodies are not
+split), strips <code>sudo</code>/<code>env</code>/<code>xargs</code>/<code>time</code> wrappers and executable path prefixes, and anchors the
+regex at the start of each sub-command. Use it for "is this command actually being run" rules
+(package installs, <code>sudo</code>); <code>search</code> stays for "does this text mention X anywhere" rules (paths,
+redirections, download-piped-into-shell). <code>bash -c "..."</code> and <code>osascript ... do shell script "..."</code>
+bodies are recursed into.</p>
+</li>
+<li><p><code>block</code>: deny outright; Claude Code receives the denial reason.</p>
+</li>
+<li><p><code>confirm</code>: prompts for confirmation in the terminal (waits for <code>y</code> on the tty) + a desktop
+notification; denies by default with no tty or on timeout.</p>
+</li>
+<li><p><code>log</code>: allow, but record it in the audit log.</p>
+</li>
+</ul>
+<p>Default rules live in <a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/cc_monitor/default_rules.json" target="_blank" rel="noopener noreferrer">cc_monitor/default_rules.json</a>, covering: dangerous
+deletes, disk-overwrite commands, <code>curl|bash</code>, recursive <code>chmod 777</code>, <code>sudo</code>, <code>git push --force</code>,
+reading/writing SSH keys and credential files, writing to system directories, attempts to kill the
+monitoring itself (<code>kill</code>/<code>pkill</code> targeting CC-Monitor's own probe process, <code>confirm</code> level; a
+generic <code>kill</code>/<code>pkill</code> is <code>log</code>-only to avoid alert fatigue), reading SSH keys/<code>.env</code>/credential
+files via <code>cat</code>/<code>less</code>/<code>head</code> and friends (a blind spot the <code>Read</code>-tool-only rule didn't cover),
+dumping the whole environment via <code>env</code>/<code>printenv</code>/<code>export -p</code>, <code>su</code>/<code>pkexec</code> privilege escalation
+(the same risk category as <code>sudo</code>), single-file non-recursive <code>chmod 777</code> (relative paths included,
+not just filesystem-rooted ones), and destructive direct database commands (<code>mysql</code>/<code>psql</code>/
+<code>redis-cli</code>/<code>mongo</code>/<code>sqlite3</code> followed by <code>DROP</code>/<code>DELETE</code>/<code>TRUNCATE</code>/<code>FLUSHALL</code>), reading shell
+history files by any means (<code>cat</code>/<code>grep</code>/<code>python -c open(...)</code>/the <code>Read</code> tool, covering
+<code>.zsh_history</code>, <code>.bash_history</code>, macOS Terminal's <code>.zsh_sessions/</code>, <code>$HISTFILE</code>, and Claude Code's
+own <code>~/.claude/history.jsonl</code>) or running a bare <code>history</code>/<code>fc -l</code> (which can surface plaintext
+credentials typed in the past), and reverse-shell/backdoor execution (covering <code>-e</code>/<code>-c</code> variants of
+<code>nc</code>/<code>ncat</code>/<code>netcat</code>, <code>socat exec:</code>, and a <code>mkfifo</code>-plus-named-pipe reverse shell), tampering with
+Claude Code's own config (<code>~/.claude/settings.json</code>/<code>.claude/hooks/</code>/<code>CLAUDE.md</code> — the
+config-layer counterpart to the anti-bypass rules above), Docker-socket-mount container escapes
+(<code>-v /var/run/docker.sock:...</code>), common secret formats appearing in written content
+(AWS/GitHub/Anthropic/OpenAI/Slack/Google/npm/Stripe fixed prefixes plus private-key headers),
+and git-hooks/git-config persistence (<code>core.hooksPath</code>, <code>url....insteadOf</code>), and more.</p>
+<h2>Development Progress</h2>
+<p>For exactly what shipped in each version, see <a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/CHANGELOG.en.md" target="_blank" rel="noopener noreferrer">CHANGELOG.en.md</a>
+(<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">中文</a>).</p>
+<h3>Implemented</h3>
+<ul>
+<li> Application-layer hook interceptor (<code>PreToolUse</code>/<code>PostToolUse</code>), covering Bash/Write/Edit/Read/WebFetch and other tools</li>
+<li> Policy engine: regex rule matching + three actions (block/confirm/log) + three risk tiers</li>
+<li> SQLite audit log (<code>events.db</code>), retaining the full hook input/output for every event</li>
+<li> CLI: <code>CC-Monitor tail</code> (live view) / <code>rules</code> (view rules) / <code>stats</code> (stats) / <code>verify</code> (bypass detection)</li>
+<li> Human-readable event formatting: raw JSON turned into "event type + summary + result"</li>
+<li> Terminal color output: independent coloring for risk level / decision / rule name, with <code>NO_COLOR</code>/<code>CC_MONITOR_COLOR</code> support</li>
+<li> Bash command syntax highlighting (command name / flags / strings / variables / pipes &amp; redirects, each colored separately)</li>
+<li> Terminal confirmation (<code>/dev/tty</code> interaction) + desktop notification (<code>notify-send</code>/<code>osascript</code>)</li>
+<li> Installer: safely merges hooks into <code>settings.json</code> (global / project / custom-path modes) without touching existing config</li>
+<li> System-layer probe (<code>CC-Monitor-probe</code>, eBPF on Linux): tracing of the Claude Code process tree's <code>execve</code>/<code>connect</code> (network-only coverage on macOS via nettop, see below)</li>
+<li> Bypass detection: fuzzy-matches what the probe observed against hook records (process tree + time window + quote-stripped substring match), flagging <code>hook_bypass_suspected</code></li>
+<li> Network visibility: eBPF captures <code>connect()</code> destination IP:port; domain names come from
+a <code>uprobe:libc:getaddrinfo</code> that records the hostname the moment the application resolves
+it (reverse DNS as a fallback) — no MITM proxy needed</li>
+<li> Network byte-count stats: <code>tcp_sendmsg</code>/<code>tcp_cleanup_rbuf</code> kernel probes, aggregated upload/download bytes per (ip, port)</li>
+<li> Web UI Network tab: connection detail table + GeoIP location (local MaxMind/DB-IP Lite database) + WebGL2 world map, with connection counts clickable for per-connection time/process/PID detail</li>
+<li> Claude Code identity check: cross-platform (<code>ps</code>) detection of which OS user every <code>claude</code> process runs as, flagged when it differs from the Web UI's own user</li>
+<li> Four Home stat cards — tool calls, MCP calls, Skill calls, AI trajectory — all with click-through drilldowns showing Session ID/folder/timestamp</li>
+<li> AI Approvals supports an <code>action: "notify"</code> rule type (Claude Code clarifying questions, e.g. <code>AskUserQuestion</code>) and keeps a long-term history table, capturing the user's actual terminal answer for <code>notify</code>-kind records</li>
+<li> AI Approvals also covers Claude Code's native <code>PermissionRequest</code> dialog: operations that
+matched no rule but that Claude Code's own permission system wants to ask "Do you want to
+proceed?" about now show up on the page too (<code>kind='permission'</code>); a 90s timeout or
+pressing Enter at the terminal silently hands the request back to the native dialog —
+installing CC-Monitor never removes that safety net</li>
+<li> Anthropic account profile (name/email/organization/plan/rate-limit tier) read from the local <code>~/.claude.json</code>, zero network calls</li>
+<li> Per-session <code>Σ Total / Cached</code> token summary on the Status page (same accounting as ccstatusline)</li>
+<li> Model Usage table, Limits table, context window usage %, and Context compaction count (real detection, not an estimate) on the Status page</li>
+<li> Home page GitHub Operations stats (push/clone/commit/pull-fetch/gh CLI/other git operations)</li>
+<li> Home page SSH Operations (ssh/scp/sftp/key management/other) and Downloads
+(wget/curl/aria2/other) cards, classified from Bash command text</li>
+<li> The "AI Trajectory" card and world map now also include command-text-inferred network
+targets: when Claude runs wget/curl/git clone/ssh/scp/…, the target hostname is
+extracted from the command, resolved to an IP, and geo-located, then merged alongside
+real system-layer-probe data with an "inferred" tag (not guaranteed to have actually
+connected, and no byte counts) — many people never start the probe by hand, so this used
+to be empty entirely</li>
+<li> World map gained an animated "this machine ↔ destination" arc with a travelling light
+dot (modeled on <a href="https://github.com/cn0xroot/BeeEye" target="_blank" rel="noopener noreferrer">BeeEye</a>'s approach): each connection
+draws an arc from a schematic anchor (fixed at (0,0), open ocean — explicitly not this
+machine's real location; no extra request is made to ask a third party for the public
+IP just for this) to the destination, with the dot's direction following whichever
+direction moved more bytes (download-heavy animates back toward the anchor; inferred
+targets have no real byte counts, so they default to animating outward). Falls back to
+Canvas 2D when WebGL2 isn't available, so the map never disappears entirely just because
+WebGL2 is missing — both rendering paths were verified with real screenshots from a
+headless browser, confirming both the animation and the direction logic</li>
+<li> Terminal Sessions gained a "New Window" button: shares the same working-directory picker
+modal as "New Session," the only difference being it never types <code>claude\r</code> into the
+PTY — for when you just want a terminal without being dropped into a Claude Code
+session. <code>POST /api/sessions</code> takes a <code>launchClaude: false</code> flag; verified over a real
+WebSocket connection that the "New Window" shell prompt never has <code>claude</code> typed in
+front of it, while "New Session" does</li>
+<li> Home page Screenshot Audit: identifies Bash screenshot CLI commands / image files opened
+via Read / MCP screenshot-type tool actions; the drilldown shows only basic info (command
+/ file path), never the screenshot's own image content</li>
+<li> New kill/pkill monitoring-tamper detection rules: specifically flags kill/pkill targeting
+CC-Monitor's own probe/hook processes (<code>confirm</code> level); a generic kill/pkill is <code>log</code>-only
+to avoid alert fatigue</li>
+<li> Home page Docker Operations stats (run/build/exec/compose/other), classified from Bash
+command text; run/build/exec are broken out separately since they're a different risk tier
+than read-only inspection</li>
+<li> Sensitive-file-read detection extended to Bash commands: <code>cat</code>/<code>less</code>/<code>head</code> and friends
+reading SSH keys/<code>.env</code>/credential files are now covered (previously only the <code>Read</code> tool
+opening them directly was), plus new detection for <code>env</code>/<code>printenv</code>/<code>export -p</code> dumping the
+whole environment</li>
+<li> New <code>su</code>/<code>pkexec</code> privilege-escalation detection (same risk category as <code>sudo</code>, previously
+a complete blind spot)</li>
+<li> New single-file, non-recursive <code>chmod 777</code> detection: relative-path, single-file cases
+weren't covered by any existing rule before</li>
+<li> New destructive direct-database-command detection: <code>mysql</code>/<code>psql</code>/<code>redis-cli</code>/<code>mongo</code>/
+<code>mongosh</code>/<code>sqlite3</code> followed by <code>DROP</code>/<code>DELETE</code>/<code>TRUNCATE</code>/<code>FLUSHALL</code>/<code>FLUSHDB</code> had zero
+rule coverage before</li>
+<li> New shell-history-read detection: <code>cat .bash_history</code> / running bare <code>history</code> had no rule
+coverage before — command history can retain plaintext credentials typed in the past</li>
+<li> Strengthened reverse-shell/backdoor-execution detection: the previous
+<code>reverse_shell_pattern</code> only recognized <code>nc -e</code> — expanded to cover the <code>-c</code> variant,
+the <code>ncat</code>/<code>netcat</code> aliases, <code>socat exec:</code>, and a <code>mkfifo</code>-plus-named-pipe reverse shell,
+verified not to false-positive on ordinary network diagnostics like <code>nc -zv</code>/<code>nmap</code></li>
+<li> New "Archive/Compression Operations" home card (tar/zip/7z/gzip/other), classified from
+Bash command text</li>
+<li> New "Network Diagnostic Tools" home card (nc/nmap/telnet/other) — a pure visibility stat,
+a separate concern from the reverse-shell risk judgment</li>
+<li> New "Process Management / Backgrounding" home card (nohup/disown/background job/other) —
+"background job" is detected via an isolated trailing <code>&amp;</code>, deliberately narrowed to avoid
+false-positiving on the <code>&amp;</code> inside a URL query string</li>
+<li> New "Subagent spawns" home card: grouped by <code>subagent_type</code>, previously buried inside the
+generic "tool calls" count with no dedicated visibility</li>
+<li> Collapsed the GitHub/SSH/Download/Docker/Archive/Network-Diagnostics/Process-Management
+home cards (33 sub-category cards across 7 rows) down to one summary card per group;
+clicking one now shows a category breakdown table plus the full command list, the same
+interaction as the MCP/Skill/Subagent call cards</li>
+<li> New detection for tampering with Claude Code's own config (<code>settings.json</code>/
+<code>.claude/hooks/</code>/<code>CLAUDE.md</code>) — the biggest anti-bypass gap found so far, since rewriting
+the config is stealthier than killing the probe process</li>
+<li> Docker privileged/mount detection extended to Docker-socket mounts, risk bumped from
+medium to high</li>
+<li> New secret-format scanning on written content (<code>secret_pattern_in_write</code>): no longer
+judged by file path alone — recognizes AWS/GitHub/Anthropic/OpenAI/Slack/Google/npm/Stripe
+fixed prefixes plus private-key headers; <code>policy.py</code> gained a multi-candidate <code>content</code>
+field mapping (Write's <code>content</code>, Edit's <code>new_string</code>, NotebookEdit's <code>new_source</code>)</li>
+<li> New git-hooks/git-config persistence-attack-surface detection (<code>core.hooksPath</code>,
+<code>url....insteadOf</code>, direct writes into <code>.git/hooks/</code>) — same risk category as the existing
+crontab/systemd persistence rules, previously a complete blind spot for git</li>
+<li> Appearance settings dialog: color-theme swatch grid, interface font, interface font size (new settings)</li>
+<li> Session quota shows "remaining %" with a conky-style stepped palette; weekly quotas show "used %" with a continuous red→yellow→green gradient; per-model quotas like Fable are detected dynamically</li>
+<li> <strong>macOS platform support</strong>: hooks (<code>PreToolUse</code>/<code>PostToolUse</code>/<code>PermissionRequest</code>), AI
+Approvals, usage display (reading credentials from the login Keychain), the Web Terminal
+(fixed a <code>node-pty</code> spawn-helper permissions issue), the system-layer network probe
+(<code>cc_monitor/probe_darwin.py</code>, sampling via the built-in <code>nettop</code>, no root needed), and
+desktop-app approval alerts (Dock bounce + badge + best-effort system notification) all
+work and have been verified; Linux remains the most polished and thoroughly tested
+platform. <strong>Verified on real Apple Silicon (M4) hardware</strong>: the batch of fixes in
+v1.7.1 (the <code>match: "segment"</code> matching mode, the <code>history_read</code> rewrite, automatic
+default-rule merging / automatic rematch of historical events) was extracted and
+merged after being found and fixed against a real M4-chip macOS machine running an
+actual firmware reverse-engineering workflow (IDA/Ghidra/GDB debugging sessions, heavy
+shell scripting) — not a scenario only ever exercised on Linux</li>
+</ul>
+<h3>Not implemented / TODO</h3>
+<ul>
+<li> <strong>macOS system-layer bypass detection (Endpoint Security Framework)</strong>: the design doc's
+planned approach — observing <code>execve</code> at the kernel/system-extension level to cross-check
+whether hooks have been bypassed or tampered with (what <code>CC-Monitor verify</code> does on Linux
+via eBPF) — requires a signed system extension and user-granted Full Disk Access; the
+current macOS probe only covers the network side (see above), this layer is still
+unimplemented</li>
+<li> <strong>Mandatory sandboxing</strong> (Phase 3): Landlock LSM / bubblewrap (Linux), <code>sandbox-exec</code> /
+containerization (macOS) — currently the tool can only block-and-alert, not actually cage
+Claude Code inside a hard sandbox</li>
+<li> <strong>Making <code>CC-Monitor-probe</code> persistent</strong>: currently started manually with <code>sudo</code>; no systemd
+unit / autostart yet — whether to run it as a persistent service is left as the user's own decision</li>
+<li> <strong>Tamper-resistant audit log</strong>: the log runs under the same user privileges as the monitored
+process, so it could in theory be deleted/altered by that same user; hardening (off-host
+forwarding, append-only permissions via <code>chattr +a</code>, etc.) is not done yet</li>
+<li> <strong>Cross-machine log aggregation / a shared rule-set community</strong> (Phase 3): currently a
+purely local, single-machine tool</li>
+<li> <strong>Semantic rule matching</strong>: currently pure regex; no lightweight-model-assisted intent
+detection (e.g. recognizing an equivalently dangerous operation phrased differently)</li>
+<li> <strong>Packaging as a single-file executable</strong>: currently runs directly against the system Python
+install; no PyInstaller/Nuitka-style packaging</li>
+</ul>
+<h2>Known Limitations</h2>
+<blockquote>
+<p>The fuller disclaimer, the supply-chain/system-stability risk Q&amp;A, and the privacy notes live
+separately in <a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/SECURITY.en.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a> — this section only lists concrete, code-level
+known limitations.</p>
+</blockquote>
+<ul>
+<li><strong>Only operations initiated by Claude Code are monitored; commands you type in your own
+terminal are invisible.</strong> Every application-layer event comes from Claude Code's hooks
+(PreToolUse/PostToolUse and friends), so a <code>brew install</code>/<code>sudo port install</code> you run by hand
+in a terminal, a command run with the <code>!</code> prefix inside the Claude Code prompt, or a command
+Claude hands back to you because <code>sudo</code> needs a password never reaches the audit DB or the stat
+cards. That is the product boundary, not a missed detection; to verify a rule, ask Claude Code
+to run the command in the conversation.</li>
+<li><strong>The Web UI process and the terminal(s) you normally run <code>claude</code> in must be the same OS
+user</strong>, or each writes to its own separate <code>~/.cc-monitor/</code> database and neither can see the
+other's data (confirmation prompts and audit events from your terminal simply never appear on
+the Web UI's AI Approvals / audit log pages) — <code>CONFIG_DIR</code> is derived from the current
+process's <code>$HOME</code>, not a shared global path. This bites you if you start the Web UI with
+<code>sudo</code>/as root while your normal <code>claude</code> usage runs under your own account; <code>start.sh</code> warns
+when it detects a root launch, and the Web UI itself logs its effective username on startup so
+you can double-check.</li>
+<li><code>confirm</code> requires <code>/dev/tty</code>; with no interactive terminal (CI, headless environments) it
+denies by default.</li>
+<li>The probe's bypass detection is fuzzy matching, not precise semantic analysis; under heavy
+system load the probe's processing can lag a few seconds, so <code>CC-Monitor verify</code> may need a moment
+before showing the latest results.</li>
+<li>The network layer only sees IP:port, not the real hostname (best-effort reverse DNS, not always
+accurate). Byte-count stats only cover IPv4 TCP connections (<code>skc_family == AF_INET</code>); IPv6
+and UDP traffic still show up on the CONNECT timeline but aren't counted toward
+upload/download totals.</li>
+<li>The world map / location data depends on you configuring a MaxMind GeoLite2 database
+yourself — with none configured, this data is simply empty, not a bug. Even configured,
+accuracy is whatever GeoLite2's free tier gives you (coarser than the paid GeoIP2 database,
+especially for mobile/CDN egress IPs that often resolve to a carrier's datacenter rather
+than the user's actual location) — an inherent limitation of IP geolocation, not something
+CC-Monitor can fix.</li>
+</ul>
+<h2>Disclaimer</h2>
+<p>CC-Monitor is an individually-maintained open-source project, provided "as is" under the
+<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a>, without any warranty of any kind, express or implied. Before you rely
+on it:</p>
+<ul>
+<li><strong>The policy engine does approximate matching, not formal verification.</strong> Every rule is, at its
+core, a regex matched against command text, file paths, or written content — there will always
+be phrasings that slip past a rule, and always be legitimate operations that get misjudged.
+<strong>Don't treat it as your only line of defense</strong>; when working with code/repos you genuinely
+don't trust, the usual additional protections (container isolation, read-only mounts, a
+dedicated sandboxed account) are still necessary.</li>
+<li><strong>The system-layer probe currently only audits — it doesn't enforce isolation.</strong> It can see and
+record signs that the application-layer hooks were bypassed, but seeing it doesn't automatically
+stop it — real mandatory isolation (Landlock/sandboxing) is still on the roadmap, not
+implemented.</li>
+<li><strong>The author is not liable for any direct or indirect loss arising from use or misuse of this
+tool</strong> (work interruption from a rule false-positive, a security incident from a rule
+false-negative, an anomaly from the probe's permissions, or issues from your own modifications
+to the rules/code). Use at your own risk — it's worth running it in a non-production environment
+first and understanding what the default rules actually block.</li>
+<li><strong>Some features (such as reading account usage/quota info) may invalidate your existing Claude
+Code login session, requiring you to log back in.</strong> These features read Claude Code's own local
+credentials (<code>~/.claude/.credentials.json</code> on Linux, the login keychain on macOS) and don't
+modify the credential file themselves, but edge cases around how/when they're read (concurrent
+access, etc.) can't be fully ruled out as a trigger for an unexpected login-state issue. If
+staying logged in matters to you right now (e.g. a long-running task in progress), make sure
+you're OK with the possibility of a re-login before turning these features on.</li>
+</ul>
+<p>For the fuller Q&amp;A on third-party dependencies, supply-chain risk, system-stability risk, and
+where your data actually goes, see the dedicated
+<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/SECURITY.en.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a> (<a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">Chinese</a>).</p>
+<h2>License</h2>
+<p><a href="https://github.com/cn0xroot/CC-Monitor/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>
+<h2>Acknowledgments</h2>
+<p>CC-Monitor's hooks/probe layer (<code>cc_monitor/</code>) is Python standard library only, no
+third-party packages. The Web UI (<code>webui/</code>) builds on these open-source projects:</p>
+<p><strong>Runtime dependencies</strong></p>
+<ul>
+<li><a href="https://github.com/WiseLibs/better-sqlite3" target="_blank" rel="noopener noreferrer">better-sqlite3</a> (MIT) — the audit event/session database</li>
+<li><a href="https://github.com/expressjs/express" target="_blank" rel="noopener noreferrer">express</a> (MIT) — the Web UI's HTTP server</li>
+<li><a href="https://github.com/websockets/ws" target="_blank" rel="noopener noreferrer">ws</a> (MIT) — the terminal/live-update WebSocket transport</li>
+<li><a href="https://github.com/microsoft/node-pty" target="_blank" rel="noopener noreferrer">node-pty</a> (MIT) — the real PTY behind the Web Terminal</li>
+<li><a href="https://github.com/xtermjs/xterm.js" target="_blank" rel="noopener noreferrer">xterm.js</a> (MIT) — the in-browser terminal, plus its <code>xterm-addon-fit</code> and <code>xterm-addon-webgl</code> addons</li>
+<li><a href="https://github.com/runk/node-maxmind" target="_blank" rel="noopener noreferrer">maxmind</a> (MIT) — reading local GeoIP <code>.mmdb</code> files for the Network tab's location data</li>
+<li><a href="https://github.com/TooTallNate/proxy-agents/tree/main/packages/https-proxy-agent" target="_blank" rel="noopener noreferrer">https-proxy-agent</a> (MIT) — proxying the Anthropic usage-API request when <code>HTTPS_PROXY</code> is set</li>
+<li><a href="https://github.com/electron/electron" target="_blank" rel="noopener noreferrer">Electron</a> (MIT), <a href="https://github.com/electron-userland/electron-builder" target="_blank" rel="noopener noreferrer">electron-builder</a> (MIT), <a href="https://github.com/electron/rebuild" target="_blank" rel="noopener noreferrer">@electron/rebuild</a> (MIT) — the desktop build and its native-module packaging</li>
+</ul>
+<p><strong>Data &amp; tooling</strong></p>
+<ul>
+<li><a href="https://github.com/bpftrace/bpftrace" target="_blank" rel="noopener noreferrer">bpftrace</a> (Apache-2.0) — the eBPF tracer the Linux system-layer probe (<code>probe_linux.bt</code>) is built on</li>
+<li><a href="https://github.com/sapics/ip-location-db" target="_blank" rel="noopener noreferrer">sapics/ip-location-db</a> — republishes <a href="https://db-ip.com/" target="_blank" rel="noopener noreferrer">DB-IP</a> Lite data (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>) as ready-to-use <code>.mmdb</code> files; <code>install.sh</code> downloads this by default for the Network tab's GeoIP lookups</li>
+<li><a href="https://www.maxmind.com/en/geolite2/signup" target="_blank" rel="noopener noreferrer">MaxMind GeoLite2</a> — the alternative, usually more accurate GeoIP database option, self-hosted by the user under MaxMind's own license</li>
+<li><a href="https://keepachangelog.com/" target="_blank" rel="noopener noreferrer">Keep a Changelog</a> — the loosely-followed format for <code>CHANGELOG.md</code>/<code>CHANGELOG.en.md</code></li>
+</ul>
+<p><strong>Inspiration / prior art</strong></p>
+<ul>
+<li><a href="https://github.com/sirmalloc/ccstatusline" target="_blank" rel="noopener noreferrer">ccstatusline</a> — CC-Monitor's account/usage display independently re-implements the same OAuth-credential lookup and Anthropic usage-API call ccstatusline uses (no code shared, no dependency on it); <code>install.sh</code> also offers to install and wire it up as a companion terminal statusline</li>
+<li><a href="https://vibeisland.app/" target="_blank" rel="noopener noreferrer">Vibe Island</a> — the interaction model AI Approvals is modeled after (an Allow/Deny card for pending actions), reimplemented here as a cross-platform web page instead of a macOS-only notch UI</li>
+<li><a href="https://github.com/cn0xroot/BeeEye" target="_blank" rel="noopener noreferrer">BeeEye</a> (another project by author) — the Network tab's world map (WebGL2 equirectangular projection, coastline rendering, glowing points, the connection arc/travelling-dot animation, Canvas 2D fallback) is a direct port of its <code>WorldMap.jsx</code>, borrowed between the two projects</li>
+<li><a href="https://github.com/evilcos/slowmist-agent-security" target="_blank" rel="noopener noreferrer">slowmist-agent-security</a> (SlowMist) — a manual security-review checklist for AI agents/MCP servers/skills, not a rule library; reading through it surfaced several policy-engine rule ideas for <code>default_rules.json</code> (credential-harvesting <code>grep</code> scans, <code>npx</code>/<code>pipx run</code> one-shot execution, reading another process's <code>/proc/&lt;pid&gt;/environ</code>/<code>cmdline</code>, browser cookie/login-data file access, and dynamic-exec code — <code>eval(</code>/<code>exec(</code>/<code>os.system(</code> — appearing in written content), all now implemented as <code>credential_grep_scan</code>/<code>npx_pipx_ephemeral_run</code>/<code>proc_env_read</code>/<code>browser_credential_read</code>(<code>_bash</code>)/<code>dynamic_exec_in_write</code> (see CHANGELOG)</li>
+<li><a href="https://github.com/al0ne/suricata-rules" target="_blank" rel="noopener noreferrer">suricata-rules</a> (al0ne) — a network-layer Suricata IDS ruleset (CobaltStrike/Metasploit/Empire/DNS tunneling/crypto-mining/webshells, etc.); a different detection layer from CC-Monitor entirely (packet content vs. Claude Code's own tool calls) so its rules aren't directly portable, but its category breakdown surfaced several attack-technique classes CC-Monitor had no coverage for at all, now implemented as <code>crypto_miner_pool_domain_command</code>(<code>_write</code>) (mining-pool domains / the <code>stratum://</code> protocol), <code>db_arbitrary_file_write</code>(<code>_content</code>) (MySQL logging/export features abused as an arbitrary-file-write primitive to drop a webshell), <code>webshell_pattern_in_write</code> (the classic one-liner shapes behind China Chopper/Behinder/Weevely-style webshells), <code>curl_download_then_exec</code> (the download-then-run-separately variant of <code>curl_pipe_shell</code>), <code>c2_framework_execution</code>/<code>pentest_recon_tool_execution</code> (pentest/C2-framework tool invocations), and <code>covert_tunnel_tool_execution</code> (DNS/ICMP tunneling tool invocations) — 9 rules in total</li>
+<li><a href="https://github.com/GTFOBins/GTFOBins.github.io" target="_blank" rel="noopener noreferrer">GTFOBins</a> — the security community's canonical reference cataloguing dozens of common Unix binaries and the exact command shapes that turn them into a local-restriction bypass/privesc/shell primitive. A natural fit for CC-Monitor's regex-matching model, and it surfaced a category CC-Monitor had zero coverage for: not "a dangerous tool was invoked" but "an everyday, harmless-looking utility's own built-in exec feature is being used to escape into a shell" — implemented as a single <code>shell_escape_via_utility</code> rule (covering <code>find -exec</code>, <code>awk system()</code>, <code>perl exec</code>, Python's <code>pty.spawn</code>/<code>os.system</code>, <code>tar --checkpoint-action=exec</code>, <code>vim -c ':!sh'</code>, <code>zip --unzip-command</code>, <code>script -c</code>, and <code>ssh</code> <code>ProxyCommand</code> — the classic shapes)</li>
+</ul>

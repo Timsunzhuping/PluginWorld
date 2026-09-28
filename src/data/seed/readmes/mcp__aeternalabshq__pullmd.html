@@ -24,7 +24,7 @@ emits a leaner, token-efficient body by default. See
 <li>an <strong>MCP server</strong> at <code>POST /mcp</code> (Streamable-HTTP transport, stateless)</li>
 <li>a <strong>Claude Code skill</strong> as a downloadable zip</li>
 </ul>
-<p>Every conversion gets an 8-hex <strong>share id</strong> that works as a stable
+<p>Every conversion gets a 32-hex <strong>share id</strong> that works as a stable
 live-endpoint: <code>GET /s/:id</code> returns the cached markdown and
 re-fetches from the source if older than one hour. Use the share id
 as a fixed URL that always returns fresh content — useful for
@@ -56,6 +56,8 @@ web pages exactly like v2, just with a cleaner body by default.</p>
 <li><strong>Coverage guard</strong> (3.7) - recovers pages where extraction kept only a sliver of the body; see <a href="#configuration" target="_blank" rel="noopener noreferrer"><code>PULLMD_COVERAGE_GUARD</code></a>.</li>
 <li><strong>Account controls</strong> (3.8) - a non-admin can clear entries from their own history, self-registration can be closed with <a href="#configuration" target="_blank" rel="noopener noreferrer"><code>PULLMD_ALLOW_SIGNUP</code></a>, and <code>scripts/admin.js create-user</code> creates accounts from the shell.</li>
 <li><strong>Download button</strong> (3.9) - the PWA saves a result as a <code>.md</code> file, named by the server via <a href="#response-headers" target="_blank" rel="noopener noreferrer"><code>X-Suggested-Filename</code></a> and optionally date-prefixed.</li>
+<li><strong><a href="#monitoring" target="_blank" rel="noopener noreferrer">Sidecar health endpoint</a></strong> (3.10) - <code>GET /api/status</code> answers <code>503</code> when a configured sidecar stops responding, so a dead renderer shows up as an alert instead of quietly degrading extraction.</li>
+<li><strong>Configurable cache retention</strong> (3.11) - <a href="#configuration" target="_blank" rel="noopener noreferrer"><code>PULLMD_CACHE_RETENTION_DAYS</code></a> sets how long cache rows and share links live; default 90 days, <code>0</code> keeps them forever.</li>
 </ul>
 <hr />
 <h2>Quick start</h2>
@@ -322,6 +324,11 @@ npm test              # node --test
 <td>Prefix template for the suggested download filename (<code>X-Suggested-Filename</code>). Unset = no prefix. Tokens <code>YYYY MM DD HH mm ss</code> are substituted in local time, all other characters pass through; anything outside <code>A-Za-z0-9._-</code> ends up as a hyphen. Example: <code>YYYY-MM-DD-HH-mm-ss-</code> gives <code>2026-08-01-13-33-42-YT-some-talk-dQw4w9WgXcQ.md</code>.</td>
 </tr>
 <tr>
+<td><code>PULLMD_CACHE_RETENTION_DAYS</code></td>
+<td>no</td>
+<td>How long cache rows survive without a re-fetch, in days. Default: <code>90</code>. <code>0</code> = unlimited: nothing is ever pruned, so the cache doubles as an archive. The accepted range is <code>0</code> to <code>36500</code> (100 years); anything else warns once at startup and falls back to <code>90</code>. Share links expire with their row - <code>/s/:id</code> stops resolving once the row is older than the retention window. Lowering the value on a running instance prunes every row older than the new value on the next cache write (any conversion).</td>
+</tr>
+<tr>
 <td><code>PULLMD_COVERAGE_GUARD</code></td>
 <td>no</td>
 <td>Set to <code>off</code> to disable the coverage guard. Default (unset): on. The guard notices when an extraction kept only a sliver of the page - the failure mode of page-builder one-pagers, whose chapters sit in flat sibling containers that Readability's single-candidate scoring discards - and re-converts the container holding the body instead. It only ever grows the result, records <code>source: coverage-guard</code>, and explains itself in <code>metadata.extractorReason</code>.</td>
@@ -342,8 +349,10 @@ because Reddit's API expects a stable, identifying UA.</p>
 instances (multi-tenant VPS, office deployments). Conversions still
 get cached and assigned share IDs; users just can't see what <em>other</em>
 users have fetched. Anyone with a known <code>/s/:id</code> link still gets
-their markdown back. Use this as a stopgap until per-user scoping
-lands.</p>
+their markdown back. Share ids are 128 random bits, so a link cannot
+be guessed, and <code>/s/:id</code> throttles unknown-id lookups to 120 per
+minute and IP (valid links are never throttled). Use this as a
+stopgap until per-user scoping lands.</p>
 <hr />
 <h2>Authentication (v2.0+)</h2>
 <blockquote>
@@ -432,6 +441,10 @@ doing nothing.</p>
 <td><code>/api/stats</code>, <code>/api/storage</code>, <code>/api/config</code> (aggregate)</td>
 <td align="center">no</td>
 </tr>
+<tr>
+<td><code>/api/status</code>, <code>/api/recipes/status</code> (health)</td>
+<td align="center">no</td>
+</tr>
 </tbody></table>
 <p>Cache deletes are scoped to the caller. An admin (and every caller in
 <code>disabled</code> mode) removes the shared, URL-deduped cache row, which affects
@@ -499,7 +512,7 @@ Response headers worth checking:
   X-Source       reddit | hackernews | cloudflare | readability | trafilatura |
                  playwright | markitdown | youtube | pdf-ocr | ...
   X-Quality      0.0-1.0 extraction confidence
-  X-Share-Id     8-hex permalink, openable as /s/&lt;id&gt;
+  X-Share-Id     32-hex permalink, openable as /s/&lt;id&gt;
   X-Transcript-Status  youtube only: ok | none | blocked | error
                  (blocked/error = transient, not cached — retry later)
 
@@ -664,6 +677,10 @@ for it.</p>
 <td>Which <a href="#site-recipes" target="_blank" rel="noopener noreferrer">site recipes</a> loaded, which were rejected, and any frontmatter fields dropped by the allowlist.</td>
 </tr>
 <tr>
+<td><code>GET /api/status</code></td>
+<td>Health of the extraction sidecars (trafilatura, Playwright, markitdown). <code>200</code> when every configured sidecar answers, <code>503</code> when one is down. See <a href="#monitoring" target="_blank" rel="noopener noreferrer">Monitoring</a>.</td>
+</tr>
+<tr>
 <td><code>POST /mcp</code></td>
 <td>Streamable-HTTP MCP endpoint (3 tools: <code>read_url</code>, <code>get_share</code>, <code>list_recent</code>).</td>
 </tr>
@@ -761,7 +778,7 @@ for it.</p>
 <ul>
 <li><code>X-Source</code> — <code>reddit</code> · <code>cloudflare</code> · <code>readability</code> · <code>readability-fallback</code> · <code>trafilatura</code> · <code>playwright</code> · <code>recipe-content</code> · <code>coverage-guard</code> · <code>markitdown</code> · <code>youtube</code> · <code>image-caption</code> · <code>audio-transcript</code> · <code>pdf-ocr</code></li>
 <li><code>X-Quality</code> — <code>0.0</code>–<code>1.0</code> extraction confidence</li>
-<li><code>X-Share-Id</code> — the 8-hex permalink id</li>
+<li><code>X-Share-Id</code> — the 32-hex permalink id</li>
 <li><code>X-Suggested-Filename</code> — a download filename for this conversion, e.g. <code>YT-some-talk-dQw4w9WgXcQ.md</code>. YouTube gets title plus video id, images/audio/documents keep the original file name from the URL, everything else uses the title; <code>PULLMD_FILENAME_DATE_PREFIX</code> prepends a date. Also on <code>/s/:id</code>, <code>POST /api/html</code> and <code>POST /api/file</code>; on <code>/api/stream</code> the same value arrives as <code>suggestedFilename</code> in the <code>result</code> event, since SSE has no headers to carry it.</li>
 <li><code>X-Transcript-Status</code> — YouTube only: <code>ok</code> · <code>none</code> · <code>blocked</code> · <code>error</code>. <code>blocked</code> (YouTube rate-limited the transcript fetch, HTTP 429) and <code>error</code> are transient and not cached — retry later; <code>none</code> means the video genuinely has no transcript</li>
 <li><code>X-Extracted</code> — <code>true</code> / <code>false</code>. Present only when <code>query</code> is active.</li>
@@ -846,9 +863,30 @@ authoritative layer for traffic it forwards.</p>
 <ul>
 <li><strong><code>/api?url=…</code></strong> re-fetches from source if the cache row is older than <strong>1 hour</strong>.</li>
 <li><strong><code>/s/:id</code></strong> does the same on-demand refresh, so share links double as live endpoints.</li>
-<li>Cache rows are pruned <strong>90 days</strong> after the last write. <code>/s/:id</code> hits keep the row alive (since they trigger refresh + write); read-only access does not extend the TTL.</li>
+<li>Cache rows are pruned <code>PULLMD_CACHE_RETENTION_DAYS</code> days (default <strong>90</strong>; <code>0</code> keeps them forever) after the last write. <code>/s/:id</code> hits keep the row alive (since they trigger refresh + write); read-only access does not extend the TTL.</li>
 <li>If the source is unreachable on refresh, the last good snapshot is served — share links keep working even when the original URL dies.</li>
 </ul>
+<hr />
+<h2>Monitoring</h2>
+<p><code>GET /api/status</code> reports whether the extraction sidecars are reachable:</p>
+<pre><code class="language-json">{
+  "ok": false,
+  "version": "3.9.0",
+  "services": {
+    "trafilatura": { "status": "ok", "latencyMs": 3 },
+    "playwright":  { "status": "down", "error": "unreachable" },
+    "markitdown":  { "status": "not-configured" }
+  }
+}
+</code></pre>
+<ul>
+<li><code>status</code> is <code>ok</code>, <code>down</code>, or <code>not-configured</code>. A sidecar you never configured is not a failure — self-hosting without Playwright or markitdown is a supported setup.</li>
+<li><code>error</code> is one of <code>unreachable</code>, <code>timeout</code>, <code>unhealthy</code> (answered <code>200</code> but reports itself broken), <code>http &lt;code&gt;</code>, or <code>misconfigured</code>. Deliberately a closed vocabulary: the endpoint is public and must not echo internal hostnames.</li>
+<li>HTTP <strong><code>200</code></strong> when every configured sidecar answers, <strong><code>503</code></strong> when at least one is down, so a plain HTTP check catches it without keyword matching.</li>
+<li>Results are cached for 5 seconds and concurrent callers share one round of probes, so polling it cannot amplify into internal traffic.</li>
+</ul>
+<p>Why it exists: a broken sidecar does not take PullMD down, it silently degrades extraction quality — pages that need a browser render come back near-empty while everything still answers <code>200</code>. Without an explicit check that can go unnoticed for a long time.</p>
+<p><strong>Uptime Kuma:</strong> monitor type <em>HTTP(s)</em>, URL <code>https://&lt;your-host&gt;/api/status</code>, accepted status codes <code>200-299</code>. On an instance with authentication enabled the endpoint stays reachable without credentials.</p>
 <hr />
 <h2>Document conversion</h2>
 <p>When the markitdown sidecar is running (set <code>MARKITDOWN_URL=http://markitdown:8003/convert</code>), PullMD can convert document files to Markdown in addition to web pages.</p>
@@ -1043,7 +1081,7 @@ X-Filename: report.pdf               # URI-encoded; or use ?filename=
 <li><code>lib/render-decision.js</code> — Predicate that decides when to fall back to Playwright (readability-fellback + thin, body-soup signature, or quality &lt; 0.5; plus <code>force</code> / <code>skip</code> overrides).</li>
 <li><code>lib/playwright-client.js</code> — HTTP client for the Playwright sidecar with <code>AbortSignal</code> propagation for SSE-disconnect cancellation.</li>
 <li><code>lib/scoring.js</code> — Quality scoring used to pick between extractors and as a render-trigger heuristic.</li>
-<li><code>lib/cache.js</code> — SQLite cache (<code>better-sqlite3</code>) with 90-day TTL and 8-hex share ids.</li>
+<li><code>lib/cache.js</code> — SQLite cache (<code>better-sqlite3</code>) with configurable retention (default 90 days) and 32-hex (128-bit) share ids.</li>
 <li><code>lib/mcp.js</code> — Stateless MCP server registering the three tools.</li>
 <li><code>lib/distrib.js</code> — Public-URL substitution in <code>/help</code> and <code>/pullmd.zip</code>.</li>
 <li><code>trafilatura-sidecar/</code> — Python sidecar (FastAPI) wrapping Trafilatura.</li>
