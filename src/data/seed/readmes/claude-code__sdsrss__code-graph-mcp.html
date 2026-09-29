@@ -202,12 +202,21 @@ pointers.</strong> None of these are call edges, but none are invisible either: 
 are carried as the <code>references</code> relation, which <code>find_references</code> returns and
 <code>impact</code> reports separately as <code>value reference(s) — callbacks / fn-pointers / type positions</code>. Together with the row above, this is why <code>include_dead</code>
 results are candidates to verify rather than a verdict.</li>
+<li><strong>Dispatch by name.</strong> A function reached through a string key, a reflection
+call or an event name (<code>handlers["save"]</code>, <code>getattr(obj, "save")</code>,
+<code>send(:save)</code>, <code>bus.on("save", …)</code>) has no edge. When <code>callgraph</code>, <code>impact</code>
+or <code>refs</code> finds no caller for a function, the answer lists up to 5 lines
+where the name appears in such a shape or is passed as a value (<code>boundaries</code>
+in <code>--json</code> and MCP), and a <code>code-graph-mcp grep</code> that shows every
+occurrence. It is a disclosure, not an edge, and a lexical one: a line it
+does not list is not proof that nothing dispatches to the function.</li>
 </ul>
 <h2>Architecture</h2>
 <pre><code>src/
 ├── domain.rs     # Shared constants, relation types, env-var config
 ├── resolve.rs    # Shared symbol resolution + ambiguity verdicts (CLI and MCP)
 ├── outcome.rs    # Retrieval-adoption metrics from session transcripts
+├── budget.rs     # Output budgets (--budget / max_tokens): rank, shorten, drop, next step
 ├── cli/          # Every `code-graph-mcp &lt;cmd&gt;` subcommand (one file per command)
 ├── mcp/          # MCP protocol layer (JSON-RPC, tool registry, server)
 │   └── server/   # McpServer with IndexingState + CacheState sub-structs
@@ -374,6 +383,7 @@ cargo uninstall code-graph-mcp       # or delete the target/release binary
 <td>Find all references to a symbol (callers, importers, inheritors, implementors, value/type references). Supports <code>compact</code> mode</td>
 </tr>
 </tbody></table>
+<p><strong>Output budget.</strong> <code>project_map</code>, <code>module_overview</code>, <code>get_call_graph</code> and <code>get_ast_node</code> take an optional <code>max_tokens</code> (100-100000, counted as bytes/3 of the JSON answer). The answer is ranked by caller count; lower-ranked items are first shortened (no key symbols, no signature, no source body), then left out, and never cut in the middle. A <code>budget</code> object reports what was shortened or left out and <code>budget.next</code> holds the CLI command that returns it (one per section that lost entries, joined by <code>; </code>). On <code>module_overview</code> and <code>project_map</code>, <code>budget.over_budget</code> is <code>true</code> when even the fixed part of the answer is larger than the budget. Without <code>max_tokens</code> the answer is unchanged. Every existing size cut in these four tools (<code>hot_functions_truncated</code>, <code>active_capped</code>, the call-graph rollup, <code>compressed_node</code>, <code>_truncated</code>) now carries a <code>next</code> command too.</p>
 <p><strong>Hidden aliases.</strong> These names are not in <code>tools/list</code> but still dispatch via <code>tools/call</code>, so existing clients keep working: <code>trace_http_chain</code> / <code>find_http_route</code> (→ <code>get_call_graph</code> with <code>route_path</code>), <code>read_snippet</code> (→ <code>get_ast_node</code>), <code>dependency_graph</code>, <code>find_similar_code</code>, <code>find_dead_code</code>, plus the management tools <code>start_watch</code>, <code>stop_watch</code>, <code>get_index_status</code> and <code>rebuild_index</code>. <code>impact_analysis</code> is <strong>removed</strong> — calling it returns <code>Unknown tool</code>; use <code>get_ast_node</code> with <code>include_impact=true</code>, or the CLI's <code>impact --json</code> for the full report.</p>
 <h2>CLI Commands</h2>
 <p>All tools are also available as CLI subcommands for shell scripts, hooks, and terminal workflows:</p>
@@ -547,6 +557,7 @@ cargo uninstall code-graph-mcp       # or delete the target/release binary
 </tr>
 </tbody></table>
 <p>Common options: <code>--json</code> (JSON output), <code>--compact</code> (compact output), <code>--limit N</code>, <code>--depth N</code>, <code>--file &lt;path&gt;</code>.</p>
+<p><code>map</code>, <code>overview</code>, <code>callgraph</code> and <code>show</code> take <code>--budget &lt;tokens&gt;</code> (100-100000, counted as bytes/3 of the text answer; not with <code>--json</code> or <code>--compact</code>). Items with the fewest callers are shortened first (a module loses its key symbols, a symbol its signature, a definition its body, a call-graph node its type), then left out, deepest call-graph nodes first. Nothing is cut in the middle, and in <code>overview</code> of a directory one file takes at most 70% of the budget. A notice line says what was left out and is followed by <code>next: &lt;command&gt;</code>, which prints it. The existing <code>... and N more</code> lines of <code>map</code> are followed by a <code>next:</code> line too.</p>
 <p>As of <strong>v0.37.0</strong> the CLI is <a href="https://docs.rs/clap" target="_blank" rel="noopener noreferrer">clap</a>-based: <strong>every subcommand has <code>--help</code></strong> for its full flag list (<code>code-graph-mcp &lt;command&gt; --help</code>), value flags accept both <code>--flag value</code> and <code>--flag=value</code>, and unknown flags or malformed arguments fail fast with a clear error and a non-zero exit code (<code>2</code>) instead of being silently ignored. For example, <code>trace</code> hides downstream middleware with <code>--no-middleware</code> (shown by default), and <code>snapshot</code> is a <code>create</code>/<code>inspect</code> subcommand pair.</p>
 <h2>Plugin Skills</h2>
 <p>Installing the plugin ships two skills that Claude loads on its own when the
