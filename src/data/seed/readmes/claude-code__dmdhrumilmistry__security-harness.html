@@ -1,0 +1,443 @@
+<h1>Security Harness</h1>
+<p>A multi-agent <strong>application-security review harness</strong> for Claude Code (and, later, other AI agents). One
+router skill dispatches to a full offensive-security pipeline that <strong>maps</strong> a codebase, <strong>hunts</strong>
+vulnerabilities with a per-class knowledge base, <strong>chains</strong> findings into escalations, <strong>verifies</strong> real
+impact, and <strong>reports</strong> to README / JSON / SARIF / doc / PDF.</p>
+<blockquote>
+<p>Scope: this harness performs <strong>static</strong> analysis (source review, data-flow tracing, PoC/payload
+construction) on code you own or are authorized to test. It does not attack live third-party systems.</p>
+</blockquote>
+<h2>What's inside</h2>
+<pre><code>security-harness/                         # a plugin marketplace
+└── plugins/security-harness/
+    ├── skills/
+    │   ├── sh-router            # single entry point - routes any appsec request
+    │   ├── sh-security-review   # the pipeline orchestrator (Stages 0-5)
+    │   └── sh-kb-*  (15)        # per-vuln-class knowledge bases
+    ├── agents/
+    │   ├── sh-recon             # map: Graft graph + stack/SBOM/CVE + attack surface
+    │   ├── sh-hunter            # find: source→sink hunting, one per class (parallel)
+    │   ├── sh-chainer           # escalate: combine findings into attack chains
+    │   ├── sh-verifier          # confirm: offensive + seceng + dev verification + PoC
+    │   └── sh-reporter          # deliver: README/JSON/SARIF/HTML/PDF/doc
+    └── references/              # shared contracts (finding schema, SARIF map, state files, rubrics)
+</code></pre>
+<h3>Vulnerability classes covered (the <code>sh-kb-*</code> skills)</h3>
+<p>access-control (IDOR/BOLA/priv-esc) · sqli · xss · ssrf · injection (cmd/code/SSTI/LDAP) · auth (session/JWT)
+· deserialization · path-traversal (LFI/RFI) · secrets · csrf · xxe · open-redirect · crypto · race-conditions
+· file-upload. Dependency CVEs/SBOM are handled by the recon stage.</p>
+<h2>Install</h2>
+<p>The harness ships for several agents. Full packaging details and the release
+checklist are in <a href="https://github.com/dmdhrumilmistry/security-harness/blob/HEAD/docs/DISTRIBUTION.md" target="_blank" rel="noopener noreferrer"><code>docs/DISTRIBUTION.md</code></a>.</p>
+<p><strong>Claude Code</strong> - add this repo as a plugin marketplace and install the plugin:</p>
+<pre><code>/plugin marketplace add dmdhrumilmistry/security-harness
+/plugin install security-harness
+</code></pre>
+<p><code>/plugin marketplace add</code> accepts any of: a GitHub <code>owner/repo</code> (as above), a full git URL
+(<code>https://github.com/dmdhrumilmistry/security-harness.git</code>), or a local path to a clone
+(e.g. <code>/plugin marketplace add ./security-harness</code> from the directory containing your checkout).
+Then run <code>/plugin install security-harness</code> and reload when prompted.</p>
+<p><strong>Gemini CLI</strong> - a native extension, manifest at the repo root:</p>
+<pre><code class="language-bash">gemini extensions install https://github.com/dmdhrumilmistry/security-harness
+</code></pre>
+<p><strong>opencode, Codex, or any <a href="https://agentskills.io" target="_blank" rel="noopener noreferrer">agentskills.io</a> agent</strong> - copy the
+skills into a discovery directory. Codex additionally picks up <code>AGENTS.md</code> on its own:</p>
+<pre><code class="language-bash">git clone https://github.com/dmdhrumilmistry/security-harness
+cd security-harness
+python3 scripts/sync-agent-skills.py --install agents     # ~/.agents/skills
+python3 scripts/sync-agent-skills.py --install opencode   # ~/.config/opencode/skills
+</code></pre>
+<p><strong>Graft is installed and set up automatically by the pipeline.</strong> Stage 0 runs <code>npm install -g @nanonets/graft</code> if it's missing (requires Node/npm), then <code>graft init &lt;target&gt; --no-agents --no-global</code>
+to register the Graft MCP server and freshness hooks for the target repo. The graph itself (<code>&lt;target&gt;/graft/</code>,
+auto-gitignored) is built during recon. To pre-install manually: <code>npm install -g @nanonets/graft</code>. Graft's
+structural build is free and needs no API key; the optional <code>--deep</code> LLM pass uses <code>GRAFT_API_KEY</code> /
+<code>GRAFT_PROVIDER</code> / <code>GRAFT_MODEL</code> when set.</p>
+<p><strong>The other tools are also auto-installed by Stage 0 when missing</strong> (via whatever package manager is on the
+machine - winget/choco/scoop, brew, apt, npm/pip/go - see <code>references/tooling-setup.md</code>). Installs are
+announced, prefer no-elevation methods, and never block the run: anything that can't be installed is simply
+marked unavailable and the pipeline falls back. Stage 0 installs only what fills a missing capability group:</p>
+<ul>
+<li>SBOM: <a href="https://github.com/anchore/syft" target="_blank" rel="noopener noreferrer"><code>syft</code></a> · CVEs: one of <a href="https://github.com/anchore/grype" target="_blank" rel="noopener noreferrer"><code>grype</code></a>
+(preferred), <a href="https://github.com/aquasecurity/trivy" target="_blank" rel="noopener noreferrer"><code>trivy</code></a>, or <a href="https://github.com/google/osv-scanner" target="_blank" rel="noopener noreferrer"><code>osv-scanner</code></a></li>
+<li>Reports: <code>wkhtmltopdf</code> or <code>pandoc</code> (for PDF/DOCX); otherwise you get <code>report.html</code> (or a headless-Chrome PDF).</li>
+</ul>
+<p>All of them are optional - the pipeline degrades gracefully to native search + manifest parsing if none install.</p>
+<h2>Usage</h2>
+<p>Invoke the router with a natural-language request:</p>
+<pre><code>/sh-router full security review of ./api
+/sh-router find SQLi and IDOR in src/
+/sh-router just map this codebase        # recon only
+</code></pre>
+<p>Or call the pipeline directly:</p>
+<pre><code>/sh-security-review . classes:sqli,access-control,ssrf depth:deep
+/sh-security-review . stage:report       # regenerate reports for the latest run
+</code></pre>
+<h3>Model &amp; cost control</h3>
+<p>Each stage runs on a model matched to its cognitive load, so tokens are spent where discovery quality
+actually depends on them and saved on mechanical work. <strong>This is the default - no arguments needed.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Default model</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>recon</td>
+<td><code>sonnet</code></td>
+</tr>
+<tr>
+<td>hunt (per class)</td>
+<td><code>haiku</code> for pattern classes (secrets, crypto, open-redirect, csrf) · <code>sonnet</code> for source→sink tracing (sqli, xss, ssrf, injection, path-traversal, xxe, file-upload, auth) · <code>opus</code> for deep-logic classes (access-control, race-conditions, deserialization)</td>
+</tr>
+<tr>
+<td>chain</td>
+<td><code>opus</code></td>
+</tr>
+<tr>
+<td>verify</td>
+<td><code>opus</code> (the precision gate - kept strong)</td>
+</tr>
+<tr>
+<td>report</td>
+<td><code>haiku</code></td>
+</tr>
+</tbody></table>
+<p>Override with the <code>models:</code> argument (passed through the router too):</p>
+<pre><code>/sh-security-review .                         # default tiered map above
+/sh-security-review . models:max              # every stage + hunter on opus (max quality, max cost)
+/sh-security-review . models:cheap            # aggressive downshift (trades some verify precision)
+/sh-security-review . models:verify=opus,hunt=sonnet          # per-stage overrides
+/sh-security-review . models:report=sonnet,hunt.pattern=sonnet  # per-hunter-tier override
+</code></pre>
+<p>Stages: <code>setup, recon, hunt, chain, verify, report</code>. Models: <code>opus, sonnet, haiku, inherit</code>. For <code>hunt</code>,
+a bare model flattens all hunters to it; <code>hunt.pattern</code> / <code>hunt.trace</code> / <code>hunt.logic</code> target one tier.
+Other token savers are built in: recon only spawns hunters for classes with real attack surface, hunters
+query the Graft graph instead of reading whole files, and <code>findings.json</code>/SARIF are generated by a
+deterministic script rather than the model.</p>
+<h3>Output</h3>
+<p>Everything lands under <code>&lt;target&gt;/.security-harness/&lt;run-id&gt;/</code>:</p>
+<ul>
+<li><code>recon.md</code>, <code>codebase-map.json</code> - the map (stack, SBOM, CVEs, attack surface).</li>
+<li><code>findings.jsonl</code> → <code>chains.md</code> → <code>verified.jsonl</code> - the working state (see <code>references/state-files.md</code>).</li>
+<li><code>reports/</code> - <code>README.md</code>, <code>findings.json</code>, <code>results.sarif</code>, <code>report.html</code>, <code>report.pdf</code> (+ <code>report.docx</code>).</li>
+</ul>
+<p>Each published finding carries a payload, a PoC, the verification verdict, CWE/OWASP ids, CVSS, and a
+code-level mitigation.</p>
+<h2>Pull request review</h2>
+<p><code>sh-pr-review</code> reviews a single pull request rather than a whole codebase, posts the
+result as inline comments <strong>on the PR itself</strong>, and sets a <code>security/pr-review</code> commit
+status that branch protection can enforce.</p>
+<p><strong>Run it from your own machine, on any PR you can read.</strong> Install the plugin and ask:</p>
+<pre><code>review https://github.com/acme/api/pull/128
+review PR 42
+security review this PR
+</code></pre>
+<p><strong>Paste a PR link</strong> and it reviews that PR in that repository, cloning it to a temporary
+directory first, because the hunters read files and not just the patch. Nothing is
+written into the repo you are working in.</p>
+<p><strong>Pass a bare number</strong> and it resolves against <strong>the repo you are currently in</strong>, the one
+<code>git remote</code> points at. Pass nothing and it takes the open PR for your current branch.</p>
+<p>Phase 7 prints the findings and the verdict and <strong>asks before posting anything</strong> - a
+decline is a normal outcome, and the payload stays on disk for you to post later.</p>
+<p>Before spending any analysis it checks whether you can actually write to the target repo,
+so reviewing someone else's project tells you up front that posting will 403 rather than
+discovering it ten minutes in.</p>
+<p>Three properties make it usable as a merge gate rather than noise:</p>
+<ul>
+<li><strong>Only what the PR is responsible for fails it.</strong> Every finding carries a <code>pr_impact</code>
+of <code>introduced</code>, <code>aggravated</code>, or <code>pre_existing</code>. The first two block; <code>pre_existing</code>
+is reported and never blocks. Blocking a merge over code the author never wrote is how
+a required check gets deleted, so when a hunter is unsure between <code>aggravated</code> and
+<code>pre_existing</code>, it must pick <code>pre_existing</code>.</li>
+<li><strong>Depth follows risk.</strong> Triage runs first, in the orchestrator, with no subagents. It
+maps changed paths and added-line sink tokens onto the same class slugs the <code>sh-kb-*</code>
+bases use, then picks a tier. Tier 0 (no security-relevant change) launches nothing at
+all and still sets the status. Tier 3 runs the full pipeline.</li>
+<li><strong>Re-pushes do not spam.</strong> Each comment carries a hidden fingerprint computed without
+line numbers, so a re-review adds only what is new and lists what was fixed as
+"Resolved since the last review".</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Verdict</th>
+<th>Status</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>fail</td>
+<td><code>failure</code></td>
+<td>introduced or aggravated finding at or above <code>--fail-on</code> (default <code>medium</code>), confidence &gt;= 80</td>
+</tr>
+<tr>
+<td>warn</td>
+<td><code>success</code></td>
+<td>nothing introduced or aggravated; pre-existing findings reported</td>
+</tr>
+<tr>
+<td>pass</td>
+<td><code>success</code></td>
+<td>no findings, or triage stopped at Tier 0</td>
+</tr>
+<tr>
+<td>error</td>
+<td><code>error</code></td>
+<td>the review could not complete</td>
+</tr>
+</tbody></table>
+<p><code>warn</code> reports <code>success</code> on purpose: a warning that blocks a merge is a failure with
+extra steps, and teams respond by removing the check. <code>error</code> is kept distinct from
+<code>failure</code> so a broken run never looks like a vulnerability it did not find.</p>
+<p>The review event is always <code>COMMENT</code>, never <code>REQUEST_CHANGES</code> or <code>APPROVE</code>. The commit
+status is the enforcement mechanism, and it is the one branch protection reads.</p>
+<p><strong>Scope:</strong> the skill writes to the pull request and the commit status, and nowhere else.
+It opens no issues and creates nothing in any external tracker.</p>
+<h3>Re-reviews are incremental</h3>
+<p>A PR gets reviewed once per push, so the second review has to be cheaper than the first or
+the tool becomes something people turn off.</p>
+<p><strong>Dedup happens before the spending, not before the posting.</strong> The fingerprints already on
+the PR are read in Phase 1 and handed to the hunters and the verifier. Finding a duplicate
+at the end would mean the most expensive model in the pipeline had already re-confirmed a
+conclusion that was written on the PR the whole time. This needs no cache: the state lives
+in the PR, so it works on a cold machine and in CI.</p>
+<p><strong>A local cache makes the rest incremental.</strong> <code>sh-review-cache</code> stores each run's file
+hashes, findings and verdicts under your OS cache directory (never in the repo, since a
+cross-repo review runs in a temp clone that gets deleted). The next review re-hunts only
+files whose content actually changed, reuses verdicts for findings that are unchanged, and
+reuses the recon map if nothing it covers moved.</p>
+<p><strong>A base-branch merge costs nothing.</strong> Merging <code>main</code> into a PR branch changes the head
+SHA and nothing the author wrote, but a commit status is pinned to a SHA, so the required
+check silently disappears from the new head. When the PR's own files are byte-identical
+<em>and</em> the base delta touches nothing the findings depend on, the previous verdict is
+re-stamped onto the new SHA with no agents launched at all. That last condition is what
+makes it safe: a base merge that deletes a sanitizer leaves every PR file unchanged while
+turning a safe line into an exploitable one.</p>
+<p>Invalidation is deliberately conservative, because a stale entry in a security tool does
+not make it slow, it makes it <strong>wrong</strong>. The cache key hashes every <code>sh-kb-*</code> knowledge
+base, so a KB update invalidates every cached finding - a cached "clean" must never
+suppress the finding that update was written to catch. Model identity, skill version, file
+content and a 7-day TTL all invalidate too, and an unspecified model is treated as a miss.</p>
+<p><code>--no-cache</code> disables it, <code>--refresh-cache</code> re-baselines, and <code>run.md</code> records per phase
+what was launched, reused and skipped, so a cache that quietly stops hitting is visible
+rather than assumed.</p>
+<h3>Posting, and where things are written</h3>
+<p><strong>The review and the commit status are posted by default.</strong> A review that was computed and
+never delivered helped nobody. <code>--confirm</code> restores a prompt before posting, <code>--dry-run</code>
+sends nothing, <code>--no-status</code> posts the review but leaves the commit status alone.</p>
+<p>Posting goes through <code>scripts/sh-pr-post.py</code> rather than hand-built API calls, because it
+is a multi-step operation with a mandatory tail: review, then status, then receipts, with
+a 422 recovered by moving the comment rather than shifting a line number. The script
+<strong>never exits leaving the status at <code>pending</code></strong> - if the review cannot be posted it still
+sets <code>error</code>, saying the tooling failed rather than accusing the PR.</p>
+<p>Inline comments are reserved for findings at <strong>medium or above</strong> with confidence &gt;= 80.
+Low-severity findings go in the collapsed body section, so a low-priority finding showing
+up with zero inline comments is the policy working, not a failure.</p>
+<h3>Local run metrics</h3>
+<p>Every run records what it cost, so "the cache is working" and "reviews got slower" stop
+being matters of opinion.</p>
+<pre><code class="language-bash">python3 &lt;skill&gt;/scripts/sh-metrics.py path      # where records live
+python3 &lt;skill&gt;/scripts/sh-metrics.py report    # aggregate, by model
+python3 &lt;skill&gt;/scripts/sh-metrics.py purge --older-than-days 30
+</code></pre>
+<p>Two append-only JSONL files - <code>runs.jsonl</code> (repo, PR, tier, verdict, totals, the flags you
+passed) and <code>events.jsonl</code> (one line per phase or agent: model, tokens, duration, outcome,
+whether it was reused from cache). JSONL so a crashed run still leaves valid lines above
+the crash.</p>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Metrics</th>
+<th>Cache</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Linux / BSD</strong></td>
+<td><code>$XDG_DATA_HOME/security-harness/metrics</code><br />default <code>~/.local/share/security-harness/metrics</code></td>
+<td><code>$XDG_CACHE_HOME/security-harness</code><br />default <code>~/.cache/security-harness</code></td>
+</tr>
+<tr>
+<td>macOS</td>
+<td><code>~/Library/Application Support/security-harness/metrics</code></td>
+<td><code>~/Library/Caches/security-harness</code></td>
+</tr>
+<tr>
+<td>Windows</td>
+<td><code>%LOCALAPPDATA%\security-harness\metrics</code></td>
+<td><code>%LOCALAPPDATA%\security-harness\cache</code></td>
+</tr>
+</tbody></table>
+<p>Linux follows the XDG Base Directory spec, so both honour <code>XDG_DATA_HOME</code> and
+<code>XDG_CACHE_HOME</code> when set and fall back to <code>~/.local/share</code> and <code>~/.cache</code> when they are
+not. Override either directly with <code>SH_METRICS_DIR</code> and <code>SH_REVIEW_CACHE_DIR</code>.</p>
+<p><strong>On <code>python</code> vs <code>python3</code>:</strong> most Linux distributions ship <code>python3</code> and have no <code>python</code>
+at all, so the examples here use <code>python3</code>. The bundled scripts carry a
+<code>#!/usr/bin/env python3</code> shebang and are executable, so <code>./scripts/sh-metrics.py report</code>
+works directly on Linux and macOS. The skill resolves
+<code>PY="$(command -v python3 || command -v python)"</code> once per run, which covers all three
+platforms including Git Bash on Windows.</p>
+<p><strong>Strictly local.</strong> Neither script contains any network code or reporting endpoint.
+Anything token-shaped is redacted before it is written, because local files get pasted
+into issues.</p>
+<h3>Running it unattended</h3>
+<p>Optional, and a separate decision from using the skill. Run it by hand on your own PRs
+for a while first, so you know what it says about your codebase before it says it in
+front of your team.</p>
+<p>When you are ready, "Enforcing the check on a repository" in
+<a href="https://github.com/dmdhrumilmistry/security-harness/blob/HEAD/plugins/security-harness/references/pr-review-mapping.md" target="_blank" rel="noopener noreferrer"><code>references/pr-review-mapping.md</code></a>
+has a copy-paste workflow for <strong>your</strong> repo, plus the fail-safe that stops a dead job
+leaving a required check stuck on <code>pending</code>.</p>
+<p>The threshold stays at the default <code>medium</code>. Pre-existing findings never block a merge,
+so an unscanned codebase does not produce a wall of red on day one - only what a PR
+actually introduces or aggravates can fail it.</p>
+<h2>How it works</h2>
+<ol>
+<li><strong>Setup</strong> - probe available tools, define scope, create the run directory.</li>
+<li><strong>Recon</strong> (<code>sh-recon</code>) - build the Graft graph; detect stack/versions; SBOM + CVEs; enumerate entry
+points, trust boundaries, and dangerous sinks.</li>
+<li><strong>Hunt</strong> (<code>sh-hunter</code> ×N, parallel) - one hunter per relevant class loads its <code>sh-kb-*</code> knowledge base,
+traces attacker input from source to sink, and records candidates. A shared <strong>attempts ledger</strong> stops
+agents from repeating each other's probes.</li>
+<li><strong>Chain</strong> (<code>sh-chainer</code>) - compose findings into higher-severity attack paths.</li>
+<li><strong>Verify</strong> (<code>sh-verifier</code>) - refute first, then confirm exploitability from evidence, build PoCs, assign
+CVSS, and cut false positives.</li>
+<li><strong>Report</strong> (<code>sh-reporter</code>) - produce the deliverables.</li>
+</ol>
+<p>Subagents share nothing but files; the contract is in <code>plugins/security-harness/references/state-files.md</code>.</p>
+<h2>Extending</h2>
+<p>Add a new vulnerability class by creating <code>skills/sh-kb-&lt;class&gt;/SKILL.md</code> following the shared template
+(When to hunt · Sources &amp; sinks · Detection recipe · Payloads/PoC · False-positive filters · CWE/OWASP ·
+Chaining hints · Mitigation), then add its slug to the <code>class</code> enum in <code>references/finding-schema.json</code>
+and the routing table in <code>skills/sh-router/SKILL.md</code>.</p>
+<h2>Automated knowledge-base updates</h2>
+<p>A scheduled GitHub Action (<code>.github/workflows/update-knowledge-base.yml</code>) keeps the <code>sh-kb-*</code> knowledge
+bases fresh. <strong>Every alternate day</strong> (and on manual <code>workflow_dispatch</code>), it runs an agent to distill new,
+reputable public security research - OWASP, PortSwigger Research, CWE/CAPEC, NIST, MDN, curated GitHub
+repos, and public HackerOne disclosures - into small, well-sourced improvements. A <strong>second, adversarial
+reviewer agent</strong> then scans the resulting diff for malicious/injected content, and the PR is
+<strong>auto-merged only if that reviewer approves</strong>.</p>
+<h3>Two workflows, three jobs</h3>
+<p>PR creation is deliberately separated from review and merge, so the thing that writes
+the diff is never the thing that decides to ship it.</p>
+<p><strong>Stage 1 - <a href="https://github.com/dmdhrumilmistry/security-harness/blob/HEAD/.github/workflows/update-knowledge-base.yml" target="_blank" rel="noopener noreferrer"><code>update-knowledge-base.yml</code></a></strong>
+(scheduled or manual). One job, <code>create-pr</code>:</p>
+<ol>
+<li><strong>Generate</strong> - the agent edits the KB from allowlisted sources. No commit, no push.</li>
+<li><strong>Open PR</strong> - a deterministic step opens (or updates) a PR on the <code>automated/kb-update</code>
+branch, labeled <code>awaiting-review</code>.</li>
+<li><strong>Hand off</strong> - on a successful PR creation it dispatches stage 2 with the PR number.</li>
+</ol>
+<p><strong>Stage 2 - <a href="https://github.com/dmdhrumilmistry/security-harness/blob/HEAD/.github/workflows/kb-review-and-merge.yml" target="_blank" rel="noopener noreferrer"><code>kb-review-and-merge.yml</code></a></strong>
+(dispatched by stage 1, or run by hand against any automated PR). Two jobs:</p>
+<ul>
+<li><strong><code>review</code></strong> - a <em>separate</em> agent run inspects the diff <strong>adversarially</strong> for
+prompt-injection artifacts, out-of-scope edits, secrets/exfil, PII, weaponized
+exploits, off-allowlist sourcing, or house-style violations. It has <strong>no web and no
+shell</strong>, and <strong>fails closed</strong>: anything suspicious, any uncertainty, or a missing
+verdict file → REJECT. The verdict is posted as a PR comment and drives the label.</li>
+<li><strong><code>merge</code></strong> - runs <strong>only</strong> on <code>APPROVE</code>, and merges the PR. A <code>REJECT</code> skips it and
+the <code>blocked</code> job reports why.</li>
+</ul>
+<blockquote>
+<p><strong>Why a dispatch rather than a <code>pull_request</code> trigger:</strong> a PR opened by <code>GITHUB_TOKEN</code>
+does not trigger <code>pull_request</code> workflows. <code>workflow_dispatch</code> is one of the two events
+exempt from that recursion guard, so stage 1 can hand off reliably.</p>
+</blockquote>
+<p><strong>Auto-merge means an approving agent lands code in <code>main</code>.</strong> The controls on that:</p>
+<ul>
+<li>The merge job refuses any PR that is closed, from a fork, or whose head branch is
+outside <code>automated/*</code> (<code>ALLOWED_HEAD_PREFIX</code> in the workflow).</li>
+<li>It prefers GitHub's own auto-merge, so <strong>branch protection still applies</strong>. With a rule
+on <code>main</code> requiring an approving review, the PR queues and waits for a human instead of
+merging. It falls back to an immediate merge only on repos where auto-merge is off.</li>
+<li>Set the <code>auto_merge</code> input to <code>false</code> on a manual run to review without merging.</li>
+<li>The reviewer prompt tells the agent its verdict is binding, not advisory.</li>
+</ul>
+<blockquote>
+<p>Requires the repo setting <strong>"Allow GitHub Actions to create and approve pull requests"</strong> (Settings →
+Actions → General → Workflow permissions) so the workflow can open the PR. If you want a human in the
+loop despite auto-merge, protect <code>main</code> with a branch-protection rule requiring a pull request and at
+least one approving review - the auto-merge path honours it.</p>
+</blockquote>
+<h3>Pluggable agents</h3>
+<p>Both stages run through <a href="https://github.com/dmdhrumilmistry/security-harness/blob/HEAD/.github/actions/ai-agent/action.yml" target="_blank" rel="noopener noreferrer"><code>.github/actions/ai-agent</code></a>,
+a composite action that dispatches to whichever agent you configure. Claude Code, OpenAI
+Codex, Gemini CLI, and an escape hatch for anything else:</p>
+<table>
+<thead>
+<tr>
+<th><code>agent</code></th>
+<th>Runs</th>
+<th>Credential</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>claude</code> (default)</td>
+<td><code>anthropics/claude-code-action@v1</code></td>
+<td><code>CLAUDE_CODE_OAUTH_TOKEN</code> or <code>ANTHROPIC_API_KEY</code></td>
+</tr>
+<tr>
+<td><code>codex</code></td>
+<td><code>codex exec --full-auto</code></td>
+<td><code>OPENAI_API_KEY</code></td>
+</tr>
+<tr>
+<td><code>gemini</code></td>
+<td><code>gemini --yolo --prompt</code></td>
+<td><code>GEMINI_API_KEY</code></td>
+</tr>
+<tr>
+<td><code>custom</code></td>
+<td>your <code>KB_AGENT_INSTALL</code> / <code>KB_AGENT_COMMAND</code></td>
+<td>whatever it needs</td>
+</tr>
+</tbody></table>
+<p>Pick per run from the <code>workflow_dispatch</code> inputs, or set repo variables to change the
+default: <code>KB_AGENT</code> and <code>KB_MODEL</code> for the generator, <code>KB_REVIEW_AGENT</code> and
+<code>KB_REVIEW_MODEL</code> for the reviewer. Running the generator and the reviewer on <strong>different
+agents</strong> is a meaningful hardening step: an injection tuned for one model is less likely
+to land on a second, independent one.</p>
+<p>For <code>agent: custom</code>, set <code>KB_AGENT_COMMAND</code> to a shell command. The prompt is written to
+the file named by <code>$AGENT_PROMPT_FILE</code>, and <code>$AGENT_MODEL</code> carries the model input.</p>
+<p>Prompt-injection defenses, since the generator reads the open web:</p>
+<ul>
+<li><strong>Domain allowlist.</strong> <code>WebFetch</code> is restricted to the trusted domains in
+<code>.github/kb-update/trusted-sources.md</code> (mirrored in the workflow's <code>--allowedTools</code>). <code>WebSearch</code> can
+discover URLs, but only allowlisted domains can actually be fetched.</li>
+<li><strong>Content is data, not commands.</strong> The task prompt (<code>.github/kb-update/prompt.md</code>) instructs Claude to
+treat every fetched byte as untrusted reference material and to ignore any instructions embedded in a
+page - HackerOne report bodies (user-generated) are flagged as the highest-risk tier.</li>
+<li><strong>No shell, no push on the generator; the reviewer is the gate.</strong> The generator can only edit files.
+The independent reviewer (<code>.github/kb-update/review-prompt.md</code>) is what stands between fetched content
+and <code>main</code> - nothing merges without its explicit approval.</li>
+<li><strong>Different agents for generator and reviewer.</strong> Optional, and the strongest version of the gate: set
+<code>KB_AGENT</code> and <code>KB_REVIEW_AGENT</code> to two different engines.</li>
+</ul>
+<p><strong>Setup:</strong></p>
+<ul>
+<li>Add the credential for whichever agent you use (Settings → Secrets and variables → Actions):
+<strong><code>CLAUDE_CODE_OAUTH_TOKEN</code></strong> (default), <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, or <code>GEMINI_API_KEY</code>.
+The OAuth token authenticates against <strong>your Claude subscription's usage limits</strong> rather than a metered
+API key - generate it locally with <code>claude setup-token</code> (requires an active Claude Pro/Max subscription)
+and paste the result.</li>
+<li>Enable <strong>"Allow GitHub Actions to create and approve pull requests"</strong> (Settings → Actions → General →
+Workflow permissions) so the workflow can open its PR. Recommended: add a branch-protection rule on <code>main</code>
+requiring a PR and an approving review, so no automated change can land without a human even with
+auto-merge on.</li>
+<li>To change which sources are allowed, edit the allowlist in <code>trusted-sources.md</code> <strong>and</strong> the matching
+<code>WebFetch(domain:...)</code> entries in the workflow - keep the two in sync.</li>
+</ul>
+<p>Each run records what it did in <code>.github/kb-update/last-run-summary.md</code>.</p>
+<h2>Roadmap</h2>
+<ul>
+<li><del>Codex / Cursor mirror wiring.</del>
+✅ Shipped: <code>AGENTS.md</code>, a Gemini CLI extension, and <code>scripts/sync-agent-skills.py</code>
+for <code>.agents/skills</code> and opencode. See <a href="https://github.com/dmdhrumilmistry/security-harness/blob/HEAD/docs/DISTRIBUTION.md" target="_blank" rel="noopener noreferrer"><code>docs/DISTRIBUTION.md</code></a>.</li>
+<li><del>Optional live-fetch augmentation of knowledge bases (PortSwigger/OWASP/CWE) on top of curated references.</del>
+✅ Shipped as the scheduled knowledge-base updater above.</li>
+<li>Optional DAST bridge for runtime confirmation of <code>needs-runtime</code> findings.</li>
+</ul>
+<h2>License</h2>
+<p>MIT</p>
