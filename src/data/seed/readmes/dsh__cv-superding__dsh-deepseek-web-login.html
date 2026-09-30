@@ -1,0 +1,992 @@
+<img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/banner-dsh-deepseek-web-login.jpg" alt="dsh-deepseek-web-login — 用 chat.deepseek.com 网页版登录态驱动 DSH agent" width="900" /><p><a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer"><strong>中文</strong></a> · <a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/README.en.md" target="_blank" rel="noopener noreferrer">English</a></p>
+
+<p><a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-Apache--2.0-263146?style=flat-square&amp;labelColor=0b1220" alt="License" /></a>
+<a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/DSH-plugin-4f46e5?style=flat-square&amp;labelColor=0b1220" alt="DSH Plugin" /></a>
+<a href="#%E6%A8%A1%E5%9E%8B%E6%A1%A3%E4%BD%8D" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/provider-deepseek--web-06b6d4?style=flat-square&amp;labelColor=0b1220" alt="Provider" /></a>
+<a href="#%E6%B5%8B%E8%AF%95%E4%B8%8E%E9%AA%8C%E8%AF%81" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/tests-111%20assertions-10b981?style=flat-square&amp;labelColor=0b1220" alt="Tests" /></a>
+<a href="https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/cv-superding/dsh-deepseek-web-login/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://github.com/cv-superding/dsh-deepseek-web-login/releases" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/v/release/cv-superding/dsh-deepseek-web-login?style=flat-square&amp;labelColor=0b1220&amp;color=f59e0b" alt="Release" /></a>
+<a href="#%E5%85%8D%E8%B4%A3%E5%A3%B0%E6%98%8E" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/status-unofficial%20%C2%B7%20use%20at%20your%20own%20risk-ef4444?style=flat-square&amp;labelColor=0b1220" alt="Status" /></a>
+<a href="#%E8%B4%A1%E7%8C%AE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square&amp;labelColor=0b1220" alt="PRs" /></a>
+<a href="#%E5%BC%80%E5%8F%91" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/node-%E2%89%A522-339933?style=flat-square&amp;labelColor=0b1220&amp;logo=node.js&amp;logoColor=white" alt="Node" /></a></p>
+<p><strong>把 chat.deepseek.com 网页版接进 DSH：用浏览器登录态（不是 API Key）驱动 agent 的工具调用、思考流与图片理解。</strong></p>
+<hr />
+<h2>这是什么</h2>
+<p>DSH（DeepSeek Harness）通过 <code>ctx.llm</code> 的 <strong>provider 适配器</strong>接入模型。本项目实现了 <code>deepseek-web</code>
+这个 provider —— 它不调用官方 API，而是复用你<strong>已登录的网页版</strong>：PoW 挑战、会话、SSE 流式、
+文件上传，全部走网页端私有接口。</p>
+<p>于是：<strong>在模型选择器里选 <code>DeepSeek 网页 · 快速模式</code>，就能用网页版免费额度跑 DSH 的 agent</strong>。</p>
+<pre><code class="language-text">DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ chat.deepseek.com
+                                     │  ├─ PoW（SHA3 WASM 求解）
+                                     │  ├─ chat_session（每次调用临时会话，用完即删）
+                                     │  ├─ chat/completion（SSE patch 流）
+                                     │  └─ file/upload_file（图片输入）
+                                     └─ 提示词工具协议 ⇄ tool-call 块
+</code></pre>
+<img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/architecture.svg" alt="架构与数据流" width="1000" /><h2>它是怎么工作的（以及为什么不是「反代」）</h2>
+<p>被问得最多的两个问题：<strong>你们是操作 DOM，还是截获页面的请求？是不是个反代？</strong>
+答案都是<strong>不是</strong> —— 它自己构造请求、直接发给网页端私有接口。准确的说法是
+「<strong>网页端私有接口的非官方客户端</strong>」。逐步拆开：</p>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>做什么</th>
+<th>用什么</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>① 登录捕获</strong>（只做一次）</td>
+<td>开一个<strong>独立 profile</strong> 的浏览器窗口让你登录，把页面自己发出的请求头读一份存下来：<code>Authorization: Bearer</code>、域 cookie、反爬头 <code>x-hif-dliq</code> / <code>x-hif-leim</code>、一批 <code>x-client-*</code></td>
+<td>Electron 的 <code>webRequest.onBeforeSendHeaders</code></td>
+</tr>
+<tr>
+<td><strong>② 请求构造</strong>（每次调用）</td>
+<td>自己拼 <code>POST /api/v0/chat/completion</code>；PoW 自己解：先要 <code>create_pow_challenge</code>，再用 SHA3 WASM 算出答案塞进 <code>x-ds-pow-response</code></td>
+<td>插件自己的 HTTP 客户端</td>
+</tr>
+<tr>
+<td><strong>③ 发送</strong></td>
+<td>默认从 <strong>Chromium 网络栈</strong>出去（Electron <code>net.fetch</code>），TLS / HTTP2 指纹与真实浏览器一致；也可切回 Node</td>
+<td>见下方「传输层」</td>
+</tr>
+<tr>
+<td><strong>④ 解析与对接</strong></td>
+<td>自己解 <code>response/fragments</code> 的 SSE 帧、分思考与正文通道；工具调用走<strong>提示词协议</strong>（网页端没有原生 function calling）</td>
+<td>自研解析器</td>
+</tr>
+</tbody></table>
+<p><strong>唯一沾到"截获"的只有第 ① 步</strong>，而且那一步是「读一份 + 清掉自己的痕迹」：同一个回调顺手把请求头里的
+Electron 品牌（UA 与 UA-CH）删掉，否则网页端会判「使用环境异常」。它<strong>不改写业务请求、也不转发任何东西</strong>，
+而且只在登录那一次生效 —— <strong>登录完之后页面关掉，插件照样跑。</strong></p>
+<h3>为什么不是「反代」</h3>
+<p>反代（反向代理）的关键是<strong>中间人</strong>：客户端以为自己在跟原服务器说话，实际请求被转发了一层。
+这里没有中间人 —— <strong>插件自己就是那个客户端</strong>，以网页端的身份直连 DeepSeek。
+中间没有转发层，也不需要额外跑一个本地服务。</p>
+<h3>和另外两条常见路线的区别</h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>DOM 自动化（如 cuckoo-code）</th>
+<th>请求 hook（浏览器扩展，如 deepseek-pp）</th>
+<th>本插件</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>请求由谁发出</strong></td>
+<td><strong>页面</strong></td>
+<td><strong>页面</strong></td>
+<td><strong>插件自己</strong></td>
+</tr>
+<tr>
+<td>登录态来源</td>
+<td>人在窗口里手动登</td>
+<td>你日常浏览器里的登录态</td>
+<td>开窗捕获一次、存在本机</td>
+</tr>
+<tr>
+<td>网页改版会怎样</td>
+<td>选择器一改就坏</td>
+<td>只依赖接口路径</td>
+<td>只依赖接口，完全不碰 DOM</td>
+</tr>
+<tr>
+<td>浏览器要一直开着吗</td>
+<td>是</td>
+<td>是</td>
+<td><strong>否</strong></td>
+</tr>
+</tbody></table>
+<p>前两条路线的共同点是「<strong>请求是浏览器发的</strong>」，只有本插件是发送方。代价是接口变了要跟着改；
+换来的是不依赖 DOM、可以后台无人值守地跑。</p>
+<h2>界面预览</h2>
+<p>设置页按用途分成 <strong>6 个标签</strong>（一次只显示一页）—— <strong>账号</strong>（登录状态 / 当前账号 / <strong>账号库</strong> / 手动 Token）·
+<strong>模型</strong>（可用模型 / 连通性测试）· <strong>防风控</strong>（请求节流 / 会话清理及其三个区间 / <strong>调用台账</strong>）·
+<strong>传输层</strong>（指纹 + 一键测试）· <strong>上下文</strong>（每轮全量 / 链式投喂）· <strong>关于</strong>（版本与更新 / 数据位置 / 风险说明）。
+操作反馈条常驻在标签栏之上，切到哪一页都看得见。</p>
+<p>设置页（<strong>真实截图</strong>，拍于拆页之前）：当前账号 / 登录状态（适配器注册、凭证来源、PoW WASM、服务端校验）/ 三种登录方式（Microsoft Edge · 我的默认浏览器 · 从已登录窗口恢复）/ 手动粘贴 token。</p>
+<img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/screenshot-settings.png" alt="DSH 设置面板 · DeepSeek 网页登录（真实截图）" width="820" /><p>DSH「使用统计」里看到的调用量 —— 免费网页通道，当日 1042.8 万 tokens / 164 次调用：</p>
+<img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/screenshot-usage-stats.png" alt="DSH 使用统计 · deepseek-web 免费通道调用量" width="820" /><p>设置页<strong>示意图</strong>（标注各区块用途）：登录状态 / <strong>当前账号（退出当前账号 · 退出并登录其它账号）</strong> / 浏览器窗口登录 / 从已登录窗口恢复 / 手动 token / 连通性测试 / 模型列表。</p>
+<img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/panel-preview.svg" alt="DSH 设置面板 · DeepSeek 网页登录" width="820" /><h2>核心能力</h2>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>🔐 <strong>网页登录（无 API Key）</strong></td>
+<td>Electron 独立分区窗口里正常登录，插件<strong>旁路捕获</strong>真实 <code>Authorization</code>、cookie、<code>x-hif-*</code> 指纹头与客户端版本头</td>
+</tr>
+<tr>
+<td>🧩 <strong>PoW 求解</strong></td>
+<td><code>create_pow_challenge</code> + DeepSeek 自家 <code>sha3_wasm_bg.*.wasm</code> 的 <code>wasm_solve</code>；WASM 地址<strong>自动发现</strong>（哈希随部署变化），失败自动回退</td>
+</tr>
+<tr>
+<td>🌊 <strong>流式</strong></td>
+<td>同时兼容 <code>response/fragments</code>（THINK/RESPONSE 片段）与直连 <code>thinking_content</code>/<code>content</code> 两套 SSE 格式，含 <code>{o:"APPEND"}</code> 与裸 <code>{v}</code> 续段；按逻辑流去重，快照重放不重复吐字</td>
+</tr>
+<tr>
+<td>🛠 <strong>工具调用</strong></td>
+<td>网页端没有原生 function calling → 提示词 JSON 协议 + 流式过滤器（跨包标记、围栏、多调用、假阳性回退）→ 合成 <code>tool-call</code> 块并给出 <code>finish: tool-calls</code>；工具定义按 5.6 万字符预算整段下发，超预算时<strong>列出被省略的工具名</strong>并要求模型别猜参数</td>
+</tr>
+<tr>
+<td>🛡 <strong>格式漂移双保险</strong></td>
+<td>① 指令层显式禁止 XML/DSML 标记并说明后果（实测模型会主动拒绝该格式）；② 解析层同时容忍 JSON 与 XML/DSML 两族（<code>|DSML|</code> 前缀、<code>dsml-</code> 连字符、裸 <code>&lt;invoke&gt;</code>、CDATA）</td>
+</tr>
+<tr>
+<td>🩹 <strong>非法 JSON 宽容修复</strong></td>
+<td>模型常把 Windows 路径写成单反斜杠：<code>\A</code> 是非法转义，而 <code>\r</code> <strong>合法</strong>却会把 <code>\resources</code> 静默变成回车。多候选修复链逐字还原路径，解析不出才降级为正文（<strong>绝不静默丢内容</strong>）</td>
+</tr>
+<tr>
+<td>🖼 <strong>图片输入</strong></td>
+<td>走网页端文件上传通道（<code>/api/v0/file/upload_file</code> → <code>ref_file_ids</code>），同一张图在多处出现时自动去重（服务端拒绝重复 id）。实测：上传自造的「左红右蓝」PNG，模型答出「左=红色，右=蓝色」</td>
+</tr>
+<tr>
+<td>🧹 <strong>会话卫生</strong></td>
+<td>每次调用新建临时会话并在结束后删除 —— 实测调用前后网页端会话列表<strong>完全一致</strong>，不污染你的聊天记录</td>
+</tr>
+<tr>
+<td>🎛 <strong>设置面板</strong></td>
+<td>状态展示、<strong>退出当前账号 / 退出并登录其它账号</strong>（连带清除浏览器分区登录态）、浏览器登录、从已登录窗口恢复、手动粘贴 token、连通性测试（host HTTP API：<code>/deepseek-web-login/api/*</code>）</td>
+</tr>
+</tbody></table>
+<img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/tool-bridge.svg" alt="工具调用协议桥" width="1000" /><details>
+<summary>登录与凭证捕获流程（点击展开）</summary><img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/login-flow.svg" alt="登录与凭证捕获流程" width="1000" /></details><h2>快速开始</h2>
+<h3>1. 安装</h3>
+<pre><code class="language-bash"># 方式 A：从 Release 的 tgz 装配（推荐，免构建；版本号以最新 Release 为准）
+dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.1.3.tgz
+
+# 方式 B：git 装配（本机需可访问 github.com）
+dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login
+
+# 方式 C：从 npm 装（免 git、免构建，国内镜像也会同步）
+#   先确认已发布：npm view dsh-deepseek-web-login version   ← 查不到就先用方式 A/B
+dsh plugin --profile desktop add dsh-deepseek-web-login
+</code></pre>
+<blockquote>
+<p>⚠️ <strong>在插件市场里点「更新」失败时</strong>（报 <code>update failed and restoration of the previous build could not be verified</code>，括号里写着"当前宿主无法安装更新前的精确 GitHub 提交"）—— 那句括号只是
+<strong>"失败后无法自动回滚"</strong> 的说明，不是失败原因。本插件长期只提供 <strong>git 安装来源</strong>，所以更新要
+clone GitHub、失败后市场也救不回来。绕过办法（挑一条，都不用等市场修好）：</p>
+</blockquote>
+<pre><code class="language-bash"># 1) 按 tag 精确装（比装 HEAD 稳，不会被中间提交绊住）
+dsh plugin --profile desktop add github:cv-superding/dsh-deepseek-web-login#v0.2.0
+
+# 2) 用 Release 的 tgz（完全不走 git；先从 Releases 页下载对应 tgz）
+dsh plugin --profile desktop add ./dsh-deepseek-web-login-0.2.0.tgz
+
+# 3) 从 npm 装（免 git、免构建；先 `npm view dsh-deepseek-web-login version` 确认已发布）
+dsh plugin --profile desktop add dsh-deepseek-web-login
+</code></pre>
+<blockquote>
+<p>市场目录里的这个条目当前标记为 <code>npm: null</code>（<strong>未发布到 npm</strong>）⇒ 只能走 git。
+包侧已就绪（<code>private</code> 已去掉、<code>repository</code> 已补 —— 后者是目录识别 npm 包的硬条件），
+发布之后目录每天重探一次（未发布的判定 1 天后过期），探到即自动切到 npm 路径
+（版本比较 + tarball，不再依赖本机 git）。仍显示 git 时等一天再看，或直接用上面第 3 条。</p>
+</blockquote>
+<h3>2. 登录一次</h3>
+<blockquote>
+<p><code>--profile desktop</code> 是 DSH Desktop（Electron 应用）使用的 profile。若你跑的是 web profile，换成 <code>--profile web</code>。
+重启 DSH 后生效（本插件是 bundle 装配，重启即自动加载）。</p>
+</blockquote>
+<h3>2. 登录一次</h3>
+<p><strong>设置 → DeepSeek 网页登录 → 浏览器窗口登录</strong>，在弹出的窗口里正常登录（手机号 / 邮箱 / 验证码均可）。
+登录窗口报的是<strong>干净 Chrome UA</strong>（不含 Electron 字样，UA-CH 品牌也清过）—— 否则网页端会判定
+「使用环境异常」直接拒绝服务；若仍被拦，用同一行的 <strong>用我的默认浏览器登录</strong>，按提示用 F12 取 token 粘贴。
+捕获成功后窗口自动关闭，面板显示<strong>已登录</strong>。</p>
+<blockquote>
+<p>💡 <strong>这个按钮每次都会先清掉上次的登录状态</strong> —— 登录用的是独立 profile
+（<code>~/.dsh/web-login/browser-profile</code>，<strong>不碰你日常 Edge 的 cookie 与历史</strong>），
+所以窗口一打开就是干净的登录页，不会带着上一个账号。
+想省一次输入（凭证明明还有效、只是要重新捕获）就用账号行上的「<strong>重登</strong>」——
+那条路<strong>默认不清</strong>，浏览器里若还留着登录态会立刻复用、一个密码都不用敲。
+⚠️ 但<strong>如果这条账号已经被标记失效</strong>（红标「需要重新登录」），它就会先清掉再让你重新登录 ——
+因为此时浏览器里那份登录态<strong>也已经不可用</strong>，复用只会把同一个坏凭证再抓一遍（会陷入点多少遍都失败的死循环）。</p>
+</blockquote>
+<ul>
+<li>凭证只存在本机 <code>~/.dsh/web-login/deepseek-auth.json</code>，<strong>不在仓库里</strong>；面板「当前账号 → 退出当前账号」一键清除（同时清掉浏览器分区里的登录态，保证真退出、可换号）</li>
+<li>凭证丢了或校验不通过：点 <strong>从已登录窗口恢复</strong>（复用上次登录的持久化分区，无需重新登录）</li>
+<li>非 Electron 环境（纯 web profile）：用面板里的<strong>手动粘贴 Token</strong>通道</li>
+</ul>
+<h3>3. 选模型开跑</h3>
+<p>模型选择器 → provider <strong><code>DeepSeek 网页版（免费）</code></strong> → <code>DeepSeek 网页 · 快速模式</code>，
+然后照常用 agent（工具调用、思考流、贴图都可用）。</p>
+<blockquote>
+<p>⚠️ <strong>一个账号同时只开一个聊天窗口</strong>：多开并发会触发网页端临时封禁（1 天）——要开多个窗口就换账号，或把多余的窗口换到别的 provider。详见<a href="#%E5%B7%B2%E7%9F%A5%E9%99%90%E5%88%B6" target="_blank" rel="noopener noreferrer">已知限制</a>。</p>
+</blockquote>
+<h2>模型档位</h2>
+<p>权威依据：<code>GET /api/v0/client/settings?scope=model</code> 的 <code>model_configs</code>（按账号返回，实测 configVersion 81）</p>
+<table>
+<thead>
+<tr>
+<th>model_type</th>
+<th>名称</th>
+<th>enabled</th>
+<th>switchable</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>default</code></td>
+<td>快速模式</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>expert</code></td>
+<td>专家模式</td>
+<td>❌ 已停用</td>
+<td>❌</td>
+</tr>
+<tr>
+<td><code>vision</code></td>
+<td>识图模式</td>
+<td>❌ 已停用</td>
+<td>❌</td>
+</tr>
+</tbody></table>
+<p>即<strong>专家 / 识图已被服务端停用并合并进「快速模式」</strong>。因此本插件只暴露两条 —— 它们
+<strong>不是两个模型</strong>，而是同一个「快速模式」的 <code>thinking_enabled</code> 开关两档预设：</p>
+<table>
+<thead>
+<tr>
+<th>模型 id</th>
+<th>thinking</th>
+<th>适合</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>deepseek-chat</code></td>
+<td>关</td>
+<td>工具调用、改写、检索：直接作答，最快、最省额度</td>
+</tr>
+<tr>
+<td><code>deepseek-reasoner</code></td>
+<td>开</td>
+<td>数学、多步调试、规划：先推理再作答（推理流作为思考块回传）</td>
+</tr>
+</tbody></table>
+<p>同一档位内也可用<strong>推理强度</strong>（Off/High）切换；历史里的 <code>deepseek-pro</code> / <code>deepseek-expert</code> / <code>deepseek-vision</code>
+会按别名回退到快速模式，不报错。</p>
+<p><strong>容量</strong>（2026-09-11 逐字段核对 <code>GET /api/v0/client/settings?scope=model</code>，configVersion 81）：</p>
+<ul>
+<li>单请求输入<strong>硬上限</strong>：<code>input_character_limit = 2621440</code> 字符（≈2.5 MiB 字符）</li>
+<li>附件（file_feature）token 预算：<code>token_limit = 890880</code>（开不开思考都一样）
+—— ⚠️ 这个数字<strong>不是上下文窗口</strong>。曾经把它当上下文窗口写进代码与文档（还写成「1M 扣输出预留」），
+而 890880 = 870×1024，面板一按 ÷1024 显示就成了「870K」，看起来像「说好的 1M 缩水成 870K」。</li>
+<li>上下文窗口：服务端没有这个字段，按 DeepSeek 标称的 <strong>1M</strong> 取 <code>1048576</code>（服务端自己的数字都是 1024 的整数倍）</li>
+</ul>
+<p>本插件 contextWindow 声明 1048576，
+prompt 字符上限默认 400,000（可配）—— 这个数字同时是<strong>风控阀门</strong>，见「配置」一节的说明。</p>
+<h2>配置</h2>
+<p>插件 entry config（<code>cordis.patch.yml</code> / profile bundles 装配时的 <code>config</code>）：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>maxPromptChars</code></td>
+<td><code>400000</code></td>
+<td>送出 prompt 的字符上限（超出走中段截断：保系统提示+工具协议与最近回合）。⚠️ <strong>调高会明显提高被限流的风险</strong>，可调区间 <code>[120000, 1500000]</code>，默认刻意<strong>不顶格</strong></td>
+</tr>
+<tr>
+<td><code>maxRefImages</code></td>
+<td><code>24</code></td>
+<td>一次请求最多带多少张历史图片（<code>ref_file_ids</code> 的长度）。网页端对这一批有上限（实测 40~52），超了整轮都会被拒、且<strong>该会话此后每轮都失败</strong>，所以按时间只带最近的 N 张；被略过的图在 prompt 里标成 <code>[earlier image omitted]</code>。<code>0</code> = 不限制（<strong>不推荐</strong>）。⚠️ 这里说的「张」其实是<strong>图片内容条目</strong>：模型每 <code>read_image</code> 读一次、或同一张图被重新渲染/裁剪出新内容，都会多算一条 —— 所以它往往远多于你亲手贴的张数。0.1.79 起提示语改说「份图片内容」；0.1.81 起提示按<strong>阶梯</strong>上屏 —— 首次必说明，之后要「被略过的份数翻倍、且至少再多 10 份」才再说一次（此前每轮都刷，实测 19 分钟 52 次；0.1.79 的「同一规模只提示一次」没修干净：那个签名里含「总条数」，而它每轮都在涨）</td>
+</tr>
+<tr>
+<td><code>idleTimeoutMs</code></td>
+<td><code>120000</code></td>
+<td>SSE 空闲超时</td>
+</tr>
+<tr>
+<td><code>deleteWebSessions</code></td>
+<td><code>true</code></td>
+<td>调用后删除临时网页端会话</td>
+</tr>
+<tr>
+<td><code>autoContinue</code></td>
+<td><code>true</code></td>
+<td>回答在句中被截时自动发起新请求续写（无缝拼进同一条回答）；截断提示从此不出现。另外，<strong>模型把工具程序写进正文</strong>（没有作为工具调用发出）时，也由它管那一轮纠正请求</td>
+</tr>
+<tr>
+<td><code>maxContinuations</code></td>
+<td><code>2</code></td>
+<td>自动续写的最大轮数（每轮是一次新的网页端请求，调高消耗更多免费额度）</td>
+</tr>
+<tr>
+<td><code>minRequestIntervalMs</code></td>
+<td><strong><code>2000</code></strong></td>
+<td>请求间隔<strong>区间下限</strong>（毫秒），从上次调用<strong>结束</strong>时刻算起</td>
+</tr>
+<tr>
+<td><code>maxRequestIntervalMs</code></td>
+<td><strong><code>4000</code></strong></td>
+<td>间隔<strong>区间上限</strong>；实际等待在 <code>[下限, 上限]</code> 内<strong>随机</strong>取值（上下限相等＝固定间隔）</td>
+</tr>
+<tr>
+<td><code>allowConcurrent</code></td>
+<td><strong><code>false</code></strong></td>
+<td>是否允许同一账号并发请求。默认串行，多个调用排队（FIFO）</td>
+</tr>
+<tr>
+<td><code>sessionCleanup</code></td>
+<td><strong><code>deferred</code></strong></td>
+<td>临时会话清理：<code>immediate</code>＝结束后 1.5s 删 / <code>deferred</code>＝攒批集中清理（默认）/ <code>keep</code>＝不删</td>
+</tr>
+<tr>
+<td><code>sessionCleanupDelayMs</code></td>
+<td><code>90000</code></td>
+<td>deferred：从第一个会话入队起最多等多久就清理（区间未设时的兜底标量）</td>
+</tr>
+<tr>
+<td><code>sessionCleanupBatchSize</code></td>
+<td><code>8</code></td>
+<td>deferred：攒够多少个立即清理（区间未设时的兜底标量）</td>
+</tr>
+<tr>
+<td><code>cleanupBatch</code></td>
+<td><code>6~10</code>（随机）</td>
+<td>deferred：攒批阈值的<strong>区间</strong>（个）。这一轮具体攒几个 = 每次清理时在区间内随机抽</td>
+</tr>
+<tr>
+<td><code>cleanupDelayMs</code></td>
+<td><code>60000~120000</code>（随机）</td>
+<td>deferred：最长等待的<strong>区间</strong>（毫秒）。每轮清理重抽</td>
+</tr>
+<tr>
+<td><code>cleanupGapMs</code></td>
+<td><code>800~2500</code>（随机）</td>
+<td>deferred：<strong>相邻两个删除请求之间</strong>的间隔区间（毫秒）。每删一个重抽</td>
+</tr>
+<tr>
+<td><code>transport</code></td>
+<td><strong><code>chromium</code></strong></td>
+<td>传输层：<code>chromium</code>＝Electron 的 <code>net.fetch</code>（指纹与真实浏览器一致）/ <code>node</code>＝Node 原生 fetch</td>
+</tr>
+<tr>
+<td><code>contextMode</code></td>
+<td><strong><code>full</code></strong></td>
+<td>上下文投喂：<code>full</code>＝每轮重发全量 prompt / <code>chained</code>＝只发增量 + 把上一条回答当父消息（见下节）</td>
+</tr>
+<tr>
+<td><code>probeIntervalMs</code></td>
+<td><code>1800000</code></td>
+<td>登录态主动探活间隔（毫秒），<code>0</code>＝关闭。只读 <code>users/current</code>，零额度</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>⚠️ <strong><code>maxPromptChars</code> 是风控阀门，不是「越大越好」。</strong>
+网页端是<strong>无状态</strong>的：每一轮请求都要把<strong>整段对话转写</strong>重新发一遍，所以这个上限直接决定单次请求的体量。
+实测同一个会话里单次输入从 9.7k token 一路涨到 <strong>293k</strong>；把它默认顶到 150 万字符
+（纯中文 ≈100 万 token）等于默认就允许「一次顶满 1M 上下文」。我们自己的四个账号在两天内陆续被限制，
+体量是主要嫌疑。所以 <strong>0.1.76 起默认值降到 40 万</strong>（≈27 万 token，长任务够用）。</p>
+<p>确实需要更长的转写可以自己往上调（上限仍是 150 万），但请把它理解为「<strong>拿账号稳定换更长的记忆</strong>」：
+真要长上下文，更划算的是把「上下文投喂」切成 <code>chained</code>（只发增量、历史交给服务端维护），
+而不是抬高这个天花板 —— 后者是每一轮都要多付的成本。</p>
+</blockquote>
+<h3>上下文投喂：每轮全量 vs 链式增量</h3>
+<p>一次 completion 请求的 <code>prompt</code> 是<strong>整份对话转写</strong>（系统提示 + 工具目录 + 全部历史）。为什么必须这么发？
+因为插件一直把 <code>parent_message_id</code> 写成 <code>null</code> —— 每条消息都是网页端会话里的<strong>根消息</strong>、
+没有父链，服务端按消息树回溯上下文时回溯到空。这是 2026-09-12 实测判定过的行为
+（同一会话内先发「记住编号 ZC-7391-KX」得 <code>OK</code>，再问编号答「不知道」）。</p>
+<p>浏览器不是这么干的。参考实现里 <code>nextParentMessageId = history?.parentMessageId ?? finalAssistantMessageId</code>、
+<code>isFirstMessage = parent_message_id === null</code> —— <strong>只有会话第一条的 parent 是 null</strong>，
+之后每轮都把上一条消息 id 当 parent 发上去，历史由服务端维护。</p>
+<p>设置页「上下文」标签可以切到 <strong>链式投喂</strong>：后续轮只发新增内容，<code>parent_message_id</code> 指向上一条回答的
+<code>message_id</code>（取自 SSE 首帧 <code>event: ready</code> 的 <code>response_message_id</code>）。收益是请求体小得多、
+更像真人连续对话；代价是<strong>工具协议只存在于链首那条消息里</strong>，一旦服务端把早期上下文丢掉，
+模型可能不按约定格式发工具调用。</p>
+<p>所以默认仍是 <code>full</code>（与 0.1.61 及以前完全一致），而 <code>chained</code> 采用「能省则省、一有不确定就退回全量」
+的策略 —— 出现下面任何一条就重新起链（发全量 + <code>parent=null</code>，只是多花点 token，不会错位）：</p>
+<table>
+<thead>
+<tr>
+<th>退回全量的情形</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>本轮是新会话 / 会话轮换 / 切号</td>
+<td>链属于某个具体会话，换了就不能续</td>
+</tr>
+<tr>
+<td>固定头（系统提示 + 工具目录）变了</td>
+<td>链首那份已经过期，续上去模型会照旧定义干活</td>
+</tr>
+<tr>
+<td>历史不是<strong>严格追加</strong>（被压缩、改写、回退）</td>
+<td>增量算不出来</td>
+</tr>
+<tr>
+<td>本轮新增内容为空 / 增量本身超预算</td>
+<td>没有值得省的东西，或风险大于收益</td>
+</tr>
+<tr>
+<td>上一轮流失败、被取消、或没拿到 <code>message_id</code></td>
+<td>父消息可能不存在或已作废</td>
+</tr>
+</tbody></table>
+<p>判定逻辑是纯函数（<code>src/context-feed.ts</code>），测试在 <code>tests/check-context-feed.mjs</code>（判据）
+与 <code>tests/check-context-chain.mjs</code>（接线与生命周期，假 transport + 假 SSE）。</p>
+<h3>请求节流：为什么需要，值该给多少</h3>
+<p>网页端对<strong>同一账号</strong>同时只能生成一条，并发生成会被直接拒绝；实测更严重的是<strong>账号级限制</strong>：
+两个窗口并发生成，不到 6 分钟就触发 <strong>1 天</strong>的临时限制（登录态没坏，但期间该账号所有请求被拒）。</p>
+<p>而 DSH 本身会并发调用同一个账号 —— 从插件日志反推 272 轮调用的起止时间，发现 <strong>16 对真重叠</strong>：
+重叠的一方是主回答，另一方只有 8<del>17 字、耗时 1</del>3 秒，那是 DSH 的<strong>会话标题生成</strong>
+（<code>options.purpose === 'session-title'</code>）。也就是说你还在等回答时，另一个请求已经发往同一账号了。</p>
+<p>所以插件默认做了两件事：<strong>串行</strong>（一次只放行一条，含标题这类辅助调用）+ <strong>两次调用之间至少间隔 3 秒</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>间隔区间（min~max）</th>
+<th><code>allowConcurrent</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>推荐（默认）</strong></td>
+<td><code>2000~4000</code></td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td>追速度、只跑短任务</td>
+<td><code>1500~2500</code></td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td>已被限流过 / 高密度自动化（多步骤工具调用）</td>
+<td><code>5000~9000</code></td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td>完全关闭节流（<strong>不建议</strong>，会恢复并发重叠）</td>
+<td><code>0~0</code></td>
+<td><code>false</code></td>
+</tr>
+<tr>
+<td>实验：还原 DSH 原生并发</td>
+<td>任意</td>
+<td><code>true</code> ⚠️</td>
+</tr>
+</tbody></table>
+<p><strong>为什么是区间而不是固定值</strong>：固定间隔的方差≈0，统计上就是明显的「定时器特征」；
+同一场景的开源项目 cuckoo-code（从未被风控）用的正是 <code>2000~4000ms</code> 随机区间。</p>
+<h3>会话清理（为什么默认不是「立刻删」）</h3>
+<p>一次模型调用要发 4 个请求：建会话 → 取 PoW → completion → 删会话。其中
+「<strong>每轮新建一个临时会话、用完立刻删掉</strong>」是最强的机器行为特征之一 —— 真人绝不会每 30 秒建删一次对话。</p>
+<p><strong>为什么不能干脆复用会话</strong>：DSH 每次把<strong>全量历史</strong>交给适配器，而网页端会话是<strong>有状态</strong>的，
+复用会让服务端同时看到「会话自身的历史」和「我们重发的全量 prompt」两份上下文，很快撑爆窗口。
+所以只能优化<strong>删除侧</strong>：<code>deferred</code>（默认）攒够 <code>6~10</code> 个（每轮随机）或最多等 <code>60~120</code> 秒
+（每轮随机）后集中清理，并且<strong>优先用一个请求批量删</strong>（服务端支持的话 N 个会话只花 1 个请求；
+不支持则自动回退为逐个删，此后不再尝试）。想要彻底不留记录就选 <code>keep</code>（请求最少，但网页端会留下临时会话）。</p>
+<p><strong>为什么这三个参数也是"区间 + 随机"</strong>：它们原来全是<strong>死值</strong> —— 正好攒到第 8 个动手、正好等 90 秒、
+逐个删除时请求连发。固定值的方差≈0，本身就是统计上最明显的机器特征（真人不会这么精确）。
+所以三个参数各给一对上下限，实际取值在区间内随机抽：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>谁在重抽</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>cleanupBatch</code>（攒够几个）</td>
+<td><strong>每轮清理</strong>重抽一次</td>
+</tr>
+<tr>
+<td><code>cleanupDelayMs</code>（最长等多久）</td>
+<td><strong>每轮清理</strong>重抽一次</td>
+</tr>
+<tr>
+<td><code>cleanupGapMs</code>（删除间隔）</td>
+<td><strong>每删一个</strong>重抽一次</td>
+</tr>
+</tbody></table>
+<p><strong>「删除间隔」是为"别一下子连发几十个删除请求"</strong>：批量删是首选（1 个请求搞定），
+但服务端一旦不接受批量删就会退化为逐个删 —— 那时如果连发，几十个删除请求会瞬间打过去，
+这比"攒批"本身更像脚本。所以相邻两个删除请求之间会按 <code>cleanupGapMs</code> 停一下；
+上限设成 0 就等于"不等待"（回到老行为）。</p>
+<p>批量删与逐个删都<strong>串行化</strong>了：上一轮没删完时，下一次 flush 只会排在后面，不会插进来并发发请求。</p>
+<blockquote>
+<p>间隔按「上一次调用<strong>结束</strong>」起算，所以长回答（几十秒）之后不会额外白等 —— 它只在
+「结束 → 下一个开始」这段真正密集的空隙里起作用。
+<strong>两种改法</strong>：① 设置页的「防风控」页里直接调 —— 并发开关 + 间隔滑块 + 三个快捷档位 +
+会话清理模式与三个清理区间滑块，改完<strong>即时生效</strong>并自动落盘；② 写在插件 entry config 里（改完需重启 DSH）。
+优先级：<strong>设置页保存的值 &gt; entry config &gt; 内置默认</strong>（设置页是显式操作，不会被配置文件里的旧值盖回去），
+落盘位置 <code>${DSH_HOME:-~/.dsh}/web-login/gate.json</code>。「登录状态」卡里也会显示当前生效值。</p>
+</blockquote>
+<h3>传输层（指纹）：默认走 Chromium 网络栈</h3>
+<p>网页端请求的网络栈决定了「在服务端眼里你是浏览器还是一个脚本」。实测三方对比（同机同日）：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>JA4</th>
+<th>cipher 列表哈希</th>
+<th>ALPN</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node fetch(undici)</td>
+<td><code>t13d5212h1_…</code></td>
+<td>—</td>
+<td><strong>h1</strong></td>
+</tr>
+<tr>
+<td>Chrome（本机 152）</td>
+<td><code>t13d1517h2_8daaf6152771_cb7bf5808d99</code></td>
+<td><code>8daaf6152771</code></td>
+<td>h2</td>
+</tr>
+<tr>
+<td><strong>默认：net.fetch（Electron 43）</strong></td>
+<td><code>t13d1516h2_8daaf6152771_806a8c22fdea</code></td>
+<td><strong><code>8daaf6152771</code></strong></td>
+<td>h2</td>
+</tr>
+</tbody></table>
+<p>Node 的请求在 <strong>TLS 层</strong>就能被判定为非浏览器（不走 HTTP/2、cipher 数量差 3 倍多、不带 GREASE），
+而且这几项<strong>调参修不了</strong>。改用 Electron 的 <code>net.fetch</code> 后走 Chromium 内置网络栈，
+cipher 列表哈希与 Chrome 逐字节一致 —— 且<strong>零新依赖</strong>（不用 uTLS / curl-impersonate）。
+唯一残留差异是扩展数 16 vs 17（内置 Chromium 150 vs 本机 Chrome 152，版本差异，属正常）。</p>
+<p>设置页「传输层（指纹）」卡可以直接切换，并带一个<strong>零额度的一键测试</strong>
+（回显指纹 / 流式 / 鉴权三项结论）。</p>
+<p>⚠️ <strong>切到 Chromium 后请求会跟随系统代理</strong>（Node 则完全无视代理）。
+如果梯子关闭时系统代理仍指向 <code>127.0.0.1:7897</code>，请求会失败 —— 这时切回 <code>node</code> 即可。</p>
+<h3>账号库：多账号并存与一键切换</h3>
+<p><strong>凭证失效时不用自己找路</strong>：探活失败的账号会直接标成「<strong>需要重新登录</strong>」，那一行上就有
+「重新登录这个账号」按钮。它与「登录新账号」的区别只有一点 —— <strong>不清浏览器登录态</strong>：
+「登录新账号」必须先清干净（否则新窗口还是旧账号，抓回来还是它），而修同一个号正相反，
+留着才可能一打开就复用上，一个密码都不用敲。修完<strong>原地更新</strong>那条记录，不改变当前正在用的账号。</p>
+<p><strong>已经判定失效的账号，请求不会再发出去。</strong> 探活失败时会往账号记录里写下原因，0.1.80 起
+<strong>发起请求前会先看一眼</strong>：如果那份失败是<strong>授权类</strong>的（<code>Authorization Failed</code> / <code>invalid token</code> /
+<code>HTTP 401·403</code> / 中文「登录态已失效」），就直接返回一句「这个账号的登录态已失效（…），本次请求
+没有发出」，不再白跑一整轮。
+在此之前探活的判定只用于<strong>展示</strong>（红标 + 日志）—— 22:42 就判死的 token，22:50 还能被拿去
+逐个重试 14 张图的上传。现在这两条路用的是同一个判据。
+⚠️ <strong>断网、超时、5xx、429 不拦</strong> —— 那些情况下凭证是好的，拦下来会把健康账号锁住。
+所以如果你确定某个被拦的账号其实还能用，点一次「校验全部」（只读探活、零额度）就能把它解锁。</p>
+<p><strong>cookie 的过期构成会记下来</strong>：捕获时顺手存下每个 cookie 是会话级还是持久级、最晚什么时候到期，
+界面上写成 <code>5 项 · 1 会话级 · 4 持久级 · smidV2 还剩 399 天</code>。
+⚠️ 它<strong>不是登录态寿命</strong> —— 实测真正鉴权用的是 <code>token</code>（只发 token 不带 cookie 能通过，
+只发 cookie 不带 token 直接被拒 <code>40002 Missing Token</code>），所以这只是<strong>浏览器侧的上界</strong>。
+老记录 / 手动粘 token 的账号没有这份信息，界面会写「未记录（重新登录后会补上）」。</p>
+<p>保存过的账号都在本机 <code>~/.dsh/web-login/accounts/</code>，设置页「账号」标签里可以一键切换、
+改<strong>备注</strong>、移除、导出/导入备份（都弹<strong>系统对话框</strong>，自己选位置和文件）。以前换号的代价是「退出 → 清浏览器分区 → 重新登录 → 等捕获」，
+现在切换即时生效（<strong>下一次请求</strong>就用新账号）。</p>
+<p><strong>账号多了可以分组</strong>：工具条上有「新建分组」，每行一个下拉把账号归到某个组，组标题可点开/收起
+（折叠状态只记在本地）。列表按组分区显示，<strong>当前账号所在的组自动置顶</strong> —— 正在用的号不会沉下去；
+组内仍是捕获时间倒序。「未分组」是兜底区，不给改名/删除。</p>
+<p><strong>删组不会删账号</strong>：组定义存在 <code>~/.dsh/web-login/groups.json</code>，账号记录里只有一个指针；
+组没了，那些账号就落回「未分组」，一个都不会从列表里消失。<strong>分组只影响显示</strong> ——
+切号、会话复用、清理策略都不看它。</p>
+<p><strong>「校验全部」</strong> 会对库里每个账号跑一次只读探活（<code>users/current</code>，<strong>零额度</strong>，串行执行），
+用来刷新登录态、补上账号名、清掉已经恢复的失败标记。它和「刷新状态」（刷当前账号那张卡）不是一回事。</p>
+<p><strong>换账号不会丢对话、也不会让模型失忆</strong> —— 这是个常见的担心，但在这套架构下不成立：
+对话记录存在 DSH 本地、每一轮请求都把<strong>整段历史完整重发</strong>、网页端不留任何会话。
+账号只是"通行证 + 额度归属"，换它不影响对话内容。（真正会"失忆"的是在 DSH 里开一个新会话。）</p>
+<blockquote>
+<p>⚠️ <strong>关于「自动换号」（默认关闭，滑块在「设置 → DeepSeek 网页登录 → 防风控」）</strong>：
+它会按你设的间隔（分钟，0 = 关闭）换到下一个可用账号，<strong>0.6.8 起还有一条"失效即换"</strong>：
+某个账号的凭证被服务端判为失效（<code>AUTH</code> / <code>40003</code>）时，只要库里还有别的可用账号，
+就会自动换过去并把这一轮接着跑完 —— 不需要你再手动点「切换」。</p>
+<p>但请想清楚再打开它：真人不会在几分钟内换一个账号接着发消息 —— 那是极强的机器行为特征，
+与本文档里传输层指纹、随机间隔、会话清理这些"降低机器可识别性"的努力直接冲突。
+另外同一服务商会把多账号关联起来（同设备 / 同 IP / 同指纹 / 相近行为），
+一旦被判定为"同一人的多开小号"，处置通常比单账号超频更重。
+<strong>账号库的目标是"在自己的多个正常账号之间切换更省事"，不是"靠轮换把限流绕过去"</strong> ——
+所以它默认是关的，间隔也别给太短（半小时起步比较稳）。</p>
+<p>⚠️ 这个设置存在 <code>~/.dsh/web-login/gate.json</code>。<strong>换到新环境/重装 DSH 时它不会跟着迁过去</strong>
+（账号库也不会 —— 用「导出备份 / 导入备份」搬），重启后会回到"关闭"，
+表现为"以前会自己换号，现在不换了"。</p>
+<p>导出的备份文件里是可完整登录的凭证，等同于账号本身 —— 别分享、别提交到仓库。</p>
+</blockquote>
+<p><strong>「登录新账号」和「退出」的区别</strong>（很容易搞混，但后果完全不同）：</p>
+<ul>
+<li><strong>登录新账号（添加）</strong> —— 只清掉浏览器里的登录态，然后把新账号<strong>加入账号库但不切换</strong>。
+你正在用的号不受影响；加完在列表里点「切换」才会用它。（多账号并存靠它。）</li>
+<li><strong>退出</strong> —— 等于把该账号<strong>从账号库移除</strong>：本地凭证与浏览器登录态一起清掉，不是"只登出"。
+想留住它就先「导出备份」。</li>
+</ul>
+<p>另外「<strong>账号</strong>」页分成两个子页（<strong>登录状态</strong> / <strong>账号库</strong>），一次只看一半，不用滚很久。</p>
+<blockquote>
+<p>ℹ️ <strong>账号显示名用的是"网页端返回的屏蔽值"</strong>：接口只给 <code>192******27</code>、
+<code>lidi*********+mn1@gmail.com</code> 这种形式，<strong>原始邮箱/手机号插件拿不到</strong>，
+所以做不到"显示全"。0.1.69 起不再对这个值做<strong>二次屏蔽</strong> —— 之前两个 Gmail 账号
+都会被显示成 <code>lid***@gmail.com</code>，看上去像同一个号。</p>
+</blockquote>
+<p><strong>导出/导入怎么选文件</strong>：点「导出备份…」弹系统<strong>另存为</strong>，位置与文件名自己定；
+点「导入备份…」弹系统<strong>打开</strong>框选文件 —— 都不用再手打路径（导入也不再要求你先把路径抄出来）。
+两条路都有回退：万一当前环境拿不到系统对话框，导出会写进插件目录并在界面回显<strong>完整路径</strong>，
+导入会改为由界面读文件内容后交给宿主 —— 功能不会因此失效，只是路径由插件决定。
+导入优先走"只把<strong>文件路径</strong>告诉宿主、宿主自己去读"，所以凭证明文通常并不经过 HTTP。</p>
+<h3>调用台账：证明节流真的在起作用</h3>
+<p>「防风控」标签底部有一张台账卡，按天记录每次调用的结果（只留近 7 天、只记元信息，
+<strong>不含任何对话内容与凭证</strong>），看两个数：</p>
+<ul>
+<li><strong>相邻对话间隔</strong>（中位 / p90 / 最短）：固定间隔方差≈0 是"定时器特征"；<strong>最短间隔</strong>尤其说明问题
+—— 它直接对应"有没有连环请求"。间隔只统计 <code>purpose === 'chat'</code>，会话标题生成是 DSH 自己发的
+旁路请求，算进去会让分布失真。</li>
+<li><strong>失败分类</strong>：限流 / 账号被限制 / 登录态问题 / 网络，各占多少。只看"失败了"没用，
+要知道是哪一类才谈得上对策。</li>
+</ul>
+<h3>登录态探活与受限倒计时</h3>
+<ul>
+<li><strong>探活</strong>：启动后 20 秒 + 之后每 30 分钟（<code>probeIntervalMs</code>）用只读的 <code>users/current</code> 确认登录态
+还有效，目的是<strong>在任务跑到一半之前</strong>发现过期。零额度、可关、失败只提示不阻断。</li>
+<li><strong>受限倒计时</strong>：账号被临时限制时（<code>user is muted</code>），设置页显示「还剩 X 小时 Y 分」。
+注意这个状态<strong>只能从生成请求被拒里学到</strong> —— 受限期间只读接口依然返回 200，探活探不出来。</li>
+</ul>
+<h2>已知限制</h2>
+<ul>
+<li><strong>同账号同时只能开一个聊天窗口</strong>：网页端按账号限制并发生成，多开会触发服务端的<strong>临时封禁（1 天）</strong>——登录态没坏，但期间该账号所有请求都会被拒。要多窗口就换账号，或把多余的窗口换到别的 provider</li>
+<li><strong>原生 tools 不存在</strong>：工具调用靠提示词协议；模型偶发格式漂移已被解析器与指令双重兜住，但本质是模型行为，无法 100% 保证</li>
+<li><strong>工具目录有预算上限</strong>：DSH 下发的工具定义会尽量全部写进 prompt（0.1.33 前只有 2.4 万字符预算，实测 61 个工具时静默砍掉了 26 个）。工具特别多或描述特别长时仍可能装不下，此时会把<strong>没描述到的工具名列出来</strong>，让模型向用户确认参数，而不是默默砍掉</li>
+<li><strong>单次请求 60s 上限</strong>（<code>completion_request_timeout_ms</code>）：网页端靠 <code>sse_auto_resume</code> 续接，<strong>本插件不实现续接</strong>；流在没有 <code>FINISHED</code> 标记的情况下结束时报 <code>max-tokens</code>，而不是假装正常完成</li>
+<li><strong>思考模式的推理过程不进上下文</strong>：历史序列化只回放正文与工具调用/结果，以省 token</li>
+<li><strong>图片</strong>：走上传通道（<code>/api/v0/file/upload_file</code> → <code>ref_file_ids</code>）。上传失败时降级为 <code>[image attached]</code> 文本标记，<strong>并在回答开头明确告知</strong>「有 N 张图片没能传给模型（原因）」 —— 图丢了不会再无声无息（0.1.66 前只写日志，界面上看不出来）。同一张图在历史里出现多次（用户消息 + <code>read_image</code> 工具结果内嵌）时 <code>ref_file_ids</code> <strong>自动去重</strong>：服务端不接受重复 id（<code>biz_code 9 / invalid ref file id</code>），被拒后整条会话后续每轮都会失败。<strong>上传时文件名必须带受支持的图片后缀</strong>（png / jpg / jpeg / webp / gif）：服务端是按<strong>文件名后缀</strong>判类型的，multipart 里的 <code>content-type</code> 说了不算 —— 而宿主给 <code>read_image</code> 这类工具结果的 <code>name</code> 是<strong>纯 sha256、没有后缀</strong>。0.1.68 起由 <code>imageUploadName()</code> 统一归一回 <code>image.&lt;ext&gt;</code>（0.1.67 及以前：凡是经工具返回的图，一律传不上去）。<strong>0.1.83 起链式投喂的后续轮不再重复引用历史图片</strong>：服务端按 <code>parentMessageId</code> 链回溯时，历史消息的附件本来就在它的上下文里（真机实测：两张不同布局的图、第二轮都不带 <code>ref_file_ids</code>，仍都答对四个角），所以旧行为「每轮把最近 24 张重挂一遍」纯属冗余 —— 那会让网页端每条新消息下都挂一批同样的图、会话内的图片引用越积越多。现在只有<strong>全量重发</strong>（新会话 / 换号 / 系统提示变了）或<strong>这一轮确实新贴了图</strong>时才发送引用</li>
+<li><strong>DSH 渲染层把单个 <code>$</code> 当行内公式（不是本插件的行为）</strong>：DSH 前端的 markdown 默认开 <code>singleDollarTextMath</code>，所以含 <code>$</code> 的文本会被渲染成公式 —— 现象是 <strong><code>$</code> 消失、<code>-</code> 变成 <code>−</code>(U+2212)、<code>|</code> 变成 <code>∣</code>(U+2223)，字母被逐个拆行而数字串（如 <code>256</code>）仍连在一起</strong>。PowerShell / bash 命令首当其冲，看起来极像「模型输出了乱码」。判据：<strong>原文能完整复原 ⇒ 不是模型退化</strong>（退化会丢信息，编码/渲染错只是把信息换了个样子）。规避：讨论命令时套围栏代码块或行内反引号 —— 代码构造里不跑数学扩展。</li>
+<li><code>temperature</code> / <code>stop</code> / <code>max_tokens</code> 网页端无对应字段，会被忽略；usage 为<strong>估算值</strong>（网页端不返回 token 计数）</li>
+<li>免费额度有频控；<code>429</code> 会带上 <code>providerRetryAfterMs</code> 交给 DSH 的重试策略</li>
+<li><code>describe_image</code> 是 DSH 侧另一个独立工具（调用外部视觉模型），与本插件无关；本插件的图片能力不依赖它</li>
+<li><strong>默认走 Chromium 网络栈</strong>（Electron 的 <code>net.fetch</code>），TLS/HTTP2 指纹与真实浏览器一致；
+但它会跟随<strong>系统代理</strong>，梯子关着而系统代理仍指向它时会连不上 —— 设置页「传输层（指纹）」切回 Node 即可</li>
+</ul>
+<h2>测试与验证</h2>
+<pre><code class="language-bash">node tests/logic-test.mjs            # 111 项断言（8 个测试文件）（序列化 / 工具过滤 JSON+XML / JSON 修复 / SSE / token 解包 / 掩码）
+node tests/probe-live.mjs            # 线上直连探针：原始 SSE 事件流 + 时长（--big=N 验证长 prompt）
+node tests/probe-xml-live.mjs        # 线上验证 XML 标记场景（指令劝阻 + 解析兜底）
+node tests/probe-vision.mjs          # 线上验证图片通道（自造左红右蓝 PNG → 上传 → 提问）
+node tests/probe-batch-live.mjs     # 线上复现事故 #4 的触发条件（深度思考 + 批量 3 条带 $env:/Windows 路径的命令）
+node tools/changelog-section.mjs    # 从 CHANGELOG 取某版本段落（发布流程复用）
+node tests/check-bundle.mjs          # 产物核对（关键修复是否都进了 lib）
+node tests/check-injector-guards.mjs # 复核注入器注入前校验的正则
+node tests/check-fetch-injection.mjs  # 传输层注入必须"每次现取"（防单测静默打到线上）
+node tests/check-net-diagnostics.mjs  # net.fetch 诊断通道（标记文件生命周期 + 流式探针正反向）
+node tests/check-transport.mjs       # 传输层选择（降级判定 + 注入层真的跟着变）
+node tests/check-context-feed.mjs    # 上下文投喂判据（增量/回退的五种情形）
+node tests/check-context-chain.mjs   # 链式投喂接线与生命周期（假 transport + 假 SSE）
+node tests/check-image-refs.mjs       # 图片引用组装（同一张图去重 + 图丢了要写进回答）
+node tests/check-image-ref-reject.mjs # 图片引用被拒（code 9）→ 识别 + 两级降级重试；授权失败则中止剩余上传
+node tests/check-image-chain-send.mjs # 链式投喂只发「服务端还没见过的」图（新贴的图不能丢）
+node tests/check-bugfix-0182.mjs      # 全库审查确认的缺陷（图片上限落盘 / 重登保元数据 / 重登意图等）
+node tests/check-stale-auth.mjs       # 已知授权失效的账号不许发请求（含行为侧：请求到底发没发）
+node tests/check-login-token.mjs       # 手动粘贴 token：包装 JSON 解出空 ⇒ fail-closed（不把 JSON 当 token）
+node tests/check-auth-recheck.mjs      # F1 探活带回限流状态 + F2 AUTH 先复核再标记（apply 级行为）       # 手动粘贴 token：包装 JSON 解出空 ⇒ fail-closed（不把 JSON 当 token）
+node tests/count-session-images.mjs # 某个会话里累积了多少「图片内容条目」（回答"我没发这么多图"的质疑）
+node tests/probe-upload-name.mjs      # 真机 A/B：文件名后缀如何影响上传（需要已登录凭证）
+node tests/check-account-sync.mjs    # 账号库自动同步（重读节拍 + 内容签名：变了才重建列表）
+node tests/check-account-groups.mjs   # 账号库分组（读盘容错 / 建改删重名 / 分区排序含当前组置顶）
+node tests/check-accounts-view.mjs    # /accounts 的 sections 必须是「可直接渲染的视图」（标题不能退化成 id）
+node tests/check-login-fresh.mjs      # 登录前按需清理登录态（清 profile + 清分区，幂等语义）
+node tests/check-unexecuted-program.mjs  # 判「模型把要执行的程序写进了正文」（正反两侧都钉）
+node tests/check-relogin-integrity.mjs   # 重登不能损坏记录（保住显示名 / 失效账号先清登录态）
+node tests/check-accounts.mjs        # 账号库（去重/切换/移除/导入导出/旧文件迁移）
+node tests/check-smoke.mjs           # 新模块能否被独立加载（循环依赖 / 版本号漂移）
+</code></pre>
+<p>CI（<code>.github/workflows/ci.yml</code>）在每次推送到 <code>main</code> 与每个 PR 上跑上面两条命令；
+打 <code>v*</code> tag 由 <code>.github/workflows/release.yml</code> 自动创建 Release 并附上 tgz（用仓库自带的 token，维护者无需持有个人令牌）。</p>
+<p>多条断言直接固化自<strong>真实事故现场</strong>：</p>
+<ul>
+<li>工具调用里含未转义 Windows 路径，曾导致解析失败、标记泄漏成正文 → 现在必须解析成功且<strong>路径逐字还原</strong></li>
+<li>SSE 去重模型错误，曾把完整回答丢成「，」「不上」「了一圈」这类 1~3 字碎片（并触发 EMPTY_RESPONSE 重试）
+→ 现在「缩水快照」与「分歧快照」都必须被忽略，回答<strong>一字不丢</strong>（见 CHANGELOG.md 0.1.1）</li>
+<li>跨包工具调用标记的 hold-back 判断失效，曾让<strong>合法 JSON</strong> 泄漏成正文（分块把 <code>{"tool</code> 与 <code>_calls":…</code> 切开时）
+→ 现在用<strong>真实会话日志的分块序列</strong>回归（见 <code>CHANGELOG.md</code> 0.1.2）</li>
+<li>模型漏写调用对象的闭合括号（批量调用时每个少一个 <code>}</code>），曾让整段调用 JSON 泄漏成正文
+→ 现在结构性补括号（<strong>仅当数组已闭合</strong>，被截断的流绝不补）+ 解析失败不再吐成正文（见 <code>CHANGELOG.md</code> 0.1.3）</li>
+<li>会话被自己提前删除（建会话后立刻排定 1.5s 后删除 → PoW+建连超时就删掉了正在用的会话）
+→ 现在删除只发生在流结束之后；会话失效还会换新会话透明重试（见 <code>CHANGELOG.md</code> 0.1.4）</li>
+<li><code>envelopeError</code> 只看外层 <code>code</code>，把 <code>data.biz_code</code> 里的真实错误吞掉（<code>invalid chat session id</code> / <code>user is muted</code> 都被降级成看不懂的「非流式响应」）
+→ 现在识别 <code>biz_code</code>，并区分「可恢复」「需等待」「重试没用」三类（见 <code>CHANGELOG.md</code> 0.1.4）</li>
+</ul>
+<h2>故障排查</h2>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>处理</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>面板「未登录」但登录窗口里已登录</td>
+<td>点「从已登录窗口恢复」；或看 <code>loginProgress.lastError</code></td>
+</tr>
+<tr>
+<td><code>AUTH</code> / <code>40003 Authorization Failed</code></td>
+<td>这个账号的凭证被服务端判失效了。<strong>0.6.8 起</strong>：自动换号开着、且库里还有别的可用账号时，会<strong>自动换过去把这一轮接着跑完</strong>（不再需要你手动切号；日志里会写「将自动换到另一个可用账号重试」）。否则请重新登录这个号，或点它那一行的「切换」换一个能用的号</td>
+</tr>
+<tr>
+<td>以前会自己换号，现在<strong>不换了</strong>（尤其是刚换过 DSH 环境 / 重装过之后）</td>
+<td>自动换号的设置存在 <code>~/.dsh/web-login/gate.json</code>，<strong>换环境不会跟着迁过去</strong> ⇒ 静默回到默认的「关闭」，表现为"以前会自己换号，现在不换了"。去「设置 → DeepSeek 网页登录 → 防风控」把「自动换号」重新拉起来即可（拉动一次就会写回该文件）</td>
+</tr>
+<tr>
+<td><code>MISSING_CREDENTIAL</code></td>
+<td>凭证文件不存在（<code>~/.dsh/web-login/</code>）</td>
+</tr>
+<tr>
+<td><code>EMPTY_RESPONSE</code></td>
+<td>可能触发频控或长上下文截断，属于默认可重试码</td>
+</tr>
+<tr>
+<td><code>RATE_LIMIT</code></td>
+<td>免费额度频控，稍后重试</td>
+</tr>
+<tr>
+<td>报错里带「临时限制」/ <code>user is muted</code></td>
+<td><strong>账号被网页端临时限制</strong>（不是插件问题）：登录态有效、建会话也正常，只有发消息被拒。消息里会给出解除时间；等解除或改用其它账号/官方 API key</td>
+</tr>
+<tr>
+<td>「浏览器窗口登录」点了没反应，host 日志有 <code>fromPartition</code> 报错</td>
+<td>DSH 把插件宿主挪到了 <strong>utility 进程</strong>（没有窗口 API）→ 0.1.7 起改用<strong>真实 Edge/Chrome + CDP</strong> 登录：面板会显示「宿主进程」，按钮变成「用 Microsoft Edge 登录」。升级插件 + 重启 DSH 即可</td>
+</tr>
+<tr>
+<td>面板显示「Cookie / 指纹头 未捕获」</td>
+<td>说明你走的是<strong>手动粘贴 token</strong> 那条路（该路径本来就没有这两项）。实测仅凭 Bearer token 即可完成校验、PoW 求解与真实生成；若日后频繁遇到 <code>AUTH</code> / <code>40003</code>，改用「浏览器登录」获取更完整的凭证（token + cookie + 指纹头）</td>
+</tr>
+<tr>
+<td>报错 <code>A message is being generated, please try again later.</code></td>
+<td><strong>这个报错本身不是封号</strong>：同一账号同时只能生成一条消息（另一个窗口/标签页正在生成），0.1.9 起自动重试。但别把多开当常态 —— 多窗口并发会触发服务端的<strong>临时封禁（1 天）</strong>，见<a href="#%E5%B7%B2%E7%9F%A5%E9%99%90%E5%88%B6" target="_blank" rel="noopener noreferrer">已知限制</a>；建议一个账号只保留一个窗口，多开请换账号或换 provider</td>
+</tr>
+<tr>
+<td>正文里出现 <code>&lt;ds_system&gt;…&lt;/ds_system&gt;</code> / <code>&lt;system&gt;…&lt;/system&gt;</code> / <code>&lt;ide_result_status&gt;…&lt;/ide_result_status&gt;</code></td>
+<td>模型在<strong>模仿</strong>系统消息格式（与转写回声同类）。这些标签 <strong>DSH 从来不产生</strong>（<code>app.asar</code>、已装插件、<code>~/.dsh</code> 原始字节搜索 0 处；会话日志里只出现在模型的输出字段），所以一律当垃圾剥离、不上屏。清单<strong>只收有现场证据的名字</strong>，不做通配 —— 否则会吃掉正常回答里讨论这些标签的段落</td>
+</tr>
+<tr>
+<td>回复在句中截断但没报错</td>
+<td>服务端在句中截断、却仍然发了 FINISHED（实测 12s 内即断，不是 60s 上限）。这类截断<strong>没有可靠信号</strong>，只能靠启发式判断尾部字符：以「，」「、」「；」「：」（中英文逗号/顿号/分号/冒号）收尾 = 明显未写完 → 自动续写；以「。」「！」「？」「）」「」」等句末标点收尾 = 认为正常结束（<code>…</code> 也按正常结束处理，因为省略号也可能是有意的收束语气）。判定为未完时会自动发起新请求接着写并拼进同一条回答，<strong>不再出现「可能被截断」提示</strong>。真被切断（没有 FINISHED）时走另一条判据，不受上面的尾部规则影响</td>
+</tr>
+<tr>
+<td>回复里出现 <code>{"tool_calls":…}</code> 或 <code>&lt;tool_calls&gt;</code> 标记</td>
+<td>模型格式漂移。解析器已两族兼容 + 修复兜底；若仍出现请把原文贴进 issue（解析不出时不再把 JSON 吐进正文：本轮无其他正文则自动重试，已有正文则给一句提示）</td>
+</tr>
+<tr>
+<td>报错 <code>DeepSeek 网页端错误（code 10）：too many ref file</code></td>
+<td>这一次请求要引用的图片太多了。图片是<strong>请求级</strong>的（一次请求用 <code>ref_file_ids</code> 带一批），网页端对这一批有数量上限（实测 40 张通过 / 52 张被拒）。<strong>0.1.77 起默认只带最近的 24 张</strong>，被略过的会在 prompt 里标成 <code>[earlier image omitted]</code> 并给一句说明，所以正常情况下不会再撞上。⚠️ 如果是在<strong>旧版本</strong>上撞到的：那几轮会连续失败，且<strong>该会话此后每一轮都失败</strong>（图还留在历史里，每轮重发都超标）—— 但<strong>升级到 0.1.77 之后同一个会话就能继续用</strong>：新请求只带最近的 24 张，历史里那些旧图不再被引用。在升级之前，唯一出路是新建会话。⚠️ 0.1.79 起改说「份图片内容」而不是「张图片」—— 那个数字是<strong>内容条目</strong>（含模型读图产生的局部片段），不是你自己贴的张数；0.1.81 起这句提示按<strong>阶梯</strong>上屏，只在「首次」与「被略过的份数翻倍（且至少再多 10 份）」时出现，不会每轮刷</td>
+</tr>
+<tr>
+<td>报 <code>code 9 / invalid ref file id</code>，而且此后<strong>每一轮</strong>都失败</td>
+<td>请求带的图片引用被服务端拒了。0.1.78 起会<strong>自动两级降级</strong>（先清掉那几张的缓存重传、再不带图重发），正常情况下你不会再看到这个错误；若仍出现，说明两级都用尽了，换个会话继续即可</td>
+</tr>
+<tr>
+<td>模型把要执行的程序写进正文、该轮什么也没做就结束了</td>
+<td>冷启动的新会话 + 第三方预设可能触发：有些预设会在系统提示里写「你在 Programmatic Tool Calling 模式，所有动作都要靠 <code>run_code</code> 写 TypeScript 程序完成」，模型于是把<strong>程序的代码</strong>当正文贴出来、而不作为工具调用发出 —— 这一轮零工具调用，agent loop 就判定回合结束。0.1.74 起会自动识别这种形态（围栏代码块内含 <code>tools.&lt;名字&gt;(…)</code>）并<strong>追加一轮纠正请求</strong>，只纠正一次；关掉 <code>autoContinue</code> 可一并关掉</td>
+</tr>
+<tr>
+<td>发消息一直失败，日志里一串「N 张图片没能传给模型（<code>Authorization Failed (invalid token)</code>）」</td>
+<td>这个账号的登录态<strong>早就失效了</strong>（探活已经写进账号记录），而旧版本在发请求前不看这块牌子 —— 于是白跑一整轮：每张图都要先求一次 POW、再发一次上传。<strong>0.1.80 起请求发出前就会拦下来</strong>，直接给你一句「这个账号的登录态已失效（…），本次请求没有发出」并指出两条出路。⚠️ 判定只认<strong>授权类</strong>失败，断网 / 超时 / 5xx / 429 一律放行 —— 一次网络抖动不会锁住健康账号。0.1.80 同时让<strong>授权失败时不再逐张重试剩下的图</strong>（同一 token 上传剩下的一定也会被拒），并在告知语里写清「剩余 N 张未再尝试」</td>
+</tr>
+<tr>
+<td>加完账号，账号库列表里没出现</td>
+<td>面板<strong>每 3 秒</strong>会自动重读一次账号库（登录流程进行中），捕获一落地就会自己出现 —— 不用关掉设置页再打开（0.1.67 前必须重开）。空闲时是 <strong>30 秒</strong>一次，用来让探活补上的账号名 / 限制状态 / 失败标记自己更新。列表内容没变时不会重建 DOM，所以不会打断你正在点的按钮</td>
+</tr>
+<tr>
+<td>回答看起来「说了一半就停了」（末尾有 <code>[deepseek-web] 本轮有一部分「历史回放格式」的内容被过滤…</code>）</td>
+<td>模型在正文里<strong>开始复读历史</strong>（<code>[Tool Result for …]</code> / <code>User:</code> / <code>Assistant:</code> 这类转写格式），守卫<strong>从命中行起砍到结尾</strong>，所以后半段被丢掉了。0.1.70 起：① <strong>只是在正文里引用一次</strong>工具结果不再触发（正常写作会保留 —— 之前会把整段回答一起吞掉）；② 真被砍掉时会追加那行告知，不再静默。<strong>局限</strong>：单独写在<strong>行首</strong>的引用与真回声在字节层面无法区分，仍会被砍 —— 但你会看到提示。想彻底避免：提问时说一句「不要贴工具返回原文」</td>
+</tr>
+<tr>
+<td>模型停住不动，只能手动敲「继续」</td>
+<td>两种成因，0.1.70 起都不再静默：① <strong>整轮只有思考</strong>（正文与工具调用都没有）—— 以前被当成「正常完成」直接结束回合，现在报可重试的 <code>EMPTY_RESPONSE</code>，DSH 会自动重发；② 回答<strong>被回声守卫砍掉后半段</strong> —— 会在末尾追加一行告知（见上一条）。若重发仍失败，你会看到明确的失败提示</td>
+</tr>
+<tr>
+<td>工具调用不触发</td>
+<td>换说法或换 <code>deepseek-reasoner</code>；也可用面板「发送测试」确认链路</td>
+</tr>
+</tbody></table>
+<h3>诊断工具：<code>tools/inspect-session.mjs</code></h3>
+<p>怀疑「回复不对」时，不用猜 —— 直接读 DSH 的会话日志，看<strong>每一轮的原始事实</strong>：
+用了哪个模型、内容块的真实长度与首尾、结束原因、以及流式分块的类型与字节数。</p>
+<pre><code class="language-bash">node tools/inspect-session.mjs                  # 列出会话（时间 / 大小 / 事件数 / 标题）
+node tools/inspect-session.mjs &lt;会话ID前缀&gt;      # 诊断该会话的每一轮
+node tools/inspect-session.mjs --search "关键词" # 按关键词找会话
+</code></pre>
+<p>它只读本机会话日志（不联网、不上传）。典型输出：</p>
+<pre><code class="language-text">[14:04:01] 模型: deepseek-web/deepseek-chat  ctx=1048576
+[14:04:01] 分块原文(文本): ["I'll check what plugins exist"," for this in the DSH ecosystem",
+                           ", and also look at the current"," GUI's capabilities.\n\n{\"tool",
+                           "_calls\":[{\"name\":\"find_dsh", ...]
+[14:04:03] 助手消息（1 块）: text(len=257) head="..." tail="...\"lang\":\"zh\"}}]}"
+</code></pre>
+<p>三条经验判据：</p>
+<ul>
+<li>文本长度 <strong>远小于</strong> 分块字节数 → 解析层丢字</li>
+<li>文本里出现 <code>{"tool_calls":…}</code> / <code>&lt;tool_calls&gt;</code> → 工具调用没被接住（格式漂移或 hold-back 失效）</li>
+<li>同一 step 出现 <strong>多次</strong> <code>usage</code> / <code>finish</code> → 触发了重试（通常是空响应）</li>
+</ul>
+<blockquote>
+<p><strong>报 bug 时请附这段输出</strong>（它不含凭证；如有敏感内容请先自行删减）。
+上面三个真实事故（工具调用 JSON 泄漏、回答丢成碎片、合法 JSON 泄漏）都是靠它定位的。</p>
+</blockquote>
+<h3>诊断：传输层（<code>net.fetch</code> / TLS 指纹）</h3>
+<p>网页端请求默认由 Node 的 <code>fetch</code>（undici）发出，指纹与真实浏览器<strong>结构性不同</strong>。
+想确认「换成 Chromium 网络栈」是否可行时，跑一次探测 —— <strong>默认零额度</strong>，不生成、不发消息：</p>
+<pre><code class="language-bash"># 宿主进程的 HTTP 端点只有 DSH 自己的页面打得通（外部 curl 会撞同源守卫），所以走文件这条路：
+echo '{"mode":"probe"}' &gt; "$HOME/.dsh/web-login/probe-request.json"
+# 重启 DSH，日志里会打出  deepseek-web: [net-fetch 探测] {...}
+</code></pre>
+<p>三步各看一个结论：</p>
+<table>
+<thead>
+<tr>
+<th>步骤</th>
+<th>看什么</th>
+<th>判定</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>① 指纹</td>
+<td><code>ja4</code> / <code>http_version</code> / <code>http2_hash</code></td>
+<td>变成 <code>t13d…h2…</code> 且带 GREASE ＝ 与 Chrome 一致</td>
+</tr>
+<tr>
+<td>② 流式</td>
+<td><code>hasBody</code> / <code>chunks</code> / <code>abortedEarly</code></td>
+<td>三项都为真才能读 SSE（否则改造路线不成立）</td>
+</tr>
+<tr>
+<td>③ 鉴权</td>
+<td><code>status</code> / <code>body</code></td>
+<td>200 且能读出账号 ＝ header/cookie 原样透传</td>
+</tr>
+</tbody></table>
+<p>（设置页「传输层（指纹）」卡里也有<strong>一键测试</strong>，走的就是这个接口。）</p>
+<p>想连 DeepSeek 的 SSE 一起端到端验证（<strong>会消耗一点额度</strong>）：把 <code>probe</code> 换成 <code>stream</code>。
+文件被读取后会改名为 <code>probe-request.json.done-&lt;时间戳&gt;</code>，不会每次启动都重跑。</p>
+<h2>开发</h2>
+<pre><code class="language-bash">npm ci                                 # 安装开发依赖（首次 / 换版本后）
+node scripts/build.mjs                 # 构建 host(lib/index.js) + client(lib/client.js)
+node scripts/test-offline.mjs          # 全量离线用例
+node tests/check-bundle.mjs            # 产物核对
+node scripts/make-dev-copy.mjs &lt;后缀&gt;   # 生成开发副本（见下）
+</code></pre>
+<p>构建走<strong>本地已安装的</strong> tsdown（不再 npx 联网下载、不再要求 Bash，Windows 直接可用）；
+缺依赖时会明确报错并提示执行 <code>npm ci</code>。</p>
+<p><strong>迭代注意（实测坑）</strong>：当前 DSH 版本移除了热重载所依赖的 loader API，而 Node ESM 模块缓存以
+「解析后的文件路径」为键 —— 同一路径重新注入仍会命中旧模块实例。改代码后需<strong>换包名/换路径</strong>注入：
+<code>node scripts/make-dev-copy.mjs a1</code> 生成副本，配合 <code>DSW_PLUGIN_ID</code> 同步改 client 模块 id。</p>
+<p><strong>装配要点</strong>：包内 <code>cordis.patch.yml</code> 会自注册 entry，<strong>不要再手动 insert</strong>（会撞 <code>duplicate loader entry id</code>）；
+DSH Desktop 用的是 <code>desktop</code> profile，而注入器的 junction 默认建在 <code>profiles/web/</code>，必要时手动补 junction。</p>
+<h2>文档索引</h2>
+<table>
+<thead>
+<tr>
+<th>文档</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/README.en.md" target="_blank" rel="noopener noreferrer">README.en.md</a></td>
+<td>English README</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a> · <a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/NOTICE" target="_blank" rel="noopener noreferrer">NOTICE</a></td>
+<td>Apache-2.0 全文 · 版权与第三方声明</td>
+</tr>
+<tr>
+<td><a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/docs/assets" target="_blank" rel="noopener noreferrer">docs/assets/</a></td>
+<td>本文所有示意图（SVG 源文件，可自行改）</td>
+</tr>
+<tr>
+<td><code>src/protocol.ts</code></td>
+<td>工具协议与流式过滤器（含每条修复策略的注释与实测案例）</td>
+</tr>
+<tr>
+<td><code>src/webapi.ts</code></td>
+<td>PoW / 会话 / SSE / 文件上传（含协议字段与端点注释）</td>
+</tr>
+<tr>
+<td><code>src/login.ts</code></td>
+<td>Electron 登录窗口与凭证捕获（含 AppKit token 解包等踩坑注释）</td>
+</tr>
+</tbody></table>
+<h2>贡献</h2>
+<p>欢迎 Issue / PR。提交前请先跑一遍上面的测试命令。<strong>请注意</strong>：</p>
+<ul>
+<li>不要在 issue、日志或截图里附带 <strong>token / cookie</strong> 等凭证</li>
+<li>报告工具调用格式问题时，请贴<strong>模型原始输出</strong>（含标点与反斜杠），那是最有价值的线索</li>
+</ul>
+<h2>致谢（协议情报来源）</h2>
+<p>本插件实现为<strong>原创代码</strong>，但网页端私有接口的行为（PoW 与 WASM 求解约定、SSE patch 流结构、
+文件上传与 <code>ref_file_ids</code>、DSML/XML 工具标记变体）参考了以下公开项目的文档与实现，并逐项实测验证。
+<strong>这些项目的源码未包含在本仓库中</strong>：</p>
+<ul>
+<li><a href="https://github.com/LLM-Red-Team/deepseek-free-api" target="_blank" rel="noopener noreferrer">LLM-Red-Team/deepseek-free-api</a> —— 最早的网页端逆向 API 实现</li>
+<li><a href="https://github.com/Fly143/deepseek-free-api" target="_blank" rel="noopener noreferrer">Fly143/deepseek-free-api</a> —— PoW 求解器、DSML 工具标记、SSE 格式注释</li>
+<li><a href="https://github.com/ForgetMeAI/FreeDeepseekAPI" target="_blank" rel="noopener noreferrer">ForgetMeAI/FreeDeepseekAPI</a> —— 浏览器登录捕获、PoW WASM 调用约定</li>
+</ul>
+<p>同时感谢 DeepSeek Harness 生态与 <a href="https://github.com/yjh051108/dsh-super-injector" target="_blank" rel="noopener noreferrer">dsh-super-injector</a>（运行时注入 / 侧挂开发链路）。</p>
+<h2>关于「装了这个插件之后封号了」</h2>
+<p>这个归因在群里出现过几次。先把<strong>上下文的各部分量级</strong>摆出来，再判断该怪谁。</p>
+<p><strong>本插件这一侧到底占多少</strong></p>
+<table>
+<thead>
+<tr>
+<th>来源</th>
+<th>量级</th>
+<th>由谁决定</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>工具协议指令（本插件自己写的文本）</td>
+<td><strong>3,045 字符 ≈ 950 token</strong></td>
+<td>本插件，多个版本未变</td>
+</tr>
+<tr>
+<td>工具目录（本插件负责渲染，内容来自 DSH 下发的工具）</td>
+<td>0.6.2 起长尾工具压成一行，同口径实测 <strong>-50%</strong></td>
+<td><strong>你装了多少工具插件</strong></td>
+</tr>
+<tr>
+<td>以上 + system 头合计（61 个工具的环境）</td>
+<td>约 6.4 万字符 ≈ 1.6 万 token</td>
+<td>大头是工具目录，不是协议</td>
+</tr>
+</tbody></table>
+<p><strong>能记在本插件账上的，只有那 3,000 字符。</strong></p>
+<p><strong>真正把上下文撑大的，通常是别的东西</strong></p>
+<ul>
+<li><strong>MCP 服务器</strong>：每接一个，它的工具 schema 就整份进上下文，而且是<strong>每一轮</strong>都在</li>
+<li><strong>Skills</strong>：装得越多，system prompt 越厚</li>
+<li><strong>越狱 / 破甲类提示词</strong>：这类文本动辄上万 token，且会一直留在上下文里</li>
+<li><strong>全局注入文件</strong>：<code>~/.dsh/prompt-inject.md</code>（本机实测 41 KB）+ <code>~/.dsh/AGENTS.md</code>（7 KB）
+—— 这两个文件是<strong>每轮整份</strong>进 system prompt 的，合计约 49 KB ≈ 1.2 万 token，
+是本插件协议文本的 <strong>16 倍</strong></li>
+</ul>
+<p>上下文越大 ⇒ 每轮请求越重 ⇒ 越容易撞上风控的体量与密度判定。<strong>这部分与本插件无关，本插件也管不到。</strong></p>
+<p><strong>维护者本机实测（供参考，不是担保）</strong></p>
+<p>连续 5 天日常使用（含工具调用密集的会话）<strong>未被封禁</strong>；单日台账 178 次请求里有 6 次「网页版限流」，
+全部在退避后自动恢复。区别很重要：<strong>限流是常态、可自动恢复；封禁是另一回事。</strong></p>
+<p><strong>怀疑自己中招，按这个顺序自查</strong></p>
+<ol>
+<li>数一下装了哪些 MCP 服务器、哪些 skill —— <code>~/.dsh/profiles/desktop/cordis.patch.yml</code> 里逐行可见</li>
+<li><code>wc -c ~/.dsh/prompt-inject.md ~/.dsh/AGENTS.md</code> —— 看这两个文件的体积</li>
+<li>打开设置页的「Token 统计」，看单轮输入量级（本机中位数在 10 万 token 上下，工具目录只占其中一小块）</li>
+<li>把用不到的 MCP / 插件行禁用掉（<code>- id: xxx</code> + <code>disabled: true</code>，重启生效），再观察</li>
+</ol>
+<p>本插件能做的（压密度、串行工具调用、会话清理、长尾工具瘦身）都写在上面「请求节流」等章节里；
+<strong>剩下的大头，只能从你自己的上下文里省。</strong></p>
+<h2>免责声明</h2>
+<blockquote>
+<p>⚠️ <strong>非官方项目</strong>：与 DeepSeek 无任何关联，未获其授权、认可或赞助。"DeepSeek" 为其权利人商标。</p>
+<p>⚠️ <strong>使用风险自负</strong>：本插件调用 chat.deepseek.com 的<strong>网页端私有接口</strong>（非官方 API），
+可能违反其服务条款，并可能导致账号被限流或封禁。请自行评估、遵守其条款，仅供学习研究与个人使用。</p>
+<p>⚠️ <strong>凭证安全</strong>：本仓库不含任何凭证；登录态由你在本机登录后捕获，存放于 <code>~/.dsh/web-login/</code>。</p>
+<p>⚠️ <strong>按现状提供</strong>：接口随时可能变更导致失效，作者不提供任何担保（见 Apache-2.0 §7）。</p>
+</blockquote>
+<h2>许可证</h2>
+<p><a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a> —— 含专利授权与专利报复条款；<strong>不授予</strong>商标权（§6）。版权与第三方说明见 <a href="https://github.com/cv-superding/dsh-deepseek-web-login/blob/HEAD/NOTICE" target="_blank" rel="noopener noreferrer">NOTICE</a>。</p>
+<h2>交流群</h2>
+<p>用法讨论、蹲更新，或者踩到坑想吐槽，欢迎加 QQ 群：</p>
+<p>
+  <img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/qq-group.jpg" alt="QQ 群二维码" width="300" />
+  <br />
+  <sub>QQ 群号：<strong>1124773537</strong></sub>
+</p>
+<sub>unofficial plugin · not affiliated with DeepSeek · use at your own risk</sub>
+

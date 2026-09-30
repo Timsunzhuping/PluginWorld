@@ -106,7 +106,7 @@
 <li><strong>一次授权只兑换一次</strong>：浏览器回调与手动粘贴可能同时到达，用 compare-and-set 保证只有一方发起兑换（另一方得到「正在处理中」，已结算的流程得到 410 且<strong>不做任何兑换</strong>）。错误的 <code>state</code> <strong>只拒绝那一个请求</strong>，不会终止正在进行的合法登录。回调服务器只绑 loopback、只应答 <code>/callback</code>、只接受本机来源；</li>
 <li><strong>刷新是单飞的</strong>：并发请求共享同一次刷新。否则到期瞬间的一批请求会各自轮换刷新令牌，除第一个之外全部作废（上游会给出终局判定）。刷新令牌轮换后<strong>先读回校验再落盘</strong>；</li>
 <li><strong>模型能力逐模型查表</strong>（<code>src/host/claude/model-catalog.ts</code>），<strong>不从模型名推断</strong>。该表转录自本机随 harness 安装的参照目录，<strong>只证明抄录忠实，不证明服务端提供这些模型</strong>——服务端自己的 <code>GET /v1/models</code> 才是权威，且它<strong>只覆盖上下文窗口</strong>，能力字段不被改写；</li>
-<li><strong>思考形态有四类，顺序决定成败</strong>（<code>thinkingMode</code>）：<code>mid-convo</code> → <code>{type:'adaptive', block_binding:{prefix_mismatch_behavior:'drop_block'}}</code> 外加 <code>output_config.effort</code>；<code>adaptive</code> → <code>{type:'adaptive'}</code>；<code>budget</code> → <code>{type:'enabled', budget_tokens}</code>（预算算术按参照实现转录，思考预算计入 <code>max_tokens</code>，<strong>必须为回答留出至少 1024 token</strong>）；<code>none</code> → 不发思考字段。<strong><code>mid-convo</code> 排在最前且无条件</strong>——<code>claude-fable-5-1</code> 与 <code>claude-opus-5</code> 同时带 <code>forceAdaptiveThinking</code>，把它们当成普通 <code>adaptive</code> 会<strong>静默丢掉 <code>block_binding</code> 与 <code>output_config</code></strong>，而参照实现自己的注释写明该缺失会导致<strong>持续 400</strong>；</li>
+<li><strong>思考形态有四类，顺序决定成败</strong>（<code>thinkingMode</code>）：<code>mid-convo</code> → <code>{type:'adaptive', block_binding:{prefix_mismatch_behavior:'drop_block'}}</code> 外加 <code>output_config.effort</code>；<code>adaptive</code> → <code>{type:'adaptive'}</code>；<code>budget</code> → <code>{type:'enabled', budget_tokens}</code>（预算算术按参照实现转录，思考预算计入 <code>max_tokens</code>，<strong>必须为回答留出至少 1024 token</strong>）；<code>none</code> → 不发思考字段。<strong><code>mid-convo</code> 排在最前且无条件</strong>——<code>claude-fable-5-1</code> 与 <code>claude-opus-5</code> 同时带 <code>forceAdaptiveThinking</code>，把它们当成普通 <code>adaptive</code> 会<strong>静默丢掉 <code>block_binding</code> 与 <code>output_config</code></strong>，而参照实现自己的注释写明该缺失会导致<strong>持续 400</strong>。反过来，<strong><code>block_binding</code> 本身必须由 <code>anthropic-beta: thinking-binding-controls-2026-08-01</code> 授权</strong>（官方文档：缺该 beta 时返回 400 <code>block_binding: Extra inputs are not permitted</code>），因此请求头从<strong>已构建的请求体</strong>读出是否带 <code>block_binding</code>，带则追加该 beta；</li>
 <li><strong>思考块带签名则原样回放</strong>（这是思考模式下多轮工具调用的前提；<code>redacted_thinking</code> 同样回放），<strong>无签名则丢弃</strong>。工具名在出站时按 Claude Code 规范大小写归一化、入站时按大小写无关匹配回用户工具名；若两个工具归一化后碰撞，则<strong>放弃归一化</strong>原样发送，避免把结果投给错误的工具；</li>
 <li><strong>多账号号池，与其它线路同源</strong>：走共享内核 <code>AccountPoolCore</code> 并复用同一张设置卡片，具备顺序耗尽 / 轮询调度 / 粘性会话、429 冷却换号、账号级失效保留、设为主账号与备注。<strong>账号身份是两层</strong>：不可变的 <code>internalId</code> 是唯一路由键，<code>identityKeys</code>（uuid / email / 派生 seed）是<strong>只增不换</strong>的别名集，同一账号再次登录会<strong>合并</strong>而不是产生幽灵账号。<strong>唯一例外的诚实说明</strong>：当服务端既没返回 uuid 也没返回 email 时无法自动识别同一账号，卡片会把该账号标注出来并提供<strong>手动合并</strong>；</li>
 <li><strong>可选择性收编本机已有的 Claude Code 登录（默认关闭）</strong>：开启前只做一次「文件是否存在」的探测，<strong>不读取内容</strong>；只有你显式开启后才读取。收编得到的是一份<strong>快照</strong>，<strong>永不由本插件刷新</strong>——Claude Code 刷新的是同一枚轮换令牌，两个进程各自刷新会互相作废，而进程内的单飞解决不了跨进程竞态。快照过期后卡片会提示你<strong>回 Claude Code 重新登录后再收编</strong>，并且<strong>绝不会写入或删除 Claude Code 的任何文件</strong>；</li>
@@ -668,16 +668,20 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 <code>1M</code> / <code>512K</code> / <code>200000</code> 等写法）；<strong>默认思考深度</strong>只对声明了
 档位的模型生效。<strong>档位原样透传</strong>（<code>ReasoningEffortId</code> 在 harness 里是无约束 brand，本仓库多条线路都直接使用
 <code>xhigh</code>），不做任何收敛，以免把用户选的档位静默降级。</p>
-<p><strong>模型表</strong>共 15 条：14 条转录自本机随 harness 安装的参照目录，另加 1 条<strong>本地新增</strong>的 <strong>Claude Opus 5.5</strong>
-（<code>claude-opus-5-5</code>，官方 2026-09-22 发布，1M 上下文 / 128K 输出 / 支持图片，档位 <code>low</code>–<code>max</code>）。
+<p><strong>模型表</strong>共 16 条：14 条转录自本机随 harness 安装的参照目录，另加 2 条<strong>本地新增</strong>：<strong>Claude Opus 5.5</strong>
+（<code>claude-opus-5-5</code>，官方 2026-09-22 发布，1M 上下文 / 128K 输出 / 支持图片，档位 <code>low</code>–<code>max</code>），以及
+<strong>Claude Sonnet 5.5</strong>（<code>claude-sonnet-5-5</code>，官方 2026-09-28 发布，规格同上；不支持 temperature、思考不可关闭；
+官方默认档位为 <code>high</code>，且思考块与会话前缀绑定，因此走 <code>mid-convo</code> 分支并带 <code>block_binding</code>）。以下说明针对 Opus 5.5。
 它有一条<strong>与其它模型不同的硬约束</strong>：<strong>思考永远开启、不能关闭</strong>——官方文档明确 <code>thinking:{type:"disabled"}</code>
 与 <code>{type:"enabled",budget_tokens:N}</code> <strong>都会返回 400</strong>，因此能力表把它标为不可关闭思考，档位表是控制思考深度的
 唯一手段。它的<strong>默认档位是 <code>medium</code></strong>（其余带 effort 的模型默认 <code>high</code>），这一点被刻意保留：本仓库有两类模型走
 「强制 effort」分支，若把 Opus 5.5 一并归入，就会<strong>静默把每次请求抬高一档、花更多钱</strong>，因此它走的是普通 adaptive
-分支。</p>
+分支。但它（与 Fable 5.1、Sonnet 5.5 一样）是官方文档列明的<strong>思考块前缀校验模型</strong>：2026-08-31 之后创建的账号，一旦
+前缀变化（压缩、工具列表变化、图片卸载）回放思考块就会<strong>每次都 400</strong>，因此能力表用 <code>bindsThinkingToPrefix</code> 标记它，
+adaptive 分支对这类模型额外发送 <code>block_binding: drop_block</code>（<strong>不</strong>强制 effort）。</p>
 <p>它还有一条<strong>版本门槛</strong>：上游要求申报的客户端版本 <strong>≥ 2.1.280</strong> 才为该模型提供服务。能力表用 <code>minCliVersion</code>
-记录这一点（<strong>只有这一行有门槛</strong>，其余 14 行缺省——缺省表示「未知」而不是「无门槛」，不臆造数字）。插件申报的
-默认版本为 <strong>2.1.283</strong>，并且<strong>在发出请求之前就本地校验</strong>「申报版本 vs 该模型门槛」，不满足时直接给出模型、当前
+记录这一点（<strong>只有这一行有门槛</strong>，其余 15 行缺省——缺省表示「未知」而不是「无门槛」，不臆造数字）。插件申报的
+默认版本为 <strong>2.1.285</strong>（不低于首次提供 Sonnet 5.5 的 Claude Code 2.1.284），并且<strong>在发出请求之前就本地校验</strong>「申报版本 vs 该模型门槛」，不满足时直接给出模型、当前
 版本与要求版本，<strong>而不是白花一个往返让上游返回 400</strong>。测试另有一条不变量：<strong>申报的默认版本必须 ≥ 表中每个模型的
 门槛</strong>——这条锁让「加了高门槛模型却忘了抬版本」无法通过 CI。</p>
 <h3>收编本机已有的 Claude Code 登录（可选，默认关闭）</h3>
