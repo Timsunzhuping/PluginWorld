@@ -1,0 +1,678 @@
+<h1>dsh-prompt-manager</h1>
+<h2>3.4.0：解除 DSH 精确版本绑定</h2>
+<ul>
+<li><code>@deepseek-ai/dsh-llm</code>、<code>@deepseek-ai/dsh-system-prompt</code> 的运行时 peer 范围改为 <code>*</code>，商店范围 <code>dsh.compatibility.dsh</code> 同步改为 <code>*</code>。DSH 升级（包括 RC 版本）不再仅因旧版本号而跳过本插件，无需添加 <code>allow-version</code> 豁免。</li>
+<li>开发依赖仍固定到 <code>0.2.0-rc.2</code>，用于可复现的编译和测试，不限制安装时的宿主版本。已在该依赖版本上通过完整测试，覆盖提示词组装、volatile 设置更新、每会话选择、压缩替换及客户端交互测试。</li>
+<li><strong>不限制版本不等于保证所有未来版本兼容</strong>。已验证当前 DSH <code>0.2.0-rc.2</code> 的真实启动器准入检查；客户端测试使用模拟宿主，尚未完成本版真实 Profile 的安装、浏览器冷启动、卸载和回滚验收，因此新版商店证据仍为 <code>unknown</code>，不把单元测试当成部署验收。</li>
+<li>本次不改变正文、订阅、设置索引或会话选择的存储结构；也不改变其他插件的兼容声明。</li>
+</ul>
+<p>源码构建后可用 <code>npm pack</code> 生成本地安装包，再通过 <code>dsh plugin --profile web add /absolute/path/to/lolkda-dsh-prompt-manager-3.4.0.tgz</code> 安装，<strong>重启 DSH 进程并刷新页面</strong>。本地修改不会自动更新正在运行的 Profile；正式版经 GitHub Release 工作流发布到 npm 的 <code>latest</code> 标签，发布后可使用 <code>@latest</code> 或显式指定 <code>@3.4.0</code> 安装。</p>
+<h2>3.4.0-rc.2：修掉启动竞态下丢失的设置命名空间</h2>
+<p><code>3.4.0-rc.1</code> 把索引改成 Loader entry 上的 volatile <code>Config</code> 字段，但那个 schema 是在模块求值时用<strong>同步 <code>require('@deepseek-ai/schemastery')</code></strong> 拿工厂再构建的。0.1.7-rc.1 的 Loader 会并发 import 整个 Profile 的条目，同步 require 撞上「正在加载的 ESM-only 依赖（cosmokit）」时 Node 抛 <code>ERR_REQUIRE_ESM_RACE_CONDITION</code>，而当时的 <code>catch</code> 把它静默吞掉 —— 于是 <code>Config</code> 变成 <code>undefined</code>，这个 entry 在宿主眼里没有 schema，<code>dsh-settings</code> 直接跳过它：<strong>设置命名空间从不对外服务</strong>。表现出来就是输入框旁两个芯片消失、新增/订阅都报「宿主没有接受这次保存」，而已有订阅索引滞留在 <code>settings.yaml.imported</code> 里读不出来；插件自身的 HTTP 路由一切正常，所以看起来"没报错但什么都不工作"。</p>
+<p>本版把工厂改为经 ESM 图解析（顶层 <code>await import('@deepseek-ai/schemastery')</code>），不再与加载器抢同一条同步路径；解析失败时改为在挂载时通过 <code>ctx.logger.warn</code> 说明原因，不再静默。<code>test/config-schema.mjs</code> 注入加载器那条真实错误做回归，<code>tools/check-boot-acceptance.mjs</code> 对真实冷启动验收。</p>
+<p>升级后请<strong>重启 dsh 进程</strong>（<code>Config</code> 在模块求值时定死，刷新页面无效），并把 <code>settings.yaml.imported</code> 里旧的 <code>prompt-manager:</code> 段重新导回（在「设置 → 提示词 → 来源」重新添加来源并应用即可，本地快照仍在）。</p>
+<h2>3.4.0-rc.1：DSH 0.1.7-rc.1 本地适配</h2>
+<p>本版使用原生 <code>Config</code>/volatile 与 <code>configForms</code>，不修改 DSH 核心。Loader entry id 保持 <code>prompt-manager</code>，旧同名 <code>settings.yaml</code> 段由 DSH 自动导入 Profile patch，原文件保留为 <code>.imported</code>；正文、脚本、订阅与每会话选择的数据目录不变。设置被宿主拒绝时明确显示失败，正文已保存而索引失败时保持可重试，不误报成功。下文旧版本迁移章节中的旧 Settings API 与存储路径仅说明历史版本。</p>
+<p><a href="https://github.com/lolkda/dsh-prompt-manager/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/lolkda/dsh-prompt-manager/actions/workflows/ci.yml/badge.svg" alt="ci" /></a></p>
+<p>把提示词作为 <strong>system prompt section</strong> 注入 <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a>（DSH），并在 Web GUI 的 <strong>设置 → 提示词</strong> 里管理它们：开关、排序、新增、删除、改正文（markdown）。</p>
+<p>正文里可以引用 <code>{{变量}}</code>：插件提供机器事实、配置值、探测结果和脚本变量；DSH 原生提供当前 agent / 会话的 <code>{{cwd}}</code>、<code>{{model}}</code>、<code>{{provider}}</code>。原生变量列在目录中，但不由本插件重复注册，也不作为全局固定值。</p>
+<p>除了 system prompt，这个插件还能替换 <strong>DSH 压缩上下文时发给摘要模型的那条指令</strong>（原本写死在 <code>dsh-compaction-basic</code> 里）—— 见「压缩指令」一节。</p>
+<table>
+<thead>
+<tr>
+<th>部分</th>
+<th>存在哪</th>
+<th>谁在改</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>索引（标题 / 顺序 / 开关）</td>
+<td>当前 Profile patch 中 <code>id: prompt-manager</code> 的 volatile <code>config</code></td>
+<td>设置页，或编辑 Profile 配置</td>
+</tr>
+<tr>
+<td>组合（只挑普通提示词成员）</td>
+<td>同一段里的 <code>presets</code></td>
+<td>设置页的「组合」页</td>
+</tr>
+<tr>
+<td><strong>哪个组合 / 哪条压缩指令生效</strong></td>
+<td><code>$DSH_HOME/prompt-manager/sessions/&lt;会话 id&gt;.json</code></td>
+<td><strong>每个会话各记各的</strong>：会话输入框那一行的「提示词」/「压缩」芯片</td>
+</tr>
+<tr>
+<td>正文（markdown）</td>
+<td><code>$DSH_HOME/prompt-manager/sections/&lt;id&gt;.md</code></td>
+<td>设置页，或任意编辑器</td>
+</tr>
+<tr>
+<td>变量脚本</td>
+<td><code>$DSH_HOME/prompt-manager/scripts/&lt;name&gt;.js</code></td>
+<td>设置页的「变量」页，或任意编辑器</td>
+</tr>
+</tbody></table>
+<p>上面那张表里只有第三行是<strong>按会话</strong>的，其余都是全机一份：有哪些提示词、正文、组合的定义（成员清单）、订阅来源、镜像/代理都是目录类东西，换哪个会话看都一样；而"现在用哪套"是对话自己的事。所以 A 会话切一下，B 会话不会跟着变 —— 见「每会话选择」一节。</p>
+<p>插件只内置一条提示词：机器环境（系统 / shell / 工具链版本在挂载时探测填充；工作目录 <code>{{cwd}}</code>、模型 <code>{{model}}</code> 和提供方 <code>{{provider}}</code> 在每次组装时按当前 agent / 会话解析）。其余自己写，或从可订阅的仓库拉。一份现成的提示词包在 <a href="https://github.com/lolkda/dsh-prompt-pack" target="_blank" rel="noopener noreferrer">lolkda/dsh-prompt-pack</a>（CTF 作业契约 + FastCtx 工具路由）。</p>
+<h2>安装</h2>
+<p>三种装法，选一种。<code>lib/</code>、<code>client/</code>、<code>environment.md</code> 都随包发布，所以装完不需要本地工具链。</p>
+<h3>方式 A：<code>dsh plugin</code> 一条命令（推荐）</h3>
+<pre><code class="language-bash">dsh plugin --profile web add github:lolkda/dsh-prompt-manager
+</code></pre>
+<p>这个命令把剩下的参数转给 profile 目录里的 pnpm，装完 DSH 会发现这个包的清单里声明了 <code>dsh.bundle.patch</code>，<strong>自动把它加进 <code>dsh.profile.bundles</code></strong> 并应用包内那份 <code>cordis.patch.yml</code> —— profile 自己的 <code>cordis.patch.yml</code> 一个字都不用写。装完重启一次 profile。</p>
+<p>发布到 npm 的同一条命令（<code>@lolkda/dsh-prompt-manager</code> 已上架）：</p>
+<pre><code class="language-bash">dsh plugin --profile web add @lolkda/dsh-prompt-manager
+</code></pre>
+<p>正式版 <code>3.4.0</code> 发布到 <code>latest</code>，不再锁定 DSH 精确版本。要明确安装本次正式版：</p>
+<pre><code class="language-bash">dsh plugin --profile web add @lolkda/dsh-prompt-manager@3.4.0
+</code></pre>
+<p><code>next</code> 仅用于预发布，可能仍指向旧 RC；升级本次正式版请使用 <code>@latest</code> 或 <code>@3.4.0</code>。</p>
+<h3>方式 B：相对路径挂载（离线 / 开发用，不装包）</h3>
+<pre><code class="language-bash">git clone https://github.com/lolkda/dsh-prompt-manager "$DSH_HOME/profiles/web/vendor/dsh-prompt-manager"
+</code></pre>
+<p>然后在 <code>$DSH_HOME/profiles/web/cordis.patch.yml</code> 末尾追加：</p>
+<pre><code class="language-yaml">- insert:
+    - id: prompt-manager
+      name: './vendor/dsh-prompt-manager/lib/index.js'
+</code></pre>
+<p>loader 用 <code>new URL(name, ctx.baseUrl)</code> 解析前导 <code>./</code>，而 <code>ctx.baseUrl</code> 就是 profile 目录，所以这个路径指向 <code>$DSH_HOME/profiles/web/vendor/dsh-prompt-manager/lib/index.js</code>。</p>
+<p><strong>两种方式二选一</strong>：既装包又留这一行，插件会被挂载两次。不写 <code>config</code> 也可以 —— <code>environment</code> 默认就是开的，要关就在你自己的 patch 层里覆盖。</p>
+<h3>卸载</h3>
+<pre><code class="language-bash">dsh plugin --profile web remove @lolkda/dsh-prompt-manager
+</code></pre>
+<p>删掉依赖后，DSH 下次启动会把它的层从 <code>dsh.profile.bundles</code> 里摘掉，重启 profile 生效。手写挂载（方式 B）删掉那一行、再删 vendor 目录即可。删包不动你的条目：正文在 <code>$DSH_HOME/prompt-manager/</code>，索引在 settings 里，都不属于这个包。</p>
+<h3>装完怎么确认</h3>
+<pre><code class="language-bash">dsh --profile web --dump-config        # 组合出来的树里应该有一行 id: prompt-manager
+curl -s http://127.0.0.1:3080/dsh-prompt-manager/status | head -c 200
+</code></pre>
+<p>再打开 <strong>设置 → 提示词</strong>，列表里应该有你已有的条目（或内置的「本机环境」那条）。</p>
+<h2>这个包读写什么、会起什么进程</h2>
+<p>按 DSH STORE 的四项访问轴逐项说明。汇总权限等级是 <strong><code>high</code></strong> —— 按商店的定义，"可访问任意网络、任意 Shell"即属此级，本插件两条都沾（下详）；这不是自谦也不是自夸，是照它的判定口径填的。<strong>本插件不访问任何凭据</strong>，理由见「凭据」一条。</p>
+<ul>
+<li><strong>文件（<code>files</code>）</strong>：索引与组合由原生 Config/Settings 读写当前 Profile patch 中 <code>prompt-manager</code> entry 的配置；旧 <code>settings.yaml</code> 仅在 DSH 迁移时导入。正文、脚本、订阅快照保留在已配置的 storeDir（默认 <code>$DSH_HOME/prompt-manager/</code>），先写临时文件再 <code>rename</code>。不读环境变量敏感项，不读写 DSH 的会话日志。</li>
+<li><strong>网络（<code>network</code>）</strong>：只有订阅源会出网（<code>fetch</code> 拉 <code>prompt-manager.json</code> 与正文，可配 https 镜像）。探测命令与变量脚本可能自行出网，那是<strong>你配置的命令</strong>在做，不是插件在做。不开监听端口，不做任何回连或遥测。</li>
+<li><strong>命令（<code>commands</code>）</strong>：按你 settings 里的配置跑<strong>探测命令</strong>（默认 <code>pwsh</code>/<code>bash</code>/<code>git</code>/<code>node</code>/<code>python</code>，挂载时各跑一次）和<strong>变量脚本</strong>（<code>node &lt;脚本文件&gt;</code>，保存时 / 挂载时 / 你点「重新测量」时各跑一次）。命令、参数、脚本全部来自这份配置，<strong>插件自己不带任何可执行文件</strong>；删掉配置就没有任何进程被起。它们以 DSH 进程的权限运行，你怎么审自己写的脚本，就怎么审这里的配置。</li>
+<li><strong>凭据（<code>credentials</code>）</strong>：<strong>不读取、不存储、不转发任何凭据。</strong> 具体地：不读环境变量里的 token/key、不读 git 凭据助手、不读 <code>~/.npmrc</code> 之类凭据文件、不发带认证头的请求。仓库里出现 <code>token</code>/<code>credential</code>/<code>password</code> 字样的地方只有两类，都不是凭据访问：<code>client/client.js</code> 里的 "token" 指<strong>变量占位符</strong>（<code>{{名字}}</code> 这种东西，与 React 的 key）和 README 发布章节里"<strong>不放</strong>任何 npm token（改走 OIDC）"的说明；<code>src/source.ts</code> 与 <code>src/routes.ts</code> 各有一处<strong>守卫</strong>，作用是<strong>拒绝</strong>带凭据的镜像 URL（<code>url.username</code>/<code>url.password</code> 非空即报错）。换句话说，凭据相关代码在这里是<strong>拒收</strong>逻辑，不是采集逻辑。</li>
+<li><strong>改请求</strong>：只碰<strong>压缩</strong>那一次调用（见「压缩指令」一节）。监听 <code>llm/stream</code>，只在 <code>purpose === 'compaction'</code> 时把最后那条指令消息换成本插件里配置的正文；<strong>普通对话请求一个字节都不动</strong>。没配压缩指令时不注册任何替换动作。可以整体关掉：<code>compaction: false</code>。</li>
+<li><strong>HTTP</strong>：注册一条 <code>/dsh-prompt-manager</code> 前缀路由。<strong>本机对端</strong>（<code>127.0.0.0/8</code> / <code>::1</code>）照旧免会话可用，但 <code>Host</code> 头必须是本机名（挡 DNS rebinding）；<strong>其它对端不由插件自己判</strong>，交给宿主已有的浏览器信任 —— 就是 <code>/api</code> 用的那把尺子（loopback，或部署信任的 Host + 签名浏览器会话）。写操作一律再加 same-origin。端点清单见 <code>src/routes.ts</code>。<strong>它不是认证</strong>：本机其它进程照样能调；边界是"别家网页进不来"，单用户工作机上够用。</li>
+<li><strong>生命周期脚本</strong>：<strong>没有</strong> <code>preinstall</code>/<code>install</code>/<code>postinstall</code>/<code>prepare</code> 任何一项（<code>npm install</code> 不构建、git 安装也不构建，因为 <code>lib/</code>、<code>client/</code> 就是提交进仓库的构建产物）；只有 <code>prepublishOnly</code>，它只在<strong>作者</strong>执行 <code>npm publish</code> 时跑，装包的人永远不会触发。</li>
+<li><strong>外部运行依赖</strong>：无。<code>dependencies</code> 为空，运行期只用 DSH 自己提供的服务（<code>systemPrompt</code>、<code>settingsScope</code>、<code>llm</code>）与 Node 内置模块；<code>lib/</code> 与 <code>client/</code> 都是自洽产物。</li>
+<li><strong>已知风险</strong>（照实说，不粉饰）：<ul>
+<li>那条路由<strong>不是认证</strong>：本机任意进程都能调它读写你的提示词索引 —— 单用户工作机上够用，多用户/共享机器上不够。<strong>部署把面板开到局域网时，这条路由跟着开</strong>：能拿到浏览器会话的页面也能调它，和那个页面本来就能调 <code>/api</code>（改设置、跑会话、切权限）是同一件事，插件不额外加宽，也不额外收窄。</li>
+<li>探测命令与变量脚本<strong>以 DSH 的权限执行</strong>，能力上限等于你给 DSH 的权限；恶意或手误的脚本能做的事，插件拦不住。</li>
+<li>订阅来的正文会<strong>注入 system prompt</strong>，等于让第三方仓库的内容进入你的模型上下文；只订阅你信得过的仓库，应用前先看 diff（来源页会列出变更文件与增删行数）。</li>
+<li>订阅条目默认只读，但**「fork 成本地条目」之后就是本地正文**，之后它的内容与来源仓库不再有关系。</li>
+</ul>
+</li>
+</ul>
+<h2>设置页</h2>
+<p><strong>设置 → 提示词</strong>（order 60，排在 General / Models / Plugins / Agent presets / 市场之后）：</p>
+<ul>
+<li><strong>列表</strong>：三个 tab（全部 / 本地 / 订阅）分层；一行 = 标题 + 注入开关 + 右侧「⋯」菜单（编辑 / 删除）。订阅条目带「订阅」徽标，其中的 <code>owner/repo</code> 是指向上游仓库的真链接。<strong>压缩指令那一行没有开关</strong> —— 它的 <code>enabled</code> 不决定任何事，能决定它的选择按会话各记各的，所以那行只标一句「每会话自选」。底部是「新增提示词」「新增压缩指令」「订阅来源（N）」「变量（N）」「组合（N）」—— 固定两列一行，奇数个时最后一个占满整行，所以这一行不会随面板宽几个像素而变形。条目数到上限时「新增」直接拒绝并说明原因。标题下面那行说明末尾是插件自己的仓库链接和一句点星请求。</li>
+<li><strong>这一页不报"哪个组合 / 哪条压缩指令正在生效"</strong>：那是每个会话自己的事实，页面上无法得知，所以它只报压缩的<strong>全机计数器</strong>（已替换 N 次 / 已见到 N 次压缩 / 最近一次时间），以及"哪个组合生效由每个会话自己决定"这句话。</li>
+<li><strong>编辑器</strong>：标题、顺序、只读 id、Markdown 正文 + 实时预览、可用变量芯片（点一下插到光标处）、未注册引用的警告，底部「保存修改」。<strong>订阅条目的正文只读</strong>，另有「fork 成本地条目」。</li>
+<li><strong>来源页 / 变量页 / 脚本编辑器 / 组合页</strong>：分别见后面四节。</li>
+</ul>
+<p><strong>生效时机是下一个模型步骤</strong>：<code>systemPrompt.assemble()</code> 每个 agent step 调用一次，section 文本每次现算，所以开关、排序、正文都不需要重启。改插件代码另说，见文末「注意」。</p>
+<p><strong>持久化</strong>：由原生 <code>configForms</code> 的 <code>writable/mode</code> 决定是否可写；接受的修改进入当前 Profile patch。非本机浏览器默认可能使用只读内存表单，已安装且启用的 LAN 设置提供方可恢复经过宿主鉴权的写入。页面不会把拒绝或缺少接受回执当成保存成功。</p>
+<p><strong>删除</strong>一条 = 先删正文文件、再从索引移除（顺序有意：文件删不掉时索引不动，条目还在、还能重试）。</p>
+<h2>压缩指令</h2>
+<p>DSH 把上下文压成摘要时，会额外发一次模型调用：重放当前对话前缀，最后追加一条<strong>指令消息</strong>告诉摘要模型输出什么结构。这条指令原本写死在 <code>dsh-compaction-basic</code> 里，本插件让你把它换成自己写的一条 markdown —— 和普通条目一样有 id、有正文文件，但不属于组合，由每个会话手动指定。</p>
+<ul>
+<li><strong>建一条</strong>：列表页底部「新增压缩指令」。分配一个 id 并直接打开编辑页，<strong>正文是空的</strong> —— 这条指令要替换的是 DSH 自带的那一份，从这里读不到它，所以不预填骨架（照抄一份既是替别人的措辞做猜测，也会随上游改动过时；顺带一提，那样抄来的文字里只要出现 <code>{{...}}</code> 形状的字面量，就会被下面的引用校验直接拒绝保存）。<strong>这是一份草稿：不保存就什么都不写</strong>，直接返回不会在列表里留下空条目（离开前会确认一次，问的是「放弃这条新压缩指令？」）。点「保存修改」时只写两样：正文文件、索引里那条记录。它不是 system prompt section：<strong>不注册 section、不参与注入开关</strong>，<code>order</code> 只影响列表排序；列表里那一行也不带开关（它的 <code>enabled</code> 不决定任何事），只标一句「每会话自选」。</li>
+<li><strong>改正文</strong>：照常进编辑页写，正文里可以用 <code>{{变量}}</code>（插值规则与 section 相同，见「变量」一节；解析不了的引用按字面量写出去并记一条日志，绝不让那次压缩失败）。</li>
+<li><strong>哪个生效</strong>：<strong>每个会话自己在会话输入框那一行的「压缩」芯片里选</strong>，选的结果记在那个会话自己的文件里（见「每会话选择」）。选「不用」= 用 DSH 自带的那条。没有选过的会话就用 DSH 自带的；新会话不继承任何别的会话的选择。选中的 id 指向不存在的条目、指向普通段落条目、或正文为空 → 回退到 DSH 自带指令并记一次日志。<strong>永远不会有"空指令"发出去</strong>。</li>
+<li><strong>页面上没有任何东西能把某条指令"设为当前"</strong>：设置页是编目录的，不是替哪个会话做选择的。想让它生效，去那个会话的「压缩」芯片里选它 —— 保存或改正文之后页面上会直接这么说。删除一条也不会去动任何会话的文件：选过它的会话读到一个不存在的 id，就按上面那条回退，并在日志里被点名一次。</li>
+<li><strong>生效时机是下一次压缩</strong>，不是下一个模型步骤 —— 压缩什么时候发生由 DSH 的阈值策略决定（默认上下文用到 80%）。想立刻验证：<code>/compact</code>，或把阈值调低。</li>
+<li><strong>组合包不再导出压缩提示词</strong>，也不包含 <code>preset.compaction</code>。旧版组合包仍可导入：其中的压缩正文保留为<strong>独立的压缩条目</strong>，从组合成员里移除，并忽略旧绑定；需要使用时，在会话的「压缩」芯片里手动指定。导入不会替任何会话做选择，也不会改动已有选择。</li>
+<li><strong>看它有没有真的生效</strong>：列表页状态行显示 <code>压缩指令：每个会话自己选 · 已替换 N 次 · 最近 &lt;时间&gt;</code>（N 来自 <code>/dsh-prompt-manager/status</code> 的 <code>compaction</code> 字段）。它报的是<strong>全机</strong>计数器，不报"哪个会话正在用哪条" —— 那是会话自己的事情，页面看不到；摘要看起来"格式不一样"的时候，第一个该看的就是这行。</li>
+<li><strong>改不了的部分</strong>：摘要落进会话时外面那层 <code>&lt;compacted-summary&gt;</code> 标签和「自动生成的检查点」前导语（<code>This is an automatically generated checkpoint …</code>）是后端在摘要返回<strong>之后</strong>自己拼的，不在这次请求里，所以拦不到。要改它们只能自己写一个压缩后端（实现 <code>CompactionEngine</code>）。本插件只替换<strong>发给模型的指令</strong>。</li>
+<li><strong>关掉</strong>：<code>compaction: false</code>，所有压缩调用恢复原样。</li>
+</ul>
+<h2>组合</h2>
+<p>一个<strong>组合</strong> = 从现有条目里挑一组，起个名字。两个入口：</p>
+<ul>
+<li><strong>会话输入框那一行的</strong>工具行右侧（模型选择器左边）有「提示词 · …」芯片：点开是全部组合和「不用组合（按每条开关）」，选中即切换 —— <strong>只切这个会话</strong>。</li>
+<li><strong>设置 → 提示词 → 组合</strong>：增删改，每个组合用勾选清单挑<strong>普通提示词</strong>（含关着的）—— 「把某条关掉的提示词临时打开」正是组合的用途。组合编辑器没有压缩指令选择器，组合卡片也不再展示压缩绑定；压缩指令只能在会话的「压缩」芯片中手动指定。</li>
+</ul>
+<p>三点要紧的：</p>
+<ol>
+<li><strong>一个会话选了组合，就是那个组合说了算</strong>：每条自己的开关原样留着，但不参与判断；在那个会话里切回「不用组合」，就回到那些开关。设置页不标"哪些条目被注入了"，因为那是某个会话的事实，页面看不到。</li>
+<li><strong>切换只影响做出这个选择的那一个会话</strong>，在<strong>下一个模型步骤</strong>生效，不需要重启、也不需要重注册 section。代价是那个会话的 system prompt 变了，KV cache 前缀失效一次。别的会话一个字都不变。</li>
+<li><strong>组合管选哪些，不管顺序</strong>：顺序仍是每条自己的 <code>order</code>。</li>
+</ol>
+<p><strong>组合和压缩选择完全独立</strong>：选择、切换、取消组合都只改会话的 <code>preset</code>，保留其 <code>compaction</code>；手动切换压缩指令只改 <code>compaction</code>，保留 <code>preset</code>。没有“跟随组合”的模式，也不会把两份压缩提示词叠加使用。</p>
+<p><code>presets</code> 里可以写索引里还不存在的 id（订阅还没拉回来），组合页会标成「条目不存在」而不是替你删掉；某个会话正用着这个组合时，宿主也会在日志里点名一次。上限 20 个组合、每个 50 条成员。某个会话选中的组合不存在（比如你刚把它删了）时不会冻住提示词：回到单条开关并记一次警告，只影响那个会话。</p>
+<h3>组合包：把一个组合导出成文件</h3>
+<p>组合页每个组合的「⋯」菜单 + 页脚，导出得到 <code>prompt-manager-pack-&lt;组合 id&gt;.json</code>。包里装什么按"正文属于谁"分：</p>
+<table>
+<thead>
+<tr>
+<th>成员类型</th>
+<th>包里放什么</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>本地 / 内置条目</td>
+<td>正文<strong>内联</strong></td>
+<td>除了这份文件没有别处能复现它</td>
+</tr>
+<tr>
+<td>订阅条目</td>
+<td>只记来源（<code>slug</code> + <code>repo</code> + <code>ref</code> + <code>file</code>）</td>
+<td>正文属于上游；导入方配上同一个仓库，正文自然就出来（同 repo ⇒ 同 slug ⇒ 同 id）</td>
+</tr>
+<tr>
+<td>指向已不存在条目的 id</td>
+<td>记进 <code>missing</code>，如实报告</td>
+<td>这是在说"这个包不完整"</td>
+</tr>
+</tbody></table>
+<p>导入时：<strong>id 撞车就加后缀</strong>（<code>env</code> → <code>env-2</code>，组合成员同步改写，所以同一个包导两次是两个集合）；<strong>换了 id 的订阅条目放弃来源标记</strong>（正文按 id 去上游找，id 变了就永远读不到，留着只读标记反而更糟）；<strong>绝不导入脚本</strong>（脚本是代码）；正文里有写法不合法的 <code>{{...}}</code> <strong>整包拒绝</strong>（那种正文一进索引每个步骤都会失败）；<strong>先校验、再写正文、最后一次性写索引</strong>，写正文中途失败会把已写的文件删掉。导入不会自动启用那个组合，也不会替你配来源。</p>
+<h2>每会话选择</h2>
+<p>"有哪些提示词、哪些组合、每条正文写什么"是<strong>全机一份</strong>的目录；"现在这个会话用哪套"不是。后者记在每个会话自己的文件里：</p>
+<ul>
+<li><strong>位置</strong>：<code>&lt;storeDir&gt;/sessions/&lt;会话 id&gt;.json</code>（默认 <code>$DSH_HOME/prompt-manager/sessions/</code>）。一个会话一个文件，内容是 <code>{"preset": "&lt;组合 id&gt;", "compaction": "&lt;压缩指令 id&gt;"}</code>，两个字段都用 <code>""</code> 表示"没选"。</li>
+<li><strong>默认</strong>：没有文件的会话 = 从没选过 = <strong>不用组合</strong>（每条自己的开关说了算）、<strong>不用自定义压缩指令</strong>（用 DSH 自带的）。新会话永远从这个状态开始，不继承任何别的会话。</li>
+<li><strong>怎么改</strong>：会话输入框那一行的「提示词」和「压缩」两颗芯片。切一下就是这个会话的事，别的会话不受影响；下一步模型生效（压缩是下一次压缩生效）。也可以手改那个文件 —— 宿主每次组装都重新读，不需要重启。</li>
+<li><strong>落盘、重启后还在</strong>。旧会话没有文件，就是"没选过"，所以升级不需要任何迁移动作。</li>
+<li><strong>有上限</strong>：最多 200 个会话保留选择，超过就按文件修改时间从旧到新删。</li>
+<li><strong>读不出来也不报错</strong>：文件损坏（JSON 解析不了）按"没选"处理，并在日志里说一次；指不到东西的 id 按上面「压缩指令」「组合」两节里的回退规则处理。</li>
+<li><strong>接口</strong>：<code>GET /dsh-prompt-manager/session/&lt;会话 id&gt;</code> 读（返回 <code>{ session, preset, compaction, stored }</code>）、<code>POST</code> 同一个地址合并写（body <code>{preset?, compaction?}</code>）、<code>DELETE</code> 清掉。<code>/status</code> 的 <code>sessions</code> 字段报 <code>{ dir, count, writable }</code>，即文件放哪、几个会话有、现在能不能写。这些路由和 <code>/api</code> 用同一把尺子（本机对端，或部署信任的 Host + 浏览器会话；写操作再加 same-origin），所以从别的设备打开的界面里，只要那一页有会话，这几颗芯片就能用。</li>
+<li><strong><code>settings.yaml</code> 里的 <code>activePreset</code> 和根 <code>compaction</code> 保留但不再决定任何事</strong>，只是为了让旧文件还能通过 schema 校验。设置页也不会再去读它们。</li>
+</ul>
+<h2>订阅 GitHub 仓库</h2>
+<p>一个<strong>来源</strong> = 一个仓库 + 一个 ref。在<strong>来源页</strong>填 <code>owner/name</code>、ref（分支 / tag / commit）和可选镜像；它接上会检查一次，之后<strong>只在你点「检查更新」时</strong>才联网。</p>
+<h3>仓库要长什么样</h3>
+<p>根目录必须有一份 <code>prompt-manager.json</code>（<a href="https://github.com/lolkda/dsh-prompt-pack" target="_blank" rel="noopener noreferrer">dsh-prompt-pack</a> 根目录那份就是示例）：</p>
+<pre><code class="language-json">{
+  "prompts": [
+    { "file": "contract.md", "title": "CTF 契约", "order": 10 },
+    { "file": "fastctx.md", "title": "FastCtx 工具路由", "order": 20 }
+  ]
+}
+</code></pre>
+<p><code>id</code> 缺省取文件名，<code>title</code> / <code>order</code> / <code>enabled</code> 可以不写。要这份清单是因为列举目录要么消耗 GitHub API 配额、要么解析整仓 tarball，而"作者多写一个文件"代价最低。清单是远端内容，所以每个字段都校验：非法路径、<code>..</code>、非 <code>.md</code>、重复文件、超过 50 条都拒绝。</p>
+<h3>上游改了文件名怎么办</h3>
+<p>条目的 id 是<strong>身份</strong>（组合记的是它，正文也按它去来源里找），所以改名不能让 id 跟着变。三层保护：</p>
+<ol>
+<li><strong>清单里写 <code>id</code>（最可靠）</strong>：<code>{"file": "ctf.md", "id": "contract"}</code> —— 之后文件怎么改名、正文怎么改，本地 id 都不动。它还是<strong>修复手段</strong>：组合里记着已不存在的 id 时，在上游清单里把它写回来，检查 → 应用，那条成员就重新生效（人工给的标题 / 顺序 / 开关一起回来）。</li>
+<li><strong>正文没变的改名会自动认出来</strong>：一次检查里恰好一个文件被删、一个文件新增且正文 sha1 相同，就判定改名，新路径沿用旧 id，列表里标「由 prompts/contract.md 改名」。</li>
+<li><strong>认不出来时不猜</strong>：改名同时改了正文、或两个新文件正文一样无法判断谁继承身份 —— 按"删一条 + 加一条"处理并说明原因（要固定身份就回到第 1 条）。</li>
+</ol>
+<p>改名在计划里是<strong>一对变更</strong>：只勾一行，应用时两行一起落（只应用一半会让两条记账共用一个 id）。id 真的变了时，你给旧 id 设的标题 / 顺序 / 开关会跟着搬到新 id。</p>
+<h3>手动更新的四步</h3>
+<ol>
+<li><strong>检查更新</strong>：分支先用 <code>github.com/&lt;repo&gt;/commits/&lt;ref&gt;.atom</code> 拿 head sha（<strong>零 API 配额</strong>），没变就说"已是最新"；变了才逐文件发 <code>If-None-Match</code> 条件请求，304 复用本地。本地正文被手工删过时退回无条件请求取回来。</li>
+<li><strong>看变更</strong>：每文件一行 <code>prompts/a.md  +14 / −3</code>，带勾选框（默认全选）。远端删掉的标「（删除）」，认出的改名标「由 … 改名」。</li>
+<li><strong>应用</strong>：旧正文进 <code>previous/</code>，暂存覆盖 <code>current/</code>，写回 <code>state.json</code>，补上新条目 —— <strong>新条目默认关闭</strong>。</li>
+<li><strong>还原</strong>：一次撤销上一次应用（被删的文件连标题 / 顺序 / 开关一起回来）。</li>
+</ol>
+<p>订阅条目的正文只读（想改就 fork），标题 / 顺序 / 开关照旧可改；来源被删时它的条目一起移除。把来源的 <code>enabled</code> 设成 <code>false</code> 是"先停对上游的动作、别动在用的正文"：检查 / 应用 / 还原都返回 409，已应用的条目照常注入。</p>
+<h3>通道与文件布局</h3>
+<table>
+<thead>
+<tr>
+<th>环节</th>
+<th>走法</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>变化探测</td>
+<td><code>https://github.com/&lt;repo&gt;/commits/&lt;ref&gt;.atom</code>（直连，不消耗配额）</td>
+</tr>
+<tr>
+<td>取正文</td>
+<td><code>&lt;镜像&gt;/https://raw.githubusercontent.com/...</code> 或 <code>{url}</code> 模板，带 <code>If-None-Match</code></td>
+</tr>
+<tr>
+<td>代理</td>
+<td><code>none</code> = 默认 fetch（已继承 DSH 启动器从环境变量装的全局代理）；<code>http</code> = undici <code>ProxyAgent</code>；<code>socks5</code> = undici 的 <code>Socks5ProxyAgent</code></td>
+</tr>
+</tbody></table>
+<p>镜像<strong>只作用于 <code>raw.githubusercontent.com</code></strong>，<code>api.github.com</code> / <code>codeload.github.com</code> 一律直连。镜像返回 HTML 页面时会被识别并报错，绝不会把错误页当提示词暂存。代理与镜像全局一份，写在 <code>settings.yaml</code> 的 <code>prompt-manager</code> 段：</p>
+<pre><code class="language-yaml">prompt-manager:
+  mirror: 'https://gh-proxy.example'      # 空 = 不过镜像
+  proxy: { kind: socks5, url: 'socks5://127.0.0.1:1080' }
+  sources:
+    - id: owner-repo                       # 从 owner/repo 派生，可手改
+      repo: owner/repo
+      ref: main
+      mirror: ''                           # 空 = 沿用全局
+      enabled: true
+</code></pre>
+<pre><code>$DSH_HOME/prompt-manager/
+  sections/&lt;id&gt;.md                        本地条目正文
+  scripts/&lt;name&gt;.js                       变量脚本（一条一个文件，输出一个 JSON 对象）
+  scripts/.state.json                     每条脚本上次成功运行的 sha1 / 时间 / 变量值 / 退出码
+  sources/&lt;slug&gt;/current/&lt;file&gt;.md        订阅正文快照
+  sources/&lt;slug&gt;/previous/&lt;file&gt;.md       上一次应用替换掉的版本
+  sources/&lt;slug&gt;/staging/&lt;file&gt;.md        检查下载完、还没应用的正文
+  sources/&lt;slug&gt;/state.json               应用时间、head sha、逐文件 sha1/etag、undo 账本
+</code></pre>
+<h2>配置</h2>
+<p>插件不带提示词，所以配置里只剩它注册的变量和正文目录；排序、section 名、正文本身都是每条自己的事（section 名固定为 <code>user:prompt-manager:&lt;id&gt;</code>）。</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>environment</code></td>
+<td><code>true</code></td>
+<td>注册下面那组环境变量</td>
+</tr>
+<tr>
+<td><code>variables</code></td>
+<td>空</td>
+<td>额外的固定值变量 <code>{{名字}}</code>。名字要满足 <code>[a-z][a-z0-9_]*</code>，不能和已注册的重名</td>
+</tr>
+<tr>
+<td><code>probes</code></td>
+<td>空</td>
+<td>挂载时跑一次的命令，每个注册一个变量（见下节）。最多 64 项</td>
+</tr>
+<tr>
+<td><code>probeDefaults</code></td>
+<td><code>true</code></td>
+<td>同时运行包内自带的探测默认值（<code>pwsh</code> / <code>bash</code> / <code>git</code> / <code>node</code> / <code>python</code>），内置条目靠它们解析变量</td>
+</tr>
+<tr>
+<td><code>scripts</code></td>
+<td>空</td>
+<td>变量脚本的执行覆盖：<code>{ &lt;脚本名&gt;: { command, args, timeoutMs } }</code>，默认 <code>node &lt;脚本&gt;</code>、3 秒超时；<code>args</code> 里的 <code>{script}</code> 换成脚本绝对路径</td>
+</tr>
+<tr>
+<td><code>probeTexts</code></td>
+<td>英文占位符</td>
+<td>探测没拿到版本时的文案，可覆盖 <code>missing</code> / <code>empty</code> / <code>timeout</code> / <code>skipped</code></td>
+</tr>
+<tr>
+<td><code>probeBudgetMs</code></td>
+<td><code>8000</code></td>
+<td>整轮探测的时间上限，超出的记 <code>skipped</code></td>
+</tr>
+<tr>
+<td><code>storeDir</code></td>
+<td><code>$DSH_HOME/prompt-manager</code></td>
+<td>存储根目录：正文在其中的 <code>sections/</code>，每会话选择在其中的 <code>sessions/</code>。<code>$DSH_HOME</code> 取值：显式 <code>storeDir</code> &gt; 非空 <code>$DSH_HOME</code> &gt; <code>~/.dsh</code></td>
+</tr>
+<tr>
+<td><code>compaction</code></td>
+<td><code>true</code></td>
+<td>volatile 开关：<code>false</code> 禁用替换，<code>true</code>/缺省启用；字符串仅保留旧索引指针的兼容读取，不替任何会话做选择。每次解析均读取当前值，关闭后再开启不需要重挂。没有会话选择时压缩调用仍原样发出</td>
+</tr>
+</tbody></table>
+<h2>内置条目</h2>
+<p>包里只有一条：<code>environment.md</code>（id <code>env</code>，标题「机器环境」，order 5），索引放在 settings 的 <strong>base 层</strong>，所以新装起来打开设置页就能看到、能拨开关、也能编辑。同一个 id 的取值优先级：订阅快照 &gt; 本机正文文件 <code>sections/env.md</code> &gt; 包内正文。</p>
+<ul>
+<li><strong>关掉</strong>：设置页拨开关。<strong>删掉</strong>：会往 user 层写一份不含该 id 的 <code>entries</code>（base 层被整体遮蔽）；想恢复就删掉 <code>settings.yaml</code> 里 <code>prompt-manager.entries</code> 这一项。</li>
+<li>部署<strong>没有 settings 服务</strong>时也照样注入（此时索引就是内置条目本身）。</li>
+<li>内置正文的系统信息由本插件注册的环境变量提供，工具版本由包内探测默认值提供；<strong>工作目录使用 DSH 自带的 <code>{{cwd}}</code></strong>，每次组装读取当前会话的目录，不取宿主进程的 <code>process.cwd()</code>；<strong>当前模型和提供方使用 <code>{{model}}</code> / <code>{{provider}}</code></strong>，跟随当前 agent 的选择，切换模型后下一个模型步骤更新。关闭 <code>environment</code> / <code>probeDefaults</code>，或在没有 DSH 会话变量提供者的独立注册表里组装时，相应的缺失引用会按字面量渲染并记一条警告，不会让组装失败。</li>
+<li><strong>已经编辑过「机器环境」的正文不会被升级覆盖</strong>：本机正文仍优先于包内模板。想让已有自定义正文也提示工作目录和模型，在编辑器中加上 <code>This session's working directory is {{cwd}}.</code> 以及 <code>This agent's current model is {{model}} (provider: {{provider}}).</code> 即可；保存后下一个模型步骤生效。</li>
+<li><strong>更新后看起来还是旧正文时，先核对来源</strong>：<code>GET /dsh-prompt-manager/body/env</code> 的 <code>source: "user"</code> 表示当前使用本地覆盖，而非包内模板。重启不会取消这个覆盖。推荐先备份，再只补入上述会话信息，保留已有定制；不要把「删除条目」当作恢复包内正文。</li>
+</ul>
+<h2>探测：把工具版本变成变量</h2>
+<p><code>probes</code> 让插件在<strong>挂载时</strong>跑一遍命令，把结果注册成变量。包内已带一组默认探测（<code>pwsh</code> / <code>bash</code> / <code>git</code> / <code>node</code> / <code>python</code>），下面是覆盖或补充：</p>
+<pre><code class="language-yaml">config:
+  probes:
+    pwsh:   { command: pwsh,   args: ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'] }
+    git:    { command: git,    args: ['--version'], pattern: '([0-9]+\.[0-9]+\.[0-9]+)' }
+    node:   { command: node,   args: ['--version'], pattern: 'v?([0-9.]+)' }
+    python: { command: python, args: ['--version'], pattern: '([0-9.]+)' }
+    rust:   { command: rustc,  args: ['--version'] }
+  probeTexts: { missing: '无' }
+</code></pre>
+<pre><code class="language-markdown">- Git {{git}}，Node {{node}}，Python {{python}}，Rust {{rust}}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>command</code></td>
+<td>可执行名（走 <code>PATH</code>）或绝对路径</td>
+</tr>
+<tr>
+<td><code>args</code></td>
+<td>固定参数数组，默认不经 shell</td>
+</tr>
+<tr>
+<td><code>shell</code></td>
+<td>经平台 shell 执行。Windows 上 <code>npm</code> / <code>pnpm</code> 这类 <code>.cmd</code> 垫片必须设 <code>true</code>，否则 <code>EINVAL</code></td>
+</tr>
+<tr>
+<td><code>pattern</code></td>
+<td>可选正则，取第一个捕获组；匹配不上就退回整行</td>
+</tr>
+<tr>
+<td><code>timeoutMs</code></td>
+<td>这一项的超时，默认 1500</td>
+</tr>
+</tbody></table>
+<p>四种结果都是<strong>有值的字符串</strong>，所以引用永远不会渲染成空：有输出 → 第一条非空行（<code>stdout</code> 或 <code>stderr</code>，套 <code>pattern</code>、截断到 120 字符）；起不来 → <code>missing</code> 文案（默认 <code>(not installed)</code>）；起来了没印东西 → <code>empty</code>（默认 <code>(no output)</code>）；超时 / 预算用尽 → <code>timeout</code> / <code>skipped</code>。</p>
+<p>四条要紧的话：<strong>只在挂载时跑一次</strong>（DSH 的变量 provider 每次组装同步求值，把命令放进去等于每个步骤起一批子进程；装了新工具就改一下 config 或重启）；<strong>同名项是整体替换</strong>（<code>git: { command: git }</code> 会连 <code>args</code> 和 <code>pattern</code> 一起丢掉）；<strong>名字被占了只警告不炸</strong>（跳过这一项，其余照常）；<strong>写错的配置直接拒绝挂载</strong>（变量名不合法、缺 <code>command</code>、<code>pattern</code> 不是合法正则、超过 64 项）。命令在宿主进程里执行、不经工具沙箱，但只来自组合配置这个部署自己的文件，永不接受模型或页面的输入。</p>
+<h2>变量脚本：让提示词用你自己写的 JS</h2>
+<p>一条脚本 = 一个文件 <code>scripts/&lt;name&gt;.js</code>，跑起来是<strong>独立子进程</strong>，<strong>打印一个 JSON 对象</strong>，键就是变量名 —— 所以一条脚本能给多个变量：</p>
+<pre><code class="language-js">console.log(JSON.stringify({ rust: '1.80.0', go: 'go1.22' }))
+</code></pre>
+<p>值只在<strong>挂载时</strong>或你点「运行一次 / 重新测量」时测一次，之后每次组装读内存里的值。</p>
+<p>四步：<strong>新建脚本</strong>（给个名字，页面给一份能直接跑的模板）→ <strong>改</strong>（往 JSON 里加键）→ <strong>运行一次（测试）</strong>（跑的是保存时会跑的同一件事：同一条命令、同一个工作目录；页面列出这次会提供哪些变量、退出码、耗时、stderr。<strong>测试不写文件、不注册变量</strong>）→ <strong>保存并启用</strong>（保存会先跑一遍，输出不是合法 JSON、变量名不合法、名字和别人撞车都拒绝，磁盘上不会留下坏脚本；通过后落盘并注册，下一个模型步骤生效）。回到正文编辑器，输入框上方列出当前可用变量，点一下插到光标处；目录外的引用会显示核对提示，实际能否解析以会话组装为准。</p>
+<table>
+<thead>
+<tr>
+<th>事情</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>输出</td>
+<td>平铺 JSON 对象，值是字符串或数字；数组、嵌套对象、null、空对象都拒</td>
+</tr>
+<tr>
+<td>变量名</td>
+<td><code>^[a-z][a-z0-9_]*$</code>，最长 64</td>
+</tr>
+<tr>
+<td>长度 / 数量</td>
+<td>值超 120 字符截断；单脚本最多 64 个变量，脚本最多 20 条</td>
+</tr>
+<tr>
+<td>非 0 退出码</td>
+<td>输出还能解析就照用，退出码显示在页面上</td>
+</tr>
+<tr>
+<td>超时 / 起不来</td>
+<td>默认 3 秒后杀掉（只杀解释器本身）；<code>node</code> 不在 <code>PATH</code> 上报「无法启动」</td>
+</tr>
+<tr>
+<td>失败时</td>
+<td><strong>保留上一次成功测到的值</strong>，错误显示在变量页，提示词不受影响</td>
+</tr>
+<tr>
+<td>删除脚本</td>
+<td>文件与缓存一起删。仍被引用的变量冻结在最后一次的值上，没被引用的连变量一起删；删除前页面列出哪些提示词还在引用它</td>
+</tr>
+<tr>
+<td>改名</td>
+<td>先删旧的、再存新的（旧名字的变量会被新脚本接管）。两条脚本抢同一个名字会被拒（409）</td>
+</tr>
+<tr>
+<td>手工放文件</td>
+<td>直接把 <code>.js</code> 丢进 <code>scripts/</code> 一样生效，下次打开页面就能看到；没有缓存的会在挂载后台跑一次补上</td>
+</tr>
+</tbody></table>
+<p>默认 <code>node &lt;脚本绝对路径&gt;</code>，工作目录是 <code>scripts/</code>，继承宿主环境变量，另加 <code>DSH_PROMPT_MANAGER=1</code> 和 <code>DSH_PROMPT_MANAGER_SCRIPT=&lt;名字&gt;</code>。换解释器或加参数写 <code>config.scripts</code>：<code>inventory: { command: 'python', args: ['{script}'] }</code>。</p>
+<p><strong>脚本以宿主进程的身份运行，没有沙箱</strong> —— 能读能写能上网。写入和正文同一把尺子（本机对端，或部署信任的浏览器会话；再加 same-origin），但"设置页能写的东西现在包括会被执行的代码"这件事要心里有数：别放不信任的脚本，也别把面板开到你不信任的网络里。</p>
+<h2>变量</h2>
+<p>section 文本每次组装做 <code>{{变量}}</code> 插值。<strong>实际值由运行时提供者解析</strong>：本插件注册下面这 8 个，加上 <code>variables</code>、<code>probes</code>、脚本补进来的那些。DSH 自己提供 <code>{{cwd}}</code> / <code>{{provider}}</code> / <code>{{model}}</code>，按当前 agent / 会话解析；它们也列在可用变量目录中，但只有名称和说明，不携带全局固定值。下表列的是本插件的进程级环境事实：</p>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>本机实测值</th>
+<th>来源</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>{{os}}</code></td>
+<td><code>Windows</code></td>
+<td>友好平台名（<code>win32</code> → Windows，<code>darwin</code> → macOS，<code>linux</code> → Linux）</td>
+</tr>
+<tr>
+<td><code>{{os_release}}</code></td>
+<td><code>10.0.19045</code></td>
+<td><code>os.release()</code>：Windows 构建号 / Linux 内核版本 / macOS Darwin 版本</td>
+</tr>
+<tr>
+<td><code>{{platform}}</code></td>
+<td><code>win32</code></td>
+<td><code>process.platform</code></td>
+</tr>
+<tr>
+<td><code>{{arch}}</code></td>
+<td><code>x64</code></td>
+<td><code>process.arch</code></td>
+</tr>
+<tr>
+<td><code>{{home}}</code></td>
+<td><code>C:\Users\Administrator</code></td>
+<td><code>os.homedir()</code></td>
+</tr>
+<tr>
+<td><code>{{dsh_home}}</code></td>
+<td><code>C:\Users\Administrator\.dsh</code></td>
+<td>解析后的 harness home（<code>$DSH_HOME</code>，没设就是 <code>~/.dsh</code>），和正文目录用同一个解析函数</td>
+</tr>
+<tr>
+<td><code>{{user}}</code></td>
+<td><code>Administrator</code></td>
+<td><code>os.userInfo().username</code></td>
+</tr>
+<tr>
+<td><code>{{host}}</code></td>
+<td><code>ADMIN-5MK6PJTEU</code></td>
+<td><code>os.hostname()</code></td>
+</tr>
+</tbody></table>
+<p>都是<strong>进程级事实</strong>，挂载时算一次，运行期间不变（也不会白白让 KV 前缀失效）。正文里用 <code>{{dsh_home}}/profiles/web/vendor/...</code> 这种路径比硬编码 <code>C:\Users\...</code> 更经得起换机器。</p>
+<p><strong>会话目录用 DSH 自带的 <code>{{cwd}}</code>，本插件不注册它</strong>：<code>@deepseek-ai/dsh-agent-loop</code> 注册了 <code>{{cwd}}</code>（取值 <code>context.agent.session.header.cwd</code>，逐会话解析，是这个会话创建时的绝对目录）。本插件不能注册同名变量 —— 注册表同层重名会抛错，跨层则会被作用域层遮蔽 —— 但它完全可以被你的正文引用：写 <code>{{cwd}}</code> 就渲染成当前会话的目录。</p>
+<p><strong>模型名称用 DSH 自带的 <code>{{model}}</code>，提供方用 <code>{{provider}}</code></strong>：初始值来自当前 agent 的 <code>options.model</code> / <code>options.provider</code>；模型选择模块会在每次组装时用当前选择覆盖这两个变量，并让同一步的请求使用同一份选择。因此不同会话互不串用，切换模型在下一模型步骤生效，不需要重启插件，也不会一直显示创建会话时的旧模型。这里显示的是 DSH 选择的<strong>模型 ID 和 provider 路由 ID</strong>，不是界面里的自定义展示名，也不推测网关背后是否另做了模型映射。不要在 <code>config.variables</code> 或变量脚本里把这两个名字写成全局固定值。</p>
+<p>编辑器「可用变量」和变量页会同时列出 <code>{{cwd}}</code> / <code>{{model}}</code> / <code>{{provider}}</code>，标记为 <strong>DSH 原生</strong>，可以点击插入。设置页没有当前 agent 上下文，因此只显示“按当前 agent / 会话动态解析”，不显示某个会话的真实值；<code>/variables</code> 中这些条目没有 <code>value</code> 或 <code>updatedAt</code>，<code>/status.variables</code> 也不会伪造它们的全局值。页面预览只渲染 Markdown，真正插值发生在会话组装时。</p>
+<p><strong>变量目录不是整个运行时注册表</strong>：其他插件可能提供额外名字，目录外的引用只提示“未列入当前变量目录”，不能据此断言组装一定失败。原生引用也不会在组合包导入时被误报为未注册。</p>
+<p><strong>没注册的引用不会炸掉组装</strong>：插件把它转义成字面量并记一条警告（<code>test/guard.mjs</code> 与真实 <code>renderPrompt</code> 交叉验证）。但那一段注入的就真是 <code>{{名字}}</code> 原文 —— 别把它当兜底。</p>
+<h2>升级</h2>
+<h3>从 3.3.2（3.3.3）</h3>
+<ul>
+<li><strong>修 3.3.2 里"信任权威读不到"的问题</strong>：<code>connection</code> 是<strong>兄弟行</strong>（<code>connection</code> 行）提供的服务，cordis 里兄弟行的服务<strong>只有声明了依赖才看得见</strong>。3.3.2 想从 <code>webServer</code> 的作用域里 <code>Reflect.get</code> 摸它，真实组合下必然抛 <code>cannot get property "connection" without inject</code>，被吞成"没挂 Connection"，于是局域网页面照旧全灭（只是报错换成了中文的 <code>no-trust-authority</code>）。现在改成<strong>声明式注入</strong>（<code>ctx.inject(['connection'], …)</code>，和 <code>@lolkda/dsh-web-lan</code> 同一个做法）：没挂 Connection 的组合照旧只服务本机，挂了的就按它的判定走，后挂载也能在下一次请求生效。</li>
+<li>测试里那个假 ctx 之前<strong>太宽松</strong>（它让插件看见了没声明的服务），所以 3.3.2 的测试是绿的、真机是坏的。现在假 ctx 忠实模拟 cordis：兄弟行提供服务、只有声明过的才看得见、没声明的读会抛 —— 这条 bug 现在有测试守着。</li>
+</ul>
+<h3>从 3.3.1（3.3.2）</h3>
+<ul>
+<li><strong>路由不再自己判信任</strong>：原先这条路由要求"对端必须是 loopback"，比宿主还严。装了 <code>@lolkda/dsh-web-lan</code> 之类的部署之后，<code>/api</code> 通、这条路由不通，于是从别的设备打开的设置页<strong>不是只读，而是整个存储不可达</strong> —— 正文目录空白、订阅/变量/组合计数全 0，还把服务端那句英文原文糊在页面上。</li>
+<li>现在本机对端照旧（免会话，<code>Host</code> 仍必须是本机名），<strong>其它对端交给宿主自己的浏览器信任</strong>（和 <code>/api</code> 同一把尺子：部署信任的 Host + 浏览器会话），写操作仍要 same-origin。<strong>部署怎么放宽，插件跟着放宽</strong>，插件不额外加宽也不额外收窄。</li>
+<li>拒绝都带 <code>code</code>（<code>host-not-loopback</code> / <code>no-trust-authority</code> / <code>no-session</code> / <code>host-not-trusted</code>），页面按 code 说中文，不再引用宿主原文。</li>
+<li>客户端<strong>不再捏造事实</strong>：读不到就说"读不到"（原来会捏一个 <code>writable: false</code> 的假 store，把编辑器点亮、让保存必失败），压缩指令读不到时也不再断言"已关闭"。</li>
+<li><strong>没有配置或数据迁移</strong>：路由路径、返回结构、设置字段都没变。</li>
+</ul>
+<h3>从 3.3.0（3.3.1）</h3>
+<ul>
+<li>修复 <code>cwd</code> / <code>model</code> / <code>provider</code> 不显示在可用变量按钮中、被编辑器和组合包导入误报为未注册的问题。</li>
+<li>原生变量标记为「DSH 原生」，目录仅提供名称、作用和引用关系；实际值仍由 DSH 按当前 agent / 会话解析，不重复注册，不缓存成全局值。</li>
+<li>变量目录外的引用改为核对提示；真正的解析校验仍以每次会话组装为准。Markdown 预览不会代入某个会话的实际值。</li>
+<li>本地自定义正文的优先级不变，不会为了显示新变量而覆盖已有内容。</li>
+</ul>
+<h3>从 3.2.3（3.3.0）</h3>
+<ul>
+<li>组合只包含普通提示词，不再提供压缩选择器、绑定字段或压缩正文导出。选择、切换或取消组合不会改动会话的压缩指令。</li>
+<li>压缩提示词只通过会话的「压缩」芯片手动指定；没有选择的新会话使用 DSH 默认指令。</li>
+<li><strong>已保存的会话选择保持不变</strong>。旧数据没有记录压缩选择来自手选还是组合带入，无法可靠区分，所以不会自动清空；不再需要的选择可手动改为「DSH 自带」。</li>
+<li>旧组合的 <code>compaction</code> 字段被忽略，组合写回时不再携带它。旧版组合包仍可读取，其中压缩正文保留为独立条目，不属于导入的组合，也不会自动选中。组合包格式版本仍为 1。</li>
+</ul>
+<h3>从 3.2.2（3.2.3）</h3>
+<ul>
+<li>内置「机器环境」增加<strong>当前会话的工作目录</strong> <code>{{cwd}}</code>，以及<strong>当前 agent 的模型和提供方</strong> <code>{{model}}</code> / <code>{{provider}}</code>。</li>
+<li>复用 DSH 原生变量，每次组装按当前 agent / 会话解析；不同对话互不串用，切换模型后下一模型步骤更新。没有新增全局固定变量或运行依赖。</li>
+<li><strong>无需迁移配置或会话数据</strong>。包内模板更新不会覆盖你已经编辑的「机器环境」正文；已有自定义正文要使用这些信息，手动加入相应变量即可。</li>
+</ul>
+<h3>从 3.2.1（3.2.2）</h3>
+<p>修一个只跟 <strong>DSH 版本</strong>有关的问题：在 <strong>0.1.6-alpha.2</strong> 上，会话输入框那行的「提示词」「压缩」两颗芯片<strong>点不动</strong> —— 菜单照开、组合照列，但每一项都是灰的，点一下什么都不发生。数据面一个字没改。</p>
+<ul>
+<li><strong>原因</strong>：3.2.1 靠读 <code>ctx.sessions.list</code> 快照里的 <code>current</code> 字段知道"现在是哪个会话"。<code>0.1.6-alpha.2</code> 把这个字段删了（<code>0.1.6-alpha.1</code> 还在，<code>0.1.5</code> 也在），于是两颗芯片拿到的一直是 <code>undefined</code>；而它们在 <code>undefined</code> 时把菜单项全标成 <code>disabled</code> —— 表现就是"菜单能开、点不动"。</li>
+<li><strong>现在改成</strong>用<strong>槽自己交出来的那个 id</strong>：<code>conversation.input.right</code> 声明的就是 <code>scope: 'session'</code>，DSH 渲染时会把"这个输入框属于哪个会话"作为 <code>sessionId</code> 属性交给注册方（<code>ui-session</code> 的标准属性，<code>0.1.5</code> 起就有，跨版本稳）。不再依赖任何会变的快照字段。</li>
+<li>顺带两处小改：插件不再注入 <code>sessions</code> 服务（<code>inject</code> 只剩 <code>['slots', 'settingsScope']</code>，<code>dsh.client.inject</code> 里的 <code>@deepseek-ai/dsh-api-session-controller</code> 也一起去掉 —— <strong>这一项是启动时快照，改它要重启 profile</strong>，只改 <code>client/client.js</code> 的内容则靠 HMR）；只读页面（局域网地址打开、设置通道退化为内存模式）下「不用组合（按每条开关）」「不用：DSH 自带的压缩指令」这两项也一起禁用 —— 它们同样是写操作，以前放行只会把一次点击变成一条"切换失败"。</li>
+<li><strong>升级动作：没有。</strong> 会话文件格式、路由、行为、已选的组合全不变。</li>
+</ul>
+<h3>从 3.2.0（3.2.1）</h3>
+<p>只少了一颗按钮，不动数据面：</p>
+<ul>
+<li>编辑页去掉了「转为压缩指令 / 转为普通段落」：一条条目是段落还是压缩指令，在「新增提示词 / 新增压缩指令」建它的时候就定下了，之后不再互相转换。索引里的 <code>kind</code> 仍然是"它是什么"的唯一依据（宿主照旧只读它，从来没写过），所以<strong>已在用的条目、每个会话的选择、组合包格式都不受影响</strong>。</li>
+</ul>
+<h3>从 3.1.x（3.2.0）</h3>
+<p><strong>"哪个组合 / 哪条压缩指令生效"从全机一份改成每个会话各记各的</strong>，落盘在 <code>&lt;storeDir&gt;/sessions/&lt;会话 id&gt;.json</code>。不需要迁移动作：</p>
+<ul>
+<li>升级前是"全局生效"的（<code>activePreset</code> / 根 <code>compaction</code>），升级后这两个字段<strong>不再决定任何事</strong>，只是留着让旧文件还能过校验。所以升级后<strong>所有会话都回到"没选过"</strong>：不用组合（每条自己的开关说了算）、用 DSH 自带的压缩指令。想给某个会话恢复某套组合，在那个会话的「提示词」芯片里选一次就行，一次点击，只影响它。</li>
+<li>新装了本插件但还没打开过任何会话前，行为和以前一样：没选组合时每条自己的开关决定注入，没选压缩指令时压缩调用逐字节不变。</li>
+<li>想在升级前先看看有没有人在用：<code>settings.yaml</code> 里的 <code>activePreset</code> 和根 <code>compaction</code> 就是旧的全局值，照它挨个会话选一次即可。</li>
+<li>组合自身的 <code>compaction</code> 字段（以及包里的 <code>preset.compaction</code>）语义收窄为"<strong>从这个会话的芯片里选这个组合时，顺手带上这条压缩指令</strong>"，不再是"组合生效时它决定用哪条"。</li>
+<li>设置页少了几处入口：组合的「设为当前 / 取消当前」、压缩指令行的「设为当前 / 取消当前」和那颗开关、压缩编辑器里的「设为当前」。理由同上 —— 那些入口只能"替所有会话一起决定"。压缩指令行改成标一句「每会话自选」。</li>
+</ul>
+<h3>从 3.0.x（3.1.0）</h3>
+<p>只加东西，不需要迁移：</p>
+<ul>
+<li>索引多了可选字段 <code>compaction</code>（根字段）和组合上的 <code>compaction</code>、条目上的 <code>kind: 'compaction'</code>。老文档原样生效：没有 <code>compaction</code> 就继续用 DSH 自带的压缩指令，升级前后<strong>压缩调用逐字节相同</strong>。</li>
+<li>组合包格式 <code>dsh-prompt-manager-pack</code> 版本仍是 1：包里多出可选的 <code>preset.compaction</code> 与 <code>entries[].kind</code>，3.0 写的包照样能导入（导入后组合不带压缩指令）。</li>
+<li>宿主多了一个可选依赖 <code>@deepseek-ai/dsh-llm</code>（只用到它的类型；运行时经 <code>ctx.inject(['llm'], …)</code> 取服务，没有它插件照常挂载，只是没有压缩接缝）。</li>
+</ul>
+<h3>从 2.x（3.0.0）</h3>
+<p>只换<strong>对外身份</strong>，不动数据面：</p>
+<table>
+<thead>
+<tr>
+<th>变了</th>
+<th>2.x</th>
+<th>3.0.0</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>npm 包名</td>
+<td><code>dsh-prompt-manager</code> —— 该名字在 npm 与 DSH 商城上已被另一个插件占用</td>
+<td><code>@lolkda/dsh-prompt-manager</code></td>
+</tr>
+<tr>
+<td>客户端插件 id</td>
+<td><code>dsh-prompt-manager</code></td>
+<td><code>@lolkda/dsh-prompt-manager</code>（必须等于包名）</td>
+</tr>
+<tr>
+<td>cordis 插件名 / 挂载行 id</td>
+<td><code>prompt-manager</code></td>
+<td><code>dsh-prompt-manager</code></td>
+</tr>
+<tr>
+<td>HTTP 路由前缀</td>
+<td><code>/prompt-manager</code></td>
+<td><code>/dsh-prompt-manager</code></td>
+</tr>
+<tr>
+<td>安装方式</td>
+<td>手改 profile 的 patch</td>
+<td><code>dsh plugin … add</code> 一条命令</td>
+</tr>
+</tbody></table>
+<p><strong>没变的（所以不用迁移）</strong>：settings 命名空间 <code>prompt-manager:</code>、正文目录 <code>$DSH_HOME/prompt-manager/</code>、section 名 <code>user:prompt-manager:*</code>、组合包格式 <code>dsh-prompt-manager-pack</code>。手写挂载的把 patch 行的 <code>id</code> 改成 <code>dsh-prompt-manager</code>（<code>name</code> 不用动），装包的用新包名重装一次，然后重启 profile、刷新页面。</p>
+<h3>从 1.x（2.0.0）</h3>
+<p>2.0.0 把插件从「CTF 契约注入器」改名成通用的提示词管理器（插件名与仓库名从 <code>dsh-ctf-prompt</code> 换成 <code>dsh-prompt-manager</code>，旧 GitHub 地址 301）。要改三处：挂载行用新的 vendor 路径或包名；<code>settings.yaml</code> 的 <code>ctf-prompt:</code> 段改名成 <code>prompt-manager:</code>（<code>entries</code> 不用动）；<code>$DSH_HOME/ctf-prompt/sections/*.md</code> 挪到 <code>$DSH_HOME/prompt-manager/sections/</code>。同一次改名里 <code>contract</code> / <code>fastctx</code> 两条种子条目移出仓库，变成 <a href="https://github.com/lolkda/dsh-prompt-pack" target="_blank" rel="noopener noreferrer">dsh-prompt-pack</a> 这份可订阅的包。</p>
+<h2>为什么用插件而不是 AGENTS.md</h2>
+<p>DSH 里两种注入方式落在不同通道：</p>
+<table>
+<thead>
+<tr>
+<th>方式</th>
+<th>落点</th>
+<th>声明优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ctx.systemPrompt.section()</code>（本插件）</td>
+<td>system prompt 正文</td>
+<td>高</td>
+</tr>
+<tr>
+<td><code>AGENTS.md</code> / <code>CLAUDE.md</code></td>
+<td>对话里的 user 角色 <code>&lt;system-reminder&gt;</code></td>
+<td>DSH 明确声明「不覆盖 system 指令」</td>
+</tr>
+</tbody></table>
+<p>插件注册的 section 会和 harness identity、persona、工具指引拼成同一段 system prompt，因此权威性和它们完全等同。需要「必须遵守」的契约时用这个；描述性的项目知识仍然放 <code>AGENTS.md</code> 更合适。</p>
+<h2>注意</h2>
+<ul>
+<li><strong>改插件代码要重启，改浏览器半边不用</strong>：DSH 不监听插件模块文件，loader 按 URL 缓存 ESM 模块，所以改完 <code>lib/</code> 必须重启 profile。浏览器半边另有一条 HMR 链路（<code>dsh-client-hmr</code> 轮询已注册 bundle，字节一变就通知页面原地重载）；部署没挂 <code>dsh-client-hmr</code> 时没有这条链路，刷新页面也可能吃到旧副本，只能重启。</li>
+<li><strong><code>dsh.client</code> 那类元数据是启动时快照</strong>：改动 <code>inject</code> 列表或包名要重启 profile；只改 <code>client/client.js</code> 的内容靠 HMR。</li>
+<li><strong>改正文不用重启</strong>：<code>sections/*.md</code> 每次组装现读；订阅正文点过「应用」后也是下一次组装生效。<strong>加变量脚本不用重启</strong>：脚本是数据文件，保存时插件自己注册新变量。</li>
+<li><strong>脚本值不随会话变</strong>：值在挂载或你点「重新测量」时测一次就固定。这既是性能考虑，也是 KV cache 考虑 —— 随每次组装变化的变量会让缓存前缀每步失效。会话相关的事实（模型、cwd 之类）归注册它们的插件所有，不在这个插件里造。</li>
+<li><strong>section 名是派生的</strong>：每条固定 <code>user:prompt-manager:&lt;id&gt;</code>，所以只要 id 不重复就不会和 <code>deployment:persona</code>、<code>harness:identity</code> 这类已注册 section 撞名。</li>
+<li><strong>package.json 的三样必须同时在位</strong>：<code>dsh.client</code>、<code>exports["./client"]</code>、<code>client/client.js</code> —— 只声明浏览器半边而没有 bundle，浏览器插件表挂载时会直接报错。bundle 工厂的 <code>id</code> 必须等于包名。</li>
+<li><strong>KV cache</strong>：section 文本或顺序一变，缓存前缀从该点失效；文本稳定时开销只有一次。某个会话切换组合就是给它换一组 section，所以那个会话每切一次失效一次，别的会话的前缀不受影响 —— 换来的是不用重启、不用重开会话。</li>
+</ul>
+<h2>开发</h2>
+<pre><code class="language-bash">npm install          # 只装开发依赖：typescript 与 DSH 类型包
+npm run build        # src/*.ts -&gt; lib/*.js + lib/types/*.d.ts，并检查 client/client.js
+npm run typecheck    # tsc --noEmit
+npm test             # 先构建，再跑十四个测试（test/*.mjs，各自文件头有说明）
+npm run check:build  # 核对 lib/ 没有未提交的改动（提交前跑）
+npm run check:pack   # 核对 npm 会打包的内容里有 bundle patch、浏览器半边、构建产物
+</code></pre>
+<p><strong>发布由 tag 触发</strong>。<code>.github/workflows/ci.yml</code> 在每次 push / PR 上跑构建、测试、<code>check:build</code>、<code>check:pack</code>（ubuntu + windows 两个平台）；<code>.github/workflows/release.yml</code> 只在 <code>v*</code> tag 上发布 —— 先校验 tag 与 <code>package.json</code> 版本一致，再跑同一套门禁，然后 <code>npm publish --provenance --access public</code> 并开一个 GitHub Release。发一版就三行：</p>
+<pre><code class="language-bash">npm version patch --no-git-tag-version   # 或手改 package.json
+git add -A &amp;&amp; git commit -m "chore: 3.1.0"
+git tag v3.1.0 &amp;&amp; git push origin main --follow-tags
+</code></pre>
+<p>认证走 npm 的 <strong>Trusted Publisher（OIDC）</strong>，仓库里不放任何 npm token —— npm 正在淘汰"绕过 2FA、长期有效"的发布 token，而 OIDC 换来的凭证只活这一次运行，并顺带生成 provenance（包页面上会标出它是从哪个 commit 的哪次运行构建的）。首次要在 npm 包页 Settings → Trusted Publisher 里填 <code>lolkda</code> / <code>dsh-prompt-manager</code> / <code>release.yml</code>。</p>
+<p><code>lib/</code> 与 <code>client/</code> 都提交进仓库，所以克隆下来就能按相对路径挂载，不需要工具链 —— 这正是 <code>check:build</code> 存在的原因：<strong><code>lib/</code> 与 <code>src/</code> 必须同一个提交</strong>，否则挂载的是一份和源码对不上的代码（多出一个 <code>lib/foo.js</code> 而没 <code>git add</code> 时尤其隐蔽，挂载会直接 <code>ERR_MODULE_NOT_FOUND</code>）。改完源码：<code>npm run build &amp;&amp; npm test &amp;&amp; npm run check:build &amp;&amp; git add -A &amp;&amp; git commit</code>。</p>
+<p>清单里<strong>没有生命周期脚本</strong>（<code>prepare</code> 换成了 <code>prepublishOnly</code>）：<code>npm install</code> 不构建、git 安装也不构建，因为 <code>lib/</code>/<code>client/</code> 就是构建产物；<code>prepublishOnly</code> 只在 <code>npm publish</code> 时构建一次。这不是洁癖 —— pnpm 12 会拒绝执行 git 依赖的构建脚本（<code>ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED</code>），留着 <code>prepare</code> 等于让每个用 <code>dsh plugin add github:…</code> 装的人都撞一次墙。</p>
+<h3>包清单契约（照着做就能被 <code>dsh plugin</code> 装、被商城收录）</h3>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>本仓库的值</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>dsh.bundle.patch</code></td>
+<td><code>./cordis.patch.yml</code></td>
+<td>DSH 靠它认「这是个 profile bundle」：装成依赖后<strong>自动</strong>进 <code>dsh.profile.bundles</code> 并应用这一层；商城没有它直接判 <code>SUBMISSION_BUNDLE_MISSING</code></td>
+</tr>
+<tr>
+<td><code>dsh.client</code></td>
+<td><code>{platform: 'web', inject: [...]}</code> + <code>exports["./client"]</code></td>
+<td>浏览器半边；工厂 <code>id</code> 必须等于包名</td>
+</tr>
+<tr>
+<td><code>dsh.compatibility.dsh</code></td>
+<td><code>&gt;=0.1.5-rc.1 &lt;0.2.0</code></td>
+<td>瞄准的 DSH 线。<strong>不写不是"留空"而是被推断</strong>：校验脚本会拿唯一的 <code>@deepseek-ai/dsh-*</code> peer 范围顶上，那是个依赖服务的范围，读起来像"任何 DSH 都行"</td>
+</tr>
+<tr>
+<td><code>dsh.compatibility.dshReleases</code></td>
+<td>官方最新三个版本逐版本声明</td>
+<td>商城上下架依据：至少要有一个精确的 <code>compatible</code>，全 <code>unknown</code> 会被转 <code>unlisted</code></td>
+</tr>
+<tr>
+<td><code>dsh.compatibility.dshOperations</code></td>
+<td>逐版本记 <code>install</code>/<code>start</code>/<code>uninstall</code>/<code>rollback</code> 四项</td>
+<td>商城要的是<strong>真跑过</strong>的操作证据，范围声明不能顶替；只有实测过的版本写 <code>passed</code>，没测的照实写 <code>unknown</code>（实测过程见 <code>docs/marketplace-evidence.md</code>）</td>
+</tr>
+<tr>
+<td><code>engines.node</code></td>
+<td><code>&gt;=22</code></td>
+<td>商城记录成兼容范围</td>
+</tr>
+<tr>
+<td><code>publishConfig.access</code></td>
+<td><code>public</code></td>
+<td>scoped 包默认私有</td>
+</tr>
+<tr>
+<td><code>files</code></td>
+<td>含 <code>lib</code>、<code>client</code>、<code>cordis.patch.yml</code>、<code>environment.md</code></td>
+<td>装出来的包要自洽</td>
+</tr>
+<tr>
+<td>生命周期脚本</td>
+<td>无</td>
+<td>见上</td>
+</tr>
+</tbody></table>
+<p>包内 <code>cordis.patch.yml</code> 只 <code>insert</code> 自己这一行，<code>id</code> 用插件自有、不与别家条目撞的 id（商城会拿它和所有既有条目的 <code>entryIds</code> 比对），并且<strong>不允许</strong>出现 <code>name: '@deepseek-ai/…'</code> 这种冒充官方组件的行。</p>
+<p>装成包来验证（不碰你自己的 profile）：<code>dsh plugin --profile pmcheck add git+file:///D:/path/to/checkout</code>，然后 <code>dsh --profile pmcheck --dump-config</code> 应该能看到 <code>id: prompt-manager</code> 那一行 —— 它是包内 <code>cordis.patch.yml</code> 自己插进去的，<code>pmcheck</code> 的 patch 文件从头到尾没动过。看完 <code>remove</code> 掉、删掉 <code>$DSH_HOME/profiles/pmcheck</code> 即可。</p>
+<h2>License</h2>
+<p>MIT</p>

@@ -313,6 +313,13 @@ process restart, and context compaction that keeps the full archive.
 session that keeps its ancestry, without editing a transcript by hand.
 <code>/status</code> is the session inspector (identity, context window and limits when
 the provider reported them); <code>/session-info</code> and <code>/info</code> are not aliases.</li>
+<li><strong><code>/rewind</code>: undo a turn.</strong> Before the first mutating tool call of a turn,
+keryx snapshots the work tree into a per-session shadow git repository (your
+own <code>.git</code> is never touched). <code>/rewind</code> restores files, the conversation, or
+both to before any of the last 50 turns, with a confirmation and an undo
+point. It covers the project work tree only; <code>shell_exec</code> side effects
+elsewhere are not undone. <code>KERYX_REWIND=off</code> disables it. See <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/rewind.md" target="_blank" rel="noopener noreferrer">the
+guide</a>.</li>
 <li><strong>Agent Client Protocol server.</strong> <code>keryx acp</code> speaks
 <a href="https://agentclientprotocol.com" target="_blank" rel="noopener noreferrer">ACP</a> v1 — newline-delimited JSON-RPC 2.0
 over stdio — so an ACP client (an editor, typically) can launch keryx as a
@@ -419,7 +426,8 @@ launcher or a posture is missing rather than quietly doing less.</li>
 bounded parallel scheduling, and an offline fleet report over a recorded event
 log (<code>keryx agents monitor &lt;events-file&gt;</code>).</li>
 <li><strong>Vendor CLIs as child agents — off by default.</strong> keryx can hand a bounded,
-<strong>read-only</strong> task to a coding CLI you already have installed (<code>codex exec</code>,
+<strong>read-only</strong> task (or, for <code>claude-cli</code> only, a reviewed write — see below)
+to a coding CLI you already have installed (<code>codex exec</code>,
 <code>claude -p</code>, or Google's Antigravity CLI, <code>agy -p --output-format stream-json</code>) and host it as a child of the same harness: a disposable git
 worktree, a stripped environment, a restricted tool roster, the same budget
 ledger and depth caps, and the same completion. <code>keryx agents external list</code>
@@ -436,11 +444,26 @@ real recorded run lives under
 <code>fixtures/external/live/antigravity-cli/2026-09-28/</code>, produced through
 keryx's own <code>agents external run</code>. <code>codex-cli</code>/<code>claude-cli</code> remain verified
 offline against recorded transcripts.</li>
+<li><strong>A write from an external agent you review before it lands.</strong>
+<code>keryx agents external run claude-cli --task "…" --write</code> runs <code>claude</code> in a
+throwaway worktree with only <code>Read Grep Glob Edit Write</code> (no shell, no network,
+no MCP). Its diff is captured, secret-redacted, hashed and stored as a pending
+review — nothing reaches your checkout. <code>keryx agents external review &lt;run-id&gt;</code>
+shows it; <code>apply &lt;run-id&gt;</code> needs a real terminal, shows the diff and asks you to
+type the first 12 hex digits of the patch hash, then creates a NEW local branch
+<code>external/&lt;run-id&gt;</code> with one commit. Your current branch and working tree are
+never touched, nothing is pushed and no pull request is opened;
+<code>discard &lt;run-id&gt;</code> drops it. There is no flag that skips the confirmation. Only
+<code>claude-cli</code> can write (<code>codex-cli</code> and <code>antigravity-cli</code> refuse <code>--write</code>), the
+review is a human reading the diff (a model review is not built), and a full run
+through the installed CLI is not recorded yet. In the TUI: <code>/external-diff</code> and a
+sidebar row while a diff waits. See the <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/external-agent-write.md" target="_blank" rel="noopener noreferrer">external agent write
+guide</a>.</li>
 <li><strong>Completion you can audit.</strong> The completion gate blocks on missing evidence: a
 run that cannot produce the evidence its flow requires does not get to claim
 it finished.</li>
 <li><strong>Four doors.</strong> The CLI (<code>keryx harness run|exec|extension|wave|replay</code>), JSONL/RPC
-and the loopback HTTP entry (<code>keryx serve</code>) share one execution loop; the
+and the loopback HTTP entry (<code>keryx serve</code>, whose <code>ask</code> decisions become approvals answered once over <code>/v1/approvals</code> or <code>keryx approvals</code>) share one execution loop; the
 interactive TUI runs its own on the same tool registry and the same policy.</li>
 <li><strong>A record you can check.</strong> <code>keryx harness run --record</code> writes a run's
 recomputable hash surface and <code>keryx harness replay</code> validates a fixture
@@ -591,7 +614,9 @@ and every <code>docs/requirements/*/</code> package into a disposable intent ind
 at, each with its outcome criterion or <code>not measured — no instrument stated</code>,
 and splits the count three ways: no outcome criterion stated, criterion
 stated but never observed, observed (split by verdict). A criterion goes in
-the <code>## Outcome criteria</code> slot <code>flow init</code> leaves in <code>description.md</code>. An
+the <code>## Outcome criteria</code> slot <code>flow init</code> leaves in <code>description.md</code>; who
+wrote it is recorded as <code>outcomeAuthor</code> (<code>flow init --outcome-author agent|human</code>, <code>flow outcome author &lt;id&gt; agent|human --reason "&lt;why&gt;"</code>), shown
+by <code>product open</code>, and gates nothing. An
 observation is a line starting <code>outcome-observed: &lt;verdict&gt; — &lt;note&gt;</code> in the
 flow's <code>journal.md</code>, with the verdict one of <code>helped</code>, <code>no-effect</code>, <code>harmed</code>,
 <code>inconclusive</code>; a requirements package uses an <code>## Outcome observations</code>
@@ -693,7 +718,10 @@ advertised surface stays a fixed cost instead of growing with your server
 list. Every call goes through the same approval prompt as <code>shell_exec</code>, a
 server is spawned without keryx's own credentials in its environment, and
 <code>--scope project</code> writes a <code>.keryx/mcp-servers.json</code> you can commit while
-<code>keryx mcp disable</code> stays personal to you.</p>
+<code>keryx mcp disable</code> stays personal to you. In <code>--trust</code> mode you can trust one
+exact tool for the session (never one its server marks <code>destructiveHint</code>);
+<code>/mcp trust list</code> and <code>/mcp trust revoke &lt;server__tool&gt;|all</code> show and remove
+those grants.</p>
 <p>Remote servers work the same way — <code>keryx mcp add linear --transport http &lt;url&gt; --header 'Authorization: Bearer ${LINEAR_TOKEN}'</code> — and if that
 variable is unset keryx refuses to dial rather than sending an empty bearer
 and letting the server answer 401. It also refuses to follow a redirect
@@ -886,9 +914,9 @@ untouched.</p>
 </tr>
 </thead>
 <tbody><tr>
-<td>No remote approval transport</td>
-<td>A remote turn whose policy decision is <code>ask</code> ends in a recorded denial</td>
-<td>Run approval-requiring turns locally</td>
+<td>Remote approvals need a tool registry</td>
+<td>The stock <code>keryx serve</code> registers no tools, so it raises no approvals; with a registry an <code>ask</code> becomes a pending approval answered over <code>/v1/approvals</code> or <code>keryx approvals</code></td>
+<td>Run tool-using turns locally</td>
 </tr>
 <tr>
 <td>Domain allowlist is macOS-only</td>
@@ -911,9 +939,9 @@ untouched.</p>
 <td>Everything else runs deterministically offline</td>
 </tr>
 <tr>
-<td>External agents are read-only, and unproven against a live vendor process</td>
-<td>A delegated CLI can read and search but never write; <code>worktree-write</code> is refused with a named reason. The parent gets the child's result and nothing before it — supervision of a running external child is not implemented. Everything is verified offline against recorded transcripts</td>
-<td>Use keryx's own child agents for work that must mutate the tree</td>
+<td>External agents are read-only, except <code>claude-cli</code> write mode, which has no full live run recorded</td>
+<td>A delegated CLI can read and search; only <code>claude-cli</code> can write, and only as a stored diff a human reviews (<code>keryx agents external review|apply|discard</code>) that lands as a new local branch — never on your checkout, never pushed. <code>codex-cli</code> and <code>antigravity-cli</code> refuse <code>--write</code> ("write mode is claude-only in this release"). A model review is not built. The parent gets the child's result and nothing before it — supervision of a running external child is not implemented. <code>claude</code> and <code>agy</code> read-only runs are live-verified; a write run through the installed CLI is not yet</td>
+<td>Use keryx's own child agents for work that must mutate the tree, or the <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/external-agent-write.md" target="_blank" rel="noopener noreferrer">external agent write guide</a> for a reviewed <code>claude-cli</code> diff</td>
 </tr>
 <tr>
 <td>A dispatched <code>flow-next</code> task is "done" by checks, not review</td>
@@ -979,6 +1007,24 @@ fails on any detector breaching its committed false-negative threshold — from 
 repository checkout, since the evaluation corpus is not shipped in the npm
 package. See
 <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/run-in-ci.md" target="_blank" rel="noopener noreferrer">run keryx in CI</a>.</p>
+<h3>Review bot on pull requests</h3>
+<p>A GitHub Action reviews each same-repository pull request, has a second model
+turn try to refute every finding, and posts one review with inline comments:</p>
+<pre><code class="language-yaml">- uses: MrCipherSmith/keryx@main
+  with:
+    model-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+</code></pre>
+<p>Set up the secret and copy <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/examples/review-bot.yml" target="_blank" rel="noopener noreferrer"><code>docs/examples/review-bot.yml</code></a>
+(<code>permissions: contents: read, pull-requests: write</code>, trigger <code>pull_request</code>, never
+<code>pull_request_target</code>). Fork pull requests are refused before any model call.
+<code>keryx review bot post</code> is a dry run until you pass <code>--post</code>; the action's
+<code>post: "false"</code> does the same. A run reviews at most <code>max-diff-bytes</code> of the diff
+(default 200,000 bytes) with one reviewer turn plus one verifier turn per finding.
+<code>keryx review metrics</code> (and <code>/reviews</code> in the shell) reports findings acted on,
+dismissed, precision and resolved-before-merge; a ratio with no data prints
+<code>n/a</code>. Metrics need the managed review packages on the machine where you run
+<code>keryx review complete</code>; the Action's runner keeps them only for the job and
+nothing uploads them. See <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/review-as-a-pr-bot.md" target="_blank" rel="noopener noreferrer">review as a pull request bot</a>.</p>
 <h2>Documentation</h2>
 <p>Full documentation site: <strong><a href="https://mrciphersmith.github.io/keryx/" target="_blank" rel="noopener noreferrer">https://mrciphersmith.github.io/keryx/</a></strong></p>
 <ul>
@@ -991,6 +1037,7 @@ package. See
 <li><strong><a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/workspace-and-lifecycle.md" target="_blank" rel="noopener noreferrer">Workspace &amp; lifecycle</a></strong> — the <code>.metaproject/</code> contract and <code>init</code>/<code>update</code> lifecycle.</li>
 <li><strong><a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/limitations.md" target="_blank" rel="noopener noreferrer">Limitations</a></strong> — known gaps, platform caveats, and what to do instead.</li>
 <li><strong><a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/shared-agent-context.md" target="_blank" rel="noopener noreferrer">Shared Agent Context</a></strong> <em>(experimental)</em> — local-first work-context layer: FWK overview, proposals, runtime policy guard.</li>
+<li><strong><a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/review-as-a-pr-bot.md" target="_blank" rel="noopener noreferrer">Review as a pull request bot</a></strong> — the GitHub Action, secrets, the same-repository rule, dry run, cost, and the precision and resolved-before-merge metrics.</li>
 <li><strong><a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/permission-modes.md" target="_blank" rel="noopener noreferrer">Permission modes</a></strong> — <code>ask</code>/<code>trust</code>/<code>auto</code> for the interactive shell: how to set them and exactly where the per-project default is stored.</li>
 <li><strong><a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">Changelog</a></strong> — what has landed since <code>v0.1.0</code>.</li>
 </ul>

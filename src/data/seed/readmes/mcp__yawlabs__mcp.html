@@ -1,0 +1,443 @@
+<h1>@yawlabs/mcp</h1>
+<p><strong>One install. Every MCP server. Managed from one place.</strong></p>
+<p>Yaw MCP (the <code>yaw-mcp</code> CLI) is an MCP server that fronts every other MCP server you use. Point each AI client (Claude Code, Claude Desktop, Cursor, VS Code) at it once, and your servers load lazily from a single connection instead of a hand-edited <code>mcpServers</code> block per client.</p>
+<p>It runs entirely on your machine. No account, no sign-in, no telemetry -- your servers live in a local <code>bundles.json</code> and your credentials in a local encrypted vault. Running as an MCP server, its only outbound calls are two background npm checks: one for its own updates (<code>YAW_MCP_AUTO_UPGRADE=0</code> to disable) and, if you have run <code>yaw-mcp sidecars install</code>, a once-a-day check that the managed sidecar packages are current (<code>YAW_MCP_SIDECAR_REFRESH=0</code> to disable). <code>yaw-mcp add</code> fetches the public server catalog on demand. Nothing else leaves your machine.</p>
+<p>It earns its keep when you hit any of these:</p>
+<ul>
+<li><strong>More than one client.</strong> Define a server once in <code>bundles.json</code>; every client on the machine picks it up. No copy-pasting the same JSON into four config files. (Sync <code>bundles.json</code> across machines with your dotfiles if you want it everywhere.)</li>
+<li><strong>Tool-context bloat.</strong> The <code>dispatch</code> meta-tool ranks your servers against the task and loads only the top match. A 30-server setup keeps a handful of tools in context at a time instead of hundreds.</li>
+<li><strong>Tokens you'd rather not leave in disk configs.</strong> Credentials live encrypted in a local vault and inject at spawn time. Rotate once; every client picks up the new value.</li>
+<li><strong>A trust signal before you activate.</strong> Every scored server shows an A-F compliance grade. Set <code>YAW_MCP_MIN_COMPLIANCE=B</code> to refuse anything below.</li>
+</ul>
+<p>One client, a few servers? <code>claude mcp add</code> is fine -- yaw-mcp's value shows up when that setup stops scaling.</p>
+<h2>How it works</h2>
+<pre><code>Your MCP client (Claude Code, Cursor, ...)
+    |
+    |  single stdio connection
+    v
+@yawlabs/mcp  --lazy load--&gt;  GitHub | Slack | Stripe | ...  (your servers)
+</code></pre>
+<ol>
+<li>Add servers with <code>yaw-mcp add &lt;slug&gt;</code> (or edit <code>~/.yaw-mcp/bundles.json</code> directly).</li>
+<li>yaw-mcp reads that file on startup.</li>
+<li>The model uses a handful of <strong>meta-tools</strong> to control which servers' tools are in context. Adding a server puts it on your list; loading it brings its tools into the session.</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Meta-tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>mcp_connect_dispatch</code></td>
+<td>Describe a task in plain English; picks the best server, loads its tools, exposes them in one call. The fast path.</td>
+</tr>
+<tr>
+<td><code>mcp_connect_discover</code></td>
+<td>List available servers, optionally ranked by a context string. Auto-loads the top match when one clearly wins. Tool-name lists are capped at five per server; pass <code>server</code> for one server's full list.</td>
+</tr>
+<tr>
+<td><code>mcp_connect_activate</code> / <code>deactivate</code></td>
+<td>Load / unload specific servers by namespace.</td>
+</tr>
+<tr>
+<td><code>mcp_connect_read_tool</code></td>
+<td>Return one tool's schema without loading its server.</td>
+</tr>
+<tr>
+<td><code>mcp_connect_exec</code></td>
+<td>Run a short declarative pipeline of tool calls in one round-trip (<code>{"$ref": "&lt;step&gt;[.path]"}</code> splices prior outputs; no eval, max 16 steps).</td>
+</tr>
+<tr>
+<td><code>mcp_connect_bundles</code></td>
+<td>List curated multi-server presets (PR review, DevOps incident, ...) and match them against your config.</td>
+</tr>
+<tr>
+<td><code>mcp_connect_suggest</code></td>
+<td>Surface recurring multi-server workflows learned from usage, with a ready-to-run <code>activate</code> call.</td>
+</tr>
+<tr>
+<td><code>mcp_connect_secrets</code></td>
+<td>Show which local-vault secrets each server's <code>${secret:NAME}</code> refs resolve to -- by name only, never a value.</td>
+</tr>
+<tr>
+<td><code>mcp_connect_health</code></td>
+<td>Call counts, error rates, and latency per loaded server.</td>
+</tr>
+</tbody></table>
+<p><strong>What <code>tools/list</code> carries.</strong> By default (<code>gateway</code>) it is the meta-tools above plus the tools of the servers loaded <em>this session</em> -- never the whole catalog, which on a large install ran to ~27,000 tokens before the first prompt. The routing advice (dispatch for a concrete task, discover to browse, exec for a known chain, loading is per session) is sent once as the server's MCP <code>instructions</code>, which Claude Code puts in the system prompt, so the per-tool descriptions stay short. A client that cannot defer tool descriptions and inlines every listed tool into every request gets <code>lite</code> instead: only <code>mcp_connect_exec</code>, <code>mcp_connect_find_tool</code> and <code>mcp_connect_read_tool</code> are listed, which between them find, describe and call any installed tool (exec loads a cached server on first use). yaw-mcp picks <code>lite</code> on its own when the client identifies itself as <code>typed-cli</code> in the MCP <code>initialize</code> handshake; the unlisted meta-tools stay callable by name. <code>YAW_MCP_TOOL_EXPOSURE</code> overrides either default.</p>
+<p><strong>Ranking.</strong> dispatch/discover rank with BM25, computed locally. On top of the ranker, three signals adjust scores:</p>
+<ul>
+<li><strong>Health-aware</strong> -- servers that recently failed or error often get down-ranked (never boosted above raw).</li>
+<li><strong>Learning</strong> -- servers that succeeded before get a small nudge (+10% max), persisted across restarts.</li>
+<li><strong>Sampling tiebreak</strong> -- when the top two are within 10% and your client supports <a href="https://modelcontextprotocol.io/specification/server/sampling" target="_blank" rel="noopener noreferrer">MCP sampling</a>, yaw-mcp asks your own model to pick (no extra provider key or cost).</li>
+</ul>
+<p>Servers auto-unload after ~10 tool calls to other servers, so context stays clean even if you forget. The threshold is adaptive per namespace (<code>[5, 50]</code>): bursty servers get more patience, long-idle ones unload at the baseline. A server that is expensive to <em>start</em> can opt out entirely with <code>yaw-mcp set &lt;server&gt; pinned=true</code> -- it then stays loaded however idle it gets, and <code>mcp_connect_health</code> still reports how idle that is.</p>
+<h2>Install</h2>
+<h3>One command (recommended)</h3>
+<pre><code class="language-bash">npx -y @yawlabs/mcp@latest install &lt;claude-code|claude-desktop|cursor|vscode|windsurf|gemini-cli|zed|cline|continue|codex-cli|typed&gt;
+</code></pre>
+<p>This edits the chosen client's config (correct path + JSON shape for your OS) to launch yaw-mcp. On Windows it wraps <code>npx</code> in <code>cmd /c</code> (without which MCP clients hit <code>ENOENT</code> on the <code>npx.cmd</code> shim), except for Continue, Codex CLI and typed, which resolve that shim themselves and get a bare <code>npx</code>. Run it once per client. <code>mcp</code> is accepted too, as another name for Claude Code's project scope (<code>&lt;project&gt;/.mcp.json</code>).</p>
+<p><code>install typed</code> writes typed's own <code>~/.config/typed/mcp.json</code> (the same path on every OS, whatever <code>CLAUDE_CONFIG_DIR</code> says), which typed ranks above the user-scope files it shares with Claude Code -- so it wins over an <code>mcp</code> entry Yaw Terminal manages in <code>~/.claude.json</code>, while a project's <code>.mcp.json</code> still wins over it. On a Yaw Terminal machine that is a trade when install writes an <code>npx</code> entry (no oam, or no global install to point it at): the entry replaces Yaw Terminal's local launch for typed, and npx resolves <code>@latest</code> on every typed start, which is slow and can exceed typed's MCP connect timeout. Install says so when it happens; <code>npm i -g @yawlabs/mcp</code> with oam installed, then a re-run, writes a fast absolute-path entry instead, or raise <code>MCP_TIMEOUT</code>. <strong>It needs a typed CLI newer than 1.5.0</strong> -- typed 1.5.0 and older do not read <code>~/.config/typed/mcp.json</code> at all; with one of those, use <code>install claude-code</code>, whose files typed also reads. <code>install typed</code> checks the typed CLI bundle on this machine (<code>~/.config/typed/typed-cli/cli.mjs</code>, or <code>$TYPED_CLI_BUNDLE</code>) and warns when it cannot read the file yet, naming <code>typed update</code>, which installs the newest typed release. Like <code>install claude-code</code>, it adds <code>mcp__mcp__*</code> to <code>permissions.allow</code> in Claude Code's user <code>settings.json</code>, which typed reads for permissions too -- <code>$CLAUDE_CONFIG_DIR/settings.json</code> when that is set, so outside a Yaw Mode pane the grant is scoped to that config dir while typed's <code>mcp.json</code> is not, and install says so. The two clients share that one grant, so <code>uninstall</code> of either keeps it while the other still has its entry (or typed still loads an <code>mcp</code> entry from another file it reads), and says so. In a Yaw Mode pane, where <code>CLAUDE_CONFIG_DIR</code> is a per-pane overlay (a <code>yaw-mode-*</code> directory) whose <code>settings.json</code> is discarded with the pane, install and uninstall of either client at user scope add and remove the grant in <code>~/.claude/settings.json</code> too (augment). In a fresh pane, which keeps nothing of its overlay, install says what goes with the pane -- the grant at user scope, and for <code>install claude-code</code> its entry in the overlay's <code>.claude.json</code> as well (at local scope, that entry alone) -- and to install from a normal shell to keep it.</p>
+<p><code>install codex-cli</code> writes an <code>[mcp_servers.mcp]</code> table into Codex's <code>config.toml</code> (<code>$CODEX_HOME/config.toml</code>, else <code>~/.codex/config.toml</code>; the project's <code>.codex/config.toml</code> at <code>--scope project</code>) and, when the file does not set it, adds <code>mcp_optional_startup_grace_ms = 0</code> on one line above the first table: without it, Codex 0.151 and later give optional MCP servers one shared second to start and leave a slower yaw-mcp's tools out of the whole session. The key is add-only -- a value you set yourself is left alone, and install says so -- and <code>--dry-run</code> shows the line before anything is written. A re-run over an entry that is already correct adds it to a file set up before install did; <code>install --list</code> marks such a row <code>installed (setting missing)</code>, and <code>doctor</code> names the run. <code>uninstall codex-cli</code> leaves the key in place.</p>
+<p>Claude Desktop on Linux is not supported yet. Anthropic ships a Linux beta but has not documented where it reads <code>claude_desktop_config.json</code>, so <code>install claude-desktop</code> refuses on Linux rather than write a guessed path, and <code>--all</code> skips it. Add the entry by hand, or use another client.</p>
+<p>Useful flags:</p>
+<ul>
+<li><code>--scope user|project|local</code> -- which file to write. Claude Code supports user, project and local; Cursor, VS Code, Gemini CLI, Zed, Continue and Codex CLI support user and project; Claude Desktop, Windsurf, Cline and typed are user-only.</li>
+<li><code>--dry-run</code> -- print what would be added (never the rest of the file) and exit without writing.</li>
+<li><code>--repair</code> / <code>--force</code> / <code>--skip</code> -- what to do about an existing <code>mcp</code> entry that differs from the one install writes. <code>--repair</code> brings it up to date and keeps the string values in its <code>env</code> block (where the <a href="#local-secret-vault" target="_blank" rel="noopener noreferrer">secret vault</a> has you put <code>YAW_MCP_VAULT_PASSPHRASE</code>); on an entry that already matches it does what a plain re-run does -- nothing, unless the file lacks a top-level setting install adds (Codex CLI's startup grace, above), which it writes. <code>--force</code> overwrites it outright, <code>env</code> included, naming each key it drops. <code>--skip</code> leaves it, and the rest of the file, untouched. Without one of them install prompts on a TTY; off a TTY it shows what differs and refuses with exit 2 (a real failure, such as a malformed config, exits 1). Under <code>--all</code> the run exits 2 when every client that did not succeed was refused this way, and 1 if any one failed.</li>
+</ul>
+<p>After it writes, install reports two things it did <strong>not</strong> change. First, how many servers <code>~/.yaw-mcp/bundles.json</code> gives yaw-mcp to serve -- and when that is none, the <code>yaw-mcp add &lt;slug&gt;</code> step still to take -- though no longer <em>before</em> a restart, since yaw-mcp re-reads that file while the session runs and picks up a server added afterwards on the next <code>mcp_connect_*</code> call. Second, how many other MCP servers were already configured in the client file it just edited; those keep launching directly from the client, and installing yaw-mcp does not move them behind the broker. The count is a number, never the server names. Under <code>--all</code> the bundles.json line prints once for the run, while the per-client count prints under each client.</p>
+<p>Or work across every client at once:</p>
+<pre><code class="language-bash">yaw-mcp install --list   # detect clients + show install state (read-only)
+yaw-mcp install --all    # install into every client yaw-mcp supports on this OS
+</code></pre>
+<blockquote>
+<p>The launch entry is keyed <code>"mcp"</code>, so its tools surface under the <code>mcp__mcp__</code> namespace. Installs made before the rename used <code>"mcp.hosting"</code> / <code>"yaw-mcp"</code>; <code>yaw-mcp install</code> detects and migrates those.</p>
+</blockquote>
+<h3>Manual install</h3>
+<p>The JSON shape (top-level <code>mcpServers</code>, except VS Code uses <code>servers</code> in <code>.vscode/mcp.json</code>):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "mcp": { "command": "npx", "args": ["-y", "@yawlabs/mcp@latest"] }
+  }
+}
+</code></pre>
+<p>On <strong>Windows</strong>, use <code>"command": "cmd", "args": ["/c", "npx", "-y", "@yawlabs/mcp@latest"]</code>.</p>
+<h3>Running yaw-mcp on oam</h3>
+<p>yaw-mcp can host itself on <a href="https://oamjs.org" target="_blank" rel="noopener noreferrer">oam</a>, a Rust+V8 JavaScript runtime built for this shape of workload — short-lived, mostly-idle MCP processes.</p>
+<p><code>yaw-mcp install</code> writes the oam entry for you when two things are true:</p>
+<ul>
+<li><strong>oam is installed</strong> — <code>curl -fsSL https://oamjs.org/install.sh | sh</code>, or <code>irm https://oamjs.org/install.ps1 | iex</code> on Windows. Those install the current release, which always satisfies the minimum. An older build is refused rather than silently used: the minimum is the last oam release yaw-mcp's own check (<code>npm run verify:oam-floor</code> in the repo) hosted a real MCP server on -- not the latest release, so a new oam release does not by itself raise it -- and nothing older than that is supported. <code>yaw-mcp doctor</code> prints the exact minimum under OAM RUNTIME, and <code>oam self-update</code> is the fix when yours is below it.</li>
+<li><strong>yaw-mcp is durably installed</strong> — <code>npm i -g @yawlabs/mcp</code>, or a project <code>node_modules</code>. A path in the npx cache is deliberately not used: that directory is evictable, and an entry pointing into it breaks the moment npm cleans it.</li>
+</ul>
+<p>Neither is required, and nothing breaks without them — the npx entry is written as before, and install tells you which one you got. Afterwards <code>yaw-mcp doctor</code> marks a client whose entry launches the broker on oam with <code>(runs on oam)</code>, and its OAM RUNTIME section reports the binary, version, and minimum.</p>
+<p>The entry it writes:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "mcp": { "command": "/path/to/oam", "args": ["run", "--no-check", "/path/to/@yawlabs/mcp/dist/index.js"] }
+  }
+}
+</code></pre>
+<p>Two consequences worth knowing. It pins a path, so it does not re-resolve <code>@latest</code> on every spawn the way the npx entry does — <code>npm update -g</code> still picks up new versions, because it rewrites that path in place, and an app upgrade that deletes the directory the path named (a scoop <code>current</code> junction is used instead, where one exists) is repaired by the broker's startup sweep or by <code>yaw-mcp heal</code>. And this setting is about the <strong>broker itself</strong>; which runtime the <em>sidecars</em> get is decided separately, below.</p>
+<h3>Which runtime the sidecars get</h3>
+<p>When oam is installed and meets the minimum, yaw-mcp hosts the MCP servers it spawns on it. Nothing needs configuring — install oam and the sidecars move over. Without oam they run on node/npx exactly as before, and no warning is printed, because nothing was asked for.</p>
+<p>Only Node-based launches are rewritten. A server whose command is <code>docker</code>, <code>uvx</code>, or a native binary is left alone, as is an npx package that cannot be found on disk.</p>
+<p>Two more npx shapes stay on npx, because npx re-resolves its spec against the registry while <code>oam run &lt;entry&gt;</code> just runs whatever sits at the path it is handed. A spec that <strong>constrains the version</strong> keeps npx unless the copy on disk can be shown to satisfy it — an exact pin moves to oam only when the resolved copy declares that same version, and a range or partial (<code>^1.2.3</code>, <code>~1.2</code>, <code>1.x</code>) always keeps npx, since honouring one would mean evaluating semver ranges against the tree. A spec naming a <strong>git or path target</strong> (<code>npx -y ./local-server</code>, <code>github:owner/repo</code>) keeps npx too: it is not a package name, so there is nothing to look it up as. A plain <code>@latest</code>, or no version at all, is the everyday case and does move over.</p>
+<p><strong>One tradeoff worth knowing.</strong> <code>npx -y &lt;pkg&gt;@latest</code> re-resolves that tag on every spawn, so those servers update themselves. <code>oam run &lt;entry&gt;</code> cannot — oam has no fetch-on-demand, so it runs the copy already on disk, and because npx then stops running for that server, the copy stops being refreshed. The version pins itself until something fetches a newer one. yaw-mcp logs the resolved version once per package at startup so this is visible rather than silent, and picks the newest copy present.</p>
+<h3>Installing the servers durably</h3>
+<pre><code>yaw-mcp sidecars install
+</code></pre>
+<p>Installs the npx-launched servers from your <code>bundles.json</code> into <code>~/.yaw-mcp/sidecars</code>, and yaw-mcp resolves from there in preference to npm's npx cache. That gives one copy per package at a version that is written down, instead of whichever of the several copies in the cache happened to be newest — and re-running the command is how you move them forward.</p>
+<p>It is not automatic and nothing requires it. Acquiring packages means network and minutes, and the connect path is what an MCP client blocks on while waiting for its tools; a first connect that silently turned into an npm install would be the wrong trade. Without it, resolution falls back to the npx cache exactly as before.</p>
+<p>Only npx servers naming a <strong>registry package</strong> are installed. An npx launch pointing at a git or path target — <code>npx -y github:owner/repo</code>, <code>npx -y ./local-server</code> — is skipped and named in the output; those keep using npx, since resolving them would mean fetching the target just to learn the name it declares. Two servers pinning the same package at different versions is also reported: one flat <code>node_modules</code> holds a single version, so the command tells you which one it installed rather than letting the loser start on something it did not ask for.</p>
+<p><code>yaw-mcp doctor</code> prints the installed version of each configured package under OAM RUNTIME, so a pinned or missing one is visible. To keep npx's self-updating behavior for a particular server instead, set <code>runtime: "node"</code> on it.</p>
+<p><code>--json</code> emits the same keys on every run — <code>root</code>, <code>installed</code>, <code>reason</code>, <code>error</code>, <code>conflicts</code>, <code>skipped</code> — so a script can read the result without first working out which path it took.</p>
+<p>To override, in <code>~/.yaw-mcp/bundles.json</code>:</p>
+<pre><code class="language-json">{
+  "defaultRuntime": "node",
+  "servers": [{ "namespace": "postgres", "runtime": "oam" }]
+}
+</code></pre>
+<ul>
+<li><code>runtime</code> on a server wins over everything, and <code>"node"</code> is the per-server escape hatch.</li>
+<li><code>defaultRuntime</code> at the top level sets the machine-wide default; <code>"node"</code> opts the whole machine out.</li>
+<li><code>YAW_MCP_DEFAULT_RUNTIME=node|oam</code> overrides <code>defaultRuntime</code> for one process.</li>
+</ul>
+<p><code>yaw-mcp doctor</code> prints the resolved runtime for every configured server, with the reason — including the cases where oam was wanted but not used, so a silent fallback is visible rather than guessed at.</p>
+<h2>CLI</h2>
+<p><code>yaw-mcp</code> with no subcommand runs as the MCP server, serving the servers in your <code>~/.yaw-mcp/bundles.json</code>. Most read-only subcommands accept <code>--json</code>. Run <code>yaw-mcp &lt;cmd&gt; --help</code> for per-command flags.</p>
+<p><strong>Setup</strong></p>
+<pre><code class="language-bash">yaw-mcp install &lt;client&gt;       # connect a client to yaw-mcp (see above)
+yaw-mcp uninstall &lt;client&gt;     # unwire a client; leaves servers in bundles.json untouched
+yaw-mcp doctor [--json]        # diagnose config, clients, learning, reliability, upgrade
+yaw-mcp status [--json]        # read-only snapshot of loaded servers, activity, vault state, and call counts
+</code></pre>
+<p><strong>Servers</strong> -- managed in <code>~/.yaw-mcp/bundles.json</code>, browse the catalog at <a href="https://yaw.sh/mcp/catalog/" target="_blank" rel="noopener noreferrer">yaw.sh/mcp/catalog</a>:</p>
+<pre><code class="language-bash">yaw-mcp add &lt;slug&gt; [--env KEY=value] [--dry-run]   # add a catalog server to bundles.json
+yaw-mcp add &lt;name&gt; --command "npx -y my-mcp"       # ...or define a local server yourself
+yaw-mcp add &lt;name&gt; --url https://host/mcp          # ...or a remote one
+yaw-mcp import &lt;client&gt; [--dry-run]                # adopt the servers a client already has
+yaw-mcp remove &lt;slug-or-namespace-or-name&gt;         # drop a server
+yaw-mcp list [--json]                              # list configured servers with their cached compliance grade
+yaw-mcp try &lt;slug&gt; [--client &lt;name&gt;] [--ttl 1h]    # wire a one-off trial straight into your client (expires)
+yaw-mcp try-cleanup &lt;slug&gt;                          # remove a trial early (doctor GCs expired ones)
+yaw-mcp trust [--yes|--list|--revoke [&lt;path&gt;]]     # approve the project-local .yaw-mcp/bundles.json found from cwd so yaw-mcp loads it (pinned to its exact contents)
+</code></pre>
+<p><code>add</code> is not <code>install</code>: <code>install &lt;client&gt;</code> connects an AI client to yaw-mcp; <code>add &lt;slug&gt;</code> adds an MCP server to yaw-mcp itself. <code>try</code> points the client directly at the upstream server, bypassing yaw-mcp, so you can evaluate it in isolation. <code>try-cleanup</code>, and <code>doctor</code> for an expired trial, take the entry back out of the client's config, Codex CLI's <code>config.toml</code> included; when <code>try-cleanup</code> cannot, it keeps the trial and exits 1 rather than report a cleanup that did not happen. A <code>--env</code> value lands in your shell history and process argv like any argument. With <code>add</code> it is stored in plain text in <code>bundles.json</code> (written owner-only, mode <code>0600</code>, on macOS and Linux; on Windows that mode is not applied -- Node maps it to the read-only attribute only -- so the file is protected by the NTFS permissions it inherits from your user profile) -- keep real credentials in the <a href="#local-secret-vault" target="_blank" rel="noopener noreferrer">local secret vault</a> and pass <code>--env KEY='${secret:NAME}'</code> instead (the single quotes are for bash, zsh and PowerShell; in cmd.exe pass it unquoted, since <code>$</code> is not special there and cmd.exe would keep the quotes as part of the value). A <code>missing</code> row in <code>yaw-mcp secrets audit</code> whose name starts with <code>&lt;malformed ref&gt;</code> is a reference that did not parse -- fix the typo in <code>bundles.json</code>. With <code>try</code> the value is written inline, in plain text, into the client's own config for the trial's lifetime, and is not vault-resolved (the client spawns the server, not yaw-mcp).</p>
+<p><strong>Servers you already have.</strong> If a client is already configured with MCP servers, <code>yaw-mcp import &lt;client&gt;</code> reads that client's own config and adds every server in it to your <code>bundles.json</code> -- command, args, url, headers and env as they stand, so the imported server starts exactly as it did before. yaw-mcp's own entry is never imported. A server <code>bundles.json</code> already has is merged, the client's copy winning; when that would change the stored entry, <code>import</code> shows what differs and asks first on a terminal (<code>[o]verwrite</code>, <code>[s]kip</code> or <code>[a]bort</code>, and a bare Enter skips that server), and off one it writes nothing and exits 2 unless you pass <code>--force</code>. <code>--dry-run</code> shows what would come across without writing anything, and with <code>--remove-originals</code> it also lists the client entries a real run would remove, or says why it would remove none.</p>
+<p>After an import the client is <em>still</em> launching those servers itself, so each one would run twice -- once directly, once through yaw-mcp. <code>import</code> says so and offers to remove the originals from the client config: on a terminal it asks (a bare Enter is no), and off one it leaves them alone and names the <code>--remove-originals</code> flag. It refuses to remove them at all if the client has no yaw-mcp entry, since that entry is the only way it would still reach them -- run <code>yaw-mcp install &lt;client&gt;</code> first.</p>
+<p>An imported entry carries no catalog slug, so its handles are its namespace and its <strong>name</strong> (the key the client used). <code>remove</code>, <code>set</code>, <code>enable</code> and <code>disable</code> all accept either: <code>yaw-mcp remove "GitHub Copilot"</code> works as well as <code>yaw-mcp remove githubcopilot</code>.</p>
+<p>A credential that was sitting in the client config comes across as a plain value in <code>bundles.json</code> (file mode <code>0600</code>); the import prints the key names -- never the values -- and points at <code>yaw-mcp secrets set</code> for moving them into the <a href="#local-secret-vault" target="_blank" rel="noopener noreferrer">vault</a>.</p>
+<p><strong>Servers the catalog does not list.</strong> The catalog is a curated front door, not the only one. Pass <code>--command</code> for a local (stdio) server or <code>--url</code> for a remote (HTTP) one, and <code>add</code> defines the server from your flags instead of looking up a slug -- no catalog fetch, so this also works offline:</p>
+<pre><code class="language-bash">yaw-mcp add mytool --command "npx -y @scope/my-mcp@latest" --description "what it is for"
+yaw-mcp add linear --url https://mcp.linear.app/mcp \
+  --header 'Authorization: Bearer ${secret:linear}'
+</code></pre>
+<p><code>--header</code> is repeatable and remote-only: a remote server spawns no process, so <code>--env</code> cannot reach it (see <a href="#remote-servers-headers" target="_blank" rel="noopener noreferrer"><code>headers</code></a>). <code>--transport sse</code> selects SSE over the streamable-HTTP default. <code>--description</code> is worth setting either way, since dispatch ranks servers on it.</p>
+<p>A project-local <code>.yaw-mcp/bundles.json</code> (committed with a repo) is ignored until <code>yaw-mcp trust</code> approves it, since every server in it is a command yaw-mcp spawns as you. Approval is pinned to the file's exact contents, so an edited file needs approving again; <code>--list</code> shows approvals (stale ones flagged) and <code>--revoke</code> withdraws one. Your own <code>~/.yaw-mcp/bundles.json</code> is never gated.</p>
+<p><strong>Calling a server from a shell</strong> -- for a git hook, a Makefile, a cron job or an agent loop that does not speak MCP:</p>
+<pre><code class="language-bash">yaw-mcp call &lt;namespace&gt; &lt;tool&gt; '{"key":"value"}'   # call one tool, print the result
+yaw-mcp call github search --args-stdin &lt; args.json # ...or pipe the argument object in
+yaw-mcp call github search --json                   # the raw MCP envelope, not just its text
+</code></pre>
+<p>One call, one spawn: the server is started for the call and torn down again, so nothing stays loaded and two calls are two spawns (for a batch, the <code>mcp_connect_exec</code> pipeline is the right tool). The tool's text goes to stdout verbatim so it can be piped; diagnostics go to stderr. Exit <code>0</code> when the tool answered, <code>1</code> when it could not be called or answered with an error, <code>2</code> when your own config refused the call.</p>
+<p>It gets the same policy a proxied call gets, and gets it <em>before</em> the server is spawned: a disabled server, one your project profile blocks, one below <code>YAW_MCP_MIN_COMPLIANCE</code>, and any tool on the <a href="#blocking-individual-tools" target="_blank" rel="noopener noreferrer"><code>blockedTools</code></a> deny list are all refused. A <code>${secret:NAME}</code> in the server's env resolves from the vault exactly as it does for the broker.</p>
+<p><strong>Inspection &amp; maintenance</strong></p>
+<pre><code class="language-bash">yaw-mcp bundles [list|match] [--json]  # browse curated bundles; match partitions against your enabled servers
+yaw-mcp upgrade [--run] [--json]       # show (or run) the command that bumps @yawlabs/mcp
+yaw-mcp heal [--dry-run] [--json]      # re-point yaw-mcp client entries whose launch file an app upgrade deleted (runs at startup too)
+yaw-mcp reset-learning                 # clear cross-session learning (~/.yaw-mcp/state.json)
+yaw-mcp completion &lt;bash|zsh|fish|powershell&gt;   # print a shell-completion script
+</code></pre>
+<p><strong>Compliance</strong></p>
+<pre><code class="language-bash">yaw-mcp compliance &lt;target&gt;   # run the 88-test compliance suite against a server
+yaw-mcp audit &lt;namespace&gt;     # audit a stdio server from bundles.json, cache its A-F grade in grades.json
+</code></pre>
+<p><code>heal</code> exists for the entry that pins a path (see <a href="#running-yaw-mcp-on-oam" target="_blank" rel="noopener noreferrer">Running yaw-mcp on oam</a>): an app upgrade that deletes the directory the path named leaves the client unable to start the broker, and the client cannot report that because it cannot start the thing that would. The broker runs the same sweep at every startup, cross-client, so a client whose entry still works repairs the ones that do not; <code>heal</code> is for the machine whose only configured client is the broken one. It touches only an entry yaw-mcp wrote that is currently broken -- a working entry is never rewritten, however unusual it looks -- and prints each old and new path. A stale entry it finds and cannot re-point -- a read-only config file on Windows, say -- is reported on stderr with the step past it, listed under <code>failed</code> in <code>--json</code>, and makes the run exit 1. <code>--dry-run</code> reports without writing; <code>--quiet</code> keeps the exit code and <code>--json</code> and drops the transcript. <code>YAW_MCP_AUTO_HEAL=0</code> turns the startup sweep off; <code>YAW_MCP_READONLY_DIAGNOSTICS=1</code> turns both off.</p>
+<p>To install completion, redirect to your shell's completions dir, e.g. <code>yaw-mcp completion zsh &gt; "${fpath[1]}/_yaw-mcp"</code>, or <code>yaw-mcp completion powershell &gt;&gt; $PROFILE</code>.</p>
+<h2>Configuration -- <code>.yaw-mcp/</code></h2>
+<p>yaw-mcp keeps its config under a <code>.yaw-mcp/</code> directory (mirroring <code>.git/</code>, <code>.vscode/</code>, <code>.claude/</code>). It reads <code>config.json</code> from three optional scopes, highest precedence first:</p>
+<table>
+<thead>
+<tr>
+<th>Scope</th>
+<th>Path</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>local</strong></td>
+<td><code>&lt;project&gt;/.yaw-mcp/config.local.json</code></td>
+<td>Machine-local overrides; gitignore it.</td>
+</tr>
+<tr>
+<td><strong>project</strong></td>
+<td><code>&lt;project&gt;/.yaw-mcp/config.json</code></td>
+<td>Shared via git with the repo.</td>
+</tr>
+<tr>
+<td><strong>global</strong></td>
+<td><code>~/.yaw-mcp/config.json</code></td>
+<td>Personal default for every project.</td>
+</tr>
+</tbody></table>
+<p>The project <code>.yaw-mcp/</code> is found by walking up from the cwd -- stopping just before <code>$HOME</code> when started under it (so a <code>.yaw-mcp/</code> at <code>$HOME</code> is treated as global only); a cwd outside <code>$HOME</code> walks to the filesystem root with an ownership check. Files may contain <code>//</code> and <code>/* */</code> comments. Full schema:</p>
+<pre><code class="language-jsonc">{
+  // optional -- gives editors key completion + inline validation
+  "$schema": "https://raw.githubusercontent.com/YawLabs/mcp/main/schemas/yaw-mcp.config.v1.json",
+  "version": 1,                          // schema version; newer versions log a warning
+  "servers": ["gh", "pg", "linear"],     // allow-list of namespaces (most-specific scope wins)
+  "blocked": ["prod_db"],                // deny-list (UNION across all scopes -- fail-safe on deny)
+  "installNudge": true                   // opt-in: discover may suggest installing MCP servers for
+                                         // CLIs found in your recent shell history (off by default)
+}
+</code></pre>
+<p>That shape ships as a JSON Schema -- <a href="https://github.com/YawLabs/mcp/blob/HEAD/schemas/yaw-mcp.config.v1.json" target="_blank" rel="noopener noreferrer"><code>schemas/yaw-mcp.config.v1.json</code></a>, served from the raw URL in the <code>$schema</code> line above -- so any editor that honors <code>$schema</code> completes the keys and flags a typo as you type. A namespace is <code>[a-z][a-z0-9_]{0,29}</code> (so <code>prod_db</code>, not <code>prod-db</code>); the schema rejects anything else, while the loader only warns and keeps loading.</p>
+<p>Malformed files log a warning and fall through (fail-open). yaw-mcp reads <em>this</em> file once at startup, so restart the client after editing it -- unlike <code>bundles.json</code>, which is re-read while the session runs. <code>mcp_connect_health</code> shows which files are applied.</p>
+<h3>Project guide -- <code>YAW-MCP.md</code></h3>
+<p>Drop a <code>YAW-MCP.md</code> next to <code>config.json</code> in either <code>.yaw-mcp/</code> and yaw-mcp surfaces it via a <code>yaw-mcp://guide</code> MCP resource. The <code>discover</code>/<code>dispatch</code> descriptions tell the model to read it first, so project routing conventions ("use the <code>gh</code> server, not bash") and credential guidance stick without restating them each session. A user guide (<code>~/.yaw-mcp/YAW-MCP.md</code>) and a project guide are concatenated with the project one last; a missing file is skipped silently.</p>
+<h3>Finding a server</h3>
+<pre><code class="language-bash">yaw-mcp search sql              # slug, name, tags, category, description
+yaw-mcp search                  # list the whole catalog
+yaw-mcp search sql --json       # machine-readable
+</code></pre>
+<p>Each match prints its runtime, tool count and the credentials it needs by name, so you know what an <code>add</code> will ask for before you run it. Nothing is written; <code>yaw-mcp add &lt;slug&gt;</code> is what installs. A slug that misses now suggests the closest real one rather than only naming a URL.</p>
+<h3>Changing a server without editing JSON</h3>
+<pre><code class="language-bash">yaw-mcp set github isActive=false           # or: yaw-mcp disable github
+yaw-mcp set github pinned=true              # never idle-unload this one
+yaw-mcp set github runtime=oam              # host it on the oam runtime
+yaw-mcp set github connectTimeoutMs=60000   # slower handshake, this server only
+yaw-mcp set github env.GITHUB_TOKEN='${secret:gh}'   # point at the vault
+yaw-mcp set github env.OLD_VAR=             # remove one variable
+</code></pre>
+<p>Only the entry you name is rewritten, so comments and formatting elsewhere in <code>bundles.json</code> survive -- unlike <code>add</code> and <code>remove</code>, which rewrite the whole file. <code>enable</code> and <code>disable</code> are the same edit as <code>set &lt;server&gt; isActive=true|false</code>.</p>
+<p>Settable: <code>isActive</code>, <code>pinned</code>, <code>runtime</code>, <code>connectTimeoutMs</code>, <code>description</code>, and one <code>env.KEY</code> at a time. Everything else is refused, including <code>command</code>, <code>args</code> and <code>url</code> -- those decide which program yaw-mcp launches as you, and belong to <code>add</code>/<code>remove</code> or a deliberate edit. A trailing <code>=</code> clears a field; clearing a stored env value asks first, since it does not come back.</p>
+<h3>Blocking individual tools</h3>
+<p><code>blocked</code> turns a whole server off. <code>blockedTools</code> turns off individual tools on servers you otherwise want:</p>
+<pre><code class="language-jsonc">// .yaw-mcp/config.json
+{ "blockedTools": ["gh_delete_repo", "pg_drop_*"] }
+</code></pre>
+<p>Entries are the flattened <code>&lt;namespace&gt;_&lt;tool&gt;</code> names that appear in the tool list, matched literally and case-sensitively, with an optional single trailing <code>*</code> for a prefix match. A bare <code>*</code> is refused, and a bare tool name does not match across servers -- <code>&lt;namespace&gt;_&lt;tool&gt;</code> cannot be split back apart reliably, because a namespace may itself contain <code>_</code>. The broker's own <code>mcp_connect_*</code> tools cannot be blocked.</p>
+<p>The two keys act on different events. <code>blocked</code> is checked when a server would start; <code>blockedTools</code> is checked when a tool would be called, which is also what makes it cover a tool reached inside an <code>mcp_connect_exec</code> pipeline. A pipeline naming a blocked tool is refused before any step runs, rather than failing partway through. Denies merge across config scopes, so a project config can add one but never remove one, and there is no allow-list counterpart.</p>
+<p>A blocked tool is withheld from the tool list, so the model does not see it as an option, but it keeps its route: calling it by name returns an explicit refusal rather than an unknown-tool error that reads like a typo. <code>discover</code> still shows it in a server's known-tools line, marked <code>[blocked]</code>, since that line describes what the server offers.</p>
+<h2>Local secret vault</h2>
+<p>Rather than putting credentials in a client config, keep a value in an encrypted file on your own machine and reference it with a <code>${secret:NAME}</code> placeholder. A <strong>local</strong> server takes it in <code>env</code>, which becomes the child process's environment:</p>
+<pre><code class="language-jsonc">"env": {
+  "GITHUB_PERSONAL_ACCESS_TOKEN": "${secret:gh}",
+  "AUTH_HEADER": "Bearer ${secret:gh}"   // placeholders compose inline
+}
+</code></pre>
+<p>A <strong>remote</strong> (HTTP/SSE) server takes it in <code>headers</code>, which are sent on every request the transport makes:</p>
+<pre><code class="language-jsonc">{ "namespace": "linear", "type": "remote", "url": "https://mcp.linear.app/mcp",
+  "headers": { "Authorization": "Bearer ${secret:linear}" } }
+</code></pre>
+<p>The two are the local and remote halves of one mechanism: same vault, same placeholder, same refusal. <code>env</code> on a remote entry is ignored (it warns and tells you to use <code>headers</code>), and <code>headers</code> on a local entry is ignored the same way. A header name is dropped at load, with a warning, if its value is blank, if the name is not a valid HTTP header name, or if it is <code>Mcp-Session-Id</code> or <code>Mcp-Protocol-Version</code> in any casing -- the transport sets those, and a duplicate would corrupt the session rather than override it.</p>
+<p>When the server starts -- a spawn for a local one, a connect for a remote one -- if <code>YAW_MCP_VAULT_PASSPHRASE</code> is set in yaw-mcp's own env, it decrypts the referenced names and substitutes them into the child's env or onto the request headers. If the passphrase is absent or a name isn't stored, the start is <strong>refused</strong> -- the literal <code>${secret:NAME}</code> is never passed through, since some servers would treat the placeholder as a real token. The value never leaves your machine, and it is stripped out of error text before that text reaches a log or the model.</p>
+<h3>Remote servers: <code>headers</code></h3>
+<p>A remote (HTTP/SSE) server spawns no process, so it has no env to put a credential in -- yaw-mcp warns and ignores <code>env</code> on a remote entry. Its credential channel is <code>headers</code>, which takes the same <code>${secret:NAME}</code> references:</p>
+<pre><code class="language-jsonc">{
+  "namespace": "linear",
+  "type": "remote",
+  "url": "https://mcp.linear.app/mcp",
+  "headers": {
+    "Authorization": "Bearer ${secret:linear}"
+  }
+}
+</code></pre>
+<p>Headers are resolved through the same fail-closed path: a missing or malformed reference refuses the <strong>connect</strong>, so no request is made at all rather than one carrying the literal to a third party. They apply to both transports, including the SSE stream.</p>
+<p><strong>Where the passphrase comes from.</strong> Three ways, in the order you'll meet them:</p>
+<ol>
+<li><strong><code>YAW_MCP_VAULT_PASSPHRASE</code> in yaw-mcp's own env</strong> -- the <code>env</code> block of the <em>yaw-mcp</em> entry in your MCP client config, not the upstream server's (yaw-mcp strips its own secrets from the env of every child it starts: every server it spawns, the npm runs behind its self-upgrade and the daily sidecar refresh, and the compliance suite). This is the only option for a spawn, which happens over stdio with no terminal to prompt on.</li>
+<li><strong>An in-session prompt for the vault.</strong> If your client supports MCP <a href="https://modelcontextprotocol.io/specification/server/elicitation" target="_blank" rel="noopener noreferrer">elicitation</a>, a locked vault asks for the passphrase and retries the server. The passphrase is never typed into your client's dialog: it goes into a masked field on a one-shot page yaw-mcp serves on <code>127.0.0.1</code>. A client with URL-mode elicitation opens that page from its own prompt. A client with form mode only (Claude Code, for one) asks whether to open it, and on yes yaw-mcp opens it in your default browser; with no browser to open (no graphical session), the call fails and names the env var instead. The page takes one submission and expires after 3 minutes. A mistyped passphrase gets one more try per session; a decline stops the asking. It's held in memory for that session only -- never written to disk, and never handed to the server being started.</li>
+<li><strong>An in-session prompt for a child's own missing credential.</strong> The same masked page (and the same URL / form mode rules above) is used when a child server's stderr names a key yaw-mcp does not have: a <code>GITHUB_TOKEN is required</code> line, an <code>AWS_ACCESS_KEY_ID is required</code> line, and the like. One masked field per missing key, the same URL-mode completion notification, the same page hardening (no CORS, no script, <code>Cache-Control: no-store</code>, 256-bit random token, Host header check, 3-minute TTL). The value lands in the child's env for the session -- not the vault slot, and not any other server -- and only for a key the server's <code>bundles.json</code> entry leaves unset or empty: a non-empty value there wins, and that key is never asked for. A value the child still reports missing on the retry is dropped. Each server gets two asks per session. A decline ends the asking for the session; a no-page or no-browser is a wall that latches the same way; an expired page spends its ask but does not latch, since the user may simply have been away.</li>
+<li><strong>The CLI prompt</strong>, for <code>yaw-mcp secrets</code> runs: no-echo on a real TTY. If the terminal will not switch echo off, the prompt refuses rather than show what you type. Note that Git Bash/MSYS can't offer one (Node sees pipes, not a TTY) -- use PowerShell, <code>winpty</code>, or the env var there.</li>
+</ol>
+<p><code>yaw-mcp doctor</code> has a <strong>SECRET VAULT</strong> section showing what's stored, which servers reference it, and whether the passphrase it can see is set and unlocks the vault -- start there when a server won't load. It reports names and a yes/no, never a value.</p>
+<pre><code class="language-bash">yaw-mcp secrets set &lt;name&gt;      # store a value (no-echo prompt, piped stdin, or --value)
+yaw-mcp secrets get &lt;name&gt;      # decrypt and print one value
+yaw-mcp secrets list            # show entry NAMES only (values stay encrypted)
+yaw-mcp secrets remove &lt;name&gt;   # delete an entry
+yaw-mcp secrets lock            # forget this process's cached passphrase -- effectively a no-op from the CLI; cannot reach a running server or change the vault
+yaw-mcp secrets rotate          # re-encrypt the whole vault under a NEW passphrase
+yaw-mcp secrets reset           # forgot the passphrase? move the vault aside, list its entry names, start a new one
+yaw-mcp secrets audit [--secret NAME] [--server NS] [--json]   # who consumed which secret, when
+</code></pre>
+<p>The passphrase derives the key via scrypt and is cached in memory for one process; the on-disk file holds only ciphertext (AES-256-GCM, per-entry IV + tag, one vault salt). <code>rotate</code> decrypts every entry first and aborts untouched if any fails -- and it re-wraps the <strong>encryption</strong>, not the underlying tokens (a leaked token is still leaked; rotate it at its source). <code>audit</code> reads an append-only <code>0600</code> NDJSON log of secret NAME + namespace + timestamp -- never a value -- and writes fail-open so a broken log never blocks a spawn.</p>
+<p><strong>Forgot the passphrase?</strong> There is no recovery: the file holds only ciphertext under a key derived from the passphrase, and nothing else -- no server, no recovery key -- can open it. <code>yaw-mcp secrets reset</code> is the way back to a working vault. It prints the entry names the vault holds (plaintext keys, so no passphrase is needed) so you know what to set again, asks you to type <code>RESET</code> (or takes <code>--force</code> from a script; without it, no TTY means a refusal), moves the old file aside as <code>secrets.json.reset-&lt;timestamp&gt;</code> next to the vault -- it still opens under the old passphrase, should that turn up -- and creates an empty vault under a new passphrase, confirmed twice on a TTY or taken from <code>YAW_MCP_VAULT_PASSPHRASE</code> when it is set. It refuses when the passphrase it is given already opens the vault: that is <code>rotate</code>, not a reset. Afterwards, a yaw-mcp server that is already running keeps the passphrase it started with and needs a restart, and a <code>YAW_MCP_VAULT_PASSPHRASE</code> in a client config's <code>env</code> block still holds the old value. <code>yaw-mcp doctor</code> says whether the passphrase it can see unlocks the vault.</p>
+<p><strong>Threat model.</strong> The vault protects the on-disk file against offline brute-force after exfiltration (stolen laptop, leaked backup): useless without the passphrase, tamper-evident via GCM. It does <strong>not</strong> defend against a process running as you while the passphrase is cached, a keylogger, or a value already leaked at its source.</p>
+<h2>Runtime detection &amp; <code>uv</code> bootstrap</h2>
+<p>On startup yaw-mcp probes for <code>node</code>, <code>npx</code>, <code>python</code>, <code>uvx</code>, and <code>docker</code> (best-effort, 3s per probe) so it can warn when a server's runtime is missing. yaw-mcp itself needs only Node.js.</p>
+<p>Python servers (<code>sqlite</code>, <code>time</code>, <code>sentry</code>, ...) launch via Astral's <code>uv</code>/<code>uvx</code>. On first encounter, if <code>uv</code> isn't on your PATH, yaw-mcp downloads Astral's standalone release, verifies the sha256, and caches it -- reusing your own <code>uv</code> if you have one. <code>uvx ARGS</code> is always rewritten to <code>uv tool run ARGS</code>, so only <code>uv</code> needs to be reachable.</p>
+<h2>Trust &amp; security</h2>
+<p>MCP servers are third-party code you choose to run. yaw-mcp doesn't sandbox them -- that's your OS and network. What it gives you is <strong>visibility and a gate</strong>:</p>
+<ul>
+<li><strong>Compliance grades (A-F)</strong> -- the <code>@yawlabs/mcp-compliance</code> suite (88 tests) grades a server; <code>yaw-mcp list</code> shows it in a <code>GRADE</code> column and <code>discover</code> shows it inline (<code>github [ready] [A]</code>). <code>YAW_MCP_MIN_COMPLIANCE=B</code> makes <code>activate</code> refuse anything below the floor. Ungraded servers pass (don't punish unknown); audit them yourself with <code>yaw-mcp compliance &lt;target&gt;</code>.</li>
+<li><strong>Source transparency</strong> -- <code>list</code> and <code>discover</code> show the exact <code>command</code>, <code>args</code>, and <code>url</code> each server launches with. Nothing is wrapped.</li>
+<li><strong>Local credentials</strong> -- vault values are encrypted at rest (scrypt + AES-256-GCM), injected at spawn, and never logged. Nothing is transmitted off the machine.</li>
+<li><strong>Failure output reaches your client</strong> -- when a server fails to start, the tail of its stderr is attached to the activation error, so it lands in your client's context (and your model's) as well as the log. That tail is the server's own output -- never your files, buffers or shell history -- and it is redacted first: values yaw-mcp injected from <code>bundles.json</code> or the vault, resolved request headers, and credential-named variables inherited from your shell (<code>GITHUB_TOKEN</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>NPM_TOKEN</code>, ...) are each replaced with <code>***NAME***</code>, which names the credential to rotate without showing it. An inherited name whose last segment is <code>PATH</code>, <code>FILE</code>, <code>DIR</code>, <code>HOST</code>, <code>PORT</code>, <code>PREFIX</code> or <code>SIZE</code> (<code>SSH_KEY_PATH</code>, <code>TOKEN_BUCKET_SIZE</code>) does not count as credential-named. Redaction is exact-substring on values of 8 characters or more, so a credential parked under a name that does not read as one is not covered. There is no opt-out: the tail is what makes a failed start diagnosable, and the missing-credential prompt below reads the same text.</li>
+<li><strong>Response pruning</strong> (<code>YAW_MCP_PRUNE_RESPONSES</code>, on by default) -- trims token cost by dropping no-information keys (null / empty array / empty object) and trimming trailing whitespace and long blank runs in text results. The text rules classify the block before editing it, so a unified diff comes back byte-faithful, fenced code blocks are left alone, and Markdown hard line breaks survive. Structured values are never altered or redacted; it is a token-savings feature, not a security control.</li>
+<li><strong>Namespace isolation</strong> -- tools are namespace-prefixed (<code>gh_create_issue</code>, never bare <code>create_issue</code>), so a server can't impersonate another's tools. <code>mcp_connect_read_tool</code> inspects a schema before any code runs.</li>
+</ul>
+<p>yaw-mcp does <strong>not</strong> block outbound traffic, firewall DNS, analyze source, or pin hashes -- a malicious server you chose to run can reach any URL your machine can. Review the command before adding a server, run untrusted ones under a restricted user or container, and prefer graded servers when alternatives are equivalent. Report a security issue in yaw-mcp itself via <a href="https://github.com/YawLabs/mcp/security/advisories/new" target="_blank" rel="noopener noreferrer">GitHub private advisories</a> (see <a href="https://github.com/YawLabs/mcp/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer"><code>SECURITY.md</code></a>).</p>
+<h2>Missing credentials</h2>
+<p>If a server exits with something like <code>GITHUB_TOKEN is required</code> and your client advertises MCP <a href="https://modelcontextprotocol.io/specification/server/elicitation" target="_blank" rel="noopener noreferrer">elicitation</a>, yaw-mcp prompts for the value and retries, rather than failing the call outright.</p>
+<h2>Environment variables</h2>
+<p>Common ones (run <code>yaw-mcp --help</code> for the full list):</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>YAW_MCP_SERVER_CAP</code></td>
+<td>Max concurrently active servers. Default <code>6</code>; <code>0</code> disables the cap. Counts servers that are loaded and advertising tools, not upstream processes: startup pre-warm briefly spawns servers it never advertises (see <code>YAW_MCP_PREWARM</code>), so on a first session the live child count can exceed this by up to the pre-warm batch size of three, each extra child closing as soon as its tool list is read.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_MIN_COMPLIANCE</code></td>
+<td>Minimum grade (<code>A</code>-<code>F</code>) an installed server must report before <code>activate</code> loads it.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_VAULT_PASSPHRASE</code></td>
+<td>Passphrase for the local secret vault. Required for spawn-time <code>${secret:NAME}</code> substitution -- set it in yaw-mcp's own env, not the upstream server's. Clients supporting elicitation prompt for it instead. When set, <code>yaw-mcp secrets reset</code> keys the fresh vault it creates under it.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_TRUST_PROJECT</code></td>
+<td><code>1</code> skips the consent check on a project-local <code>.yaw-mcp/bundles.json</code> and loads it unconditionally. CI/automation only -- it lets any repo you run yaw-mcp inside spawn commands as you. Default: the file must be approved with <code>yaw-mcp trust</code>.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_AUTO_ACTIVATE</code></td>
+<td><code>0</code> disables discover auto-loading a clearly-winning server. Default on.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_AUTO_UPGRADE</code></td>
+<td><code>0</code> disables the background self-upgrade check at startup. Default on.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_AUTO_HEAL</code></td>
+<td><code>0</code> disables the startup pass that re-points client entries whose launch file no longer exists -- what an app upgrade leaves behind when it deletes the directory the entry named. The pass only rewrites an entry yaw-mcp wrote that is currently broken; <code>yaw-mcp heal</code> is the same sweep on demand and ignores this variable. Default on.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_SIDECAR_REFRESH</code></td>
+<td><code>0</code> disables the daily background check that keeps managed sidecars current. Only ever runs if you have run <code>yaw-mcp sidecars install</code>; explicit pins and semver ranges are never moved. Default on.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_PREWARM</code></td>
+<td><code>0</code> stops yaw-mcp spawning a server at startup just to learn its tool list. Learning is rare -- the list persists and is only re-learned once it ages out -- but the session that does it starts the upstream twice, once to read the list and once for the activate that follows, which matters if the server startup is not idempotent. Off, a server whose tools are not already known shows none of them until you activate it; <code>discover</code> still lists it. Default on.</td>
+</tr>
+<tr>
+<td><code>OAM_BIN</code></td>
+<td>Path to the <code>oam</code> binary to use instead of the one on <code>PATH</code>. A path that does not exist is reported by <code>doctor</code> as an unusable oam (fix the variable), not as oam being absent.</td>
+</tr>
+<tr>
+<td><code>OAM_MAX_HEAP_MB</code></td>
+<td>Raises the V8 heap cap oam applies to a hosted server (4 GiB by default; can be lower inside a memory-limited Linux container). Set it in that server's <code>env</code> when a hosted sidecar dies with a heap out-of-memory error, or give that server <code>"runtime": "node"</code>.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_AUTO_LOAD</code></td>
+<td><code>1</code> pre-activates the top recurring pack at startup (needs persistence). Default off.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_PRUNE_RESPONSES</code></td>
+<td><code>0</code> disables response pruning. Default on.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_MAX_RESULT_BYTES</code></td>
+<td>Ceiling on a single proxied tool result. Over it, the reply is cut and carries a marker saying so, with the byte total and what was dropped -- a silently truncated result reads to the model as a complete one. Default <code>100000</code> (~25k tokens); <code>0</code> disables. <code>structuredContent</code> is passed through verbatim and is never cut.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_TOOL_TOKEN_CAP</code></td>
+<td>Ceiling on the estimated tokens of the whole loaded tool surface, checked alongside <code>YAW_MCP_SERVER_CAP</code> when a server is activated. The server cap counts servers, which says nothing about their size: six 3-tool servers and six 60-tool servers both sit at a cap of <code>6</code>. Default off.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_TOOL_EXPOSURE</code></td>
+<td>How much of the catalog <code>tools/list</code> advertises. <code>gateway</code>: the meta-tools plus the servers loaded this session. <code>lite</code>: only <code>mcp_connect_exec</code> / <code>find_tool</code> / <code>read_tool</code> plus the loaded servers, for a client that inlines every listed tool into every request; the other meta-tools stay callable by name. <code>full</code>: the pre-gateway surface, with a placeholder for every cached-but-unloaded tool. Unset, yaw-mcp picks <code>lite</code> when the client's MCP <code>clientInfo.name</code> is <code>typed-cli</code> and <code>gateway</code> otherwise; a set value always wins over that. Re-read on every <code>tools/list</code>, so a change lands without a restart. An unrecognised value logs a warning once and falls back to the client default.</td>
+</tr>
+<tr>
+<td><code>MCP_CONNECT_TIMEOUT</code></td>
+<td>Milliseconds to wait for a server's MCP handshake. Default <code>15000</code>; a server's own <code>connectTimeoutMs</code> in <code>bundles.json</code> always wins. Whole milliseconds in <code>1..2147483647</code> -- anything else falls back to the default with one warn.</td>
+</tr>
+<tr>
+<td><code>MCP_LIST_TIMEOUT</code></td>
+<td>Milliseconds to wait for a server's tool/resource/prompt inventory calls after the handshake. Default <code>15000</code>; same <code>1..2147483647</code> whole-millisecond parse, invalid values fall back with one warn.</td>
+</tr>
+<tr>
+<td><code>MCP_CALL_TIMEOUT</code></td>
+<td>Milliseconds to wait for a single proxied <code>tools/call</code>. Default <code>60000</code> (the SDK's own bound); raise it for legitimately slow servers. Same <code>1..2147483647</code> whole-millisecond parse, invalid values fall back with one warn.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_IDLE_THRESHOLD</code></td>
+<td>Non-matching tool calls a loaded server tolerates before it is unloaded. Default <code>10</code>; bursty servers earn more patience automatically. The older name <code>MCP_CONNECT_IDLE_THRESHOLD</code> still works as a fallback.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_DISABLE_PERSISTENCE</code></td>
+<td><code>1</code> keeps learning + pack history process-scoped (CI, containers). Default off.</td>
+</tr>
+<tr>
+<td><code>YAW_MCP_READONLY_DIAGNOSTICS</code></td>
+<td><code>1</code> makes <code>doctor</code> (text and <code>--json</code>), <code>bundles</code>, <code>yaw-mcp heal</code> and the broker's startup heal pass write nothing, for a caller that runs them in the background on a timer. <code>doctor</code> still scans <code>yaw-mcp try</code> trials but does not sweep expired ones out of your client configs: each is reported as a warning (so the run exits 2) and listed in <code>--json</code>'s <code>trials.unswept</code>, with <code>trials.sweepHint</code> naming the fix -- a plain <code>yaw-mcp doctor</code> with the variable unset, or <code>yaw-mcp try-cleanup &lt;slug&gt;</code>. A pre-0.12 <code>~/.yaw-mcp.json</code> or project <code>.yaw-mcp.json</code> / <code>.yaw-mcp.local.json</code> is not moved into <code>.yaw-mcp/</code>; each is reported as a warning instead (its settings are not loaded for that run). <code>--json</code> carries <code>"readOnly": true</code> on such a run. <code>status</code> never writes, so it is unaffected. Default off.</td>
+</tr>
+<tr>
+<td><code>LOG_LEVEL</code></td>
+<td><code>debug</code> | <code>info</code> | <code>warn</code> | <code>error</code>. Default <code>info</code>.</td>
+</tr>
+</tbody></table>
+<h2>Requirements</h2>
+<ul>
+<li>Node.js 20+.</li>
+<li>No account. Everything runs locally.</li>
+</ul>
+<h2>License</h2>
+<p>Source-available, not open source. Copyright (c) 2026 Yaw Labs, all rights reserved.</p>
+<p>The source is published so you can read and audit it before running it -- <code>yaw-mcp</code> spawns processes on your machine and handles your credentials, and you should not have to take that on faith. You may use it freely, personally or commercially, and redistribute unmodified copies. You may not offer it to third parties as a competing product. See <a href="https://github.com/YawLabs/mcp/blob/HEAD/LICENSE.md" target="_blank" rel="noopener noreferrer">LICENSE.md</a> for the terms, and <a href="https://github.com/YawLabs/mcp/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a> for the DCO sign-off contributors use.</p>
+<h2>Links</h2>
+<ul>
+<li><a href="https://yaw.sh/mcp/catalog/" target="_blank" rel="noopener noreferrer">yaw.sh/mcp/catalog</a> -- browse the server catalog</li>
+<li><a href="https://www.npmjs.com/package/@yawlabs/mcp-compliance" target="_blank" rel="noopener noreferrer">@yawlabs/mcp-compliance</a> -- test your MCP servers for spec compliance</li>
+<li><a href="https://github.com/YawLabs/mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG</a> -- release notes</li>
+<li><a href="https://github.com/YawLabs/mcp" target="_blank" rel="noopener noreferrer">GitHub</a> -- source and issues</li>
+<li><a href="https://x.com/YawLabs" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/follow-%40YawLabs-000000?logo=x&amp;logoColor=white" alt="Follow @YawLabs on X" /></a></li>
+</ul>
