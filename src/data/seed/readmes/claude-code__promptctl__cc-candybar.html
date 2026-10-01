@@ -1,0 +1,213 @@
+<h1>CCCandybar</h1>
+<p><strong>Powerline statusline for Claude Code — daemon-backed, config-driven, zero-config-file required.</strong></p>
+<p><img src="https://img.shields.io/static/v1?label=License&amp;message=MIT&amp;color=blue&amp;style=flat-square" alt="License:MIT" />
+<a href="https://www.npmjs.com/package/@promptctl/cc-candybar" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/@promptctl/cc-candybar?style=flat-square" alt="npm version" /></a>
+<a href="https://www.npmjs.com/package/@promptctl/cc-candybar" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Dependencies" /></a></p>
+<img src="https://raw.githubusercontent.com/promptctl/cc-candybar/HEAD/images/demo-tui.gif" alt="CCCandybar TUI Mode Demo" width="600" /><h2>What it is</h2>
+<p>CCCandybar is a statusline renderer for <a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a>. It shows session cost, context usage, git status, model info, rate-limit utilization, and more, configured through a JSON5 DSL with hot-reloading.</p>
+<p>A background daemon caches git state, usage data, and per-session values across concurrent Claude Code sessions. The renderer connects to the daemon over a Unix socket, so every invocation is fast (~50ms budget) and stateful.</p>
+<h2>Quick start</h2>
+<pre><code class="language-bash">pnpm dlx @promptctl/cc-candybar@latest install
+</code></pre>
+<p>npm is the only install channel: the GitHub releases are tags plus a changelog with no downloadable assets, and installing from a GitHub tag does not work (the built <code>dist/</code> is not committed).</p>
+<p>pnpm 11 delays freshly published packages (<code>minimumReleaseAge</code>), so on or near a release day <code>@latest</code> can silently resolve to an older version. <code>install</code> compares what it staged against the registry and warns when it is behind; to get a specific release immediately, name it: <code>pnpm dlx @promptctl/cc-candybar@&lt;version&gt; install</code>.</p>
+<p>That single command (re-run it any time to update to the latest release):</p>
+<ol>
+<li>Stages the runtime at a stable path independent of any package-manager cache — <code>~/Library/Application Support/CCCandybar/</code> on macOS, <code>$XDG_DATA_HOME/cc-candybar/</code> on Linux — as <code>bin/cc-candybar</code> (the prebuilt native render binary for your platform, or a node entry where none exists) beside <code>dist/index.mjs</code> (the daemon + CLI bundle).</li>
+<li>On macOS, builds <code>~/Applications/CCCandybarURLHandler.app</code> and registers the <code>cc-candybar://</code> URL scheme with Launch Services.</li>
+<li>Writes the staged <code>bin/cc-candybar</code> path as the statusline command into <code>~/.claude/settings.json</code> (skipped with a notice if you've customized the command; <code>--force</code> overwrites).</li>
+</ol>
+<p>Restart Claude Code. The statusline appears with the bundled default layout — an identity row (directory, gitaculous) over a status row (model, context, ceiling, autocompact, cacheTimer, block, weekly, activity). On macOS, Cmd-clicking clickable cells fires <code>cc-candybar://</code> URL verbs that the daemon dispatches (via the URL handler registered in step 2).</p>
+<h2>Customization</h2>
+<p>Drop a <code>.cc-candybar.json5</code> (or <code>.cc-candybar.json</code> — both extensions are accepted) at any of these locations (highest precedence first):</p>
+<ol>
+<li><code>$CC_CANDYBAR_CONFIG</code> in the statusline command's environment (literal path, supports <code>~</code> expansion). It is read by the client on every render and carried to the daemon, so it can differ per session. A path that names no file renders the bundled default under a <code>Config file not found</code> warning, and one the daemon cannot stat (behind an unsearchable directory, say) under <code>Config file could not be read</code> with the error — either way the bar stays live and loads the file once it can.</li>
+<li><code>&lt;project&gt;/.cc-candybar.json5</code> (then <code>.json</code> at the same location)</li>
+<li><code>&lt;cwd&gt;/.cc-candybar.json5</code> (then <code>.json</code>)</li>
+<li><code>$XDG_CONFIG_HOME/cc-candybar/config.json5</code> (then <code>.json</code>; defaults to <code>~/.config/cc-candybar/config.json5</code>)</li>
+</ol>
+<p>JSON is a strict subset of JSON5, so the same parser handles both — <code>.json5</code> is the documented format (supports inline comments, trailing commas, unquoted keys), <code>.json</code> is the legacy/compat extension. When both exist at the same location, <code>.json5</code> wins and the bar shows a persistent warning so you can remove the shadowed duplicate.</p>
+<p>The file <strong>merges onto the bundled default</strong>, so it declares only what differs. <code>globals</code> merge per field; the named sections (<code>variables</code>, <code>segments</code>, <code>actions</code>, <code>helpers</code>, …) merge by name, your entry winning; <code>root</code> merges per named row (<code>identity</code> and <code>status</code> in the bundled default; a whole tree at <code>root</code> replaces every row). The bundled default is <code>src/config/default-dsl-config.ts</code>, and fuller starting points live under <code>examples/</code>. Run <code>cc-candybar check &lt;path&gt;</code> to load a file exactly as the daemon will: exit 0 means it renders, exit 1 prints the error with the path and line to fix. Add <code>--render</code> and it prints the bar it rendered, so you can read a config's result without installing it.</p>
+<pre><code class="language-json5">// A theme, one new segment, and the row it joins. Everything else — the
+// identity row, every other segment and variable — is inherited.
+{
+  globals: { palette: 'catppuccin-mocha' },
+  variables: {
+    clock: { kind: 'time', layout: '15:04' }, // Go reference-time layout, re-read every second
+  },
+  segments: {
+    clock: { template: '{{ .clock }}' },
+  },
+  root: { rows: { status: { h: ['model', 'context', 'clock'] } } },
+}
+</code></pre>
+<p>Saving the file triggers a hot-reload of every active session.</p>
+<h2>Architecture</h2>
+<pre><code>┌─────────────┐   Unix socket   ┌──────────────────┐
+│ Claude Code │ ──────────────► │ cc-candybar daemon│
+│  (hook)     │   render req    │                  │
+│             │ ◄────────────── │  git cache       │
+└─────────────┘   ANSI output   │  usage cache     │
+                                │  session state   │
+                                │  render cache    │
+                                └──────────────────┘
+</code></pre>
+<ul>
+<li><strong>Daemon</strong> (<code>src/daemon/</code>) — long-lived background process. One per user. Caches git state via filesystem watchers, usage data, and per-session key/value state. Runs until it exits on an RSS backstop (default 512 MB via <code>CC_CANDYBAR_RSS_LIMIT_MB</code>; the V8 heap cap the spawner passes is twice that, a margin wide enough that the graceful backstop fires first under any growth its 60 s poll can see) or the host restarts; there is no idle or age timeout.</li>
+<li><strong>Client</strong> (<code>rust-client/src/main.rs</code>) — the Rust binary installed as <code>bin/cc-candybar</code>, and the only thing on the per-render path: it connects to the daemon, sends the hook JSON, and prints the ANSI response. On a daemon miss it spawns one detached and prints an empty line, so the next refresh finds a warm daemon. Every subcommand (<code>install</code>, <code>daemon</code>, <code>check</code>, <code>doctor</code>, …) execs the Node bundle at <code>dist/index.mjs</code>, which carries a socket relay of its own (<code>src/daemon/client.ts</code>) as the fallback when no native binary is staged.</li>
+<li><strong>Renderer</strong> (<code>src/dsl/render.ts</code>) — <code>renderDsl</code> is the single render path; the daemon, the demo and the tests all call it. It walks the config's layout tree, evaluates each segment's templates against the daemon's payload, and hands the styled cells to <code>src/render/</code> (strip and joiner selection, pickers and menus, the diagnostic strip). The payload's data comes from the providers in <code>src/segments/</code> — git, session, context, metrics, tmux, pricing.</li>
+<li><strong>Themes</strong> (<code>src/themes/</code>) — palette construction plus name policy (which theme, style, variation, endcaps, charset and colour depth names resolve to what). The colour arithmetic itself — blending, contrast, OKLCH transposition — lives in the separate <code>rich-js</code> package; this repo does none of it.</li>
+</ul>
+<h2>Segments</h2>
+<p>These are the segment names <code>DEFAULT_DSL_CONFIG</code> declares, each available to a user's <code>root</code> whether or not the default bar places it.</p>
+<table>
+<thead>
+<tr>
+<th>Segment</th>
+<th>Shows</th>
+<th>Visible</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>directory</code></td>
+<td>the cwd, abbreviated fish-style (<code>~/c/cc-candybar</code>)</td>
+<td>always</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td><code>✱</code> and the model's display name</td>
+<td>always</td>
+</tr>
+<tr>
+<td><code>sessionId</code></td>
+<td><code>⌗</code> and the first 8 characters of the session id</td>
+<td>always</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td><code>◈ v</code> and the Claude Code version</td>
+<td>always</td>
+</tr>
+<tr>
+<td><code>tmux</code></td>
+<td><code>tmux:</code> and the tmux session name</td>
+<td>inside tmux</td>
+</tr>
+<tr>
+<td><code>host</code></td>
+<td><code>⇄ user@host</code></td>
+<td>over SSH</td>
+</tr>
+<tr>
+<td><code>gitaculous</code></td>
+<td>the git state, collapsed to <code>⎇</code> branch, ahead/behind and <code>S</code>/<code>U</code>/<code>?</code>/<code>!</code> flags; the <code>▸</code> at its right edge expands it to <code>(git)</code>, repo, operation, sha, flags, branch, upstream ±, stashes and time since the last commit, and <code>◂</code> collapses it again (per session). Each form and piece is overridable (<a href="https://github.com/promptctl/cc-candybar/blob/HEAD/docs/segment-authoring.md#reshaping-a-bundled-segment-git" target="_blank" rel="noopener noreferrer">docs/segment-authoring.md</a>)</td>
+<td>in a repo</td>
+</tr>
+<tr>
+<td><code>gitPr</code></td>
+<td><code>⇆ #N</code> linked to the pull request, or <code>⚠ PR</code> when the forge lookup failed</td>
+<td>when a PR or a lookup error is known</td>
+</tr>
+<tr>
+<td><code>toolbar</code></td>
+<td>click affordances — copy the session id, open the project dir, the transcript and the repo page (also inside the settings menu)</td>
+<td>always</td>
+</tr>
+<tr>
+<td><code>commands</code></td>
+<td>type <code>/compact</code>, <code>/model</code> or <code>/clear</code> into this session (inside tmux); <code>/clear</code> asks for a second click (also inside the settings menu)</td>
+<td>always (not placed by default)</td>
+</tr>
+<tr>
+<td><code>themeSwitcher</code></td>
+<td><code>◀ &lt;theme&gt; ▶</code> — the theme the bar is wearing; ◀/▶ switch this session to the previous/next theme</td>
+<td>always (not placed by default)</td>
+</tr>
+<tr>
+<td><code>session</code></td>
+<td><code>§</code> this session's cost and tokens, plus budget status</td>
+<td>always</td>
+</tr>
+<tr>
+<td><code>today</code></td>
+<td><code>☉</code> today's cost and tokens across sessions, plus budget status</td>
+<td>always</td>
+</tr>
+<tr>
+<td><code>block</code></td>
+<td><code>◱</code> the 5-hour rate-limit window's utilization</td>
+<td>while that window is active</td>
+</tr>
+<tr>
+<td><code>weekly</code></td>
+<td><code>◑</code> the 7-day rolling rate limit's utilization</td>
+<td>while that window is active</td>
+</tr>
+<tr>
+<td><code>burnrate</code></td>
+<td><code>⚡</code> cost per hour, then ETA to the 5-hour and weekly limits</td>
+<td>while either window is active</td>
+</tr>
+<tr>
+<td><code>speed</code></td>
+<td><code>⇅</code> output, input and total tokens per second</td>
+<td>once the session has tokens</td>
+</tr>
+<tr>
+<td><code>tokenSparkline</code></td>
+<td><code>⚡</code> a sparkline over the last 24 speed samples</td>
+<td>once speed samples exist</td>
+</tr>
+<tr>
+<td><code>cacheTimer</code></td>
+<td><code>◴</code> minutes until the prompt cache expires, or <code>cold</code></td>
+<td>while a cache expiry is known</td>
+</tr>
+<tr>
+<td><code>context</code></td>
+<td><code>◔</code> context tokens used and the percentage left</td>
+<td>when context tokens are known</td>
+</tr>
+<tr>
+<td><code>ceiling</code></td>
+<td><code>⌈</code> the <a href="https://github.com/promptctl/memento" target="_blank" rel="noopener noreferrer">memento</a> context ceiling this session hands off at; <code>−</code>/<code>+</code> move it by 100K, <code>∞</code> lifts it, <code>↺</code> drops the session's own setting (memento's <code>ceiling set/clear session</code>). Placed beside <code>context</code></td>
+<td>when memento is installed</td>
+</tr>
+<tr>
+<td><code>autocompact</code></td>
+<td><code>⇲</code> Claude Code's auto-compact window — <code>auto</code>, or the tokens <code>/autocompact</code> last set; <code>−</code>/<code>+</code> move it by 100K up to the model's context window, <code>↺</code> returns it to <code>auto</code>. Each click types <code>/autocompact</code> into the session (inside tmux only). Placed beside <code>ceiling</code></td>
+<td>always</td>
+</tr>
+<tr>
+<td><code>metrics</code></td>
+<td><code>Δ</code> last response time, <code>⧖</code> response time, <code>⧗</code> session duration, <code>◆</code> message count, lines changed</td>
+<td>when any of those exist</td>
+</tr>
+<tr>
+<td><code>activity</code></td>
+<td><code>⌘</code> the slash command that opened the turn, <code>☐</code> the in-progress todo with its position, <code>⟳</code> tools in flight and <code>✓</code> tools finished this turn</td>
+<td>while the session is doing something</td>
+</tr>
+</tbody></table>
+<p>Each segment is a DSL declaration with a <code>template</code> (text + interpolation + style functions), a <code>bg</code>/<code>fg</code> palette spec, and optional <code>when</code> predicate. Templates compose freely — every formatter in the bundled function library (<code>formatCost</code>, <code>formatTokens</code>, <code>formatLongTimeRemaining</code>, <code>budgetStatus</code>, <code>link</code>, <code>urlEncode</code>, the sprig string/list/dict library, …) is available in every segment.</p>
+<h2>Themes</h2>
+<p>The DSL config picks a base palette via <code>globals.palette</code> (e.g. <code>textual-dark</code>, <code>gruvbox</code>) — or a template evaluated every render, so the theme can follow live data. Each segment may override with its own <code>palette:</code> field, and <code>bg</code>/<code>fg</code> take a palette colour name (<code>primary</code>, <code>surface</code>, <code>panel</code>, <code>accent</code>, <code>foreground</code>, <code>warning</code>, <code>error</code>, …) or a computed colour such as <code>{{ darken (color "primary") 2 }}</code>; a segment that authors no <code>bg</code> wears the theme's decorative tint for its position. Color math runs through OKLCH for perceptual uniformity.</p>
+<h2>Installation</h2>
+<p>Requires Node.js 20.19+ (within the 20.x line) or 22.12+, Claude Code, and Git 2.0+. For best display, install a <a href="https://www.nerdfonts.com/" target="_blank" rel="noopener noreferrer">Nerd Font</a> so the powerline glyphs render correctly.</p>
+<h3>Manual setup</h3>
+<p>Run the install once to stage the runtime, then point <code>~/.claude/settings.json</code> at the staged entry (this is also exactly what <code>install</code> writes):</p>
+<pre><code class="language-json">{
+  "statusLine": {
+    "type": "command",
+    "command": "'/Users/you/Library/Application Support/CCCandybar/bin/cc-candybar'"
+  }
+}
+</code></pre>
+<h3>Developing against a checkout</h3>
+<p><code>just deploy</code> builds <code>dist/index.mjs</code> and stages the native binary at <code>bin/cc-candybar-native</code> — point your statusline command at that path. On a machine without cargo, <code>pnpm install &amp;&amp; pnpm build</code> builds only the bundle — point your statusline at the committed <code>bin/cc-candybar</code> node entry instead. Either way the bar renders HEAD; the daemon watches the built bundle and respawns itself on rebuild.</p>
+<h3>Config file</h3>
+<p>Customization lives in <code>.cc-candybar.json5</code>. See the <a href="#customization" target="_blank" rel="noopener noreferrer">Customization</a> section above for the resolution order. Saved edits hot-reload — no restart needed.</p>
+<h2>Contributing</h2>
+<p>Contributions welcome. See <a href="https://github.com/promptctl/cc-candybar/blob/HEAD/CONTRIBUTORS.md" target="_blank" rel="noopener noreferrer">CONTRIBUTORS.md</a> for people who have contributed outside of GitHub PRs.</p>
+<h2>License</h2>
+<p><a href="https://github.com/promptctl/cc-candybar/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>

@@ -117,9 +117,9 @@ source security, secrets, API compatibility, version drift, and text encoding.</
 same semantic version with a leading <code>v</code>, for example <code>v5.0.1</code>.</p>
 <h2>Architecture</h2>
 <p>
-  <img src="https://raw.githubusercontent.com/OpenByteInc/QuantDinger/HEAD/docs/screenshots/architecture-v5.png" alt="QuantDinger v5 architecture covering clients, Agent Gateway, core platform, workers, infrastructure, observability, and the closed-loop trading workflow" width="100%" />
-</p><p><sub>The editable source is available as <a href="https://github.com/OpenByteInc/QuantDinger/blob/HEAD/docs/screenshots/architecture-v5.svg" target="_blank" rel="noopener noreferrer">architecture-v5.svg</a>.</sub></p><p>The diagram above shows the complete product and process architecture. The
-runtime topology below focuses on container-to-container ownership and data flow.</p>
+  <img src="https://raw.githubusercontent.com/OpenByteInc/QuantDinger/HEAD/docs/screenshots/architecture-v5.png" alt="QuantDinger v5 architecture covering clients, Agent Gateway, core platform, distributed runtime workers, Kafka, infrastructure, observability, and the closed-loop trading workflow" width="100%" />
+</p><p><sub>The editable source is <a href="https://github.com/OpenByteInc/QuantDinger/blob/HEAD/docs/screenshots/architecture-v5.svg" target="_blank" rel="noopener noreferrer">architecture-v5.svg</a>; the Mermaid topology below is the detailed runtime source of truth.</sub></p><p>The static diagram above is the product-level view. The runtime topology below
+is the current source of truth for container ownership and event/data flow.</p>
 <pre><code class="language-mermaid">flowchart TB
     C["Web / Mobile / API / MCP clients"]
     FE["Nginx frontend services"]
@@ -127,7 +127,11 @@ runtime topology below focuses on container-to-container ownership and data flow
     PG[("PostgreSQL")]
     CACHE[("Redis cache")]
     JOBS[("Redis jobs")]
-    TW["Trading worker"]
+    KAFKA[("Kafka event backbone")]
+    TW["Trading workers\ncontrol, realtime, execution, grid actors"]
+    DISPATCH["Strategy dispatcher workers"]
+    EVAL["Strategy evaluator workers\nhot bar runtimes"]
+    AUDIT["Kafka audit worker"]
     SW["Scheduler worker"]
     CW["Celery worker"]
     BEAT["Celery beat"]
@@ -139,7 +143,13 @@ runtime topology below focuses on container-to-container ownership and data flow
     API --&gt; PG
     API --&gt; CACHE
     API --&gt;|"durable commands"| PG
-    TW --&gt;|"leases, orders, heartbeats"| PG
+    TW --&gt;|"leases, order intents, fills, grid actor state"| PG
+    TW --&gt;|"closed bars and lifecycle events"| KAFKA
+    KAFKA --&gt; DISPATCH --&gt; KAFKA
+    KAFKA --&gt; EVAL
+    EVAL --&gt;|"inbox, leases, checkpoints, order intents"| PG
+    KAFKA --&gt; AUDIT --&gt; PG
+    PG --&gt;|"owned pending orders"| TW
     SW --&gt;|"schedules, monitoring, heartbeats"| PG
     API --&gt;|"finite async jobs"| JOBS
     BEAT --&gt; JOBS --&gt; CW
@@ -164,12 +174,28 @@ runtime topology below focuses on container-to-container ownership and data flow
 <td>Applies the database schema and exits before application services start.</td>
 </tr>
 <tr>
+<td><code>kafka-init</code></td>
+<td>Creates the versioned runtime topics and exits before event consumers start.</td>
+</tr>
+<tr>
 <td><code>backend</code></td>
 <td>Handles HTTP, authentication, validation, and durable command submission.</td>
 </tr>
 <tr>
 <td><code>trading-worker</code></td>
-<td>Owns strategy runtimes, pending orders, broker sessions, and reconciliation.</td>
+<td>Owns control/realtime runtimes, exchange sessions, the fenced order gateway, reconciliation, and durable grid actors.</td>
+</tr>
+<tr>
+<td><code>strategy-dispatcher-worker</code></td>
+<td>Converts closed-bar events into stable strategy-shard evaluation batches.</td>
+</tr>
+<tr>
+<td><code>strategy-evaluator-worker</code></td>
+<td>Owns hot distributed bar runtimes and evaluates fenced strategy inbox events.</td>
+</tr>
+<tr>
+<td><code>kafka-audit-worker</code></td>
+<td>Validates and records the versioned event stream independently of execution.</td>
 </tr>
 <tr>
 <td><code>scheduler-worker</code></td>
@@ -186,7 +212,9 @@ runtime topology below focuses on container-to-container ownership and data flow
 </tbody></table>
 <p>See <a href="https://github.com/OpenByteInc/QuantDinger/blob/HEAD/docs/architecture/PROCESS_ROLES_AND_TASKS.md" target="_blank" rel="noopener noreferrer">Backend process roles</a>,
 <a href="https://github.com/OpenByteInc/QuantDinger/blob/HEAD/docs/architecture/ARCHITECTURE.md" target="_blank" rel="noopener noreferrer">architecture</a>, and
-<a href="https://github.com/OpenByteInc/QuantDinger/blob/HEAD/docs/architecture/CONCURRENCY_MODEL.md" target="_blank" rel="noopener noreferrer">concurrency model</a> for the ownership rules.</p>
+<a href="https://github.com/OpenByteInc/QuantDinger/blob/HEAD/docs/architecture/CONCURRENCY_MODEL.md" target="_blank" rel="noopener noreferrer">concurrency model</a> for the ownership rules.
+Use the <a href="https://github.com/OpenByteInc/QuantDinger/blob/HEAD/docs/deployment/DISTRIBUTED_RUNTIME_SCALING.md" target="_blank" rel="noopener noreferrer">distributed runtime deployment and scaling guide</a>
+before changing replica counts or moving the stack to multiple hosts.</p>
 <h2>Quick start</h2>
 <h3>Option A: prebuilt images</h3>
 <p>Prerequisites: Docker with Compose v2. Node.js and a local Python environment are
@@ -220,9 +248,8 @@ compatibility when the administrator variables are left at their defaults. This
 credential is not suitable for an internet-facing deployment; change it before
 first start or immediately after the first login. The one-command installer does
 not accept <code>123456</code> as the chosen password.</p>
-<p>The Settings UI writes runtime configuration to <code>/app/.env</code>. In the GHCR stack
-this is the host <code>backend.env</code>; in a source deployment it is
-<code>backend_api_python/.env</code>. Current backend images automatically give runtime UID
+<p>The Settings UI writes runtime configuration to <code>/app/.env</code>, which is the
+project-root <code>.env</code> on the host for both GHCR and source deployments. Current backend images automatically give runtime UID
 <code>10001</code> ownership and keep mode <code>600</code>. Do not use <code>chmod 755</code> or recursive <code>777</code>:
 these files contain passwords and API keys, and <code>755</code> still does not grant write
 access to UID <code>10001</code> when root owns the file.</p>
@@ -239,10 +266,9 @@ legacy-image recovery and rootless/NFS notes.</p>
 <h3>Option B: source checkout</h3>
 <pre><code class="language-bash">git clone https://github.com/OpenByteInc/QuantDinger.git
 cd QuantDinger
-cp backend_api_python/env.example backend_api_python/.env
 cp .env.example .env
 </code></pre>
-<p>Before the first start, replace the example values in both environment files:</p>
+<p>Before the first start, replace the example values in the unified environment file:</p>
 <table>
 <thead>
 <tr>
@@ -251,14 +277,20 @@ cp .env.example .env
 </tr>
 </thead>
 <tbody><tr>
-<td><code>backend_api_python/.env</code></td>
-<td><code>SECRET_KEY</code>, <code>CREDENTIAL_ENCRYPTION_KEY</code>, <code>ADMIN_USER</code>, <code>ADMIN_PASSWORD</code></td>
-</tr>
-<tr>
 <td><code>.env</code></td>
-<td><code>POSTGRES_PASSWORD</code>, <code>REDIS_PASSWORD</code>, <code>CELERY_REDIS_PASSWORD</code>, <code>GRAFANA_ADMIN_PASSWORD</code></td>
+<td><code>SECRET_KEY</code>, <code>CREDENTIAL_ENCRYPTION_KEY</code>, administrator, PostgreSQL, Redis, and Grafana credentials</td>
 </tr>
 </tbody></table>
+<p>After an update, <code>docker compose up</code> runs the one-shot <code>env-sync</code> service before
+database and Kafka initialization. It appends newly introduced settings, imports
+missing values from the legacy backend env files, preserves existing values and
+comments, and creates a timestamped backup only when the unified file changes.
+The command below remains available for a manual preview or maintenance run:</p>
+<pre><code class="language-bash">python scripts/sync_env.py --env-file .env --template .env.example --backup
+</code></pre>
+<p>For a manual one-time migration from older releases, add
+<code>--legacy backend_api_python/.env</code> (source deployment) or <code>--legacy backend.env</code>
+(old GHCR deployment). The old file is not deleted.</p>
 <p>Generate independent secrets with:</p>
 <pre><code class="language-bash">python -c "import secrets; print(secrets.token_hex(32))"
 </code></pre>
@@ -275,8 +307,7 @@ PostgreSQL migration guidance, see
 <h2>Production deployment</h2>
 <p>Validate secrets before starting a production stack:</p>
 <pre><code class="language-bash">python backend_api_python/scripts/check_production_config.py \
-  --env-file .env \
-  --env-file backend_api_python/.env
+  --env-file .env
 </code></pre>
 <p>Start the hardened runtime with optional observability:</p>
 <pre><code class="language-bash">docker compose \
@@ -861,7 +892,6 @@ the maintainers and contributors of projects including:</p>
 <li><a href="https://redis.io/" target="_blank" rel="noopener noreferrer">Redis</a></li>
 <li><a href="https://pandas.pydata.org/" target="_blank" rel="noopener noreferrer">Pandas</a></li>
 <li><a href="https://numpy.org/" target="_blank" rel="noopener noreferrer">NumPy</a></li>
-<li><a href="https://github.com/ccxt/ccxt" target="_blank" rel="noopener noreferrer">CCXT</a></li>
 <li><a href="https://github.com/ranaroussi/yfinance" target="_blank" rel="noopener noreferrer">yfinance</a></li>
 <li><a href="https://github.com/akfamily/akshare" target="_blank" rel="noopener noreferrer">AkShare</a></li>
 <li><a href="https://vuejs.org/" target="_blank" rel="noopener noreferrer">Vue.js</a></li>
