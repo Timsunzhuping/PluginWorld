@@ -80,12 +80,50 @@
 <h2>Debugging</h2>
 <p>Set <code>CLAUDE_BRIDGE_DEBUG=1</code> to enable debug output:</p>
 <ul>
-<li><strong>Bridge log</strong> at <code>~/.pi/agent/claude-bridge.log</code> — provider calls, session sync decisions, tool results, CC stderr. Override location with <code>CLAUDE_BRIDGE_DEBUG_PATH</code>.</li>
-<li><strong>Per-query CC CLI logs</strong> at <code>~/.pi/agent/cc-cli-logs/&lt;timestamp&gt;-&lt;tag&gt;-&lt;seq&gt;.log</code> — the subprocess's own debug stream; tag is <code>provider</code> or <code>askclaude</code>. Shows CC's view of session loading, API requests, and tool calls.</li>
+<li><strong>Bridge log</strong> at <code>claude-bridge.log</code> in pi's agent dir (<code>PI_CODING_AGENT_DIR</code>, default <code>~/.pi/agent</code>) — provider calls, session sync decisions, tool results, CC stderr. Override location with <code>CLAUDE_BRIDGE_DEBUG_PATH</code>.</li>
+<li><strong>Per-query CC CLI logs</strong> at <code>cc-cli-logs/&lt;timestamp&gt;-&lt;tag&gt;-&lt;seq&gt;.log</code> in the same directory — the subprocess's own debug stream; tag is <code>provider</code> or <code>askclaude</code>. Shows CC's view of session loading, API requests, and tool calls.</li>
 </ul>
 <p>When filing a bug about a session-resume failure (e.g. "No conversation found"), the most useful attachments are the <code>syncResult:</code> lines from the bridge log plus the matching <code>cc-cli-logs/</code> file for the failing query.</p>
 <h2>Compatibility with other extensions</h2>
-<p>Other extensions can change the system prompt. When the result still contains pi's built-in system prompt text, or the two documentation paths that Anthropic looks for (<code>docs/custom-provider.md</code> in the same prompt with <code>docs/packages.md</code>), the bridge stops the turn instead of sending it, since Anthropic may otherwise bill these requests as Extra Usage. Fix the source extension before retrying; <code>CLAUDE_BRIDGE_DEBUG=1</code> writes the full prompt to <code>~/.pi/agent/claude-bridge.log</code> when this happens.</p>
+<h3>Which injection routes reach Claude Code</h3>
+<p>The bridge forwards pi's structured parts — project context files, skills, custom prompt, appended instructions — and drops the rest. Measured against the request body (<code>diag/capture-proxy.mjs</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Reaches Claude Code</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>before_agent_start</code> -&gt; <code>message</code></td>
+<td>Yes, as literal prompt text in the user turn</td>
+</tr>
+<tr>
+<td><code>context</code> editing the last user message</td>
+<td>Yes, as literal prompt text</td>
+</tr>
+<tr>
+<td><code>--append-system-prompt</code></td>
+<td>Yes, with pi's appended instructions</td>
+</tr>
+<tr>
+<td><code>context_with_system</code> editing the system message</td>
+<td>Yes when it wraps pi's prompt; the turn fails when it replaces one</td>
+</tr>
+<tr>
+<td><code>before_agent_start</code> -&gt; <code>systemPrompt</code></td>
+<td>No, dropped</td>
+</tr>
+</tbody></table>
+<p>Two traps. Returning <code>systemPrompt</code> from <code>before_agent_start</code> makes pi replace the whole system prompt, discarding any <code>context_with_system</code> edit in the same run — only one reaches the request. And system-prompt edits work by <em>wrapping</em>: replacing pi's prompt leaves the bridge with nothing to match, so it refuses the turn rather than send Claude Code a request missing your context files, skills and custom instructions. The error names the closest known prompt and where it diverged.</p>
+<p>To add instructions, use <code>message</code>, <code>context</code>, or a system-message edit that keeps pi's prompt intact.</p>
+<h3>Hooks written for Claude Code</h3>
+<p><code>~/.claude/settings.json</code> hooks fire inside bridge turns, so a hook injecting Claude-specific guidance duplicates what pi's extensions already provide. pi sets <code>PI_CODING_AGENT=true</code> for child processes, including the Claude Code child; a hook can skip itself on that:</p>
+<pre><code class="language-sh">[ -n "$PI_CODING_AGENT" ] &amp;&amp; exit 0
+</code></pre>
+<p>Hooks do not fire on the compact-summary side query.</p>
+<h3>System prompt rejections</h3>
+<p>Other extensions can change the system prompt. When the result still contains pi's built-in system prompt text, or the two documentation paths that Anthropic looks for (<code>docs/custom-provider.md</code> in the same prompt with <code>docs/packages.md</code>), the bridge stops the turn instead of sending it, since Anthropic may otherwise bill these requests as Extra Usage. Fix the source extension before retrying; <code>CLAUDE_BRIDGE_DEBUG=1</code> writes the full prompt to the bridge log when this happens.</p>
 <h3>Using claude bridge with @gotgenes/pi-subagents</h3>
 <p>Requires the following in <code>~/.pi/agent/subagents.json</code>:</p>
 <pre><code class="language-json">{"promptInheritance": {"claude-bridge": "portable"}}

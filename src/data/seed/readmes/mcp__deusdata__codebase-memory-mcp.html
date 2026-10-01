@@ -162,7 +162,7 @@ powershell -ExecutionPolicy Bypass -File "&lt;install-dir&gt;\install.ps1"
 </ul>
 <h3>Search</h3>
 <ul>
-<li><strong>Semantic search</strong> (<code>semantic_query</code>): vector search across the entire graph, powered by bundled Nomic <code>nomic-embed-code</code> embeddings (40K tokens, 768d int8) compiled into the binary — no API key, no Ollama, no Docker. 11-signal combined scoring (TF-IDF, RRI, API/Type/Decorator signatures, AST profiles, data flow, Halstead-lite, MinHash, module proximity, graph diffusion).</li>
+<li><strong>Semantic search</strong> (the <code>semantic_query</code> parameter of <code>search_graph</code>, not a separate tool): vector search across the entire graph, powered by bundled Nomic <code>nomic-embed-code</code> embeddings (40K tokens, 768d int8) compiled into the binary — no API key, no Ollama, no Docker. 11-signal combined scoring (TF-IDF, RRI, API/Type/Decorator signatures, AST profiles, data flow, Halstead-lite, MinHash, module proximity, graph diffusion).</li>
 <li><strong>BM25 full-text search</strong> via SQLite FTS5 with <code>cbm_camel_split</code> tokenizer (camelCase / snake_case aware)</li>
 <li><strong>Structural search</strong> (<code>search_graph</code>): regex name patterns, label filters, min/max degree, file scoping</li>
 <li><strong>Code search</strong> (<code>search_code</code>): graph-augmented grep over indexed files only</li>
@@ -209,12 +209,12 @@ powershell -ExecutionPolicy Bypass -File "&lt;install-dir&gt;\install.ps1"
 </ul>
 <h2>Team-Shared Graph Artifact</h2>
 <p>Commit a single compressed file to your repo and your teammates skip the reindex.</p>
-<p><code>.codebase-memory/graph.db.zst</code> is a zstd-compressed snapshot of the knowledge graph that lives next to your source. When you index, the artifact is written or refreshed; when a teammate clones the repo and runs <code>codebase-memory-mcp</code> for the first time, the artifact is decompressed and incremental indexing fills in their local diff.</p>
+<p><code>.codebase-memory/graph.db.zst</code> is a zstd-compressed snapshot of the knowledge graph that lives next to your source. The artifact is opt-in: <code>index_repository</code> writes it only with <code>persistence: true</code> (the default is <code>false</code>), and once it exists later indexes refresh it; when a teammate clones the repo and runs <code>codebase-memory-mcp</code> for the first time, the artifact is decompressed and incremental indexing fills in their local diff.</p>
 <ul>
 <li><strong>Format</strong>: SQLite database, indexes stripped, <code>VACUUM INTO</code> compacted, then zstd 1.5.7 compressed (8–13:1 ratio typical)</li>
 <li><strong>Two tiers</strong>:<ul>
-<li><strong>Best</strong> (<code>zstd -9</code> + index strip + <code>VACUUM INTO</code>) — written on explicit <code>index_repository</code></li>
-<li><strong>Fast</strong> (<code>zstd -3</code>) — written by the watcher for low-latency incremental updates</li>
+<li><strong>Best</strong> (<code>zstd -9</code> + index strip + <code>VACUUM INTO</code>) — written by <code>index_repository</code> with <code>persistence: true</code></li>
+<li><strong>Fast</strong> (<code>zstd -3</code>) — refreshes an existing artifact on every other index (including the watcher's low-latency incremental updates)</li>
 </ul>
 </li>
 <li><strong>Bootstrap</strong>: when no local DB exists but the artifact is present, <code>index_repository</code> imports the artifact first, then runs incremental indexing — avoiding the full reindex cost</li>
@@ -877,7 +877,7 @@ codebase-memory-mcp cli list_projects --format json --detail stats | jq '.projec
 </thead>
 <tbody><tr>
 <td><code>index_repository</code></td>
-<td>Index a repository into the graph. Auto-sync keeps it fresh after that.</td>
+<td>Index a repository into the graph. Auto-sync keeps it fresh after that. Waits for the whole index by default; pass <code>async: true</code> to start it in the daemon and return at once, then poll with <code>status: true</code> (see below).</td>
 </tr>
 <tr>
 <td><code>list_projects</code></td>
@@ -896,6 +896,32 @@ codebase-memory-mcp cli list_projects --format json --detail stats | jq '.projec
 <td>Check whether exact paths or a scope are indexed and fresh. A clean result means no recorded gap, not proof of completeness.</td>
 </tr>
 </tbody></table>
+<p><strong>Long indexes and client call deadlines.</strong> A synchronous <code>index_repository</code> on a large
+repository can take longer than an MCP client allows one tool call (some IDE clients give up
+after a fixed deadline). When a client cancels or disconnects, the daemon cancels an index that
+nobody else is waiting for, so retrying the same blocking call never finishes. Use the async
+mode instead:</p>
+<ol>
+<li><code>index_repository(repo_path="/abs/path", async: true)</code> starts the index in the daemon (or
+joins the one already running for that project) and returns immediately with
+<code>state</code> (<code>queued</code>/<code>running</code>). The job keeps running even if the client cancels, times out or
+disconnects; only stopping the daemon ends it.</li>
+<li><code>index_repository(repo_path="/abs/path", status: true)</code> reports <code>state</code>
+(<code>queued</code>, <code>running</code>, <code>cancelling</code>, <code>succeeded</code>, <code>failed</code>, <code>cancelled</code>), <code>started_at</code>,
+<code>finished_at</code> and an <code>error</code> summary. Poll it until the state is <code>succeeded</code>, <code>failed</code> or
+<code>cancelled</code>. Pass the same <code>repo_path</code> (and <code>name</code>, if the index call used one).</li>
+</ol>
+<p><code>async</code> and <code>status</code> are exclusive; <code>async</code> does not apply to <code>cross-repo-intelligence</code>. Both
+need the daemon-backed server (the default <code>codebase-memory-mcp</code> entry point). A temporary
+daemon (started on demand rather than by <code>codebase-memory-mcp daemon start</code>) stops, and
+cancels its jobs, when its last client disconnects. A connected MCP session keeps it alive, so
+async from your editor works. A one-shot <code>codebase-memory-mcp cli index_repository --async</code>
+that is the daemon's only client is refused with a clear error, because the job would die the
+moment the command exits: run <code>codebase-memory-mcp daemon start</code> first, keep an MCP session
+open, or call without <code>--async</code>. <code>status</code> works everywhere. When a synchronous call was cut
+short, the next
+<code>index_repository</code> or <code>status</code> call for that project carries a <code>notice</code> suggesting the async
+mode. <code>index_status</code> keeps describing the published graph and its freshness.</p>
 <h3>Querying</h3>
 <table>
 <thead>
@@ -1073,6 +1099,10 @@ export CBM_CACHE_DIR=~/my-projects/cbm-data
 <tr>
 <td><code>index_repository</code> fails</td>
 <td>Pass absolute path: <code>index_repository(repo_path="/absolute/path")</code></td>
+</tr>
+<tr>
+<td><code>index_repository</code> times out in the client</td>
+<td>Start it with <code>async: true</code>, then poll with <code>status: true</code> (see <a href="#indexing" target="_blank" rel="noopener noreferrer">Indexing</a>).</td>
 </tr>
 <tr>
 <td><code>trace_path</code> returns 0 results</td>

@@ -50,9 +50,15 @@ keryx test analyze           # testing context report
 keryx health run --changed   # normalized health report
 keryx dash                   # human admin dashboard
 </code></pre>
-<p><code>keryx init</code> creates the <code>.metaproject/</code> workspace and connects your existing
-<code>AGENTS.md</code> / <code>CLAUDE.md</code> entrypoints to it, so agents are routed to the right
-module automatically.</p>
+<p><code>keryx init</code> creates the <code>.metaproject/</code> workspace and connects your agents to
+it, so they are routed to the right module automatically. It imports your
+<code>AGENTS.md</code> / <code>CLAUDE.md</code> as project rules and writes its routing block and
+Claude hooks to per-developer, gitignored files (<code>CLAUDE.local.md</code>,
+<code>AGENTS.override.md</code>, <code>.claude/settings.local.json</code>, ignore rules in
+<code>.git/info/exclude</code>), so the files your team tracks stay untouched and
+<code>git pull</code> never meets an edit made by keryx. A team that wants the block committed opts
+into <code>scope: "shared"</code>; see
+<a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/workspace-and-lifecycle.md#where-the-block-goes-local-and-shared-scope" target="_blank" rel="noopener noreferrer">where the block goes</a>.</p>
 <h3>Connect a model provider</h3>
 <p><code>keryx shell</code> needs one configured provider. The first run with none
 configured opens a picker: choose a built-in provider (Anthropic, Ollama,
@@ -65,6 +71,12 @@ keryx auth login &lt;provider&gt;  # subscription login (device code / OAuth) or
 </code></pre>
 <p>Inside a running session, <code>/provider</code> reopens the same add/reconfigure wizard
 and <code>/connect</code> switches between providers you already configured.</p>
+<p>ChatGPT / Codex model discovery reads the current stable Codex version from npm
+metadata and caches it for one day. <strong>Test</strong> in <code>/connect</code> (or
+<code>keryx providers test openai-codex</code>) always checks for a newer version before
+listing models. This does not install Codex or poll npm in the background.
+If npm is unavailable, a previously discovered version is reused; without a
+cached version, discovery reports the problem instead of guessing a version.</p>
 <p>Once you have more than one provider connected, <code>keryx routing</code> (and, inside a
 session, <code>/routing</code>) maps a task category — <code>review</code>, <code>subagents</code>, and a
 catalogue of others — to a specific model, so reviews and subagent spawns can
@@ -82,6 +94,9 @@ described <a href="#the-agent-harness" target="_blank" rel="noopener noreferrer"
 first session:</p>
 <ul>
 <li><code>/theme [name]</code> opens the theme picker; a choice applies immediately.</li>
+<li><code>/settings</code> opens one modal with the permission mode, plan, guards, routing,
+reasoning, theme and external switches, each with its On/Off or value
+buttons; <code>/mode</code> and <code>/plan</code> are marked <code>session</code>, the rest <code>saved</code>.</li>
 <li><code>/mode [ask|trust|auto]</code> shows or switches the permission mode for the rest
 of the session — see <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/permission-modes.md" target="_blank" rel="noopener noreferrer">permission modes</a>.</li>
 <li><code>/help</code> lists every slash command available in the current mode.</li>
@@ -426,14 +441,17 @@ launcher or a posture is missing rather than quietly doing less.</li>
 bounded parallel scheduling, and an offline fleet report over a recorded event
 log (<code>keryx agents monitor &lt;events-file&gt;</code>).</li>
 <li><strong>Vendor CLIs as child agents — off by default.</strong> keryx can hand a bounded,
-<strong>read-only</strong> task (or, for <code>claude-cli</code> only, a reviewed write — see below)
+<strong>read-only</strong> task (or, for <code>claude-cli</code> and <code>codex-cli</code>, a reviewed write — see below)
 to a coding CLI you already have installed (<code>codex exec</code>,
 <code>claude -p</code>, or Google's Antigravity CLI, <code>agy -p --output-format stream-json</code>) and host it as a child of the same harness: a disposable git
 worktree, a stripped environment, a restricted tool roster, the same budget
 ledger and depth caps, and the same completion. <code>keryx agents external list</code>
 shows the registry; <code>keryx agents external run &lt;id&gt; --task "…"</code> or
-<code>/delegate &lt;agent&gt; &lt;task&gt;</code> starts a run. It takes an explicit opt-in in your
-own user config, and is hard disabled on a remote transport and under CI.
+<code>/delegate &lt;agent&gt; &lt;task&gt;</code> starts a run; <code>claude</code>, <code>codex</code> and <code>agy</code> are
+accepted as short names. <code>keryx agents external enable</code> (in the shell:
+<code>/external-agents on</code>) is the one-step opt-in: your user config and this
+project's manifest, nothing else. It is hard disabled on a remote transport
+and under CI.
 keryx never reads a vendor credential store — not even to check whether you
 are logged in — so it reports <em>"installed … login not verified — keryx
 cannot know"</em> rather than a tick. <strong>No vendor sanction is claimed.</strong>
@@ -447,16 +465,20 @@ offline against recorded transcripts.</li>
 <li><strong>A write from an external agent you review before it lands.</strong>
 <code>keryx agents external run claude-cli --task "…" --write</code> runs <code>claude</code> in a
 throwaway worktree with only <code>Read Grep Glob Edit Write</code> (no shell, no network,
-no MCP). Its diff is captured, secret-redacted, hashed and stored as a pending
+no MCP); <code>codex-cli --write</code> runs <code>codex</code> in the same kind of worktree under an
+OS sandbox (as measured: writes outside the worktree fail, a DNS lookup fails, <code>.git</code> read-only)
+that still leaves it a shell able to read files your account can read, so review
+its output too. Its diff is captured, secret-redacted, hashed and stored as a pending
 review — nothing reaches your checkout. <code>keryx agents external review &lt;run-id&gt;</code>
 shows it; <code>apply &lt;run-id&gt;</code> needs a real terminal, shows the diff and asks you to
 type the first 12 hex digits of the patch hash, then creates a NEW local branch
 <code>external/&lt;run-id&gt;</code> with one commit. Your current branch and working tree are
 never touched, nothing is pushed and no pull request is opened;
 <code>discard &lt;run-id&gt;</code> drops it. There is no flag that skips the confirmation. Only
-<code>claude-cli</code> can write (<code>codex-cli</code> and <code>antigravity-cli</code> refuse <code>--write</code>), the
-review is a human reading the diff (a model review is not built), and a full run
-through the installed CLI is not recorded yet. In the TUI: <code>/external-diff</code> and a
+<code>claude-cli</code> and <code>codex-cli</code> can write (<code>antigravity-cli</code> refuses <code>--write</code>), the
+review is a human reading the diff (a model review is not built), and neither
+has a long live history (<code>codex</code> was verified in a scratch repository on
+<code>codex</code> 0.159.2; versions outside 0.159.2 up to 0.160.0 are refused). In the TUI: <code>/external-diff</code> and a
 sidebar row while a diff waits. See the <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/external-agent-write.md" target="_blank" rel="noopener noreferrer">external agent write
 guide</a>.</li>
 <li><strong>Completion you can audit.</strong> The completion gate blocks on missing evidence: a
@@ -676,11 +698,11 @@ enabled. Nine modules are on after <code>init</code>; <code>mcp</code> is opt-in
 </thead>
 <tbody><tr>
 <td>Claude Code</td>
-<td><code>CLAUDE.md</code> routing, orientation hook, security hooks, MCP server</td>
+<td><code>CLAUDE.local.md</code> routing, orientation hook, security hooks, MCP server</td>
 </tr>
 <tr>
 <td>Codex</td>
-<td><code>AGENTS.md</code> routing and orientation hook</td>
+<td><code>AGENTS.override.md</code> routing and orientation hook</td>
 </tr>
 <tr>
 <td>Cursor</td>
@@ -691,8 +713,11 @@ enabled. Nine modules are on after <code>init</code>; <code>mcp</code> is opt-in
 <td>Repository-local Markdown/JSON artifacts under <code>.metaproject/</code></td>
 </tr>
 </tbody></table>
-<p>After <code>init</code>, agents follow the root <code>AGENTS.md</code>/<code>CLAUDE.md</code> pointer to
-<code>.metaproject/index.md</code>, which routes them to the right capability. Two commands
+<p>After <code>init</code>, agents follow the routing block — in <code>CLAUDE.local.md</code> and
+<code>AGENTS.override.md</code> by default, in the shared <code>CLAUDE.md</code>/<code>AGENTS.md</code> under
+<code>scope: "shared"</code> — to <code>.metaproject/index.md</code>, which routes them to the right
+capability. Those local files exist per checkout: run <code>keryx update</code> in a new
+worktree to give it the block and hooks. Two commands
 sharpen that routing:</p>
 <p><code>keryx orient</code> emits a bounded excerpt of the launch project's own
 <code>.metaproject/index.md</code>, followed by the graph map and wiki index. The excerpt
@@ -894,7 +919,7 @@ no measurable effect — so <strong>precision matters more than recall here</str
 <code>0.5</code> is the default for exactly that reason. Raise it if the guard still
 flags too much for your rule set; lower it only if you have evidence the
 agent is actually acting on the extra flags.</p>
-<pre><code class="language-bash">keryx review jev-edit-guard install   # merge-safe: writes .claude/settings.json
+<pre><code class="language-bash">keryx review jev-edit-guard install   # merge-safe: writes .claude/settings.local.json
 </code></pre>
 <p>Then opt in per project — the hook is installed but stays silent until this is set:</p>
 <pre><code class="language-json">// .metaproject/tasks.config.json
@@ -939,9 +964,9 @@ untouched.</p>
 <td>Everything else runs deterministically offline</td>
 </tr>
 <tr>
-<td>External agents are read-only, except <code>claude-cli</code> write mode, which has no full live run recorded</td>
-<td>A delegated CLI can read and search; only <code>claude-cli</code> can write, and only as a stored diff a human reviews (<code>keryx agents external review|apply|discard</code>) that lands as a new local branch — never on your checkout, never pushed. <code>codex-cli</code> and <code>antigravity-cli</code> refuse <code>--write</code> ("write mode is claude-only in this release"). A model review is not built. The parent gets the child's result and nothing before it — supervision of a running external child is not implemented. <code>claude</code> and <code>agy</code> read-only runs are live-verified; a write run through the installed CLI is not yet</td>
-<td>Use keryx's own child agents for work that must mutate the tree, or the <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/external-agent-write.md" target="_blank" rel="noopener noreferrer">external agent write guide</a> for a reviewed <code>claude-cli</code> diff</td>
+<td>External agents are read-only, except <code>claude-cli</code> and <code>codex-cli</code> write mode, which have no long live history</td>
+<td>A delegated CLI can read and search; only <code>claude-cli</code> and <code>codex-cli</code> can write, and only as a stored diff a human reviews (<code>keryx agents external review|apply|discard</code>) that lands as a new local branch — never on your checkout, never pushed. <code>claude</code> is confined by a tool allow-list (no shell, no network); <code>codex</code> by an OS sandbox that still leaves it a shell that can read files your user can read (it cannot send them, but they can show up in the run output), and is refused when older than 0.159.0 — live-verified in a scratch repository on <code>codex</code> 0.159.0. <code>antigravity-cli</code> refuses <code>--write</code>. A model review is not built. The parent gets the child's result and nothing before it — supervision of a running external child is not implemented. <code>claude</code> and <code>agy</code> read-only runs are live-verified</td>
+<td>Use keryx's own child agents for work that must mutate the tree, or the <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/external-agent-write.md" target="_blank" rel="noopener noreferrer">external agent write guide</a> for a reviewed <code>claude-cli</code> or <code>codex-cli</code> diff</td>
 </tr>
 <tr>
 <td>A dispatched <code>flow-next</code> task is "done" by checks, not review</td>
@@ -993,6 +1018,24 @@ one. The remote policy profile may never be weaker than the local one — it is
 compared at startup, and a weaker profile refuses to bind at all. See
 <a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/drive-keryx-remotely.md" target="_blank" rel="noopener noreferrer">drive keryx remotely</a> for routes and
 setup.</p>
+<h3>Remote control from Telegram (opt-in, off by default)</h3>
+<p><code>/remote-control</code> in a running shell mirrors that session into its own topic of a
+Telegram supergroup: you send a line from your phone and it runs as if typed
+there, the reply and any approval question come back to the topic. Nothing
+happens until you set three things up: a separate bot made with BotFather, its
+token in <code>remote/bot-token</code> in the global keryx directory with mode 600; the
+Telegram user id that may use it, in the allowlist file <code>remote/config.json</code>; and
+a supergroup with topics enabled where that bot is an admin with the manage topics
+right. The Telegram transport is the single poller inside <code>keryx serve</code> — shells
+talk to <code>serve</code> over loopback with a local shell token (new on every <code>serve</code>
+start, and never sent to an endpoint whose <code>serve</code> is gone), they never poll
+Telegram themselves, and a second <code>keryx serve</code> does not poll while the first one
+runs. At most 500 lines wait per topic, and turning it off tells the topic which
+queued lines will not run.
+Without the config files <code>serve</code> starts as before, with remote control off. This
+has been verified against a fake Bot API only; no run against real Telegram has
+been done yet. Setup and limits:
+<a href="https://github.com/MrCipherSmith/keryx/blob/HEAD/docs/docs/guides/drive-keryx-remotely.md#remote-control-from-telegram" target="_blank" rel="noopener noreferrer">drive keryx remotely</a>.</p>
 <h2>CI integration</h2>
 <p>CI can publish normalized, committable artifacts that humans and agents read
 later:</p>
