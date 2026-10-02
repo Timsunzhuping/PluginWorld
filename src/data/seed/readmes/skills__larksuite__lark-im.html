@@ -1,0 +1,452 @@
+<h1>im (v1)</h1>
+<p><strong>CRITICAL — 开始前 MUST 先用 Read 工具读取 <a href="https://github.com/larksuite/cli/blob/HEAD/../lark-shared/SKILL.md" target="_blank" rel="noopener noreferrer"><code>../lark-shared/SKILL.md</code></a>，其中包含认证、权限处理</strong></p>
+<h2>Core Concepts</h2>
+<ul>
+<li><strong>Message</strong>: A single message in a chat, identified by <code>message_id</code> (om_xxx). Supports types: text, post, image, file, audio, video, sticker, interactive (card), share_chat, share_user, merge_forward, etc.</li>
+<li><strong>Chat</strong>: A group chat or P2P conversation, identified by <code>chat_id</code> (oc_xxx).</li>
+<li><strong>Thread</strong>: A reply thread under a message, identified by <code>thread_id</code> (om_xxx or omt_xxx).</li>
+<li><strong>Reaction</strong>: An emoji reaction on a message.</li>
+<li><strong>Flag</strong>: A bookmark on a message or thread.</li>
+<li><strong>Feed Shortcut</strong>: A chat pinned to the current user's feed sidebar, identified by <code>feed_card_id</code> (an <code>oc_xxx</code> open_chat_id for CHAT type).</li>
+<li><strong>Feed Group</strong>: A tag that groups feed cards in the feed list, identified by <code>feed_group_id</code> (ofg_xxx). Members are feed cards, each identified by <code>feed_id</code> + <code>feed_type</code>. Two types: <code>normal</code> (members managed explicitly) and <code>rule</code> (members auto-derived from rules).</li>
+</ul>
+<h2>Resource Relationships</h2>
+<pre><code>Chat (oc_xxx)
+├── Message (om_xxx)
+│   ├── Thread (reply thread)
+│   ├── Reaction (emoji)
+│   └── Resource (image / file / video / audio)
+└── Member (user / bot)
+</code></pre>
+<h2>Important Notes</h2>
+<h3>AppLink and Share Links</h3>
+<p>Prefer CLI-returned links: use <code>chat_app_link</code> to open joined conversations, <code>message_app_link</code> to open messages, and <code>share_link</code> to invite others to groups. If manually building a joined-conversation AppLink, use <code>https://&lt;applink_host&gt;/client/chat/open?openChatId=&lt;oc_xxx&gt;</code>, never <code>chatId=&lt;oc_xxx&gt;</code> or <code>lark://...chat_id=&lt;oc_xxx&gt;</code>.</p>
+<h3>Identity and Token Mapping</h3>
+<ul>
+<li><code>--as user</code> means <strong>user identity</strong> and uses <code>user_access_token</code>. Calls run as the authorized end user, so permissions depend on both the app scopes and that user's own access to the target chat/message/resource.</li>
+<li><code>--as bot</code> means <strong>bot identity</strong> and uses <code>tenant_access_token</code>. Calls run as the app bot, so behavior depends on the bot's membership, app visibility, availability range, and bot-specific scopes.</li>
+<li>If an IM API says it supports both <code>user</code> and <code>bot</code>, the token type changes who the operator is. The same API can succeed with one identity and fail with the other because owner/admin status, chat membership, tenant boundary, or app availability are checked against the current caller.</li>
+</ul>
+<h3>Sender Name Resolution</h3>
+<p>When fetching messages (<code>+chat-messages-list</code>, <code>+threads-messages-list</code>, <code>+messages-mget</code>, <code>+messages-search</code>), the CLI shows a display name for both user and bot senders:</p>
+<ul>
+<li><strong>Server-provided name</strong>: the read APIs return <code>sender_name</code> (plus the full-i18n <code>sender_i18n_names</code> map) on each message <code>sender</code>; the CLI surfaces it as the sender's <code>name</code> for users and bots alike. No name lookup and no extra permission are needed — <strong>no contact scope</strong> and no <code>application:bot.basic_info:read</code>.</li>
+<li><strong>Fallback to id</strong>: when the server does not provide a name, the sender is shown by its id and the command still exits 0. There is no contact-directory fallback.</li>
+</ul>
+<p>The raw <code>sender_name</code> is not duplicated in output (its value is in <code>name</code>); the full <code>sender_i18n_names</code> map (all locales) is preserved for consumers that need a specific language, alongside an optional <code>open_bot_id</code> (<code>ou_</code>) for bot senders aligned with the message-receive event channel. System messages (<code>msg_type: system</code>) have no sender name — that is normal, not an error.</p>
+<h3>Default message enrichment (reactions / update_time)</h3>
+<p>The four message-pulling shortcuts (<code>+messages-mget</code>, <code>+chat-messages-list</code>, <code>+messages-search</code>, <code>+threads-messages-list</code>) automatically attach a <code>reactions</code> block and (for edited messages) <code>update_time</code> to each returned message — no separate <code>im.reactions.batch_query</code> call is needed. Pass <code>--no-reactions</code> to opt out. For the full contract (output shape, the <code>im:message.reactions:read</code> scope requirement, and the "missing field ≠ fetch failure" data rules), read <a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-message-enrichment.md" target="_blank" rel="noopener noreferrer"><code>references/lark-im-message-enrichment.md</code></a>.</p>
+<h3>Compact message output (<code>--concise</code>)</h3>
+<p>Some message-listing shortcuts support <code>--concise</code> for compact Markdown output. Use it when the user asks for concise output or a smaller result/file; check <code>--help</code> for availability and do not combine it with an explicit <code>--format</code>, an enabled <code>--json</code>, or a non-empty <code>--jq</code>.</p>
+<h3>Opt-in resource auto-download (<code>--download-resources</code>)</h3>
+<p><code>+chat-messages-list</code>, <code>+messages-mget</code>, and <code>+threads-messages-list</code> accept <code>--download-resources</code> to save eligible attachments into <code>./lark-im-resources/</code> and add a <code>resources</code> array to each message. It is off by default; stickers are not downloadable. A failed attachment is reported on that resource without aborting the message pull. Use <a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-messages-resources-download.md" target="_blank" rel="noopener noreferrer"><code>+messages-resources-download</code></a> for one attachment. See <a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-message-enrichment.md" target="_blank" rel="noopener noreferrer"><code>references/lark-im-message-enrichment.md</code></a> for the output contract.</p>
+<p><strong>Folder resources</strong> are containers, not files — a folder <code>file_key</code> cannot be downloaded directly. Expand it first with <code>lark-cli im files folder --recursive --file-key &lt;folder_key&gt; --srctype message --srcid &lt;message_id&gt;</code>, then download the files inside with <a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-messages-resources-download.md" target="_blank" rel="noopener noreferrer"><code>+messages-resources-download</code></a>.</p>
+<h3>Card Messages (Interactive)</h3>
+<p><strong>Before sending, replying with, or updating any <code>interactive</code> card (<code>+messages-send</code> / <code>+messages-reply</code> / <code>messages.patch</code>), you MUST read <a href="https://github.com/larksuite/cli/blob/HEAD/references/card/lark-im-card-create.md" target="_blank" rel="noopener noreferrer"><code>references/card/lark-im-card-create.md</code></a> and follow its workflow.</strong> The card JSON passed to <code>--msg-type interactive --content</code> (send/reply) or <code>messages.patch --data</code> (update) must be the output of that workflow — never hand-write or copy a card payload.</p>
+<p>Card messages (<code>interactive</code> type) are not yet supported for compact conversion in event subscriptions. The raw event data will be returned instead, with a hint printed to stderr.</p>
+<p><code>interactive</code> cards support callback events (<code>card.action.trigger</code>) — see <a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-card-action-reply.md" target="_blank" rel="noopener noreferrer"><code>references/lark-im-card-action-reply.md</code></a>.</p>
+<h3>Audio Messages</h3>
+<p><code>--audio</code> sends a voice message and supports only Opus audio files, for example <code>.opus</code> files or Ogg Opus (<code>.ogg</code>) files. For <code>mp3</code>, <code>wav</code>, or other non-Opus audio, either convert to <code>.opus</code> first and keep using <code>--audio</code>, or send the original file as an attachment with <code>--file</code>.</p>
+<h3>Sending Doc Content as a Message</h3>
+<p>When sending content fetched from a Lark doc as a message, fetch the doc with --doc-format im-markdown, then send it as a message using the --markdown format. The fetched content is already in markdown; in any content-forwarding scenario, keep the fetched original text and send it in the --markdown format. Note: if the doc contains a cite tag with type="user", keep it as-is and do not strip the tag.</p>
+<h3>Flag Types</h3>
+<p>Flags support two layers:</p>
+<ul>
+<li><strong>Message-layer flag</strong>: <code>(ItemTypeDefault, FlagTypeMessage)</code> — regular message bookmark</li>
+<li><strong>Feed-layer flag</strong>: <code>(ItemTypeThread/ItemTypeMsgThread, FlagTypeFeed)</code> — thread as feed-layer bookmark</li>
+</ul>
+<p>Item types for feed-layer flags:</p>
+<ul>
+<li><strong>ItemTypeThread</strong> (4) = thread in a topic-style chat</li>
+<li><strong>ItemTypeMsgThread</strong> (11) = thread in a regular chat</li>
+</ul>
+<h3>Feed Shortcut</h3>
+<p>Feed shortcuts add chats to the current user's feed sidebar. They are distinct from flags:</p>
+<ul>
+<li><strong>Flag</strong> = bookmark on a message/thread, scoped to the user's bookmark list.</li>
+<li><strong>Feed shortcut</strong> = entry in the user's feed sidebar (currently only chats).</li>
+</ul>
+<p>Key limits:</p>
+<ul>
+<li>Only <strong>CHAT-type</strong> (<code>feed_card_id</code> is <code>oc_xxx</code>) is exposed via OpenAPI; doc/app/subscription shortcuts exist internally but are not yet whitelisted.</li>
+<li>All three operations (create/remove/list) are <strong>user-identity only</strong> — they sign with <code>user_access_token</code>.</li>
+<li>Batch size is <strong>10 per call</strong> for create/remove; list is a one-page wrapper with opaque <code>page_token</code> pagination.</li>
+</ul>
+<h2>Shortcuts（推荐优先使用）</h2>
+<p>Shortcut 是对常用操作的高级封装（<code>lark-cli im +&lt;verb&gt; [flags]</code>）。有 Shortcut 的操作优先使用。</p>
+<table>
+<thead>
+<tr>
+<th>Shortcut</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-chat-create.md" target="_blank" rel="noopener noreferrer"><code>+chat-create</code></a></td>
+<td>Create a group chat or topic chat; user/bot; --chat-mode group</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-chat-list.md" target="_blank" rel="noopener noreferrer"><code>+chat-list</code></a></td>
+<td>List chats the current user/bot is a member of; defaults to groups; pass --types=p2p,group to include p2p single chats (user-only); user/bot; supports sorting, auto-pagination, --exclude-muted (user-only)</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-chat-members-list.md" target="_blank" rel="noopener noreferrer"><code>+chat-members-list</code></a></td>
+<td>List members of a chat; returns separate users[] / bots[] buckets; callable as user or bot; --member-types filters which kinds to return; --page-all pagination; surfaces truncations[] when the server caps a bucket</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-chat-messages-list.md" target="_blank" rel="noopener noreferrer"><code>+chat-messages-list</code></a></td>
+<td>List messages in a chat or P2P conversation; user/bot; accepts --chat-id or --user-id, resolves P2P chat_id, supports time range, --order asc/desc sorting, auto-pagination</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-chat-search.md" target="_blank" rel="noopener noreferrer"><code>+chat-search</code></a></td>
+<td>Search visible group chats by --query keyword and/or --member-ids; user/bot; e.g. look up chat_id by group name; supports type filters, sorting, auto-pagination, and --exclude-muted (user identity only)</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-chat-update.md" target="_blank" rel="noopener noreferrer"><code>+chat-update</code></a></td>
+<td>Update group chat name or description; user/bot; updates a chat's name or description</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-message-read-status.md" target="_blank" rel="noopener noreferrer"><code>+message-read-users</code></a></td>
+<td>List users who read one message; user/bot; identity-specific scopes; supports bounded auto-pagination</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-messages-edit.md" target="_blank" rel="noopener noreferrer"><code>+messages-edit</code></a></td>
+<td>Edit a message's content (text/post, including the attachment zone); bot-only (user identity is rejected by the server); PUT /open-apis/im/v1/messages/:message_id</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-messages-mget.md" target="_blank" rel="noopener noreferrer"><code>+messages-mget</code></a></td>
+<td>Batch get messages by IDs; user/bot; fetches up to 50 om_ message IDs, formats sender names, expands thread replies</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-message-read-status.md" target="_blank" rel="noopener noreferrer"><code>+messages-read-status</code></a></td>
+<td>Batch query whether the current user read 1–50 messages; user-only; returns readable items and invalid message IDs</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-messages-reply.md" target="_blank" rel="noopener noreferrer"><code>+messages-reply</code></a></td>
+<td>Reply to a message (supports thread replies); user/bot; supports text/markdown/post/media replies, reply-in-thread, idempotency key</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-messages-resources-download.md" target="_blank" rel="noopener noreferrer"><code>+messages-resources-download</code></a></td>
+<td>Download an image/file from a message; folders are not directly downloadable — expand with <code>im files folder --recursive</code> first, then download the files inside; user/bot</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-messages-search.md" target="_blank" rel="noopener noreferrer"><code>+messages-search</code></a></td>
+<td>Search messages across chats (supports keyword, sender, time range filters) with user or bot identity; filters by chat/sender/attachment/time, supports auto-pagination via <code>--page-all</code> / <code>--page-limit</code>, enriches results via batched mget and chats batch_query</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-messages-send.md" target="_blank" rel="noopener noreferrer"><code>+messages-send</code></a></td>
+<td>Send a message to a chat or direct message; user/bot; sends to chat-id or user-id with text/markdown/post/media, supports idempotency key</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-threads-messages-list.md" target="_blank" rel="noopener noreferrer"><code>+threads-messages-list</code></a></td>
+<td>List messages in a thread; user/bot; accepts om_/omt_ input, resolves message IDs to thread_id, supports --order asc/desc sorting, auto-pagination</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-flag-create.md" target="_blank" rel="noopener noreferrer"><code>+flag-create</code></a></td>
+<td>Create a bookmark on a message; user-only; defaults to message-layer flag; use --flag-type feed for feed-layer flag (item_type auto-detected from chat mode)</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-flag-cancel.md" target="_blank" rel="noopener noreferrer"><code>+flag-cancel</code></a></td>
+<td>Cancel (remove) a bookmark. When no --flag-type is given, best-effort double-cancel: removes message layer and (when chat_type is determinable) feed layer</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-flag-list.md" target="_blank" rel="noopener noreferrer"><code>+flag-list</code></a></td>
+<td>List bookmarks; user-only; auto-enriches feed-type thread entries with message content; <code>--page-all</code> is capped by <code>--page-limit</code> (default 20, max 1000), and <code>has_more=true</code> means the result is incomplete</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-shortcut-create.md" target="_blank" rel="noopener noreferrer"><code>+feed-shortcut-create</code></a></td>
+<td>Add chats to the user's feed shortcuts; user-only; oc_xxx chat IDs only; batch up to 10 per call; <code>--head</code>/<code>--tail</code> controls insertion order; partial failures return an <code>ok:false</code> ledger</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-shortcut-remove.md" target="_blank" rel="noopener noreferrer"><code>+feed-shortcut-remove</code></a></td>
+<td>Remove chats from the user's feed shortcuts; user-only; batch up to 10 per call; removing an absent shortcut is idempotent success; real per-item failures return an <code>ok:false</code> ledger</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-shortcut-list.md" target="_blank" rel="noopener noreferrer"><code>+feed-shortcut-list</code></a></td>
+<td>List one page of the user's feed shortcuts; user-only; omit <code>--page-token</code> for the first page; default output enriches CHAT entries under <code>detail</code>; pass <code>--no-detail</code> to skip the extra lookup and <code>im:chat:read</code> scope</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-group-list.md" target="_blank" rel="noopener noreferrer"><code>+feed-group-list</code></a></td>
+<td>List the caller's feed groups (tags); user-only; supports <code>--page-all</code> auto-pagination</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-group-list-item.md" target="_blank" rel="noopener noreferrer"><code>+feed-group-list-item</code></a></td>
+<td>List feed cards in a feed group (tag); user-only; enriches each item with chat_name resolved from feed_id; supports --page-all auto-pagination</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-group-query-item.md" target="_blank" rel="noopener noreferrer"><code>+feed-group-query-item</code></a></td>
+<td>Look up specific feed cards in a feed group (tag) by ID; user-only; enriches each item with chat_name resolved from feed_id</td>
+</tr>
+</tbody></table>
+<h2>API Resources</h2>
+<pre><code class="language-bash">lark-cli schema im.&lt;resource&gt;.&lt;method&gt;   # 调用 API 前必须先查看参数结构
+lark-cli im &lt;resource&gt; &lt;method&gt; [flags] # 调用 API
+</code></pre>
+<blockquote>
+<p><strong>重要</strong>：使用原生 API 时，必须先运行 <code>schema</code> 查看 <code>--data</code> / <code>--params</code> 参数结构，不要猜测字段格式。</p>
+</blockquote>
+<h3>chats</h3>
+<ul>
+<li><code>create</code> — 创建群。Identity: <code>bot</code> only (<code>tenant_access_token</code>).</li>
+<li><code>get</code> — 获取群信息。Identity: supports <code>user</code> and <code>bot</code>; the caller must be in the target chat to get full details, and must belong to the same tenant for internal chats.</li>
+<li><code>link</code> — 获取群分享链接。Identity: supports <code>user</code> and <code>bot</code>; the caller must be in the target chat, must be an owner or admin when chat sharing is restricted to owners/admins, and must belong to the same tenant for internal chats.</li>
+<li><code>update</code> — 更新群信息。Identity: supports <code>user</code> and <code>bot</code>.</li>
+</ul>
+<h3>chat.members</h3>
+<ul>
+<li><code>create</code> — 将用户或机器人拉入群聊。Identity: supports <code>user</code> and <code>bot</code>; the caller must be in the target chat; for <code>bot</code> calls, added users must be within the app's availability; for internal chats the operator must belong to the same tenant; if only owners/admins can add members, the caller must be an owner/admin, or a chat-creator bot with <code>im:chat:operate_as_owner</code>.</li>
+<li><code>delete</code> — 将用户或机器人移出群聊。Identity: supports <code>user</code> and <code>bot</code>; only group owner, admin, or creator bot can remove others; max 50 users or 5 bots per request.</li>
+</ul>
+<h3>chat.user_setting</h3>
+<ul>
+<li><code>batch_query</code> — 批量查询当前用户在群内的个人偏好设置 (e.g. <code>is_muted</code> mutes normal messages, <code>is_mute_at_all</code> mutes @all messages); up to 10 chats per request. Identity: <code>user</code> only (<code>user_access_token</code>); the caller must be in each target chat.</li>
+<li><code>batch_update</code> — 批量更新当前用户在群内的个人偏好设置 (e.g. <code>is_muted</code> mutes normal messages, <code>is_mute_at_all</code> mutes @all messages); up to 10 chats per request. Identity: <code>user</code> only (<code>user_access_token</code>); the caller must be in each target chat.</li>
+</ul>
+<h3>chat.nickname</h3>
+<ul>
+<li><code>get</code> — 获取自己的群昵称。Get your own nickname in the chat (self-only). Identity: <code>user</code> only (<code>user_access_token</code>); returns an empty string when no nickname is set.</li>
+<li><code>update</code> — 设置自己的群昵称。Set or update your own nickname in the chat (self-only). Identity: <code>user</code> only (<code>user_access_token</code>); <code>nickname</code> must be a non-empty string (max 300 bytes). Use DELETE to clear it.</li>
+<li><code>delete</code> — 清空自己的群昵称。Clear your own nickname in the chat (self-only). Identity: <code>user</code> only (<code>user_access_token</code>).</li>
+</ul>
+<h3>chat.join_requests</h3>
+<ul>
+<li><code>list</code> — 列出群的待审批入群申请（仅群主/管理员，user_access_token）。List pending join requests for a chat. Identity: <code>user</code> only (<code>user_access_token</code>); the caller must be the chat owner or an admin. Paginated (<code>page_size</code> 1-100); stop on <code>has_more == false</code> — <code>page_token</code> is returned even on the last page, so paging while it is present never terminates.</li>
+<li><code>handle</code> — 批量审批入群申请（approve/reject，仅群主/管理员，user_access_token）。Approve or reject pending join requests in bulk (1-50 items, processed in order). Identity: <code>user</code> only (<code>user_access_token</code>); the caller must be the chat owner or an admin. <code>results[]</code> mirrors <code>items[]</code> in count and order — check each <code>result</code> (<code>success</code> / <code>failed</code> / <code>already_handled</code>); exit 0 does not mean every item succeeded.</li>
+</ul>
+<h3>chat.managers</h3>
+<ul>
+<li><code>add_managers</code> — 指定群管理员。Identity: supports <code>user</code> and <code>bot</code>; only the group owner can add managers; max 10 managers per chat (20 for super-large chats), and at most 5 bots per request.</li>
+<li><code>delete_managers</code> — 删除群管理员。Identity: supports <code>user</code> and <code>bot</code>; only the group owner can remove managers; max 50 users or 5 bots per request.</li>
+</ul>
+<h3>chat.moderation</h3>
+<ul>
+<li><code>get</code> — 获取群成员发言权限。Identity: supports <code>user</code> and <code>bot</code>; the caller must be in the target chat and belong to the same tenant.</li>
+<li><code>update</code> — 更新群发言权限。Identity: supports <code>user</code> and <code>bot</code>; only the group owner (or creator bot with <code>im:chat:operate_as_owner</code>) can update; the caller must be in the chat.</li>
+</ul>
+<h3>messages</h3>
+<ul>
+<li><code>read_status</code> — 批量查询当前用户对消息的已读状态。Identity: <code>user</code> only (<code>user_access_token</code>); accepts up to 50 message IDs and returns readable items plus invalid message IDs.<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-message-read-status.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>delete</code> — 撤回消息。Identity: supports <code>user</code> and <code>bot</code>; for <code>bot</code> calls, the bot must be in the chat to revoke group messages; to revoke another user's group message, the bot must be the owner, an admin, or the creator; for user P2P recalls, the target user must be within the bot's availability.</li>
+<li><code>forward</code> — 转发消息。Identity: supports <code>user</code> and <code>bot</code>.</li>
+<li><code>merge_forward</code> — 合并转发消息。Identity: <code>bot</code> only (<code>tenant_access_token</code>).</li>
+<li><code>read_users</code> — 查询消息已读信息。Identity: supports <code>user</code> and <code>bot</code>; the caller must still be in the chat. A user can query messages they sent within the last 7 days, while a bot can query only messages sent by that bot within the last 7 days.<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-message-read-status.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>patch</code> — 更新已发送的消息卡片。Update an interactive message card sent by the app. Identity: supports <code>user</code> and <code>bot</code>; the message must have been sent within the last 14 days, and <code>content</code> must be a JSON-serialized string no larger than 30 KB.<a href="https://github.com/larksuite/cli/blob/HEAD/references/card/lark-im-card-create.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>urgent_app</code> — 发送应用内加急。Identity: <code>bot</code> only (<code>tenant_access_token</code>); the bot must be the message sender and must be in the conversation that contains the message.</li>
+<li><code>urgent_phone</code> — 发送电话加急。Identity: <code>bot</code> only (<code>tenant_access_token</code>); the bot must be the message sender and must be in the conversation that contains the message.</li>
+<li><code>urgent_sms</code> — 发送短信加急。Identity: <code>bot</code> only (<code>tenant_access_token</code>); the bot must be the message sender and must be in the conversation that contains the message.</li>
+</ul>
+<h3>reactions</h3>
+<ul>
+<li><code>batch_query</code> — 批量获取消息表情。Identity: supports <code>user</code> and <code>bot</code>.<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-reactions.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>create</code> — 添加消息表情回复。Identity: supports <code>user</code> and <code>bot</code>; the caller must be in the conversation that contains the message.<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-reactions.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>delete</code> — 删除消息表情回复。Identity: supports <code>user</code> and <code>bot</code>; the caller must be in the conversation that contains the message, and can only delete reactions added by itself.<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-reactions.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>list</code> — 获取消息表情回复。Identity: supports <code>user</code> and <code>bot</code>; the caller must be in the conversation that contains the message.<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-reactions.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+</ul>
+<h3>threads</h3>
+<ul>
+<li><code>forward</code> — 转发话题。Identity: supports <code>user</code> and <code>bot</code>.</li>
+</ul>
+<h3>images</h3>
+<ul>
+<li><code>create</code> — 上传图片。Identity: supports <code>user</code> and <code>bot</code>; user identity requires <code>im:resource</code> scope on the UAT.</li>
+</ul>
+<h3>files</h3>
+<ul>
+<li><code>create</code> — 上传文件。Identity: supports <code>user</code> and <code>bot</code>; user identity requires <code>im:resource</code> scope on the UAT.</li>
+</ul>
+<h3>pins</h3>
+<ul>
+<li><code>create</code> — Pin 消息。Identity: supports <code>user</code> and <code>bot</code>.</li>
+<li><code>delete</code> — 移除 Pin 消息。Identity: supports <code>user</code> and <code>bot</code>.</li>
+<li><code>list</code> — 获取群内 Pin 消息。Identity: supports <code>user</code> and <code>bot</code>.</li>
+</ul>
+<h3>feed.groups</h3>
+<ul>
+<li><code>batch_add_item</code> — Batch add feed cards to a feed group. Identity: <code>user</code> only (<code>user_access_token</code>).<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-groups.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>batch_query</code> — Batch query feed groups. Identity: <code>user</code> only (<code>user_access_token</code>).<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-groups.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>batch_remove_item</code> — Batch remove feed cards from a feed group. Identity: <code>user</code> only (<code>user_access_token</code>).<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-groups.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>create</code> — Create a feed group. Identity: <code>user</code> only (<code>user_access_token</code>).<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-groups.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>delete</code> — Delete a feed group. Identity: <code>user</code> only (<code>user_access_token</code>).<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-groups.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+<li><code>update</code> — Update a feed group. Identity: <code>user</code> only (<code>user_access_token</code>).<a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-im-feed-groups.md" target="_blank" rel="noopener noreferrer">Must-read</a></li>
+</ul>
+<h2>权限表</h2>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>所需 scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>chats.create</code></td>
+<td><code>im:chat:create</code></td>
+</tr>
+<tr>
+<td><code>chats.get</code></td>
+<td><code>im:chat:read</code></td>
+</tr>
+<tr>
+<td><code>chats.link</code></td>
+<td><code>im:chat:read</code></td>
+</tr>
+<tr>
+<td><code>chats.update</code></td>
+<td><code>im:chat:update</code></td>
+</tr>
+<tr>
+<td><code>chat.members.create</code></td>
+<td><code>im:chat.members:write_only</code></td>
+</tr>
+<tr>
+<td><code>chat.members.delete</code></td>
+<td><code>im:chat.members:write_only</code></td>
+</tr>
+<tr>
+<td><code>chat.members.get</code></td>
+<td><code>im:chat.members:read</code></td>
+</tr>
+<tr>
+<td><code>+chat-members-list</code></td>
+<td><code>im:chat.members:read</code></td>
+</tr>
+<tr>
+<td><code>chat.user_setting.batch_query</code></td>
+<td><code>im:chat.user_setting:read</code></td>
+</tr>
+<tr>
+<td><code>chat.user_setting.batch_update</code></td>
+<td><code>im:chat.user_setting:write</code></td>
+</tr>
+<tr>
+<td><code>chat.managers.add_managers</code></td>
+<td><code>im:chat.managers:write_only</code></td>
+</tr>
+<tr>
+<td><code>chat.managers.delete_managers</code></td>
+<td><code>im:chat.managers:write_only</code></td>
+</tr>
+<tr>
+<td><code>chat.moderation.get</code></td>
+<td><code>im:chat.moderation:read</code></td>
+</tr>
+<tr>
+<td><code>chat.moderation.update</code></td>
+<td><code>im:chat:moderation:write_only</code></td>
+</tr>
+<tr>
+<td><code>chat.join_requests.list</code></td>
+<td><code>im:chat.membership_application:read</code></td>
+</tr>
+<tr>
+<td><code>chat.join_requests.handle</code></td>
+<td><code>im:chat.membership_application:write</code></td>
+</tr>
+<tr>
+<td><code>+messages-read-status</code></td>
+<td>user: <code>im:message:readonly</code> (recommended), <code>im:message</code>, or <code>im:message:get_as_user</code></td>
+</tr>
+<tr>
+<td><code>+message-read-users</code></td>
+<td>user: <code>im:message:readonly</code> (recommended), <code>im:message</code>, <code>im:message:basic</code>, or <code>im:message:get_as_user</code>; bot: <code>im:message:readonly</code></td>
+</tr>
+<tr>
+<td><code>messages.read_status</code></td>
+<td><code>im:message:readonly</code> (recommended), <code>im:message</code>, or <code>im:message:get_as_user</code></td>
+</tr>
+<tr>
+<td><code>messages.delete</code></td>
+<td><code>im:message:recall</code></td>
+</tr>
+<tr>
+<td><code>messages.forward</code></td>
+<td><code>im:message</code></td>
+</tr>
+<tr>
+<td><code>messages.merge_forward</code></td>
+<td><code>im:message</code></td>
+</tr>
+<tr>
+<td><code>messages.read_users</code></td>
+<td>user: <code>im:message:readonly</code> (recommended), <code>im:message</code>, <code>im:message:basic</code>, or <code>im:message:get_as_user</code>; bot: <code>im:message:readonly</code></td>
+</tr>
+<tr>
+<td><code>messages.patch</code></td>
+<td><code>im:message:update</code></td>
+</tr>
+<tr>
+<td><code>messages.urgent_app</code></td>
+<td><code>im:message.urgent</code></td>
+</tr>
+<tr>
+<td><code>messages.urgent_phone</code></td>
+<td><code>im:message.urgent:phone</code></td>
+</tr>
+<tr>
+<td><code>messages.urgent_sms</code></td>
+<td><code>im:message.urgent:sms</code></td>
+</tr>
+<tr>
+<td><code>reactions.batch_query</code></td>
+<td><code>im:message.reactions:read</code></td>
+</tr>
+<tr>
+<td><code>reactions.create</code></td>
+<td><code>im:message.reactions:write_only</code></td>
+</tr>
+<tr>
+<td><code>reactions.delete</code></td>
+<td><code>im:message.reactions:write_only</code></td>
+</tr>
+<tr>
+<td><code>reactions.list</code></td>
+<td><code>im:message.reactions:read</code></td>
+</tr>
+<tr>
+<td><code>threads.forward</code></td>
+<td><code>im:message</code></td>
+</tr>
+<tr>
+<td><code>images.create</code></td>
+<td><code>im:resource</code></td>
+</tr>
+<tr>
+<td><code>files.create</code></td>
+<td><code>im:resource</code></td>
+</tr>
+<tr>
+<td><code>pins.create</code></td>
+<td><code>im:message.pins:write_only</code></td>
+</tr>
+<tr>
+<td><code>pins.delete</code></td>
+<td><code>im:message.pins:write_only</code></td>
+</tr>
+<tr>
+<td><code>pins.list</code></td>
+<td><code>im:message.pins:read</code></td>
+</tr>
+<tr>
+<td><code>feed.groups.batch_add_item</code></td>
+<td><code>im:feed_group_v1:write</code></td>
+</tr>
+<tr>
+<td><code>feed.groups.batch_query</code></td>
+<td><code>im:feed_group_v1:read</code></td>
+</tr>
+<tr>
+<td><code>feed.groups.batch_remove_item</code></td>
+<td><code>im:feed_group_v1:write</code></td>
+</tr>
+<tr>
+<td><code>feed.groups.create</code></td>
+<td><code>im:feed_group_v1:write</code></td>
+</tr>
+<tr>
+<td><code>feed.groups.delete</code></td>
+<td><code>im:feed_group_v1:write</code></td>
+</tr>
+<tr>
+<td><code>feed.groups.update</code></td>
+<td><code>im:feed_group_v1:write</code></td>
+</tr>
+</tbody></table>

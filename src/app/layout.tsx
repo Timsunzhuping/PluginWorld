@@ -25,11 +25,11 @@ const notoSansSC = Noto_Sans_SC({
 export const metadata: Metadata = {
   metadataBase: new URL("https://www.pluginworld.ai"),
   title: {
-    default: "PluginWorld — The Cross-Ecosystem AI Plugin Marketplace | dsh · Claude Code · MCP",
+    default: "PluginWorld — The Cross-Ecosystem AI Plugin Marketplace | dsh · Claude Code · MCP · Skills",
     template: "%s | PluginWorld",
   },
   description:
-    "One search box for every plugin across DeepSeek Harness (dsh), Claude Code and MCP — with unified quality and security scores. Plug in. The world is ready.",
+    "One search box for every plugin and skill across DeepSeek Harness (dsh), Claude Code, MCP and Agent Skills — with unified quality and security scores. Plug in. The world is ready.",
   keywords: [
     "AI plugins",
     "plugin marketplace",
@@ -38,6 +38,8 @@ export const metadata: Metadata = {
     "Claude Code plugin",
     "MCP server",
     "Model Context Protocol",
+    "Agent Skills",
+    "skills.sh",
   ],
   openGraph: {
     type: "website",

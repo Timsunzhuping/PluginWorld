@@ -8,6 +8,9 @@
 import { GITHUB_API, fetchJson, githubHeaders, sleep } from "./lib";
 import type { Ecosystem } from "../../src/lib/types";
 
+/** Ecosystems backed by a GitHub topic ("skills" syncs from skills.sh instead) */
+export type TopicEcosystem = Exclude<Ecosystem, "skills">;
+
 export interface GithubRepo {
   full_name: string;
   name: string;
@@ -30,14 +33,14 @@ interface SearchResponse {
   items: GithubRepo[];
 }
 
-export const TOPIC_BY_ECOSYSTEM: Record<Ecosystem, string> = {
+export const TOPIC_BY_ECOSYSTEM: Record<TopicEcosystem, string> = {
   dsh: "dsh-plugin",
   "claude-code": "claude-code-plugin",
   mcp: "mcp-server",
 };
 
 export async function fetchTopicRepos(
-  ecosystem: Ecosystem,
+  ecosystem: TopicEcosystem,
   pages = 2,
   perPage = 100,
 ): Promise<{ repos: GithubRepo[]; totalCount: number }> {
@@ -75,5 +78,7 @@ export function manifestPaths(ecosystem: Ecosystem): string[] {
       ];
     case "mcp":
       return ["server.json", "package.json"];
+    case "skills":
+      return []; // SKILL.md is resolved by the skills.sh source (scripts/sync/skills-sh.ts)
   }
 }

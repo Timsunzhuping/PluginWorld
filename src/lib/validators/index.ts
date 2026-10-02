@@ -2,6 +2,7 @@ import type { Ecosystem } from "../types";
 import { validateDshManifest } from "./dsh";
 import { validateClaudeCodeManifest } from "./claude-code";
 import { validateMcpManifest } from "./mcp";
+import { validateSkillManifest } from "./skill";
 
 export interface ValidationResult {
   valid: boolean;
@@ -27,7 +28,14 @@ export function validateManifest(
       return validateClaudeCodeManifest(manifest);
     case "mcp":
       return validateMcpManifest(manifest);
+    case "skills":
+      return validateSkillManifest(manifest);
   }
 }
 
-export { validateDshManifest, validateClaudeCodeManifest, validateMcpManifest };
+export {
+  validateDshManifest,
+  validateClaudeCodeManifest,
+  validateMcpManifest,
+  validateSkillManifest,
+};

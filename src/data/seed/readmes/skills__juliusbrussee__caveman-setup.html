@@ -1,0 +1,175 @@
+<p>You are wiring this repository through the Caveman gateway. Caveman is a
+byte-preserving LLM proxy: in record mode it measures what your app sends and
+what it costs, and changes nothing else. Your job is a minimal, verified
+integration — not a refactor.</p>
+<p>The prompt that sent you here provides four values. Refer to them as:</p>
+<ul>
+<li><code>GATEWAY</code> — the gateway base URL (e.g. <code>https://gateway.caveman.so</code> or <code>http://127.0.0.1:8787</code>)</li>
+<li><code>CAVE_API_KEY</code> — the gateway auth secret (treat like any API key: env var only, never committed, never printed in full)</li>
+<li><code>PROVIDER_KEYS</code> — <code>stored</code> (provider keys live encrypted in Caveman Cloud) or <code>byok</code> (this app sends its own provider key per request)</li>
+<li><code>DASHBOARD</code> — the dashboard base URL (e.g. <code>https://app.caveman.so</code>)</li>
+</ul>
+<p>If any value is missing, stop and ask for it. Do not guess a URL or mint a key.</p>
+<h2>Rules (non-negotiable)</h2>
+<ol>
+<li><strong>Coherent integration.</strong> Wire every live LLM callsite through existing
+configuration and responsible seams. Touch each layer correctness requires.
+No drive-by refactors or formatting sweeps; add an abstraction only when it
+clarifies ownership or lowers lifecycle cost.</li>
+<li><strong>Secrets stay in env vars.</strong> <code>CAVE_API_KEY</code> goes into the env file the repo
+already uses (<code>.env</code>, <code>.env.local</code>, …). If that file isn't gitignored, add it
+to <code>.gitignore</code> and say so. Never hardcode the key in source.</li>
+<li><strong>Report only what you observed.</strong> The final report states the HTTP status
+and usage numbers from the real verification response — never assumed
+success. If verification fails, report the failure template instead.</li>
+<li><strong>Record mode only.</strong> You are adding measurement. You do not enable any
+optimization, and you do not claim any savings — verified savings are $0
+until an optimizer is explicitly turned on and passes its eval gate.</li>
+<li><strong>Provider keys are not your business.</strong> With <code>PROVIDER_KEYS: stored</code> you
+never see one. With <code>byok</code>, the app's existing provider key stays exactly
+where it already is.</li>
+</ol>
+<h2>Step 1 — Find every live LLM callsite</h2>
+<p>Read dependency files (<code>package.json</code>, <code>requirements.txt</code>, <code>pyproject.toml</code>,
+<code>go.mod</code>, lockfiles) and search the source for LLM clients:</p>
+<ul>
+<li>SDK imports: <code>openai</code>, <code>@anthropic-ai/sdk</code>, <code>anthropic</code>, <code>ai</code> +
+<code>@ai-sdk/*</code> (Vercel), <code>langchain*</code>, <code>litellm</code>, <code>google-genai</code> /
+<code>@google/genai</code>, <code>crewai</code>, <code>pydantic_ai</code>, <code>openai-agents</code> / <code>agents</code></li>
+<li>Raw HTTP to <code>api.openai.com</code>, <code>api.anthropic.com</code>, <code>generativelanguage.googleapis.com</code></li>
+<li>Existing base-URL env vars: <code>OPENAI_BASE_URL</code>, <code>OPENAI_API_BASE</code>,
+<code>ANTHROPIC_BASE_URL</code>, <code>GEMINI_BASE_URL</code>, <code>GOOGLE_GEMINI_BASE_URL</code></li>
+</ul>
+<p>List what you found (file:line per callsite) before changing anything. If you
+find <strong>no</strong> LLM callsites, stop and report the "nothing to wire" template at
+the end of this file — do not invent an integration.</p>
+<h2>Step 2 — Pick the app slug</h2>
+<p>One slug names this app in the gateway path: <code>GATEWAY/w/&lt;app&gt;</code>. Derive it from
+the package/module name (e.g. <code>support-bot</code>, <code>acme-api</code>). Grammar:
+lowercase <code>[a-z0-9]</code> first, then <code>[a-z0-9._-]</code>, max 64 chars. Spend for this
+whole app groups under that slug on the dashboard.</p>
+<h2>Step 3 — Wire each callsite</h2>
+<p>The pattern is always the same: <strong>base URL → the gateway with <code>/w/&lt;app&gt;</code>,
+plus one auth header.</strong> Gateway auth is <code>x-cave-api-key: CAVE_API_KEY</code>
+(<code>Authorization: Bearer CAVE_API_KEY</code> also works where a header is awkward).
+With <code>PROVIDER_KEYS: byok</code>, also send <code>x-cave-upstream-key: &lt;the provider key the app already uses&gt;</code>.</p>
+<p>Two facts that make the wiring safe (both are gateway-enforced, not hopes):
+the gateway rebuilds upstream auth headers from scratch, so a client's
+<code>Authorization</code>/<code>x-api-key</code> value is never forwarded to the provider; and with
+<code>stored</code>, upstream auth comes from the encrypted connection server-side. So in
+<code>stored</code> mode, where an SDK insists on an api-key parameter, set it to the
+Cave key — it authenticates the gateway and goes no further.</p>
+<p>Exact shapes (use the one matching each callsite — these are the product's
+published recipes, not suggestions):</p>
+<p><strong>OpenAI SDK (TS)</strong> — Chat Completions and Responses both route through:</p>
+<pre><code class="language-ts">const client = new OpenAI({
+  baseURL: `${process.env.CAVE_GATEWAY_URL}/w/&lt;app&gt;/openai/v1`,
+  apiKey: process.env.OPENAI_API_KEY,           // byok: unchanged · stored: use CAVE_API_KEY
+  defaultHeaders: {
+    "x-cave-api-key": process.env.CAVE_API_KEY!,
+    // byok only:
+    "x-cave-upstream-key": process.env.OPENAI_API_KEY!,
+  },
+});
+</code></pre>
+<p><strong>OpenAI SDK (Python)</strong> — same shape: <code>base_url=f"{gw}/w/&lt;app&gt;/openai/v1"</code>,
+<code>default_headers={"x-cave-api-key": ..., "x-cave-upstream-key": ...}</code>.</p>
+<p><strong>Anthropic SDK (TS/Python)</strong> — the SDK appends <code>/v1/messages</code> itself. The
+<code>x-cave-api-key</code> header is required here in both modes (this SDK's own key
+param rides <code>x-api-key</code>, which is not a gateway-auth header):</p>
+<pre><code class="language-python">client = anthropic.Anthropic(
+    base_url=f"{os.environ['CAVE_GATEWAY_URL']}/w/&lt;app&gt;",
+    api_key=os.environ["ANTHROPIC_API_KEY"],      # byok: unchanged · stored: use CAVE_API_KEY
+    default_headers={
+        "x-cave-api-key": os.environ["CAVE_API_KEY"],
+        # byok only:
+        "x-cave-upstream-key": os.environ["ANTHROPIC_API_KEY"],
+    },
+)
+</code></pre>
+<p><strong>Vercel AI SDK</strong> — <code>createOpenAICompatible({ baseURL: </code>${gw}/w//openai/v1<code>, headers: { "x-cave-api-key": ... } })</code>; Anthropic models via
+<code>createAnthropic({ baseURL: </code>${gw}/w//v1<code>, headers: { ... } })</code>.</p>
+<p><strong>LangChain / LangGraph</strong> — <code>ChatOpenAI(base_url=f"{gw}/w/&lt;app&gt;/openai/v1", default_headers={...})</code>; <code>ChatAnthropic(base_url=f"{gw}/w/&lt;app&gt;", default_headers={...})</code>. LangGraph inherits whatever model you pass it.</p>
+<p><strong>LiteLLM</strong> — per call <code>api_base=f"{gw}/w/&lt;app&gt;/openai/v1"</code> +
+<code>extra_headers={...}</code>, or fleet-wide in the LiteLLM proxy <code>config.yaml</code>.</p>
+<p><strong>Raw HTTP / anything else</strong> — swap the host, keep the provider's native path:
+<code>GATEWAY/w/&lt;app&gt;/v1/chat/completions</code> (OpenAI protocol) or
+<code>GATEWAY/w/&lt;app&gt;/v1/messages</code> (Anthropic protocol), add the header(s).</p>
+<p>Concretely, with slug <code>support-bot</code> and the hosted gateway, an OpenAI-SDK base
+URL reads <code>https://gateway.caveman.so/w/support-bot/openai/v1</code>. And in <code>stored</code>
+mode, drop every <code>x-cave-upstream-key</code> line entirely — it is byok-only.</p>
+<p>For frameworks not listed (google-genai, crewai, pydantic-ai, openai-agents),
+fetch the matching page under <code>&lt;docs origin&gt;/docs/integrations/</code> — same origin
+this skill came from — and follow it.</p>
+<p>Add to the repo's env file (and reference from code — no literals):</p>
+<pre><code>CAVE_GATEWAY_URL=&lt;GATEWAY&gt;
+CAVE_API_KEY=&lt;CAVE_API_KEY&gt;
+</code></pre>
+<h2>Step 4 — Verify with one real request</h2>
+<p>The user pasted the setup prompt to authorize exactly this: one small
+verification request. Send it now — do not pause to ask permission for it.
+An integration that ends unverified because you hesitated is a worse outcome
+than one tiny request; finishing the verification and the report autonomously
+is the point of this skill.</p>
+<p>Send one minimal request through the wiring you just built — the app's own
+cheapest path if it has a script for it, otherwise curl <strong>on the path matching
+the protocol you just wired</strong> with the app's own model and a small cap
+(<code>max_tokens</code> ≤ 32):</p>
+<pre><code class="language-bash"># OpenAI-protocol wiring:
+curl -sS "$CAVE_GATEWAY_URL/w/&lt;app&gt;/v1/chat/completions" \
+  -H "x-cave-api-key: $CAVE_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{"model":"&lt;model the repo already uses&gt;","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
+
+# Anthropic-protocol wiring:
+curl -sS "$CAVE_GATEWAY_URL/w/&lt;app&gt;/v1/messages" \
+  -H "x-cave-api-key: $CAVE_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"&lt;model the repo already uses&gt;","max_tokens":16,"messages":[{"role":"user","content":"ping"}]}'
+</code></pre>
+<p>(byok: add <code>-H "x-cave-upstream-key: $PROVIDER_KEY"</code>.) This is one real,
+billable provider request — that is the point: real traffic, real measurement.</p>
+<p>Read the response. Success = HTTP 200 with a <code>usage</code> block. Anything else =
+the matching failure template below.</p>
+<h2>Step 5 — Report</h2>
+<p>End with exactly this shape, values filled from what you actually did and saw:</p>
+<pre><code>## Caveman is live in this repo
+
+Wired: &lt;n&gt; callsite(s) in &lt;n&gt; file(s)
+  - &lt;file&gt; — &lt;one-line what changed&gt;
+App slug: &lt;app&gt; — spend for this app groups under it
+Verified: HTTP 200 · model &lt;model&gt; · &lt;in&gt; in / &lt;out&gt; out tokens (one real request)
+Mode: record — measured only. No model-visible bytes changed, no optimization
+enabled. Verified savings are $0 until you turn an optimizer on and it passes
+its eval gate. That honesty is the product.
+
+See the dollars: &lt;DASHBOARD&gt;/traces — your request is the top row, priced from
+the public catalog. &lt;DASHBOARD&gt;/getting-started flips to "First request received."
+
+Want spend split by workflow (e.g. support-reply vs nightly-digest), not just
+by app? Say "discover workflows" — I'll fetch &lt;docs origin&gt;/docs/discover-workflows.md
+and label every callsite by the job it does.
+</code></pre>
+<h2>Failure templates (use verbatim, filled in — never soften)</h2>
+<ul>
+<li><strong>Nothing to wire</strong>: "I found no LLM callsites in this repo (searched SDKs,
+raw provider HTTP, base-URL env vars). If this repo runs a coding agent
+rather than shipping LLM code, use <code>caveman wrap &lt;agent&gt;</code> instead — see
+/getting-started."</li>
+<li><strong>Gateway unreachable</strong>: "The verification request could not reach GATEWAY
+(). Wiring is in place but unverified — nothing will be measured
+until the gateway is reachable. Check the URL and network, then re-run the
+verification curl above."</li>
+<li><strong>401 cave_invalid_api_key</strong>: "The gateway rejected CAVE_API_KEY. Mint a new
+key at /getting-started and update the env file; the wiring
+itself is unchanged."</li>
+<li><strong>404 cave_route_not_found</strong>: "The gateway matched no route — usually a
+malformed /w/ slug (lowercase [a-z0-9] first, then [a-z0-9._-], max 64)
+or a path that doesn't match the SDK's protocol. Fix the URL and re-verify."</li>
+<li><strong>Provider error (4xx/5xx via gateway)</strong>: report status + body verbatim; the
+gateway is reachable and auth passed, the upstream call failed — usually a
+provider key or model-name issue in the app itself.</li>
+</ul>
+<p>Never report success on any of these. An unverified integration is reported as
+unverified.</p>

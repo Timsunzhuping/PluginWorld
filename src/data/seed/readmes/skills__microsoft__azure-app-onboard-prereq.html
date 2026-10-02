@@ -1,0 +1,194 @@
+<h1>Azure App Onboard Prereq — Repository Evaluation</h1>
+<p>Evaluate a user's repository for build health, app completeness, and Azure deployment feasibility — before infrastructure planning. Produces per-component verdicts (PASS/WARN/FAIL) consumed by downstream phases.</p>
+<blockquote>
+<p><strong>Orchestrator relationship:</strong> Called by <code>azure-app-onboard</code> at Step 3, or standalone for code readiness checks. When called by orchestrator, return control to <code>azure-app-onboard</code> after writing artifacts — do NOT invoke downstream phases directly.</p>
+</blockquote>
+<p>Phase 1 of 4 in AppOnboard pipeline. Session: <code>.copilot-azure/sessions/{session-id}/</code>. Reads <code>context.json</code>. Writes <code>components[]</code>, <code>repo{}</code>, <code>detectedInfra[]</code>. Produces <code>prereq-output.json</code>. Schema: <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/prereq-schemas.ts" target="_blank" rel="noopener noreferrer"><code>prereq-schemas.ts</code></a> — <code>PrereqOutput</code>, <code>BuildRequirements</code>. Direct entry supported.</p>
+<h2>When NOT to Use</h2>
+<table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>Redirect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Validate infrastructure (Bicep/TF/azure.yaml)</td>
+<td><strong>azure-validate</strong></td>
+</tr>
+<tr>
+<td>Generate IaC</td>
+<td><strong>azure-prepare</strong></td>
+</tr>
+<tr>
+<td>End-to-end idea-to-production</td>
+<td><strong>azure-app-onboard</strong></td>
+</tr>
+<tr>
+<td>Run <code>azd up</code> or deploy</td>
+<td><strong>azure-deploy</strong></td>
+</tr>
+</tbody></table>
+<h2>Rules</h2>
+<blockquote>
+<p>⛔ <strong>ABSOLUTE PROHIBITION — <code>npm install</code>, <code>npm test</code>, <code>npx jest</code>, <code>pytest</code>, and ALL install/build/test commands are NEVER allowed.</strong>
+Under NO circumstances may you run <code>npm install</code>, <code>npm test</code>, <code>npx jest</code>, <code>pip install</code>, <code>pytest</code>, <code>dotnet build</code>, <code>dotnet restore</code>, <code>dotnet test</code>, <code>go mod download</code>, <code>cargo build</code>, or ANY package-manager install, build, or test command during the prereq phase. Do NOT run test suites to verify code — check for test config files statically instead. The prereq phase is read-only evaluation + static-only verification.
+<strong>ONLY exception — two sanctioned contexts, both consent-gated:</strong> (a) code the agent <strong>modified</strong> during migration/remediation (see <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/remediation-protocol.md" target="_blank" rel="noopener noreferrer">remediation-protocol.md</a> step 6), or (b) code the agent <strong>wrote</strong> from scratch on the zero-code path (see <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/zero-code-path.md" target="_blank" rel="noopener noreferrer">zero-code-path.md</a>). In either case, install/build/test runs ONLY via the user-confirmed build-validation gate (<a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/build-check.md" target="_blank" rel="noopener noreferrer">build-check.md</a> Step 3), after the user answers that specific per-command consent prompt. General prior consent never counts.</p>
+</blockquote>
+<ol>
+<li>⛔ <strong>Full pipeline (Steps 1–8), no exceptions.</strong> All prompts → Step 1 directly. Answer specific questions AS PART OF findings (Step 5), not before.</li>
+<li>⛔ <strong>No sub-agents for evaluation.</strong> 3-axis evaluation is inline. <strong>Exception</strong>: zero-code-path scaffolding (Step 2).</li>
+<li>Code/destructive modifications require <code>ask_user</code>. Max 3 questions before results. Direct entry: don't repeat orchestrator's intent questions.</li>
+</ol>
+<h2>MCP Tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>mcp_azure_mcp_get_azure_bestpractices</code></td>
+<td>Validate detected stack patterns against Azure best practices</td>
+</tr>
+<tr>
+<td><code>mcp_azure_mcp_extension_cli_install</code></td>
+<td>Check/install required CLI tools (az, azd, func)</td>
+</tr>
+</tbody></table>
+<h2>Workflow</h2>
+<h3>Step 1: Session Check</h3>
+<p><strong>Orchestrator entry:</strong> Session exists — read <code>context.json</code>, proceed to Step 2.</p>
+<p><strong>Direct entry:</strong> Check <code>.copilot-azure/sessions/active-session.json</code>:</p>
+<ul>
+<li><strong>Exists</strong> → ⛔ read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/session-protocol.md" target="_blank" rel="noopener noreferrer">session-protocol.md</a> for resume/fresh gate. Do NOT proceed until user answers.</li>
+<li><strong>Missing</strong> → create session: generate UUID, <code>New-Item -ItemType Directory -Path ".copilot-azure/sessions/{uuid}" -Force</code>, write <code>context.json</code> + <code>active-session.json</code> via <code>create</code> tool.</li>
+</ul>
+<p>Then: <code>az account show</code> → merge <code>{id, name, tenantId}</code> into <code>context.json.azure</code>. ⛔ Session MUST exist on disk before any scanning.</p>
+<h3>Step 2: Scan Workspace</h3>
+<p>Scan for project files. Detect components, <code>repo{}</code>, <code>detectedInfra[]</code>, <code>detectedServices[]</code>. Classify Terraform providers. Check CLI availability. Stack detection conflicts: user explicit statement wins (write to <code>context.json</code>, mark scan as override); scan-only → confirm with user; multiple stacks → show all and ask (see <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/component-mapping.md" target="_blank" rel="noopener noreferrer">component-mapping.md</a>); no code → <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/zero-code-path.md" target="_blank" rel="noopener noreferrer">zero-code-path.md</a>.</p>
+<blockquote>
+<p>If no project files, no Dockerfile, AND no index.html → ⛔ read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/zero-code-path.md" target="_blank" rel="noopener noreferrer">zero-code-path.md</a>.</p>
+</blockquote>
+<blockquote>
+<p>⛔ <strong>Cloud SDK early gate.</strong> Grep for <code>aws-sdk|@aws-sdk|boto3|google-cloud|@google-cloud|firebase</code>. If functional deps found → read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/cloud-sdk-migration.md" target="_blank" rel="noopener noreferrer">cloud-sdk-migration.md</a>, then <code>ask_user</code>: <strong>"Redirect to Azure Cloud Migrate"</strong> (set <code>routeToSkill: "azure-cloud-migrate"</code>) · <strong>"Continue evaluation anyway"</strong> (finish readiness eval + SDK→Azure mapping, then STOP at Step 8 — no plan until the deps are swapped) · <strong>"Cancel"</strong>.</p>
+</blockquote>
+<h3>Step 3: Per-Component Evaluation</h3>
+<table>
+<thead>
+<tr>
+<th>Sub-step</th>
+<th>Action</th>
+<th>Reference</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>3.1</td>
+<td><strong>Build check</strong></td>
+<td>⛔ <strong>You MUST read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/build-check.md" target="_blank" rel="noopener noreferrer">build-check.md</a></strong></td>
+</tr>
+<tr>
+<td>3.2</td>
+<td><strong>Completeness check</strong></td>
+<td>⛔ <strong>You MUST read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/completeness-check.md" target="_blank" rel="noopener noreferrer">completeness-check.md</a></strong></td>
+</tr>
+<tr>
+<td>3.3</td>
+<td><strong>Deployability check</strong></td>
+<td>⛔ <strong>You MUST read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/deployability-check.md" target="_blank" rel="noopener noreferrer">deployability-check.md</a></strong></td>
+</tr>
+<tr>
+<td>3.3a</td>
+<td><strong>Component mapping</strong> (conditional)</td>
+<td>Read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/component-mapping.md" target="_blank" rel="noopener noreferrer">component-mapping.md</a> ONLY IF &gt;1 project manifest found (monorepo)</td>
+</tr>
+</tbody></table>
+<p>Populate <code>buildRequirements</code> per component after evaluation. Verdict propagation, tier rules, and f1Viable aggregation are in <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/readiness-gate.md" target="_blank" rel="noopener noreferrer">readiness-gate.md</a> and the individual check references.</p>
+<h3>Step 4: Write Artifacts + Readiness Gate</h3>
+<p>⛔ Verify <code>context.json</code> exists on disk. Read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/readiness-gate.md" target="_blank" rel="noopener noreferrer">readiness-gate.md</a> (verdicts, tiers, batch-then-approve, fast-track) then <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/prereq-artifacts.md" target="_blank" rel="noopener noreferrer">prereq-artifacts.md</a> (write procedures, schemas).</p>
+<h3>Step 5: Present Findings</h3>
+<p>Per <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/readiness-gate.md" target="_blank" rel="noopener noreferrer">readiness-gate.md § Present Findings</a> — show verdicts grouped by severity before proceeding.</p>
+<h3>Step 6: Remediation (conditional)</h3>
+<p>⛔ <strong>You MUST read <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/remediation-protocol.md" target="_blank" rel="noopener noreferrer">remediation-protocol.md</a></strong> IF any ❌ FAIL verdict, 🔧 Recommended Fix, or ⚠️ WARN with <code>fixPhase: "prereq"</code> exists. Contains remediation loop, static verification, re-eval mandate, post-remediation artifact updates, and the build-validation consent gate. If all verdicts are ✅ PASS or ⚠️ WARN without <code>fixPhase: "prereq"</code>, skip to Step 7.</p>
+<h3>Step 7: Write Final State</h3>
+<p><code>completedPhases</code> already has <code>"prereq"</code> + <code>currentPhase: null</code> (from Step 4). Then:</p>
+<blockquote>
+<p>⛔ <strong>Write <code>lastScanCommit</code>.</strong> Run <code>git rev-parse HEAD</code> and store the full 40-character SHA as <code>context.json.repo.lastScanCommit</code>. Required — staleness guard in Step 1 compares to HEAD on resume to detect changes.</p>
+</blockquote>
+<h3>Step 8: Route</h3>
+<p>⛔ <strong>Mandatory — do NOT skip this step.</strong></p>
+<blockquote>
+<p><strong>Routing fields:</strong> All routing writes <code>routeToSkill</code> and <code>routeReason</code> to <code>context.json</code>.</p>
+</blockquote>
+<blockquote>
+<p><strong>Post-remediation context:</strong> If Step 6 ran, lead the routing prompt with: "Remediation complete — {N} issues fixed, your app is now {overallHealth}."</p>
+</blockquote>
+<blockquote>
+<p>⛔ <strong>Evaluate rows top to bottom — first match wins.</strong></p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Condition</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>routeToSkill</code> set (any entry)</td>
+<td><code>ask_user</code>: "Redirect to {routeToSkill}" / "Not now". ⛔ Pipeline stops — do NOT proceed to architecture planning.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>cloudSdkFindings[]</code> non-empty (user chose "Continue evaluation anyway")</td>
+<td>Present the cloud-SDK → Azure swap mapping as 🔶 blockers, then <code>ask_user</code> with this exact prompt: <strong>"🔶 Cloud SDK migration required — these dependencies must be swapped before this app can deploy to Azure. (Redirect to azure-cloud-migrate / Stop — swap manually and re-run)"</strong> — Redirect sets <code>routeToSkill: "azure-cloud-migrate"</code>, Stop halts. ⛔ Pipeline stops — do NOT proceed to architecture planning, and do NOT offer a "continue to prepare" option; the app can't deploy until the deps are swapped.</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Orchestrator + no <code>routeToSkill</code></td>
+<td>Tell the user: "✅ Your app has been evaluated and is ready — let's plan your Azure deployment." Then invoke <code>azure-app-onboard</code>. ⛔ Do NOT stop, do NOT wait for user input, do NOT narrate internal handoffs. The user already consented to the full pipeline at scope triage.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Direct + ready/readyWithCaveats + no Azure infra</td>
+<td><code>ask_user</code>: "Deploy to Azure (full pipeline)" → invoke <code>azure-app-onboard</code> / "Not now"</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Direct + ready/readyWithCaveats + existing Azure infra</td>
+<td><code>ask_user</code>: "Start fresh" → invoke <code>azure-app-onboard</code> / "Use existing infra" → invoke <code>azure-prepare</code> / "Not now"</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Direct + blocked</td>
+<td>Report blocker summary + "Fix and re-run."</td>
+</tr>
+</tbody></table>
+<p>Severity tiers (🛑🔶❌🔧⚠️✅) are defined in <a href="https://github.com/microsoft/azure-skills/blob/HEAD/references/readiness-gate.md" target="_blank" rel="noopener noreferrer">readiness-gate.md</a>.</p>
+<h2>Outputs</h2>
+<table>
+<thead>
+<tr>
+<th>Artifact</th>
+<th>Location</th>
+<th>Consumer</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Session context</td>
+<td><code>context.json</code> → <code>components[]</code>, <code>repo{}</code>, <code>detectedInfra[]</code>, <code>detectedServices[]</code></td>
+<td>All downstream phases</td>
+</tr>
+<tr>
+<td>Prereq output</td>
+<td><code>prereq-output.json</code></td>
+<td>prepare phase (via <code>azure-app-onboard</code>)</td>
+</tr>
+<tr>
+<td>Readiness report</td>
+<td><code>.copilot-azure/sessions/{uuid}/readiness-report.md</code></td>
+<td>User (offline reference)</td>
+</tr>
+</tbody></table>

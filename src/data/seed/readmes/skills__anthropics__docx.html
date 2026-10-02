@@ -1,0 +1,78 @@
+<h1>DOCX creation, editing, and analysis</h1>
+<p>A <code>.docx</code> is a ZIP archive of XML files. Choose your approach by task:</p>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Approach</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Create</strong> a new document</td>
+<td>Write a <code>docx</code> (npm) script — see gotchas below</td>
+</tr>
+<tr>
+<td><strong>Edit</strong> an existing document</td>
+<td><code>unzip</code> → edit <code>word/document.xml</code> → <code>zip</code> (docx-js cannot open existing files)</td>
+</tr>
+<tr>
+<td><strong>Read</strong> content</td>
+<td><code>pandoc -t markdown file.docx</code></td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>Script paths below are relative to this skill's directory.</p>
+</blockquote>
+<h2>Creating with docx-js — gotchas</h2>
+<p><code>docx</code> is preinstalled — do not run <code>npm install</code> first; write the script and <code>require('docx')</code> directly. Only if that require fails: <code>npm install docx</code>. The model knows the API; these are the footguns:</p>
+<ul>
+<li><strong>Page size defaults to A4.</strong> For US Letter set <code>page: { size: { width: 12240, height: 15840 } }</code> (DXA; 1440 = 1″).</li>
+<li><strong>Landscape:</strong> pass portrait dimensions and <code>orientation: PageOrientation.LANDSCAPE</code> — docx-js swaps width/height internally.</li>
+<li><strong>Tables need dual widths:</strong> set <code>columnWidths</code> on the table AND <code>width</code> on every cell, both in <code>WidthType.DXA</code> (PERCENTAGE breaks in Google Docs). Column widths must sum to the table width.</li>
+<li><strong>Table shading:</strong> use <code>ShadingType.CLEAR</code>, never <code>SOLID</code> (renders black).</li>
+<li><strong>Lists:</strong> never insert <code>•</code> literally; use a <code>numbering</code> config with <code>LevelFormat.BULLET</code>.</li>
+<li><strong><code>ImageRun</code> requires <code>type:</code></strong> (<code>"png"</code>, <code>"jpg"</code>, …).</li>
+<li><strong><code>PageBreak</code> must be inside a <code>Paragraph</code>.</strong></li>
+<li><strong>Never use <code>\n</code></strong> — use separate <code>Paragraph</code> elements.</li>
+<li><strong>TOC:</strong> headings must use built-in <code>HeadingLevel.*</code>; custom heading styles need <code>outlineLevel</code> set or they won't appear.</li>
+<li><strong>Don't use a table as a horizontal rule</strong> — use a paragraph bottom border instead.</li>
+<li><strong>Dot-leader / right-aligned-on-same-line:</strong> use <code>PositionalTab</code> (<code>alignment: PositionalTabAlignment.RIGHT</code>, <code>leader: PositionalTabLeader.DOT</code>) inside a <code>TextRun</code>, not literal <code>.</code> or space padding.</li>
+</ul>
+<h2>Verify the output</h2>
+<p>After writing a <code>.docx</code>, render it and look at it:</p>
+<pre><code class="language-bash">python scripts/office/soffice.py --headless --convert-to pdf output.docx
+pdftoppm -jpeg -r 100 output.pdf page
+ls page-*.jpg   # then Read the images
+</code></pre>
+<p><code>pdftoppm</code> zero-pads page numbers to the width of the page count (<code>page-01.jpg</code>…<code>page-12.jpg</code>).</p>
+<h2>Editing existing documents</h2>
+<p>Legacy <code>.doc</code> files must be converted first: <code>python scripts/office/soffice.py --headless --convert-to docx file.doc</code>.</p>
+<pre><code class="language-bash">unzip -q doc.docx -d unpacked/
+find unpacked -type l -delete   # strip symlink entries — docx from external parties is untrusted
+python scripts/merge_runs.py unpacked/   # coalesce fragmented runs so text is findable
+# edit unpacked/word/document.xml in place — do NOT reformat or pretty-print
+(cd unpacked &amp;&amp; rm -f ../out.docx &amp;&amp; zip -Xr ../out.docx .)
+python scripts/office/validate.py out.docx --original doc.docx   # XSD checks; --auto-repair fixes common issues
+# redlining? add --author "&lt;the name you redlined under&gt;" to check every edit is tracked
+</code></pre>
+<p>Word splits text across many <code>&lt;w:r&gt;</code> runs (revision ids, spell-check markers), so a phrase you can see in the document often doesn't exist as a contiguous string in the XML. <code>merge_runs.py</code> merges adjacent identically-formatted runs in <code>word/document.xml</code> without changing content or rendering; it also accepts a <code>.docx</code> directly (<code>python scripts/merge_runs.py doc.docx -o merged.docx</code>).</p>
+<p><strong>Tracked changes:</strong> when redlining, validate with <code>--author "&lt;the name you redlined under&gt;"</code> (needs <code>--original</code>) — it reports any text you changed without a <code>&lt;w:ins&gt;</code>/<code>&lt;w:del&gt;</code> around it, which is easy to do by accident and invisible in the accepted view. Wrap runs in <code>&lt;w:ins&gt;</code>/<code>&lt;w:del&gt;</code> with <code>w:id</code>, <code>w:author</code>, <code>w:date</code> attributes. Inside <code>&lt;w:del&gt;</code>, the text element is <code>&lt;w:delText&gt;</code>, not <code>&lt;w:t&gt;</code>. A deleted paragraph mark (<code>&lt;w:pPr&gt;&lt;w:rPr&gt;&lt;w:del w:id=".." w:author=".." w:date=".."/&gt;&lt;/w:rPr&gt;&lt;/w:pPr&gt;</code>) means "merge this paragraph into the next" — so deleting a paragraph outright is that plus a <code>&lt;w:del&gt;</code> around every run. The <code>&lt;w:del/&gt;</code> must come before the rPr's other children; their order is schema-enforced.</p>
+<p>To produce a clean copy with all tracked changes accepted: <code>python scripts/accept_changes.py in.docx out.docx</code>.</p>
+<p>Accepting a deleted paragraph mark should join that paragraph to the one below it, so a paragraph whose runs are <em>all</em> deleted vanishes. Word does this; <code>accept_changes.py</code> and <code>pandoc --track-changes=accept</code> don't always. Both fail the same way — they strip the deleted text but leave the emptied paragraph behind, which reads as a stray empty bullet when it was auto-numbered:</p>
+<ul>
+<li><code>pandoc --track-changes=accept</code> never joins the paragraphs.</li>
+<li><code>accept_changes.py</code> (LibreOffice) joins them correctly, except when the deleted paragraph is followed by an empty spacer paragraph.</li>
+</ul>
+<p>An empty bullet in either view is an artifact of that view, not a defect in the document. Check paragraph deletions in the XML.</p>
+<h2>Comments</h2>
+<p>Comments require six cross-linked files. Use the helper — directory mode when you'll also be editing <code>document.xml</code> (saves an unzip/rezip cycle), <code>.docx</code>-direct mode otherwise:</p>
+<pre><code class="language-bash"># Against an already-unpacked directory (preferred when also placing markers)
+python scripts/comment.py unpacked/ "Fees &amp; expenses cap is too low"
+python scripts/comment.py unpacked/ "Agreed" --parent 0
+
+# Against a .docx directly
+python scripts/comment.py contract.docx "This cap is too low" -o annotated.docx
+</code></pre>
+<p>The script writes <code>comments.xml</code>, <code>commentsExtended.xml</code>, <code>commentsIds.xml</code>, <code>commentsExtensible.xml</code>, the relationships, and the content-type overrides. Comment IDs are auto-assigned. It then prints the <code>&lt;w:commentRangeStart&gt;</code>/<code>&lt;w:commentRangeEnd&gt;</code>/<code>&lt;w:commentReference&gt;</code> snippet to add to <code>word/document.xml</code> so the comment anchors to specific text — until you place those markers, the comment exists but is not visible.</p>
+<h2>Dependencies</h2>
+<p><code>docx</code> (npm, preinstalled — install only if <code>require('docx')</code> fails) · <code>pandoc</code> · LibreOffice (<code>soffice</code>) · <code>pdftoppm</code> (Poppler)</p>

@@ -1,0 +1,51 @@
+# Continuous deployment to the production server (optional).
+# Activates only when these repo secrets exist:
+#   DEPLOY_SSH_KEY  — private key authorized on the server
+#   DEPLOY_HOST     — e.g. root@47.237.130.239
+#   DEPLOY_PATH     — e.g. /root/PluginWorld
+# Without them every run skips gracefully.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [daily-community-scan]
+    types: [completed]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Check deploy secrets
+        id: check
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -n "$KEY" ] && [ -n "$HOST" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Deploy secrets not configured — skipping (set DEPLOY_SSH_KEY / DEPLOY_HOST / DEPLOY_PATH to enable CD)."
+          fi
+
+      - name: Deploy over SSH
+        if: steps.check.outputs.ready == 'true'
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' && bash deploy/update.sh"

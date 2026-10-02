@@ -1,0 +1,196 @@
+<h1>Profile Isolation - verifying it, not assuming it</h1>
+<p>A profile that <em>looks</em> isolated usually is not. The failures are boring and mechanical: a timezone that does not match the exit IP, a WebRTC candidate carrying the real address, a canvas hash that changes on every read, two profiles that ended up on the same persona. This skill is the check list for catching those before they matter.</p>
+<blockquote>
+<p><strong>Authorized use only.</strong> This is for identities you own or are authorized to operate: your own accounts, your own test fixtures, your own QA fleet, and your own anti-fraud stack. It is not for accessing systems without authorization, for accounts that are not yours, or for creating fake accounts or engagement. Comply with the terms of the sites you automate and with applicable law - see <a href="#acceptable-use" target="_blank" rel="noopener noreferrer">Acceptable use</a>.</p>
+</blockquote>
+<p><strong>What this does not claim.</strong> Passing every check below means the browser layer is internally consistent. It does not mean a given site will treat two profiles as unrelated: things entirely outside the browser - a shared payment instrument, a shared contact detail, identical activity patterns - are not something any browser setting reaches. Treat a clean result as "the technical layer is not the problem", not as a guarantee.</p>
+<p>For the SDK that creates and launches these profiles, see the <strong>anti-detect-browser</strong> skill.</p>
+<h2>The configuration invariant</h2>
+<p>One identity gets one of everything. Any cell shared between two identities is a defect to find:</p>
+<pre><code>identity  →  profile  →  persona  →  proxy  →  timezone
+   1      :     1     :     1     :    1    :     1
+</code></pre>
+<p>Profiles are unlimited and free on every antibrow plan, so there is never a reason to reuse one. "Log out and log back in as the other identity" inside one profile defeats the entire setup - the cookie jar and <code>localStorage</code> are the point.</p>
+<h2>Setup under test</h2>
+<pre><code class="language-typescript">import { AntiDetectBrowser } from 'anti-detect-browser'
+
+const ab = new AntiDetectBrowser({ key: process.env.ANTI_DETECT_BROWSER_KEY })
+
+const identities = [
+  { profile: 'fixture-us-01', proxy: process.env.PROXY_US_1, tags: ['Windows 10', 'Chrome'] },
+  { profile: 'fixture-us-02', proxy: process.env.PROXY_US_2, tags: ['Apple Mac', 'Safari'] },
+  { profile: 'fixture-de-01', proxy: process.env.PROXY_DE_1, tags: ['Windows 10', 'Edge'] },
+]
+
+for (const id of identities) {
+  const { browser, page } = await ab.launch({
+    profile: id.profile,              // isolated cookies, storage, login state
+    proxy: id.proxy,                  // from the environment, one per identity
+    fingerprint: { tags: id.tags },   // drawn once, frozen, replayed after
+    label: id.profile,                // address-bar tag drawn by the kernel, unreadable from the page
+  })
+  // ... run the checks below, then ...
+  await browser.close()
+}
+</code></pre>
+<p>Python, same on-disk profile format:</p>
+<pre><code class="language-python">import os
+from antibrow import launch
+
+with launch(
+    profile="fixture-us-01",
+    proxy=os.environ["PROXY_US_1"],   # from the environment, never a literal
+    geoip=True,            # timezone + WebRTC follow the proxy exit
+    label="fixture-us-01",
+) as browser:
+    page = browser.new_page()
+    print(browser.timezone, browser.public_ip)
+</code></pre>
+<h2>The checks</h2>
+<p>Run each profile <strong>through its own proxy</strong>, and assert rather than eyeball.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Check</th>
+<th>How</th>
+<th>Fails when</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Timezone matches the exit IP</td>
+<td><code>browser.timezone</code> vs the country of <code>browser.public_ip</code></td>
+<td><code>geoip</code> was disabled, or <code>timezone</code> was forced to something the IP contradicts. This is the single most common defect.</td>
+</tr>
+<tr>
+<td>2</td>
+<td>WebRTC exposes only the proxy</td>
+<td><a href="https://browserleaks.com/webrtc" target="_blank" rel="noopener noreferrer">browserleaks.com/webrtc</a></td>
+<td>ICE candidates still carry a local or real public address</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Canvas hash is stable across launches</td>
+<td>Read it, close, relaunch the same profile, read again</td>
+<td>The two reads differ - a value that changes every read is itself an anomaly, and it means the persona is not frozen</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Worker and main thread agree</td>
+<td><a href="https://abrahamjuliot.github.io/creepjs/" target="_blank" rel="noopener noreferrer">CreepJS</a></td>
+<td>UA, <code>languages</code>, <code>hardwareConcurrency</code>, timezone or GPU differ when re-read inside a Web Worker</td>
+</tr>
+<tr>
+<td>5</td>
+<td>One GPU across three interfaces</td>
+<td>CreepJS, or read WebGL / WebGL2 / WebGPU directly</td>
+<td><code>adapter.info.vendor</code> does not match the unmasked WebGL renderer family</td>
+</tr>
+<tr>
+<td>6</td>
+<td>No two profiles share a persona</td>
+<td>Diff <code>browser.persona</code> across the fleet</td>
+<td>Two profiles report the same UA, screen geometry and seeds</td>
+</tr>
+<tr>
+<td>7</td>
+<td>No two profiles share an address</td>
+<td>Collect <code>browser.public_ip</code> for the fleet</td>
+<td>Two identities came out of the same exit, or the same /24</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Cookie jars are separate</td>
+<td>Compare <code>browser.profile_dir</code> across the fleet, then inspect <code>user-data/</code> inside each</td>
+<td>Two identities resolve to one directory, or one directory holds state belonging to another identity</td>
+</tr>
+<tr>
+<td>9</td>
+<td>One identity, one profile tree</td>
+<td>Confirm every launch of a name passes the same <code>temporary</code> value</td>
+<td>A managed <code>gmail</code> and a temporary <code>gmail</code> are two different profiles with two personas and two cookie jars. A script that disagrees with itself about <code>temporary</code> is running two identities under one name and will look like a logged-out session, not like a bug</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Whole-stack coherence</td>
+<td><a href="https://whoer.net" target="_blank" rel="noopener noreferrer">whoer.net</a>, <a href="https://pixelscan.net" target="_blank" rel="noopener noreferrer">pixelscan.net</a></td>
+<td>IP, timezone and locale disagree at a glance</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Consistency rules in CI</td>
+<td><code>npx liarjs</code> (<a href="https://liarjs.dev" target="_blank" rel="noopener noreferrer">liarjs.dev</a>)</td>
+<td>Any of ~40 open-source cross-layer rules fail - this is the one that runs unattended</td>
+</tr>
+</tbody></table>
+<p>Checks 1, 3 and 7 are the ones worth wiring into CI: they are cheap, deterministic, and they catch the defects that actually recur.</p>
+<h2>Reading a failure</h2>
+<p>Work down in this order, cheapest first - a fingerprint is almost never the actual cause:</p>
+<ol>
+<li><strong>Profile name reused?</strong> <code>list_profiles</code>, or compare <code>browser.profile_dir</code> per identity. Two identities in one directory explains everything else. Directories are named after the profile's id, not its name, so match on <code>profile.json</code> inside rather than on the folder name.</li>
+<li><strong>Same address twice?</strong> Confirm each <code>public_ip</code> is distinct.</li>
+<li><strong>Clock disagrees with the address?</strong> Print <code>browser.timezone</code> and <code>browser.public_ip</code> together.</li>
+<li><strong>Persona regenerated?</strong> If the canvas hash moved between launches, the profile is not frozen - check whether <code>profile_dir</code> or the cache directory changed under it.</li>
+<li><strong>Only then</strong> the fingerprint itself, verified with the suites above rather than assumed.</li>
+</ol>
+<h2>What the runtime touches, and how to check it</h2>
+<p>Any tool that drives logged-in sessions receives cookies and proxy credentials, so it is fair to ask what it does with them. For antibrow:</p>
+<table>
+<thead>
+<tr>
+<th>Artifact</th>
+<th>Where it lives</th>
+<th>Who sees it</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Cookies, <code>localStorage</code>, login state</td>
+<td><code>~/.anti-detect-browser/profiles/&lt;id&gt;/user-data/</code> on your disk, or <code>profiles-temp/&lt;id&gt;/</code> for a temporary profile</td>
+<td>Local. Cloud sync is opt-in per profile: a launch never creates a cloud profile by itself, and <code>sync: true</code> is what puts one there. Check which profiles sync before assuming they stay on the machine</td>
+</tr>
+<tr>
+<td>Persona (<code>persona.json</code>)</td>
+<td>same profile directory, written once and frozen</td>
+<td>Local</td>
+</tr>
+<tr>
+<td>Profile identity record (<code>profile.json</code>)</td>
+<td>same profile directory; the id it holds is what names the directory</td>
+<td>Local. It is why a rename does not cost a persona, and why the folder name is not the profile name</td>
+</tr>
+<tr>
+<td>Proxy URL and its credentials</td>
+<td>passed to the kernel at launch; answered in the network stack (HTTP 407 / SOCKS5 RFC 1929) so no extension holds them</td>
+<td>The kernel process and your proxy provider</td>
+</tr>
+<tr>
+<td>API key</td>
+<td>your environment, or <code>~/.antibrow/license.key</code></td>
+<td>Exchanged with <code>antibrow.com</code> for a short-lived license token, roughly once a day</td>
+</tr>
+</tbody></table>
+<p>The kernel is a closed-source Chromium build - that is the tradeoff for the spoofing living in C++ rather than in an injectable script - so verify behaviour rather than take it on faith:</p>
+<pre><code class="language-bash">python -m antibrow info          # kernels, profiles, license state, cache dir
+</code></pre>
+<pre><code class="language-python">browser.plan.redacted_args()     # exact kernel command line, secrets masked - safe to paste in a bug report
+</code></pre>
+<p>Point it at a proxy whose logs you can read, or at a local MITM proxy, and watch what leaves the machine during a launch. Pin the SDK version and check the published hash (<code>npm view anti-detect-browser@2.8.0 dist.integrity</code>) so the code you audited is the code that runs. If a deployment must not phone home at all, this is the wrong tool: license verification is compiled into the kernel and there is no offline mode.</p>
+<h2>What isolation cannot cover</h2>
+<p>Worth stating plainly, because a clean check list invites the wrong conclusion:</p>
+<ul>
+<li><strong>Anything outside the browser.</strong> A shared payment instrument, a shared contact detail, a shared payout destination - no browser setting touches these, and they are the strongest correlators that exist.</li>
+<li><strong>Activity patterns.</strong> Identical timing, identical content, identical interaction targets. Not a technical property.</li>
+<li><strong>Identity verification.</strong> A document check is not a fingerprint problem.</li>
+<li><strong>A platform's own decision.</strong> Nothing here changes how a site chooses to treat an account.</li>
+</ul>
+<p>If every check passes and something still looks wrong, the cause is in this list, not in the browser layer.</p>
+<h2>Acceptable use</h2>
+<p><strong>Intended:</strong> verifying isolation between identities you own; running client accounts with the account holder's authorization; building QA fixtures that emulate distinct devices; testing your own anti-fraud and correlation logic; auditing what a browser runtime does with your credentials.</p>
+<p><strong>Out of scope, and not supported:</strong> accessing any system without authorization; logging into accounts that are not yours; credential stuffing or account takeover; creating fake accounts, reviews or engagement; circumventing an authentication, payment or authorization control; scraping personal data in violation of applicable law; working around a platform's enforcement decision.</p>
+<p>Complying with the terms of the platforms being used, and with applicable law, is the operator's responsibility. Report abuse or a security issue via the contact at <code>https://antibrow.com</code>.</p>
+<h2>Related Skills</h2>
+<ul>
+<li><strong>anti-detect-browser</strong> - the SDK, profiles, personas, proxies and REST API that create the setup being verified here</li>
+<li><strong>browser-mcp-agent</strong> - MCP server mode, for letting an AI agent drive a single profile itself</li>
+</ul>

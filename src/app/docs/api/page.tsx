@@ -57,7 +57,7 @@ export default function ApiDocsPage() {
       </div>
       <div className="mt-4">
         <Param name="q" type="string" desc="Full-text search: name, description, keywords, owner" />
-        <Param name="ecosystem" type="dsh | claude-code | mcp" desc="Filter by ecosystem" />
+        <Param name="ecosystem" type="dsh | claude-code | mcp | skills" desc="Filter by ecosystem" />
         <Param name="category" type="string" desc="Filter by category, e.g. ai-agents" />
         <Param
           name="sort"

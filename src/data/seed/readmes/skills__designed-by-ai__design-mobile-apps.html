@@ -1,0 +1,661 @@
+<h1>Designing with Sleek</h1>
+<p><a href="https://sleek.design" target="_blank" rel="noopener noreferrer"><img src="https://raw.githubusercontent.com/sleekdotdesign/agent-skills/main/assets/hero.png" alt="Design mobile apps in minutes" /></a></p>
+<h2>Overview</h2>
+<p><a href="https://sleek.design" target="_blank" rel="noopener noreferrer">sleek.design</a> is an AI-powered mobile app design tool. You interact with it via a REST API at <code>/api/v1/*</code> to create projects, describe what you want built in plain language, and get back rendered screens. All communication is standard HTTP with bearer token auth.</p>
+<p><strong>Base URL</strong>: <code>https://sleek.design</code>
+<strong>Auth</strong>: <code>Authorization: Bearer $SLEEK_API_KEY</code> on every <code>/api/v1/*</code> request
+<strong>Content-Type</strong>: <code>application/json</code> (requests and responses)
+<strong>CORS</strong>: Enabled on all <code>/api/v1/*</code> endpoints
+<strong>Parsing responses</strong>: write the body to a file (<code>curl -o run.json</code>) and parse the file. Don't pipe JSON through <code>echo</code>: in zsh it expands the escaped <code>\n</code> inside string values into real newlines, which makes the body invalid JSON.
+<strong>API docs</strong>: OpenAPI spec at <code>https://sleek.design/api/v1/spec.json</code>; browsable docs at <code>https://sleek.design/api/v1/docs</code>. Fetch the spec for any contract detail not covered here.</p>
+<hr />
+<h2>Prerequisites: API Key</h2>
+<p>If <code>SLEEK_API_KEY</code> is not set, use the device flow so the user never handles the raw key:</p>
+<ol>
+<li><code>POST https://sleek.design/api/v1/device/start</code> (no auth) with body <code>{"source": "your-tool-slug"}</code>. The response contains a <code>verificationUrl</code>, a human-checkable <code>userCode</code>, a secret <code>deviceCode</code>, and a poll <code>interval</code> in seconds.</li>
+<li>Show the user the <code>verificationUrl</code> and the <code>userCode</code>, and tell them to confirm the code matches before approving.</li>
+<li>Poll <code>POST https://sleek.design/api/v1/device/poll</code> with <code>{"deviceCode": "..."}</code> every <code>interval</code> seconds. When the user approves, the poll returns <code>{"status": "approved", "key": "sk_..."}</code> exactly once: store it as <code>SLEEK_API_KEY</code>. Codes expire after 15 minutes; on <code>expired</code>, start over.</li>
+</ol>
+<p>Fallback: send the user to <strong><a href="https://sleek.design/agents/setup" target="_blank" rel="noopener noreferrer">https://sleek.design/agents/setup</a></strong>, which handles sign-in, plan upgrade, and key creation in one place, and ask them to paste the key back to you. Keys can also be managed at <strong><a href="https://sleek.design/dashboard/api-keys" target="_blank" rel="noopener noreferrer">https://sleek.design/dashboard/api-keys</a></strong>. The full key value is shown only once at creation.</p>
+<p><strong>Plans</strong>: free accounts can try the API with their one-time trial credits (about one design run), so a new user can see their first design before any payment decision. Sustained use requires the Pro plan or higher ($49.99/month, or $30/month billed yearly at $360/year; includes 20,000 monthly AI credits, roughly 650 screens). When cost becomes relevant (the user asks, an upgrade is needed to continue, or you're about to send them to a payment page), state this pricing plainly, including the yearly option. Never let a payment step come as a surprise.</p>
+<h3>Key scopes</h3>
+<table>
+<thead>
+<tr>
+<th>Scope</th>
+<th>What it unlocks</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>projects:read</code></td>
+<td>List / get projects</td>
+</tr>
+<tr>
+<td><code>projects:write</code></td>
+<td>Create / delete projects</td>
+</tr>
+<tr>
+<td><code>components:read</code></td>
+<td>List components in a project</td>
+</tr>
+<tr>
+<td><code>chats:read</code></td>
+<td>Get chat run status</td>
+</tr>
+<tr>
+<td><code>chats:write</code></td>
+<td>Send chat messages</td>
+</tr>
+<tr>
+<td><code>screenshots</code></td>
+<td>Render component screenshots</td>
+</tr>
+</tbody></table>
+<p>Create a key with only the scopes needed for the task.</p>
+<hr />
+<h2>Security &amp; Privacy</h2>
+<ul>
+<li><strong>Single host</strong>: All requests go exclusively to <code>https://sleek.design</code>. No data is sent to third parties.</li>
+<li><strong>HTTPS only</strong>: All communication uses HTTPS. The API key is transmitted only in the <code>Authorization</code> header to Sleek endpoints.</li>
+<li><strong>Minimal scopes</strong>: Create API keys with only the scopes required for the task. Prefer short-lived or revocable keys.</li>
+<li><strong>Image URLs</strong>: When using <code>imageUrls</code> in chat messages, those URLs are fetched by Sleek's servers. Avoid passing URLs that contain sensitive content.</li>
+</ul>
+<hr />
+<h2>Designing</h2>
+<p>The full request/response shapes for every endpoint used below are in the <a href="#quick-reference-all-endpoints" target="_blank" rel="noopener noreferrer">API reference</a>.</p>
+<h3>1. Create a project</h3>
+<p>Create a project with <code>POST /api/v1/projects</code> if one doesn't exist yet. Derive a name from the request.</p>
+<p>Each project has its own theme, style, and design system. If the user wants multiple design variations, create a separate project for each variation.</p>
+<h3>2. Send a chat message</h3>
+<p>Send the request with <code>POST /api/v1/projects/:id/chat/messages</code>. Sleek plans screen content and layout from your message, and will invent a visual style if you don't give it one. Don't decompose the request into screens and don't add product details the user didn't ask for; send the full intent as a single message. If the user described specific screens, include those. Sleek produces richer designs when given room to plan.</p>
+<p><strong>Author a style direction</strong>: write one whenever the user has given you anything to ground it in — reference images, apps they like, vibe adjectives, things to avoid — or whenever you're producing variations, one direction per variation. Pass the request through unchanged only when it's bare. A style direction is a single comprehensive paragraph, included in the message, covering mood (2–3 adjectives), color strategy (the logic, not hex codes), typography feel, layout philosophy, component style (radii, borders vs shadows, nav treatment), imagery and illustration style, and one or two distinctive details. Commit to a palette, a type direction, and an overall feel — anything that only sets a mood reads as a hint, not a direction. Be opinionated; don't hedge. Put the personality in color, type, and imagery rather than in unusual layout or navigation.</p>
+<p>Extend what the user gave you and never contradict it. When they point at reference images or apps they like, study each one and carry what you take into the direction — Sleek only sees images passed as <code>imageUrls</code>, so for anything local the direction is how those references reach it. Borrow patterns, never the source's branding, content, or name.</p>
+<p>Use a style direction or a <code>referenceId</code>, not both — a reference already carries a full style guide of its own.</p>
+<p><strong>Seed a style with a reference</strong>: Sleek curates a catalog of design references. When the user wants a specific look or asks for style options, list them with <code>GET /api/v1/references</code> (each has a <code>name</code> and <code>previewImageUrls</code> you can show) and pass the chosen id as <code>referenceId</code> on the first message to a project, so its style guide seeds the whole design.</p>
+<p><strong>Identify your tool</strong>: always send <code>source</code>, the slug of the tool making the request. The Sleek editor uses it to show the user who is designing while the run streams. Recognized values: <code>claude-code</code>, <code>claude</code>, <code>codex</code>, <code>chatgpt</code>, <code>cursor</code>, <code>openclaw</code>, <code>grok</code>. If your tool isn't listed, send a short kebab-case slug for it anyway (max 64 chars). Unrecognized values are fine and get a generic label.</p>
+<p><strong>Watch it live</strong>: runs render in the Sleek editor in real time. After sending the first message to a project, tell the user they can watch their screens being designed live in Sleek, and share the editor link: <code>https://sleek.design/project/:projectId</code>. Don't open a browser yourself unless the user asks.</p>
+<p><strong>Polling</strong>: chat messages are async by default: you get a <code>runId</code> and poll <code>GET /api/v1/projects/:id/chat/runs/:runId</code>. Start at 2s interval, back off to 5s after 10s, give up after 5 minutes. Exit on <code>completed</code> or <code>failed</code>; if you can't read the status, stop and report it rather than counting it as "not done yet". You can also use <code>?wait=true</code> for a blocking call (up to 300s; falls back to polling if it times out with <code>202</code>).</p>
+<p><strong>Editing a specific screen</strong>: use <code>target.screenId</code> to direct changes to the right screen. The <code>screenId</code> comes from the run's <code>result.operations</code> or from the <code>screenId</code> field on each component returned by <code>GET /api/v1/projects/:id/components</code>; it is not the component ID.</p>
+<p><strong>One run at a time</strong>: only one active run is allowed per project. If you get <code>409 CONFLICT</code>, wait for the current run to complete before sending the next message. If the user changed their mind or a stale run is blocking the project, cancel it (see <a href="#chat-cancel-run" target="_blank" rel="noopener noreferrer">Cancel Run</a>). Messages to different projects can run in parallel; use async polling (not <code>?wait=true</code>) when running multiple projects concurrently.</p>
+<p><strong>Safe retries</strong>: add an <code>idempotency-key</code> header (≤255 chars) to replay-safe re-sends. The server returns the existing run rather than creating a duplicate.</p>
+<h3>3. Show the results</h3>
+<p>After every chat run that produces <code>screen_created</code> or <code>screen_updated</code> operations, <strong>take screenshots and show them to the user</strong> using <code>POST /api/v1/screenshots</code>. The step is done only when the user has seen a screenshot of every screen the run created or updated; never complete a run silently.</p>
+<ul>
+<li><strong>New screens</strong>: one screenshot per screen + one combined screenshot of all screens in the project.</li>
+<li><strong>Updated screens</strong>: one screenshot per affected screen.</li>
+</ul>
+<p>Use <code>background: "transparent"</code> unless the user explicitly requests a specific background color.</p>
+<p>Save screenshots in the project directory (not a temporary folder) so the user can easily view them.</p>
+<p><strong>Showing vs reviewing</strong>: the defaults capture only the viewport, which is the right framing for the user — screens look like phone screens. They are the wrong framing for judging your own work, because everything below the fold is cropped away. When you're reviewing what a run produced, re-shoot the screen with <code>fullHeight: true</code> (one screen per request) to see the whole scrollable page.</p>
+<p>Screenshot requests are independent, so issue them in parallel — the user-facing shot and your <code>fullHeight</code> review shot go out together, as do the shots for different screens. "One screen per request" governs what goes into each image, not how fast you send them; it is not a reason to wait for one response before starting the next. Back off only if you actually get a <code>429</code>.</p>
+<p><strong>Never call a screen incomplete from a viewport screenshot.</strong> Content that looks missing is almost always just below the fold. Before telling the user something is absent, or sending a follow-up message asking Sleek to add it, confirm it against the whole screen: a <code>fullHeight: true</code> screenshot, or the component HTML from <code>GET /api/v1/projects/:id/components/:componentId</code>, which is the ground truth for what's on the screen. The screenshot is the default and answers most review questions on its own — don't go to the code to double-check something it already shows. Reach for the code only when you're about to claim something is missing: a render can omit what's really there (past the height cap, in a collapsed section, on a later carousel slide), so a negative conclusion is the one worth a second source. Note the reverse too — an element present in the HTML may still not be visible to the user.</p>
+<hr />
+<h2>Implementing Designs</h2>
+<p>When the user wants to implement the designs in code (not just preview them), <strong>always fetch the component HTML code</strong>. Do not rely on screenshots alone.</p>
+<p>Use <code>GET /api/v1/projects/:id/components/:componentId</code> to fetch each screen's code. The <code>componentId</code> comes from the chat run's <code>result.operations</code>.</p>
+<p>Component code can be large. When saving it to files, avoid writing the content through your text output: it's slow and wastes tokens. Instead, use shell commands to fetch the API response and write it directly to disk (e.g., pipe the response body into a file).</p>
+<h3>Which version to use</h3>
+<p>Each component carries a <code>versions[]</code> array and an <code>activeVersion: number</code>. <strong>By default, use the entry where <code>versions[i].version === activeVersion</code></strong>: that's the code currently shown in Sleek.</p>
+<p>If the user's prompt pins specific versions, follow those instead (see <a href="#pinned-versions" target="_blank" rel="noopener noreferrer">Pinned versions</a> below).</p>
+<h3>Pinned versions</h3>
+<p>The user's prompt may include a pin block telling you to implement specific historical versions instead of the current ones, like this:</p>
+<pre><code>... at this exact state instead of the project's current version:
+- component cmp_abc: version ver_001
+- component cmp_def: version ver_002
+- theme thm_ghi: version ver_003
+</code></pre>
+<p>When you see a pin block, implement those exact versions instead of <code>activeVersion</code>. Components not named in the pin block continue to use their active version. Theme IDs surface only inside pin blocks; this skill exposes no separate endpoint to enumerate them.</p>
+<h4>Fetching the right code</h4>
+<p>For each pinned component, find the entry in <code>versions[]</code> where <code>versions[i].id</code> matches the given version id (e.g. <code>ver_001</code>) and use its <code>code</code>. Do <strong>not</strong> fall back to <code>activeVersion</code> for pinned components.</p>
+<h4>Screenshots of pinned versions</h4>
+<p>Pass <code>componentVersionOverrides</code> and <code>themeVersionOverrides</code> to <code>POST /api/v1/screenshots</code>:</p>
+<pre><code class="language-json">{
+  "componentIds": ["cmp_abc"],
+  "projectId": "proj_xyz",
+  "componentVersionOverrides": { "cmp_abc": "ver_001" },
+  "themeVersionOverrides": { "thm_ghi": "ver_003" }
+}
+</code></pre>
+<p>Keys are component / theme public ids; values are the corresponding <code>versions[i].id</code>. Entities missing from a map fall back to their active version. Include the override maps whenever the prompt specified pinned versions.</p>
+<h3>HTML prototypes</h3>
+<p>The component <code>code</code> is a complete HTML document. Save it directly to a <code>.html</code> file. No build step needed.</p>
+<h3>Native frameworks (React Native, SwiftUI, etc.)</h3>
+<p>Use both the HTML code and the screenshots together:</p>
+<ul>
+<li><strong>HTML code</strong> is the implementation reference: it contains the exact structure, layout, styling, colors, spacing, content, image URLs, and icon names.</li>
+<li><strong>Screenshots</strong> are the visual target: use them to verify your implementation matches the intended look.</li>
+</ul>
+<p>The HTML tells you <em>how</em> to build it; the screenshot tells you <em>what</em> it should look like.</p>
+<h4>Icons</h4>
+<p>Sleek uses <a href="https://iconify.design" target="_blank" rel="noopener noreferrer">Iconify</a> icons in the format <code>prefix:name</code> (e.g., <code>solar:heart-bold</code>, <code>material-symbols:search-rounded</code>, <code>lucide:settings</code>). The most common sets are <strong>Solar</strong>, <strong>Hugeicons</strong>, <strong>Material Symbols</strong> and <strong>MDI</strong>.</p>
+<p><strong>Use the exact icons from the HTML code</strong>. Do not substitute with a different icon set. Matching icons is important for design fidelity.</p>
+<p>When implementing icons:</p>
+<ol>
+<li><p><strong>Check if the project already has an icon system</strong> that supports the same sets Sleek uses (Solar, Hugeicons, Material Symbols, MDI). If so, use it. Note: <code>@expo/vector-icons</code> does <strong>not</strong> support these sets, so do not use it as a substitute.</p>
+</li>
+<li><p><strong>Otherwise, fetch the SVGs from the Iconify API and embed them in the code:</strong></p>
+<pre><code>GET https://api.iconify.design/{prefix}/{name}.svg
+</code></pre>
+<p>Example: <code>https://api.iconify.design/solar/heart-bold.svg</code></p>
+<p>Collect all icon names from the HTML, fetch their SVGs, and save them as static assets or string constants in the codebase. For <strong>React Native / Expo</strong>, render them with <code>react-native-svg</code>'s <code>SvgXml</code> component, which works in Expo Go with no additional native dependencies.</p>
+</li>
+</ol>
+<h4>Fonts</h4>
+<p>The HTML includes Google Fonts via <code>&lt;link&gt;</code> tags in the <code>&lt;head&gt;</code>. Use the same fonts and weights when implementing in a native framework. Extract the font family names and weights from the <code>&lt;link&gt;</code> tags.</p>
+<h4>Navigation</h4>
+<p>The designs may include navigation elements like tab bars and headers. Update the project's navigation styling and structure to match the designs. Don't just implement the screen content while leaving the default navigation untouched.</p>
+<hr />
+<h2>Quick Reference: All Endpoints</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Scope</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>GET</code></td>
+<td><code>/api/v1/projects</code></td>
+<td><code>projects:read</code></td>
+<td>List projects</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/v1/projects</code></td>
+<td><code>projects:write</code></td>
+<td>Create project</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/v1/projects/:id</code></td>
+<td><code>projects:read</code></td>
+<td>Get project</td>
+</tr>
+<tr>
+<td><code>DELETE</code></td>
+<td><code>/api/v1/projects/:id</code></td>
+<td><code>projects:write</code></td>
+<td>Delete project</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/v1/projects/:id/components</code></td>
+<td><code>components:read</code></td>
+<td>List components</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/v1/projects/:id/components/:componentId</code></td>
+<td><code>components:read</code></td>
+<td>Get component</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/v1/references</code></td>
+<td>any valid key</td>
+<td>List references</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/v1/projects/:id/chat/messages</code></td>
+<td><code>chats:write</code></td>
+<td>Send chat message</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/v1/projects/:id/chat/runs/:runId</code></td>
+<td><code>chats:read</code></td>
+<td>Poll run status</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/v1/projects/:id/chat/runs/:runId/cancel</code></td>
+<td><code>chats:write</code></td>
+<td>Cancel run</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/v1/screenshots</code></td>
+<td><code>screenshots</code></td>
+<td>Render screenshot</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Endpoints</h2>
+<h3>Projects</h3>
+<h4>List projects</h4>
+<pre><code class="language-http">GET /api/v1/projects?limit=50&amp;offset=0
+Authorization: Bearer $SLEEK_API_KEY
+</code></pre>
+<p>Response <code>200</code>:</p>
+<pre><code class="language-json">{
+  "data": [
+    {
+      "id": "proj_abc",
+      "name": "My App",
+      "slug": "my-app",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "..."
+    }
+  ],
+  "pagination": { "total": 12, "limit": 50, "offset": 0 }
+}
+</code></pre>
+<h4>Create project</h4>
+<pre><code class="language-http">POST /api/v1/projects
+Authorization: Bearer $SLEEK_API_KEY
+Content-Type: application/json
+
+{ "name": "My New App" }
+</code></pre>
+<p>Response <code>201</code>: same shape as a single project.</p>
+<h4>Get / Delete project</h4>
+<pre><code class="language-http">GET    /api/v1/projects/:projectId
+DELETE /api/v1/projects/:projectId   → 204 No Content
+</code></pre>
+<hr />
+<h3>Components</h3>
+<h4>List components</h4>
+<pre><code class="language-http">GET /api/v1/projects/:projectId/components?limit=50&amp;offset=0
+Authorization: Bearer $SLEEK_API_KEY
+</code></pre>
+<p>Both list and get accept an optional <code>inlineIcons</code> query param (default <code>false</code>). When omitted, icons render as <code>&lt;iconify-icon&gt;</code> web components and the HTML pulls in the Iconify script, so leave it off by default. Pass <code>?inlineIcons=true</code> only when the consumer needs self-contained SVGs in the HTML (for example, importing into tools that don't run scripts).</p>
+<p>Response <code>200</code>:</p>
+<pre><code class="language-json">{
+  "data": [
+    {
+      "id": "cmp_xyz",
+      "screenId": "scr_xyz",
+      "name": "Hero Section",
+      "activeVersion": 3,
+      "versions": [
+        {
+          "id": "ver_001",
+          "version": 1,
+          "code": "&lt;!DOCTYPE html&gt;...&lt;/html&gt;",
+          "createdAt": "..."
+        }
+      ],
+      "createdAt": "...",
+      "updatedAt": "..."
+    }
+  ],
+  "pagination": { "total": 5, "limit": 50, "offset": 0 }
+}
+</code></pre>
+<h4>Get component</h4>
+<p>Fetches a single component by ID. Use this when you need the code for a specific screen (e.g., after a chat run returns a <code>componentId</code> in its operations).</p>
+<pre><code class="language-http">GET /api/v1/projects/:projectId/components/:componentId
+Authorization: Bearer $SLEEK_API_KEY
+</code></pre>
+<p>Response <code>200</code>: <code>{ "data": ... }</code> with a single component in the same shape as a list item.</p>
+<hr />
+<h3>References</h3>
+<p>References are curated design styles from featured Sleek projects. They are world-readable: any valid API key can list them, no scope needed.</p>
+<pre><code class="language-http">GET /api/v1/references?limit=50&amp;offset=0
+Authorization: Bearer $SLEEK_API_KEY
+</code></pre>
+<p>Response <code>200</code>:</p>
+<pre><code class="language-json">{
+  "data": [
+    {
+      "id": "proj_ref1",
+      "name": "Ember Fitness",
+      "previewImageUrls": ["https://.../screenshot.png"]
+    }
+  ],
+  "pagination": { "total": 44, "limit": 50, "offset": 0 }
+}
+</code></pre>
+<p>To use one, pass its <code>id</code> as <code>referenceId</code> on <a href="#chat-send-message" target="_blank" rel="noopener noreferrer">Send Message</a>.</p>
+<hr />
+<h3>Chat: Send Message</h3>
+<p>This is the core action: describe what you want in <code>message.text</code> and the AI creates or modifies screens.</p>
+<pre><code class="language-http">POST /api/v1/projects/:projectId/chat/messages?wait=false
+Authorization: Bearer $SLEEK_API_KEY
+Content-Type: application/json
+idempotency-key: &lt;optional, max 255 chars&gt;
+
+{
+  "message": { "text": "Add a pricing section with three tiers" },
+  "source": "claude-code",
+  "imageUrls": ["https://example.com/ref.png"],
+  "target": { "screenId": "scr_abc" },
+  "referenceId": "proj_ref1"
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>message.text</code></td>
+<td>Yes</td>
+<td>1+ chars, trimmed</td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>Treat as required</td>
+<td>Slug of the tool sending the request (see <a href="#2-send-a-chat-message" target="_blank" rel="noopener noreferrer">step 2 of Designing</a>)</td>
+</tr>
+<tr>
+<td><code>imageUrls</code></td>
+<td>No</td>
+<td>HTTPS URLs only; included as visual context</td>
+</tr>
+<tr>
+<td><code>target.screenId</code></td>
+<td>No</td>
+<td>Edit a specific screen using its <code>screenId</code> (from run operations or the components list; not <code>componentId</code>); omit to let AI decide</td>
+</tr>
+<tr>
+<td><code>referenceId</code></td>
+<td>No</td>
+<td>Seed the design style from a reference (see <a href="#references" target="_blank" rel="noopener noreferrer">References</a>); invalid id → <code>400</code></td>
+</tr>
+<tr>
+<td><code>?wait=true/false</code></td>
+<td>No</td>
+<td>Sync wait mode (default: false)</td>
+</tr>
+<tr>
+<td><code>idempotency-key</code> header</td>
+<td>No</td>
+<td>Replay-safe re-sends</td>
+</tr>
+</tbody></table>
+<h4>Response: async (default, <code>wait=false</code>)</h4>
+<p>Status <code>202 Accepted</code>. <code>result</code> and <code>error</code> are absent until the run reaches a terminal state.</p>
+<pre><code class="language-json">{
+  "data": {
+    "runId": "run_111",
+    "status": "queued",
+    "statusUrl": "/api/v1/projects/proj_abc/chat/runs/run_111"
+  }
+}
+</code></pre>
+<h4>Response: sync (<code>wait=true</code>)</h4>
+<p>Blocks up to <strong>300 seconds</strong>. Returns <code>200</code> when completed, <code>202</code> if timed out.</p>
+<pre><code class="language-json">{
+  "data": {
+    "runId": "run_111",
+    "status": "completed",
+    "statusUrl": "...",
+    "result": {
+      "assistantText": "I added a pricing section with...",
+      "operations": [
+        {
+          "type": "screen_created",
+          "screenId": "scr_xyz",
+          "screenName": "Pricing",
+          "componentId": "cmp_xyz"
+        },
+        {
+          "type": "screen_updated",
+          "screenId": "scr_abc",
+          "componentId": "cmp_abc"
+        },
+        { "type": "theme_updated" }
+      ]
+    }
+  }
+}
+</code></pre>
+<hr />
+<h3>Chat: Poll Run Status</h3>
+<p>Use this after async send to check progress.</p>
+<pre><code class="language-http">GET /api/v1/projects/:projectId/chat/runs/:runId
+Authorization: Bearer $SLEEK_API_KEY
+</code></pre>
+<p>The response has the same <code>data</code> shape as send message: <code>result</code> is present when <code>completed</code>, <code>error</code> when <code>failed</code>:</p>
+<pre><code class="language-json">{
+  "data": {
+    "runId": "run_111",
+    "status": "failed",
+    "statusUrl": "...",
+    "error": { "code": "execution_failed", "message": "..." }
+  }
+}
+</code></pre>
+<p><strong>Run status lifecycle</strong>: <code>queued</code> → <code>running</code> → <code>completed | failed</code></p>
+<hr />
+<h3>Chat: Cancel Run</h3>
+<pre><code class="language-http">POST /api/v1/projects/:projectId/chat/runs/:runId/cancel
+Authorization: Bearer $SLEEK_API_KEY
+</code></pre>
+<p>Marks a <code>queued</code> or <code>running</code> run as <code>failed</code> with error code <code>cancelled</code> and returns the updated run; already-finished runs are returned unchanged. Use it when the user changes their mind mid-run or a stale run is blocking the project with <code>409 CONFLICT</code>.</p>
+<hr />
+<h3>Screenshots</h3>
+<p>Takes a snapshot of one or more rendered components.</p>
+<pre><code class="language-http">POST /api/v1/screenshots
+Authorization: Bearer $SLEEK_API_KEY
+Content-Type: application/json
+
+{
+  "componentIds": ["cmp_xyz", "cmp_abc"],
+  "projectId": "proj_abc",
+  "format": "png",
+  "scale": 2,
+  "gap": 40,
+  "padding": 40,
+  "background": "transparent"
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>format</code></td>
+<td><code>png</code></td>
+<td><code>png</code> or <code>webp</code></td>
+</tr>
+<tr>
+<td><code>scale</code></td>
+<td><code>2</code></td>
+<td>1–3 (device pixel ratio)</td>
+</tr>
+<tr>
+<td><code>gap</code></td>
+<td><code>40</code></td>
+<td>Pixels between components</td>
+</tr>
+<tr>
+<td><code>padding</code></td>
+<td><code>40</code></td>
+<td>Uniform padding on all sides</td>
+</tr>
+<tr>
+<td><code>paddingX</code></td>
+<td><em>(optional)</em></td>
+<td>Horizontal padding; overrides <code>padding</code> for left/right when provided</td>
+</tr>
+<tr>
+<td><code>paddingY</code></td>
+<td><em>(optional)</em></td>
+<td>Vertical padding; overrides <code>padding</code> for top/bottom when provided</td>
+</tr>
+<tr>
+<td><code>paddingTop</code></td>
+<td><em>(optional)</em></td>
+<td>Top padding; overrides <code>paddingY</code> when provided</td>
+</tr>
+<tr>
+<td><code>paddingRight</code></td>
+<td><em>(optional)</em></td>
+<td>Right padding; overrides <code>paddingX</code> when provided</td>
+</tr>
+<tr>
+<td><code>paddingBottom</code></td>
+<td><em>(optional)</em></td>
+<td>Bottom padding; overrides <code>paddingY</code> when provided</td>
+</tr>
+<tr>
+<td><code>paddingLeft</code></td>
+<td><em>(optional)</em></td>
+<td>Left padding; overrides <code>paddingX</code> when provided</td>
+</tr>
+<tr>
+<td><code>background</code></td>
+<td><code>transparent</code></td>
+<td>Any CSS color (hex, named, <code>transparent</code>)</td>
+</tr>
+<tr>
+<td><code>showDots</code></td>
+<td><code>false</code></td>
+<td>Overlay a subtle dot grid on the background</td>
+</tr>
+<tr>
+<td><code>fullHeight</code></td>
+<td><code>false</code></td>
+<td>Capture the entire scrollable screen instead of just the viewport (see below)</td>
+</tr>
+<tr>
+<td><code>radius</code></td>
+<td><code>48</code></td>
+<td>Squircle corner radius per component in pixels (integer ≥ 0); pass <code>0</code> for sharp corners</td>
+</tr>
+<tr>
+<td><code>componentVersionOverrides</code></td>
+<td><em>(optional)</em></td>
+<td>Map of <code>componentId</code> → <code>versions[i].id</code> to render at a pinned version instead of <code>activeVersion</code> (see <a href="#pinned-versions" target="_blank" rel="noopener noreferrer">Pinned versions</a>)</td>
+</tr>
+<tr>
+<td><code>themeVersionOverrides</code></td>
+<td><em>(optional)</em></td>
+<td>Map of <code>themeId</code> → <code>versions[i].id</code> to render with a pinned theme version (see <a href="#pinned-versions" target="_blank" rel="noopener noreferrer">Pinned versions</a>)</td>
+</tr>
+</tbody></table>
+<p>Padding resolves with a cascade: per-side → axis → uniform. For example, <code>paddingTop</code> falls back to <code>paddingY</code>, which falls back to <code>padding</code>. So <code>{ "padding": 20, "paddingX": 10, "paddingLeft": 5 }</code> gives top/bottom 20px, right 10px, left 5px.</p>
+<p>By default a component is captured at frame height, so anything the user would reach by scrolling is cut off. <code>fullHeight: true</code> expands each frame to the height of its own content before capturing. Use it when you're reviewing your own work; leave it off for the screenshots you show the user, where the phone-shaped framing is the point.</p>
+<p>Frames are capped at <strong>4× the default frame height</strong>, so a screen longer than that is still cut off at the bottom even with <code>fullHeight: true</code>. On a very long screen, treat the component HTML as the authority for what's below the cap. Expanded frames make for tall images; prefer one component per request so each screen keeps its detail — and send those requests in parallel rather than one after another.</p>
+<p>When <code>showDots</code> is <code>true</code>, a dot pattern is drawn over the background color. The dots automatically adapt to the background: dark backgrounds get light dots, light backgrounds get dark dots. This has no effect when <code>background</code> is <code>"transparent"</code>.</p>
+<p>Response: raw binary <code>image/png</code> or <code>image/webp</code> with <code>Content-Disposition: attachment</code>.</p>
+<hr />
+<h2>Error Shapes</h2>
+<pre><code class="language-json">{ "code": "UNAUTHORIZED", "message": "..." }
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>HTTP</th>
+<th>Code</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>401</td>
+<td><code>UNAUTHORIZED</code></td>
+<td>Missing/invalid/expired API key</td>
+</tr>
+<tr>
+<td>403</td>
+<td><code>FORBIDDEN</code></td>
+<td>Valid key, wrong scope or plan</td>
+</tr>
+<tr>
+<td>404</td>
+<td><code>NOT_FOUND</code></td>
+<td>Resource doesn't exist</td>
+</tr>
+<tr>
+<td>400</td>
+<td><code>BAD_REQUEST</code></td>
+<td>Validation failure</td>
+</tr>
+<tr>
+<td>409</td>
+<td><code>CONFLICT</code></td>
+<td>Another run is active for this project</td>
+</tr>
+<tr>
+<td>429</td>
+<td><code>TOO_MANY_REQUESTS</code></td>
+<td>Too many requests; back off and retry later</td>
+</tr>
+<tr>
+<td>500</td>
+<td><code>INTERNAL_SERVER_ERROR</code></td>
+<td>Server error</td>
+</tr>
+</tbody></table>
+<p><code>401</code>, <code>403</code>, and <code>429</code> bodies may include <code>data.url</code>: a page where the user can fix the condition (create a key, upgrade the plan). When present, share that URL with the user instead of improvising one.</p>
+<p>Chat run-level errors (inside <code>data.error</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>out_of_credits</code></td>
+<td>Organization has no credits left</td>
+</tr>
+<tr>
+<td><code>execution_failed</code></td>
+<td>AI execution error</td>
+</tr>
+<tr>
+<td><code>cancelled</code></td>
+<td>Run cancelled via the cancel endpoint</td>
+</tr>
+</tbody></table>
+<p>An <code>out_of_credits</code> error includes <code>error.url</code>, the page where the user can top up credits. Relay it to the user; don't retry the run until they have.</p>
+<hr />
+<h2>Pagination</h2>
+<p>All list endpoints accept <code>limit</code> (1–100, default 50) and <code>offset</code> (≥0). The response always includes <code>pagination.total</code> so you can page through all results.</p>
+<pre><code class="language-http">GET /api/v1/projects?limit=10&amp;offset=20
+</code></pre>
+<hr />
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Omitting <code>source</code> on chat messages</td>
+<td>Always send <code>source</code> so the run is attributed in the Sleek editor</td>
+</tr>
+<tr>
+<td>Using <code>wait=true</code> on long generations</td>
+<td>It blocks 300s max; have a fallback to polling for <code>202</code> response</td>
+</tr>
+<tr>
+<td>Assuming <code>result</code> is present on <code>202</code></td>
+<td><code>result</code> is absent until status is <code>completed</code></td>
+</tr>
+<tr>
+<td>Piping a JSON response through <code>echo</code> to parse it</td>
+<td>zsh expands the <code>\n</code> in <code>assistantText</code> and breaks the JSON; parse from a file instead</td>
+</tr>
+<tr>
+<td>Treating an unreadable run status as "not done yet"</td>
+<td>The loop then spins to its cap long after the run finished; stop and report instead</td>
+</tr>
+<tr>
+<td>Calling a screen incomplete based on a viewport screenshot</td>
+<td>The content is usually below the fold; re-shoot with <code>fullHeight: true</code> or check the component HTML before reporting anything missing</td>
+</tr>
+<tr>
+<td>Using <code>screenId</code> as <code>componentIds</code> in screenshots</td>
+<td><code>screenId</code> and <code>componentId</code> are different: every screen has both (run operations and the components list return the pair). the chat message <code>target.screenId</code> takes <code>screenId</code>; screenshots and component reads take <code>componentId</code></td>
+</tr>
+<tr>
+<td>Confusing <code>versions[i].version</code> (number) with <code>versions[i].id</code> (string)</td>
+<td>When resolving pinned versions, match by <code>id</code> (e.g. <code>ver_001</code>); <code>version</code> is the numeric index</td>
+</tr>
+</tbody></table>

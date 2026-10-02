@@ -1,6 +1,6 @@
 # PluginWorld — Development Rules
 
-The cross-ecosystem AI plugin marketplace (dsh / Claude Code / MCP). Upstream spec:
+The cross-ecosystem AI plugin marketplace (dsh / Claude Code / MCP / Agent Skills). Upstream spec:
 `../plugin-marketplace-开发方案.md`; brand system: `../PluginWorld 视觉体系.html`.
 
 ## Hard rules
@@ -9,7 +9,7 @@ The cross-ecosystem AI plugin marketplace (dsh / Claude Code / MCP). Upstream sp
 - The data model follows spec §4; column names in `src/lib/db/schema.ts` must not drift (snake_case columns).
 - Run `npm run typecheck && npm run lint && npm test` after every task before moving on.
 - Scoring logic (`src/lib/scoring.ts`) must stay pure functions; every change needs a matching test.
-- Each of the three validators keeps ≥3 passing / ≥3 failing test cases.
+- Each of the four validators keeps ≥3 passing / ≥3 failing test cases.
 - All user-facing site content is English.
 
 ## Brand system (V1.0)

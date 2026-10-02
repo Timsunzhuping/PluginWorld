@@ -1,0 +1,90 @@
+<p>You are labeling this repository's LLM workflows for Caveman Cloud. A
+<em>workflow</em> is a job the code performs — "answer a support ticket", "build the
+nightly digest", "run the eval suite" — not a technology. Every gateway
+request can carry a workflow label; unlabeled traffic all lands in one
+<code>unlabeled-workflow</code> bucket. Your job: find the workflows, name them well,
+wire the labels, and verify nothing broke.</p>
+<p>This changes code, so it goes through the user's normal review: <strong>propose the
+table first, apply after the user agrees.</strong> Re-running on an already-labeled
+repo must change nothing (idempotent).</p>
+<p>This skill is operator-invoked. An <code>unlabeled-traffic</code> Cave Plan observation is
+review-only and does not create an advisory file, proposal, or Draft PR. Do not
+infer that telemetry selected a callsite or authorized an edit. Independently
+inventory the repository, present the labeling table, and wait for the user's
+approval before changing code.</p>
+<h2>Step 1 — Inventory the workflows</h2>
+<p>Walk the repo from its entry points, not from its imports:</p>
+<ul>
+<li>HTTP/RPC handlers that call an LLM (directly or through layers)</li>
+<li>Scheduled jobs: cron definitions, queue consumers, workers, GitHub Actions
+that invoke LLM code</li>
+<li>CLI commands and scripts (<code>scripts/</code>, <code>bin/</code>, package.json scripts)</li>
+<li>Eval / test harnesses that burn real tokens</li>
+<li>Distinct agents or chains inside a framework (each LangGraph graph, each
+crew, each agent definition is usually its own workflow)</li>
+</ul>
+<p>One workflow = one job a human would name. Ten callsites inside the same
+request handler are one workflow; one shared <code>llm.ts</code> helper used by three
+jobs is three workflows (label at the callers, never the shared helper).</p>
+<h2>Step 2 — Name them</h2>
+<p>Slug grammar (the gateway enforces this): lowercase <code>[a-z0-9_-]</code>, 1–96 chars.
+Name the job, not the tech:</p>
+<ul>
+<li>Good: <code>support-reply</code>, <code>nightly-digest</code>, <code>pr-review</code>, <code>eval-suite</code>,
+<code>onboarding-email</code></li>
+<li>Bad: <code>openai-calls</code> (tech), <code>main</code> (says nothing), <code>SupportReply</code> (invalid),
+<code>johns-test-3</code> (won't age)</li>
+</ul>
+<p>Names are forever-ish — renaming later splits the spend history. When a job's
+purpose isn't clear from the code, derive the slug from the file name and mark
+it <code>review</code> in the table rather than inventing a purpose.</p>
+<h2>Step 3 — Propose, then apply</h2>
+<p>Present this table and ask to proceed:</p>
+<pre><code>| workflow | job | where | how it gets labeled |
+|---|---|---|---|
+| support-reply | answers inbound tickets | src/bot/reply.ts:41 | defaultHeaders on the reply client |
+| nightly-digest | 02:00 summary job | jobs/digest.ts:12 | header on the digest client |
+| eval-suite (review) | scripts/eval.ts:8 — purpose inferred from filename | scripts/eval.ts:8 | env override at invocation |
+</code></pre>
+<p>Then wire each label with the lightest mechanism available at that callsite:</p>
+<ul>
+<li><strong>@caveman-ai/sdk / caveman_cloud SDK</strong>: per-trace <code>workflow</code> option, or
+<code>defaultWorkflow</code> on the client a single-job service constructs.</li>
+<li><strong>Raw provider SDKs</strong> (OpenAI/Anthropic/LangChain/LiteLLM/Vercel): add
+<code>"x-cave-workflow": "&lt;slug&gt;"</code> to the same <code>defaultHeaders</code> /
+<code>default_headers</code> / <code>extra_headers</code> block that already carries
+<code>x-cave-api-key</code>. Shared client used by several jobs → pass the header per
+call (every SDK above accepts per-request header overrides), or give each
+job its own thin client.</li>
+<li><strong>Wrapped coding agents</strong> (<code>caveman wrap</code>): <code>--workflow &lt;slug&gt;</code> flag or
+<code>CAVE_WORKFLOW=&lt;slug&gt;</code> env at the invocation site (cron line, CI step).</li>
+<li><strong>Raw HTTP</strong>: add the <code>x-cave-workflow</code> header to the request.</li>
+</ul>
+<p>Label the callers, keep the diff minimal, match the repo's style. If a
+callsite is not routed through the Caveman gateway at all, don't label it —
+list it under "not wired" in the report (labels only travel on gateway
+traffic; wiring is the caveman-setup skill's job).</p>
+<h2>Step 4 — Verify</h2>
+<p>Run whatever the repo already uses to exercise one labeled path (a test, a
+dev script, one curl). Then confirm: the request still succeeds (the gateway
+rejects an invalid label with 400 <code>cave_invalid_request_header</code> — fix the slug
+if so). Labeled spend appears on the dashboard at <code>/activity?tab=workflows</code> as
+each workflow next runs; jobs on a schedule show up when the schedule fires,
+and that's worth saying in the report rather than pretending they're live.</p>
+<h2>Step 5 — Report</h2>
+<pre><code>## Workflows labeled
+
+| workflow | job | where |
+|---|---|---|
+| support-reply | answers inbound tickets | src/bot/reply.ts:41 |
+| nightly-digest | 02:00 summary job | jobs/digest.ts:12 |
+
+Verified: &lt;the labeled path you actually exercised, and what you observed&gt;
+Lands at: &lt;DASHBOARD&gt;/activity?tab=workflows — each row appears as that workflow
+next runs. Anything still unlabeled shows as `unlabeled-workflow`.
+Not wired (no gateway routing, so no label): &lt;list or "none"&gt;
+Marked review: &lt;slugs whose purpose was inferred from filenames, or "none"&gt;
+</code></pre>
+<p>If you found no LLM entry points at all: say exactly that, and point at the
+setup skill (<code>&lt;docs origin&gt;/docs/agent-setup.md</code>) instead of manufacturing a
+table.</p>

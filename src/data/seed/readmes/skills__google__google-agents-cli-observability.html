@@ -1,0 +1,275 @@
+<h1>Observability Guide</h1>
+<blockquote>
+<p><strong>Cloud Trace</strong> works out of the box — no infrastructure needed. <strong>Prompt-response logging</strong> and <strong>BigQuery Agent Analytics</strong> require Terraform-provisioned infrastructure (service account, GCS bucket, BigQuery dataset). Run <code>agents-cli infra single-project --apply --project PROJECT_ID</code> to provision these resources. Go projects get the BigQuery telemetry stack too; the GCS completion upload behind prompt-response logging and the BigQuery Agent Analytics plugin are Python only. See <code>references/cloud-trace-and-logging.md</code> for details, env vars, and verification commands. If your project isn't scaffolded yet, see <code>/google-agents-cli-scaffold</code> first.</p>
+</blockquote>
+<h3>Deployment order</h3>
+<table>
+<thead>
+<tr>
+<th>Do you want Terraform-managed observability?</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>No</strong></td>
+<td>Run <code>agents-cli deploy</code> directly (works for all targets).</td>
+</tr>
+<tr>
+<td><strong>Yes</strong></td>
+<td>Run <code>agents-cli infra single-project --apply</code> first, then <code>agents-cli deploy</code>.</td>
+</tr>
+</tbody></table>
+<p><strong>If you already ran <code>agents-cli deploy</code> imperatively:</strong>
+Do not apply Terraform afterward. For Agent Runtime, Terraform owns the whole engine (service account, deployment spec, env vars), so a later apply can't be reconciled without taking over the resource. 
+Either delete the deployment and start over, or keep the SDK-deployed instance — skip <code>infra single-project</code> and set the observability env vars by re-running <code>agents-cli deploy --update-env-vars "KEY=VALUE,..."</code>; deploy matches the existing Reasoning Engine by display name and updates it in place, preserving env vars set outside the deploy. You must also grant its service account the telemetry IAM roles the Terraform module would otherwise provision: <code>roles/storage.admin</code> (write completions to the logs bucket), <code>roles/logging.logWriter</code>, <code>roles/cloudtrace.agent</code>, plus <code>roles/bigquery.dataOwner</code> + <code>roles/bigquery.jobUser</code> when scaffolded with <code>--bq-analytics</code>. The full set lives in <code>deployment/terraform/single-project/iam.tf</code> (from <code>app_sa_roles</code>) and <code>telemetry.tf</code>. Terraform-managed env vars aren't available in this mode.</p>
+<h3>Reference Files</h3>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>references/cloud-trace-and-logging.md</code></td>
+<td>Scaffolded project details — Terraform-provisioned resources, environment variables, verification commands, enabling/disabling locally</td>
+</tr>
+<tr>
+<td><code>references/bigquery-agent-analytics.md</code></td>
+<td>BQ Agent Analytics plugin — enabling, key features, GCS offloading, tool provenance</td>
+</tr>
+<tr>
+<td><code>references/adk-docs.md</code></td>
+<td><strong>ADK:</strong> adk.dev pages to fetch for detail beyond this skill</td>
+</tr>
+<tr>
+<td><code>references/feedback-mechanism.md</code></td>
+<td>Adding a user-feedback endpoint — request model, structured logging, log sink → BigQuery</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Observability Tiers</h2>
+<p>Choose the right level of observability based on your needs:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>What It Does</th>
+<th>Scope</th>
+<th>Default State</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Cloud Trace</strong></td>
+<td>Distributed tracing — execution flow, latency, errors via OpenTelemetry spans</td>
+<td>All templates, all environments</td>
+<td>Always enabled</td>
+<td>Debugging latency, understanding agent execution flow</td>
+</tr>
+<tr>
+<td><strong>Prompt-Response Logging</strong></td>
+<td>GenAI interactions exported to GCS, BigQuery, and Cloud Logging</td>
+<td>Scaffolded ADK Python projects</td>
+<td>Disabled locally, enabled when deployed</td>
+<td>Auditing LLM interactions, compliance</td>
+</tr>
+<tr>
+<td><strong>BigQuery Agent Analytics</strong></td>
+<td>Structured agent events (LLM calls, tool use, outcomes) to BigQuery</td>
+<td>ADK Python agents with the plugin enabled</td>
+<td>Opt-in (<code>--bq-analytics</code> at scaffold time)</td>
+<td>Conversational analytics, custom dashboards, LLM-as-judge evals</td>
+</tr>
+<tr>
+<td><strong>Third-Party Integrations</strong></td>
+<td>External observability platforms (AgentOps, Phoenix, MLflow, etc.)</td>
+<td>Any OpenTelemetry-instrumented agent</td>
+<td>Opt-in, per-provider setup</td>
+<td>Team collaboration, specialized visualization, prompt management</td>
+</tr>
+</tbody></table>
+<p><strong>Ask the user</strong> which tier(s) they need — they can be combined. Cloud Trace is always on; the others are additive.</p>
+<hr />
+<h2>Cloud Trace</h2>
+<p>Scaffolded agents use OpenTelemetry to emit distributed traces. Every agent invocation produces spans that track the full execution flow.</p>
+<h3>Span Hierarchy</h3>
+<blockquote>
+<p><strong>ADK projects.</strong> These are ADK's span names; other frameworks emit their own (<code>generate_content</code> comes from the shared google-genai instrumentor either way).</p>
+</blockquote>
+<pre><code>invoke_workflow (top-level run)
+  └── invoke_agent (one per agent in the chain)
+        ├── call_llm (model request)
+        │     └── generate_content (underlying GenAI model call)
+        └── execute_tool (tool execution)
+</code></pre>
+<h3>Setup by Deployment Type</h3>
+<table>
+<thead>
+<tr>
+<th>Deployment</th>
+<th>Setup</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Agent Runtime</strong></td>
+<td>Automatic — exporters wired at startup, gated on <code>GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY</code> (set by deploy); exports to Cloud Trace/Logging + Agent Engine console</td>
+</tr>
+<tr>
+<td><strong>Cloud Run / GKE (scaffolded)</strong></td>
+<td>Automatic — exporters wired at startup, exports to Cloud Trace/Logging</td>
+</tr>
+<tr>
+<td><strong>Cloud Run / GKE (manual)</strong></td>
+<td>Configure OpenTelemetry exporter in your app</td>
+</tr>
+<tr>
+<td><strong>Local dev</strong></td>
+<td>Works with <code>agents-cli playground</code>; traces visible in Cloud Console</td>
+</tr>
+</tbody></table>
+<p>Wired at app startup — <strong>ADK Python:</strong> <code>get_fast_api_app(otel_to_cloud=True)</code> in <code>app/fast_api_app.py</code>; <strong>ADK Go:</strong> <code>setupObservability()</code> in <code>observability.go</code>; other templates call their own. <code>references/cloud-trace-and-logging.md</code> has the details.</p>
+<p>View traces: <strong>Cloud Console → Trace → Trace explorer</strong></p>
+<p><strong>ADK:</strong> for detailed setup instructions (Agent Runtime CLI/SDK, Cloud Run, custom deployments), fetch <code>https://adk.dev/integrations/cloud-trace/index.md</code>.</p>
+<hr />
+<h2>Prompt-Response Logging</h2>
+<p>Captures GenAI interactions and exports to GCS (JSONL) and BigQuery (via log sinks + external tables). Content is governed by <strong>two independent tiers</strong>; the net Terraform-deploy default is <strong>full content in GCS/BigQuery, none in traces</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Captures</th>
+<th>Controlled by</th>
+<th>Default (Terraform deploy)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>GCS/BigQuery completions</strong></td>
+<td>Full prompts/responses (the prompt-response logging feature)</td>
+<td><code>OTEL_INSTRUMENTATION_GENAI_COMPLETION_HOOK=upload</code> + <code>LOGS_BUCKET_NAME</code></td>
+<td><strong>On</strong> — full content</td>
+</tr>
+<tr>
+<td><strong>Trace spans / Cloud Logging events</strong></td>
+<td>Span/event content</td>
+<td><code>OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT</code> (plus <code>ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false</code>, <strong>ADK Python only</strong>)</td>
+<td><strong>Off</strong> — <code>NO_CONTENT</code></td>
+</tr>
+</tbody></table>
+<p>The tiers are independent: GCS/BigQuery uploads capture full content whenever their upload vars are set and do <strong>not</strong> honor <code>OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT</code>, which governs the traces/events tier only.</p>
+<p><strong>ADK Python</strong> reads it as the experimental-semconv enum:</p>
+<ul>
+<li><code>NO_CONTENT</code> — no content in spans/events (scaffolded default)</li>
+<li><code>EVENT_ONLY</code> — content in Cloud Logging events</li>
+<li><code>SPAN_ONLY</code> / <code>SPAN_AND_EVENT</code> — content in trace spans</li>
+<li><code>true</code> / <code>false</code> — <strong>invalid</strong>; fall back to <code>NO_CONTENT</code></li>
+</ul>
+<p><strong>ADK Go</strong> reads the same variable as a <strong>boolean</strong>: <code>"1"</code> or <code>"true"</code> capture content, every other
+value — including the enum members above — elides it.</p>
+<p>For the full mechanics (semconv opt-in, declarative Terraform config, env-var table, enabling/disabling, verification commands), see <code>references/cloud-trace-and-logging.md</code>. For ADK logging docs (log levels, configuration, debugging), fetch <code>https://adk.dev/observability/logging/index.md</code>.</p>
+<hr />
+<h2>BigQuery Agent Analytics Plugin</h2>
+<blockquote>
+<p><strong>ADK projects.</strong> Optional ADK plugin that logs structured agent events to BigQuery. Enable with <code>--bq-analytics</code> at scaffold time. See <code>references/bigquery-agent-analytics.md</code> for details.</p>
+</blockquote>
+<hr />
+<h2>Third-Party Integrations</h2>
+<p>Many third-party observability platforms can ingest agent telemetry (via OpenTelemetry or custom instrumentation). The table below covers common ones; the full list is larger (see the pointer below it).</p>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Key Differentiator</th>
+<th>Setup Complexity</th>
+<th>Self-Hosted Option</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>AgentOps</strong></td>
+<td>Session replays, 2-line setup, replaces native telemetry</td>
+<td>Minimal</td>
+<td>No (SaaS)</td>
+</tr>
+<tr>
+<td><strong>Arize AX</strong></td>
+<td>Commercial platform, production monitoring, evaluation dashboards</td>
+<td>Low</td>
+<td>No (SaaS)</td>
+</tr>
+<tr>
+<td><strong>Phoenix</strong></td>
+<td>Open-source, custom evaluators, experiment testing</td>
+<td>Low</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td><strong>MLflow</strong></td>
+<td>OTel traces to MLflow Tracking Server, span tree visualization</td>
+<td>Medium (needs SQL backend)</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td><strong>Monocle</strong></td>
+<td>1-call setup, VS Code Gantt chart visualizer</td>
+<td>Minimal</td>
+<td>Yes (local files)</td>
+</tr>
+<tr>
+<td><strong>Weave</strong></td>
+<td>W&amp;B platform, team collaboration, timeline views</td>
+<td>Low</td>
+<td>No (SaaS)</td>
+</tr>
+<tr>
+<td><strong>Freeplay</strong></td>
+<td>Prompt management + evals + observability in one platform</td>
+<td>Low</td>
+<td>No (SaaS)</td>
+</tr>
+</tbody></table>
+<p><strong>Ask the user</strong> which platform they prefer — present the trade-offs and let them choose. <strong>ADK:</strong> fetch a platform's setup page at <code>https://adk.dev/integrations/&lt;slug&gt;/index.md</code> (slugs for the table above: <code>agentops</code>, <code>arize-ax</code>, <code>phoenix</code>, <code>mlflow-tracing</code>, <code>monocle</code>, <code>weave</code>, <code>freeplay</code>); ADK has more observability integrations (Datadog, Galileo, LangWatch, Latitude, Future AGI, Respan, Zespan, …) — browse the complete, current list at <code>https://adk.dev/integrations/</code> (observability topic). On other frameworks the OpenTelemetry-based platforms still work, but follow the platform's own setup docs.</p>
+<hr />
+<h2>Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Issue</th>
+<th>Solution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>No traces in Cloud Trace</td>
+<td>Verify telemetry setup runs at startup and the SA has the <code>cloudtrace.agent</code> role. <strong>ADK Python:</strong> <code>fast_api_app.py</code> uses <code>get_fast_api_app(otel_to_cloud=True)</code>; <strong>ADK Go:</strong> <code>observability.go</code> build the exporter manually. Agent Runtime additionally gates this on <code>GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY</code>.</td>
+</tr>
+<tr>
+<td>Prompt-response data not appearing</td>
+<td>Check <code>LOGS_BUCKET_NAME</code> is set; verify SA has <code>storage.objectCreator</code> on the bucket; check app logs for telemetry setup warnings</td>
+</tr>
+<tr>
+<td>Content in traces/events (unwanted)</td>
+<td><strong>ADK Python:</strong> <code>OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=NO_CONTENT</code> keeps content out of spans/events. <strong>ADK Go:</strong> any value other than <code>1</code>/<code>true</code> does, so unset it or set <code>false</code>. NOTE: GCS/BigQuery completions still capture full content — to stop that, remove <code>LOGS_BUCKET_NAME</code>/<code>OTEL_INSTRUMENTATION_GENAI_COMPLETION_HOOK</code> (drop the upload block in <code>service.tf</code>)</td>
+</tr>
+<tr>
+<td>BigQuery Analytics not logging</td>
+<td><strong>ADK Python:</strong> verify the plugin is configured in <code>app/agent.py</code>; check <code>BQ_ANALYTICS_DATASET_ID</code> env var is set</td>
+</tr>
+<tr>
+<td>Third-party integration not capturing spans</td>
+<td>Check provider-specific env vars (API keys, endpoints); some providers (AgentOps) replace native telemetry</td>
+</tr>
+<tr>
+<td>Traces missing tool spans</td>
+<td><strong>ADK:</strong> tool execution spans appear under <code>execute_tool</code> (other frameworks use their own span names) — check trace explorer filters</td>
+</tr>
+<tr>
+<td>High telemetry costs</td>
+<td>Turn content capture off (<code>NO_CONTENT</code> in Python, <code>false</code> in Go); reduce BigQuery retention; disable unused tiers</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Related Skills</h2>
+<ul>
+<li><code>/google-agents-cli-deploy</code> — Deployment targets, CI/CD pipelines, and production workflows</li>
+<li><code>/google-agents-cli-workflow</code> — Development workflow, coding guidelines, and operational rules</li>
+<li><code>/google-agents-cli-adk-code</code> — ADK API quick reference for writing agent code, Python and Go</li>
+</ul>

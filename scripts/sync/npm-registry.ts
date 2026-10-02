@@ -9,7 +9,7 @@
  *   mcp         → keywords:mcp-server
  */
 import { fetchJson, sleep } from "./lib";
-import type { Ecosystem } from "../../src/lib/types";
+import type { TopicEcosystem } from "./github-topic";
 
 export interface NpmPackage {
   name: string;
@@ -40,7 +40,7 @@ interface NpmSearchResult {
   }[];
 }
 
-const KEYWORDS_BY_ECOSYSTEM: Record<Ecosystem, string[]> = {
+const KEYWORDS_BY_ECOSYSTEM: Record<TopicEcosystem, string[]> = {
   dsh: ["dsh-plugin", "cordis-plugin"],
   "claude-code": ["claude-code"],
   mcp: ["mcp-server"],
@@ -58,7 +58,7 @@ function repoFromUrl(url: string | undefined): string | null {
  * re-ranked by monthly downloads.
  */
 export async function fetchNpmPackages(
-  ecosystem: Ecosystem,
+  ecosystem: TopicEcosystem,
   pagesPerKeyword = 2,
   minMonthlyDownloads = 200,
 ): Promise<{ packages: NpmPackage[]; totalCount: number }> {

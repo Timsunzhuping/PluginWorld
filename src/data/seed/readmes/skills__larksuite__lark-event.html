@@ -1,0 +1,229 @@
+<h1>Lark Events</h1>
+<blockquote>
+<p><strong>Prerequisite:</strong> Read <a href="https://github.com/larksuite/cli/blob/HEAD/../lark-shared/SKILL.md" target="_blank" rel="noopener noreferrer"><code>../lark-shared/SKILL.md</code></a> first for authentication, <code>--as user/bot</code> switching, <code>Permission denied</code> handling, and safety rules.</p>
+</blockquote>
+<h2>Core commands</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>lark-cli event list [--json]</code></td>
+<td>List all subscribable EventKeys</td>
+</tr>
+<tr>
+<td><code>lark-cli event schema &lt;EventKey&gt; [--json]</code></td>
+<td>Show an EventKey's params and output schema</td>
+</tr>
+<tr>
+<td><code>lark-cli event consume &lt;EventKey&gt; [flags]</code></td>
+<td>Blocking consume; events → stdout NDJSON</td>
+</tr>
+<tr>
+<td><code>lark-cli event status [--json] [--fail-on-orphan]</code></td>
+<td>Inspect the local bus daemon status</td>
+</tr>
+<tr>
+<td><code>lark-cli event stop [--all] [--force]</code></td>
+<td>Stop the bus daemon</td>
+</tr>
+</tbody></table>
+<h2>Common flags</h2>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--param key=value</code> / <code>-p</code></td>
+<td>Business params (repeatable; comma-separated for multi-value). Unknown keys fail with valid names listed inline</td>
+</tr>
+<tr>
+<td><code>--jq &lt;expr&gt;</code></td>
+<td>jq expression to filter / transform each event; empty output skips the event</td>
+</tr>
+<tr>
+<td><code>--max-events N</code></td>
+<td>Exit after N events. Default 0 = unlimited</td>
+</tr>
+<tr>
+<td><code>--timeout D</code></td>
+<td>Exit after duration D (e.g. <code>30s</code>, <code>2m</code>). Default 0 = no timeout. Whichever of <code>--max-events</code> / <code>--timeout</code> fires first wins</td>
+</tr>
+<tr>
+<td><code>--output-dir &lt;dir&gt;</code></td>
+<td>Write each event as a file (relative paths only; prevents traversal)</td>
+</tr>
+<tr>
+<td><code>--quiet</code></td>
+<td>Suppress ready/exit markers and per-event stderr diagnostics, including drop warnings. This can hide event loss. <strong>AI should not use this</strong> — it removes readiness and integrity signals</td>
+</tr>
+<tr>
+<td><code>--as user|bot|auto</code></td>
+<td>Identity for the session (see lark-shared)</td>
+</tr>
+</tbody></table>
+<h2>Examples</h2>
+<pre><code class="language-bash"># Default: stream every event for the key (no filter, no projection)
+lark-cli event consume im.message.receive_v1 --as bot
+
+# List every EventKey of one domain (the authoritative, always-current catalog)
+lark-cli event list --domain vc --json
+
+# Grab one sample event to inspect payload shape
+lark-cli event consume im.message.receive_v1 --max-events 1 --timeout 30s --as bot
+
+# Run for 10 minutes then auto-exit
+lark-cli event consume im.message.receive_v1 --timeout 10m --as bot
+
+# Consume multiple EventKeys concurrently (one shape per process, no dispatcher)
+lark-cli event consume im.message.receive_v1          --as bot &gt; receive.ndjson &amp;
+lark-cli event consume im.message.reaction.created_v1 --as bot &gt; reaction.ndjson &amp;
+wait
+</code></pre>
+<h2>Call flow</h2>
+<ol>
+<li><code>lark-cli event list --json</code> → pick a legal key. <code>--domain &lt;d&gt;</code> narrows to one domain; the domains are <code>application</code>, <code>approval</code>, <code>board</code>, <code>card</code>, <code>im</code>, <code>minutes</code>, <code>task</code>, <code>vc</code>. An unknown domain fails with the valid set listed in the hint.</li>
+<li><code>lark-cli event schema &lt;key&gt; --json</code> → read <code>resolved_output_schema</code> + <code>jq_root_path</code> to determine field paths</li>
+<li><code>lark-cli event consume &lt;key&gt; [--jq '&lt;expr&gt;']</code> → consume</li>
+</ol>
+<h2>Subprocess contract</h2>
+<h3>Ready marker</h3>
+<p><code>event consume</code>'s stderr emits a fixed line <code>[event] ready event_key=&lt;key&gt;</code>. <strong>Parent processes should block on stderr until this line appears, then start reading stdout.</strong> Do not fall back to <code>sleep</code>.</p>
+<h3>stdin EOF = graceful exit</h3>
+<p><code>event consume</code> treats stdin close as a shutdown signal (wired for AI subprocess callers). <strong>Bounded runs are exempt: when <code>--max-events</code> or <code>--timeout</code> is set (&gt; 0), stdin EOF is ignored and the run exits only via its own bound, timeout, or SIGTERM.</strong> For unbounded runs, <code>&lt; /dev/null</code> / <code>nohup</code> / systemd's default <code>StandardInput=null</code> will cause an immediate graceful exit (stderr <code>reason: signal</code>). To keep an unbounded run alive:</p>
+<ul>
+<li>Feed stdin a source that never EOFs: <code>&lt; &lt;(tail -f /dev/null)</code></li>
+<li>Or run bounded: <code>--max-events N</code> / <code>--timeout D</code></li>
+</ul>
+<h3>Exit codes &amp; reason</h3>
+<p>On exit, the last stderr line is <code>[event] exited — received N event(s) in Xs (reason: ...)</code>.</p>
+<table>
+<thead>
+<tr>
+<th>exit code</th>
+<th>reason</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td><code>reason: limit</code></td>
+<td><code>--max-events</code> reached</td>
+</tr>
+<tr>
+<td>0</td>
+<td><code>reason: timeout</code></td>
+<td><code>--timeout</code> reached</td>
+</tr>
+<tr>
+<td>0</td>
+<td><code>reason: signal</code></td>
+<td>Ctrl+C / SIGTERM / stdin EOF (stdin EOF applies to unbounded runs only)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>JSON error envelope on stderr</td>
+<td>Lark API business failure during pre-consume setup (for example subscription create/delete)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>JSON error envelope on stderr (no <code>exited</code> line)</td>
+<td>Validation failure (unknown EventKey, bad <code>--param</code> / <code>--jq</code>, another bus already connected)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>JSON error envelope on stderr</td>
+<td>Auth failure (missing token, missing scopes)</td>
+</tr>
+<tr>
+<td>4 / 5</td>
+<td>JSON error envelope on stderr</td>
+<td>Network / internal failure (bus startup, handshake, file I/O)</td>
+</tr>
+</tbody></table>
+<p>Startup and runtime failures emit a structured JSON envelope on stderr: <code>{"ok":false,"error":{"type","subtype","param","message","hint",...}}</code> (the envelope may also carry top-level <code>identity</code> / <code>_notice</code> siblings). Parse <code>error.type</code> / <code>error.subtype</code> to branch (e.g. <code>missing_scope</code> carries a <code>missing_scopes</code> list), <code>error.param</code> to find the offending flag, and <code>error.hint</code> for the recovery action — do not regex-match message text.</p>
+<p>Orchestrators should treat <code>reason: limit/timeout/signal</code> (all exit 0) as "business completion" and non-zero as "failure".</p>
+<h3>Never <code>kill -9</code></h3>
+<p><strong>Avoid <code>kill -9</code> on consume processes</strong> for EventKeys whose PreConsume registers a server-side subscription <strong>and</strong> unsubscribes on exit (minutes, vc, board keys): <code>kill -9</code> skips the OAPI unsubscribe and leaks the server-side subscription (symptoms: "subscription already exists" on restart, duplicate event delivery). Keys whose subscription is a durable relation with no cleanup (task, approval keys) do not leak this way, but SIGTERM or closing stdin remains the right shutdown for every key.</p>
+<h3>One consume, one EventKey (multi-key = multi-shell)</h3>
+<p>The command takes exactly one positional argument; <code>k1,k2</code> and wildcards are unsupported. Listening to N keys means N subprocesses — this is <strong>intentional</strong>:</p>
+<ul>
+<li>One shape per process stdout; no dispatcher logic required in the AI</li>
+<li>Fault isolation (one key failing doesn't affect others)</li>
+<li>Independent <code>--as</code> / <code>--jq</code> / <code>--max-events</code> / <code>--timeout</code> per key</li>
+</ul>
+<p>All N consumers share a single bus daemon (UDS local IPC), so the overhead is small</p>
+<h2>Writing jq via schema</h2>
+<p><code>event schema &lt;key&gt; --json</code> is the source of truth for writing <code>--jq</code>. Four things to look at:</p>
+<p><strong>(1) Where fields start</strong> — see <code>jq_root_path</code></p>
+<ul>
+<li>Value <code>"."</code> → fields are at the top level, write <code>.chat_id</code></li>
+<li>Value <code>".event"</code> → fields are inside a V2 envelope, write <code>.event.chat_id</code></li>
+</ul>
+<p><strong>(2) Field list and types</strong> — see <code>resolved_output_schema.properties.&lt;name&gt;</code></p>
+<p>Each field carries <code>type</code> / <code>description</code>, and some also have <code>format</code>. Snippet (from <code>event schema im.message.receive_v1 --json</code>):</p>
+<pre><code class="language-json">{
+  "chat_id":     {"type":"string", "format":"chat_id",      "description":"Chat ID, prefixed with oc_"},
+  "sender_id":   {"type":"string", "format":"open_id",      "description":"Sender open_id, prefixed with ou_"},
+  "create_time": {"type":"string", "format":"timestamp_ms", "description":"Send time as ms-epoch string"}
+}
+</code></pre>
+<p><strong>(3) Field semantics</strong> — see the <code>format</code> tag</p>
+<p>Lark-defined semantic tags (<strong>not</strong> JSON Schema's standard <code>format</code>). Common values: <code>open_id</code> / <code>chat_id</code> / <code>message_id</code> / <code>timestamp_ms</code> / <code>email</code>. Purpose: distinguish "same string type, different meanings" fields so you can reverse-lookup via API or convert formats.</p>
+<p><strong>(4) Decoded state</strong> — read the field's <code>description</code></p>
+<p><code>event consume</code> runs Process hooks that may pre-decode some payload fields (flattening V2 envelopes, rendering <code>.content</code> to plain text, etc.) — behavior differs from raw OAPI. <strong>Always read the field's <code>description</code> before writing jq</strong>, especially for generic field names like <code>content</code> / <code>data</code> / <code>body</code> / <code>payload</code>.</p>
+<p><strong>Why it matters</strong>: blindly applying <code>fromjson</code> to an already-decoded text field makes jq error on every event and silently drop it — the consumer looks alive but emits nothing, with only a single <code>WARN</code> line buried on stderr. (This is the general behavior: any jq runtime error skips the event with a one-line WARN; the loop does not abort.)</p>
+<p><strong>Don't shortcut the schema</strong>: when projecting <code>event schema --json</code> with jq, do not strip <code>.description</code> from <code>properties</code> — that's the field that tells you whether a field is already decoded. Dump the full property objects, not just keys.</p>
+<hr />
+<p><strong>Aside</strong>: <code>--param</code>'s valid parameters also live in the schema — the <code>params</code> section lists <code>name</code> / <code>type</code> / <code>required</code> / <code>enum</code> / <code>default</code> / <code>description</code>; <strong>section missing = this key accepts no <code>--param</code></strong>.</p>
+<h2>Topic index</h2>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Reference</th>
+<th>Coverage</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Application</td>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-event-application.md" target="_blank" rel="noopener noreferrer"><code>references/lark-event-application.md</code></a></td>
+<td>Catalog of Application EventKeys, including <code>application.bot.menu_v6</code> for custom bot menu push events + flattened <code>event_key</code> / operator fields + jq recipe</td>
+</tr>
+<tr>
+<td>Approval</td>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-event-approval.md" target="_blank" rel="noopener noreferrer"><code>references/lark-event-approval.md</code></a></td>
+<td>Catalog of 2 Approval EventKeys (<code>approval.instance.status_changed_v4</code>, <code>approval.task.status_changed_v4</code>) + optional/multi <code>subscription_type</code> pre-registration + user-auth subscription lifecycle + flat output field reference</td>
+</tr>
+<tr>
+<td>IM</td>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-event-im.md" target="_blank" rel="noopener noreferrer"><code>references/lark-event-im.md</code></a></td>
+<td>Catalog of 12 IM EventKeys + shape notes (flat vs V2 envelope) + <code>im.message.receive_v1</code> field gotchas (<code>sender_id</code> is open_id only; <code>.content</code> is plain text except for <code>interactive</code> cards) + common jq recipes (filter by chat_type / message_type / sender); for <code>card.action.trigger</code> see also <a href="https://github.com/larksuite/cli/blob/HEAD/../lark-im/references/lark-im-card-action-reply.md" target="_blank" rel="noopener noreferrer"><code>../lark-im/references/lark-im-card-action-reply.md</code></a></td>
+</tr>
+<tr>
+<td>Task</td>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-event-task.md" target="_blank" rel="noopener noreferrer"><code>references/lark-event-task.md</code></a></td>
+<td>Catalog of 1 Task EventKey (<code>task.task.update_user_access_v2</code>) + Native V2 envelope shape + task commit types + user/bot subscription notes</td>
+</tr>
+<tr>
+<td>VC</td>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-event-vc.md" target="_blank" rel="noopener noreferrer"><code>references/lark-event-vc.md</code></a></td>
+<td>Catalog of 7 VC EventKeys (meeting lifecycle <code>participant_meeting_started/joined/ended_v1</code>, <code>vc.note.generated_v1</code>, recording <code>recording_started/transcript_generated/ended_v1</code>) + field reference + source type semantics; the live list is always <code>lark-cli event list --domain vc --json</code></td>
+</tr>
+<tr>
+<td>Minutes</td>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-event-minutes.md" target="_blank" rel="noopener noreferrer"><code>references/lark-event-minutes.md</code></a></td>
+<td>Catalog of 1 Minutes EventKey (<code>minutes.minute.generated_v1</code>) + field reference + source type semantics (meeting only)</td>
+</tr>
+<tr>
+<td>Whiteboard</td>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-event-whiteboard.md" target="_blank" rel="noopener noreferrer"><code>references/lark-event-whiteboard.md</code></a></td>
+<td>Catalog of 1 Board EventKey (<code>board.whiteboard.updated_v1</code>) + per-whiteboard subscription model (requires <code>-p whiteboard_id=&lt;token&gt;</code>) + payload field reference (whiteboard_id / operator_ids triple-id)</td>
+</tr>
+</tbody></table>

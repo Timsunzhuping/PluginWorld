@@ -1,0 +1,1185 @@
+<h1>dsh-repeat-tool-breaker</h1>
+<p><a href="https://github.com/snailium/dsh-repeat-tool-breaker/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/snailium/dsh-repeat-tool-breaker/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://www.npmjs.com/package/dsh-repeat-tool-breaker" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/dsh-repeat-tool-breaker.svg" alt="npm" /></a>
+<a href="https://github.com/snailium/dsh-repeat-tool-breaker/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+<a href="https://nodejs.org" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg" alt="Node" /></a></p>
+<blockquote>
+<h3>⚠️ Supported dsh: <code>^0.1.7-rc.2 || &gt;=0.2.0-rc.1 &lt;0.2.1-0</code></h3>
+<p><strong>0.8.x covers the dsh 0.1.7 line and dsh 0.2.0 (from rc.1, up to but not including 0.2.1).
+On dsh 0.1.5, install <code>dsh-repeat-tool-breaker@0.7</code>.</strong>
+The same range is declared as a <strong>peer dependency</strong> on <code>@deepseek-ai/dsh</code>, so a resolver can
+see it; it is marked <code>optional</code> because dsh is provided by the host at runtime. Note the
+<code>0.2.0-rc.1</code> lower bound rather than <code>0.2.0</code>: semver admits a prerelease only when a
+comparator in the same set names one, so <code>&gt;=0.2.0</code> would reject every 0.2.0 rc.
+0.1.7 replaced the settings API, so one build cannot register a settings page on both
+generations — the two are served by two lines rather than by a version probe.</p>
+<p>On dsh 0.1.5, <strong>0.8.x still detects repeats, still blocks shell HTTP and still delivers its
+advisories</strong> (verified on 0.1.5-rc.2: the advisory persists with this release's message
+source). The one thing that is lost is the <strong>settings page</strong>, because the Host no longer
+registers a namespace there and the card needs 0.1.7's client services. Use <code>@0.7</code> on
+0.1.5 if you want the settings UI.</p>
+</blockquote>
+<p>Escalating repeat detection for an agent's tool calls. A local
+<a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a> (DSH) plugin
+that registers one synchronous gate on the public <code>ctx.tools.guard</code> API. A
+measure repeated inside the agent's sliding window is not stopped at the first
+threshold: it escalates — a light warning at 7, a written-summary demand at 11,
+and the gate at 12 (16 for the coarser <code>host:</code> measure), where the operator is
+offered a turn-scoped exemption
+(<code>onLimit: ask</code>, the default) or the call is denied outright. When the gate
+denies, the call never executes and the model gets an <code>isError</code> result starting
+with <code>REPEAT_TOOL_BLOCKED</code> that quotes the previous result and says what to do
+instead.</p>
+<p>Since 0.5.0 a second track watches the same fingerprints for <strong>consecutive
+failures</strong> rather than occurrences: an advisory at 3, and the same gate at 5.
+Both tracks share one gate, one measure set and one exemption policy. Numbers in
+this README belong to the occurrence track unless they are labelled <code>failWarnAt</code>
+or <code>failLimit</code>.</p>
+<p>In one paragraph, the v1 → v2 → 0.5.0 story:</p>
+<blockquote>
+<p><strong>v1 lost</strong> because it counted <em>byte-identical consecutive</em> calls while the
+model varied a presentation field (<code>description: '1st'|'2nd'|'3rd'</code>, churning
+<code>timeoutMs</code>) and ping-ponged between host spellings
+(<code>open-data.canada.ca</code> ↔ <code>open.canada.ca</code>) with a different <code>--max-time</code> each
+time — every call looked new, so the counter never advanced.
+<strong>v2 wins</strong> by deleting decoy arguments before any fingerprint is built, then
+counting <em>semantic</em> fingerprints (<code>exact:</code>, <code>cmd:</code>, <code>net:</code>, <code>host:</code>, <code>site:</code>,
+<code>sink:</code>, <code>family:</code>, <code>verb:</code>) over a per-agent window of the last 16 calls, so a
+repeat has to change the actual resource — not its spelling — to pass.
+<strong>0.4.0 adds escalation</strong>: the same measure warns, demands a summary, and only
+then gates — retuned in 0.4.2 to 7 / 11 / 12, with <code>host:</code> at 16 — and the gate
+asks the operator rather than blocking silently.
+<strong>0.5.0 adds the failure track</strong>: the same fingerprints are counted for
+<em>consecutive failures</em> too — advisory at 3, gate at 5 — because repeating a call
+that works is fixation, while repeating one that fails is not learning.</p>
+</blockquote>
+<h2>The three loops, and what catches each</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Loop</th>
+<th>Caught by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>A</strong></td>
+<td>the same <code>read</code>/<code>write</code>/<code>bash</code> arguments again, verbatim</td>
+<td><code>exact:</code> (12)</td>
+</tr>
+<tr>
+<td><strong>B</strong></td>
+<td><code>description: '1st'/'2nd'/'3rd'</code>, <code>command</code> unchanged</td>
+<td>decoy arguments are stripped <strong>before</strong> fingerprinting, so the calls become byte-identical → <code>exact:</code> (12)</td>
+</tr>
+<tr>
+<td><strong>C</strong></td>
+<td><code>curl --max-time 60 open-data.canada.ca</code> ↔ <code>curl --max-time 30 open.canada.ca</code></td>
+<td><code>net:</code> (12) after host-alias folding, plus <code>sink:</code> (12) and <code>cmd:</code> (12) after volatile-flag stripping</td>
+</tr>
+</tbody></table>
+<p>A fixed strategy is a fourth failure mode that none of those loops catches: a
+high-volume but <em>non-repetitive</em> run against one target, where every query string
+differs so <code>net:</code> never collides. On the reference deployment one agent made 30
+<code>bash</code>/<code>curl</code> calls against a single host in one turn and never converged. The
+<code>host:</code> measure (new in 0.4.0, cap 16) is what makes it visible; see
+<a href="#how-a-call-is-fingerprinted" target="_blank" rel="noopener noreferrer">How a call is fingerprinted</a>.</p>
+<p>The failure track (0.5.0) is a different axis from all of these: it fires on a
+fingerprint that keeps <strong>failing</strong>, even when the number of attempts is far too
+low to reach the occurrence stages — a model guessing at an endpoint that does
+not exist, getting a 404, and rephrasing the request. See
+<a href="#the-failure-track-two-stages" target="_blank" rel="noopener noreferrer">The failure track</a>.</p>
+<p>The sibling official plugin <code>@deepseek-ai/dsh-repeat-tool-reminder</code> (advisory, at
+3/5/8 repeats) may stay on — the two compose, with the reminder as the soft nudge
+and this breaker as the escalating gate that asks at 12.</p>
+<h2>The occurrence track: three stages</h2>
+<p>The occurrence track counts <em>repeats</em>. Every measure — one fingerprint identity
+such as <code>exact:&lt;tool&gt;:…</code>, <code>net:&lt;host&gt;&lt;path&gt;?&lt;query&gt;</code>, or <code>host:&lt;host&gt;</code> — has the
+same three-stage structure. A stage fires <strong>once per crossing, on exact
+equality</strong>: the count <em>including</em> the current call must equal the threshold, so
+the window sliding does not re-announce it. The
+<a href="#the-failure-track-two-stages" target="_blank" rel="noopener noreferrer">failure track</a> below has its own two stages.</p>
+<table>
+<thead>
+<tr>
+<th>Repeats</th>
+<th>Setting</th>
+<th>Stage</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>7</td>
+<td><code>warnAt</code></td>
+<td>1 — light warning</td>
+<td>The model is told it is repeating and should consider whether a different route would get there faster. Nothing is blocked and nothing is demanded.</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>summarizeAt</code></td>
+<td>2 — summary demand</td>
+<td>The model must write down what it established, what it assumed without verifying, what failed and why, and <strong>at least two approaches it has not tried</strong> — plus an instruction to use a <strong>larger per-batch amount</strong> so there are fewer batches. Nothing is blocked.</td>
+</tr>
+<tr>
+<td>12</td>
+<td>the <code>limits</code> entry</td>
+<td>3 — the gate</td>
+<td><code>onLimit: ask</code> (default) offers the operator a turn-scoped exemption; <code>onLimit: deny</code> blocks outright. An unattended ask degrades to a denial.</td>
+</tr>
+</tbody></table>
+<p>The occurrence cap is 12 for the action-identity measures (<code>exact</code>, <code>cmd</code>, <code>net</code>,
+<code>sink</code>) and 16 for the coarser <code>host:</code> measure — the whole window. See
+<a href="#tuning-and-how-these-numbers-were-chosen" target="_blank" rel="noopener noreferrer">Tuning</a>. The failure track's gate is
+<code>failLimit</code>, a separate setting, at 5.</p>
+<p><code>limits</code> <strong>is</strong> the occurrence stage-3 threshold. There is deliberately no separate
+<code>gateAt</code>: a second gate number would be the same value written twice, and two
+knobs that must agree will eventually disagree.</p>
+<p>Stages 1 and 2 are advisory. A guard can only return a denial, so the guard
+computes the advisory while it still sees the counts and <code>tools/post-execute</code>
+attaches it as an <code>additionalContexts</code> entry — the channel
+<code>@deepseek-ai/dsh-repeat-tool-reminder</code> uses — stamped <code>source.kind: 'plugin'</code>.
+It composes with a downstream block rather than replacing it. (An unlabeled
+context would render as a user prompt in derived history, which is why the
+<code>source</code> is mandatory.)</p>
+<p>Each stage is an ordinary, independent setting, and <strong>no setting is validated
+against another</strong>:</p>
+<ul>
+<li><code>0</code>, a negative number, or <code>null</code> disables a stage <strong>silently</strong> — that is the
+documented off-switch, not a value to reject;</li>
+<li>a <code>limits</code> entry at or below a stage means "no escalation for this measure":
+<code>exact: 5</code> under <code>warnAt: 7</code> gates at 5 with no warning at all;</li>
+<li>inverted stages are legal too — the stronger message simply fires first.</li>
+</ul>
+<p>When several measures cross a stage on the same call, the strongest stage wins
+and ties go to the highest count.</p>
+<h3>A stage above a cap can never speak</h3>
+<p>The gate fires before the advisory, so a <code>summarizeAt</code> at or above every cap is
+dead code, and no threshold above the window (16) can fire at all. Nothing
+validates one setting against another — a <code>limits</code> entry below a stage remains a
+deliberate way to skip an advisory — but the shipped defaults keep <code>summarizeAt</code>
+strictly below every cap, which is why the stages and the caps move together. The
+measurement behind the 0.4.2 numbers is in
+<a href="https://github.com/snailium/dsh-repeat-tool-breaker/blob/HEAD/docs/issue-b-thresholds.md" target="_blank" rel="noopener noreferrer"><code>docs/issue-b-thresholds.md</code></a>.</p>
+<h3><code>onLimit</code> — what happens at the gate</h3>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ask</code> (default)</td>
+<td>The operator is offered a turn-scoped exemption, <strong>once per measure per turn</strong>. Approving exempts exactly the fingerprints that hit, stops counting them for the rest of the turn, and lets later identical calls ride along; declining stops the asking for those measures and denies them until the next human message.</td>
+</tr>
+<tr>
+<td><code>deny</code></td>
+<td>Never ask. The cap-th call is denied outright with <code>REPEAT_TOOL_BLOCKED</code>.</td>
+</tr>
+</tbody></table>
+<p><code>ask</code> is the default because it is <strong>fail-closed</strong>. Every unattended outcome of an
+approval is a denial — <code>rejected</code> (the session policy is <code>never</code>), <code>cancelled</code>
+(the turn was aborted), and <code>unavailable</code>, the value the registry falls back to
+when no answerer is registered — so a headless profile degrades to <code>deny</code> on its
+own and nothing stalls. Exemptions are <strong>per fingerprint</strong>: an exemption for
+<code>host:api.weather.gc.ca</code> says nothing about <code>exact:</code> or about a different host.</p>
+<p>Asking used to be local-only (<code>localHosts: ask</code>). Since 0.4.0 it is what
+<code>onLimit</code> does for every measure; see <a href="#local-addresses" target="_blank" rel="noopener noreferrer">Local addresses</a>.</p>
+<p><code>onLimit</code> governs <strong>both</strong> tracks. A failure hit and a repeat hit go through the
+same exemption prompt and the same refusal set, so approving exempts exactly the
+fingerprints that hit whichever track flagged them. A second gate would have
+needed a second ask, a second refusal set and a second way to get stuck.</p>
+<h2>The failure track: two stages</h2>
+<p>New in 0.5.0. A second escalation track watches the same fingerprints for
+<strong>consecutive failures</strong> instead of occurrences. It exists because failure is a
+much stronger signal than repetition: repeating a call that <em>works</em> is fixation,
+repeating one that <em>fails</em> is not learning. Its thresholds therefore sit well
+below the occurrence ones (7 / 11 / 12).</p>
+<table>
+<thead>
+<tr>
+<th>Consecutive failures</th>
+<th>Setting</th>
+<th>Stage</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>3</td>
+<td><code>failWarnAt</code></td>
+<td>1 — failure advisory</td>
+<td>The model is told the target has failed three times in a row, with the failure reason quoted, and is pointed at the error, at whether the target exists, and at the cause. Nothing is blocked.</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>failLimit</code></td>
+<td>2 — the gate</td>
+<td>A call carrying that fingerprint is blocked, through the <strong>same</strong> <code>onLimit</code> policy as the occurrence gate — <code>ask</code> by default (fail-closed), <code>deny</code> for a hard break.</td>
+</tr>
+</tbody></table>
+<p>The motivating case is a model guessing at an endpoint that does not exist: it
+keeps getting a 404 and rephrasing the request. The failure is the signal, and it
+is available long before repetition counting would notice.</p>
+<h3>What counts as a failure</h3>
+<p>A failure is <strong>not</strong> <code>result.isError</code>. That flag is true only when the <em>call</em>
+failed — a thrown error, an unknown tool, a sandbox denial, an abort — and it is
+<code>false</code> for the two shapes that matter most: a non-zero exit code and an HTTP
+error status. Measured over 40 recorded sessions, the thrown case covered 40 of
+6765 <code>bash</code> results (0.6%), so counting only it would make the track blind.</p>
+<p><code>lib/failure.js</code> reads the structured <code>result.value</code> each tool declares in its
+<code>output.schema</code>, structured first:</p>
+<ul>
+<li>a non-zero <code>exitCode</code> (bash);</li>
+<li><code>statusCode &gt;= 400</code> (web fetch);</li>
+<li><code>timedOut</code>;</li>
+<li>a non-null <code>signal</code>;</li>
+<li>a sandbox denial.</li>
+</ul>
+<p>A status code is <strong>definitive in both directions</strong>: a <code>200</code> is a success whatever
+words the page contains, so the text is never consulted for a fetch that reported
+one. That matters — a fetched document mentioning "HTTP Error 400" is not a
+failure.</p>
+<p>The text fallback then covers what the structured value cannot, and it is
+restricted to <strong>shell tools</strong> on purpose. A shell's <code>exitCode: 0</code> proves nothing:
+<code>curl … | python3 … | head</code> exits with <code>head</code>'s status, and a script that catches
+its own HTTP error exits 0 too. So for a shell the text is the remaining evidence:</p>
+<ul>
+<li><code>[exit code: N]</code>, <code>(HTTP nnn)</code>, <code>[timed out after Nms]</code>, <code>[killed by signal: …]</code>,
+<code>[sandbox: file access denied</code> — the harness's own markers;</li>
+<li><code>Traceback (most recent call last)</code> and a line-anchored Python exception
+(<code>SyntaxError:</code>, <code>urllib.error.URLError:</code>, …) — a script that crashed while the
+pipeline still exited 0;</li>
+<li><code>HTTP Error nnn</code> — <code>urllib</code>'s message, printed by a script that caught it and
+carried on;</li>
+<li><code>curl: (n)</code> — curl's own diagnostic.</li>
+</ul>
+<p>One more case needs the <strong>command</strong>, not just the output, so <code>classifyFailure</code> takes it:
+when a shell command asked curl for the status (<code>-w "%{http_code}"</code> or
+<code>%{response_code}</code>), a leading 4xx/5xx in the output <strong>is</strong> the status by construction.
+That is how a model checks an endpoint by hand — curl exits 0 for a 404 unless it was
+given <code>--fail</code>, and the output is a bare number that nothing else would recognise. The
+anchor is deliberate: the same output often carries a byte count
+(<code>153226 /tmp/…</code>) whose digits contain something like <code>532</code>, and a plain <code>wc -c</code>
+number without the write-out request is not a status.</p>
+<p>Every other tool answers through its structured value, so its prose is never
+guessed at: that is what keeps a fetched page, or a <code>read</code> of a Python file
+containing the word <code>ValueError:</code>, from being read as a failure.</p>
+<p>Two things are deliberately <strong>not</strong> failures: <code>aborted</code> — a cancellation is
+external to the model's choice — and a background job that started
+(<code>kind: 'background'</code>, whose exit code belongs to a later call).</p>
+<h3>Only the fingerprint that hit is blocked</h3>
+<p>A call is blocked only when it <em>carries</em> a fingerprint that has already failed
+<code>failLimit</code> times in a row. A call that does not carry it — reading the error
+log, grepping the code, trying a different endpoint — is allowed. Blocking the
+recovery action is how a guard turns a stuck model into a wedged one.</p>
+<h3>A success clears that fingerprint's streak</h3>
+<p>A success of the failing fingerprint clears its streak. A success of a
+<em>different</em> fingerprint does not: a model that fails a build, reads a file, and
+fails the build again has failed the build twice, and the read is not progress on
+the build.</p>
+<h3>The two tracks share one measure set</h3>
+<p>A fingerprint whose <code>limits</code> cap is <code>null</code> is disabled for <strong>both</strong> tracks. This
+is load-bearing rather than tidy: measured over the corpus, the longest failure
+streaks sat on exactly those disabled measures (9 on <code>family:http-fetch</code>, 8 on
+<code>verb:curl</code>, 7 on <code>verb:export</code>), so counting them would have reintroduced the
+0.4.0 bug through a new channel. The failure track also skips exempted
+fingerprints, exactly as the occurrence track does.</p>
+<h3>The failure gate can only fire on a later call</h3>
+<p><code>ctx.tools.guard</code> is synchronous and runs <em>before</em> execution, while the outcome
+is known only in <code>tools/post-execute</code>. The failure gate therefore cannot stop the
+call that produces the fifth failure: after 5 failures, the <strong>6th</strong> call carrying
+that fingerprint is blocked.</p>
+<h3>The plugin never counts its own denial</h3>
+<p><code>REPEAT_TOOL_BLOCKED</code> is not the model's failure. A denial this plugin issued is
+excluded from the streak — otherwise the guard would feed itself: deny a call,
+the streak grows, and the next call is denied one step earlier. A declined ask is
+excluded too, because that call never ran.</p>
+<h3>Naming the measure, and the off-switches</h3>
+<p>When several fingerprints cross the failure stage together, the advisory names
+the most actionable one, using the same <code>measureRank</code> tie-break as the occurrence
+stages — a target-scoped measure such as <code>host:</code>, never a truncated <code>exact:</code>
+command line.</p>
+<p><code>failWarnAt</code> follows the same on/off rule as <code>warnAt</code>: a positive integer enables
+it, and <code>0</code>, a negative number or <code>null</code> disables it silently. <code>failLimit: null</code>
+disables the gate while keeping the advisory. The two are independent of each
+other and of the occurrence settings; as everywhere else in this plugin, nothing
+is validated against anything.</p>
+<p>Measured support (<code>tools/failure-run-measurement.mjs</code>, over 107 recorded
+sessions, counting only enabled measures): 3.6% of calls fail; 9 sessions reach a
+3-failure streak and 5 reach 5, while <strong>zero known-good runs reach 3</strong>. The
+clearest real case was a session hitting <code>host:api.github.invalid</code> — a reserved,
+permanently nonexistent host — 8 times in a row.</p>
+<h2>Requirements</h2>
+<ul>
+<li>Node.js <strong>&gt;= 20</strong> (developed and tested on 22).</li>
+<li><strong>dsh <code>^0.1.7-rc.2 || &gt;=0.2.0-rc.1 &lt;0.2.1-0</code></strong> (session format 4), declared as an
+<code>optional</code> <strong>peer dependency</strong> on <code>@deepseek-ai/dsh</code> — optional because the host provides
+dsh, and a non-optional peer would make npm/pnpm install a second copy into the consumer's
+tree. The dsh 0.1.7 line and dsh 0.2.0 are both supported and both verified: the Host-half
+packages this plugin calls (<code>dsh-tools</code>, <code>dsh-web</code>, <code>dsh-web-fetch-http</code>, <code>dsh-settings</code>,
+<code>dsh-api-settings-controller</code>) are byte-identical across the two, and the compat suite passes
+on each. 0.1.7 removed the imperative settings API and <strong>rejects</strong> the message-source shape
+that 0.1.5 <strong>requires</strong>, so one build cannot serve both generations: <strong>use 0.7.x on dsh
+0.1.5</strong>.</li>
+<li>A DSH profile that exposes the <code>tools</code> service. The settings page additionally needs the
+<strong>web</strong> surface and a profile that mounts <code>@deepseek-ai/dsh-client-ui-plugin-manager</code>.</li>
+<li>One runtime dependency: <strong><code>@deepseek-ai/schemastery</code> (^3.18.4)</strong> — the exported <code>Config</code>
+schema is built with it, and 0.1.7 renders the settings form from that schema (which is why
+<code>.volatile()</code> is required and why 3.18.2 is too old). The browser half additionally requires
+<code>react</code> and <code>@deepseek-ai/dsh-client-ui-primitives</code>, both <strong>client module-table seeds</strong> the
+platform provides rather than dependencies of this package.</li>
+</ul>
+<h2>Install</h2>
+<h3>Option A — list it as a profile bundle (recommended)</h3>
+<p>The package declares <code>"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }</code>, so
+it is a first-class profile bundle: no hand-written mount row is needed.</p>
+<pre><code class="language-bash">dsh plugin --profile &lt;name&gt; add dsh-repeat-tool-breaker
+</code></pre>
+<p>Then add it to the profile's ordered bundle list
+(<code>$DSH_HOME/profiles/&lt;name&gt;/package.json</code>):</p>
+<pre><code class="language-json">"dsh": {
+  "profile": {
+    "bundles": [
+      "@deepseek-ai/dsh-base",
+      "@deepseek-ai/dsh-web-app",
+      "dsh-repeat-tool-breaker"
+    ]
+  }
+}
+</code></pre>
+<p>The bundle's patch layer mounts the plugin with <strong>no <code>config:</code></strong>, so the
+fail-loud <code>DEFAULTS</code> really are the defaults. To tune it, reconfigure the row by
+id from the <em>profile's own</em> <code>cordis.patch.yml</code> — remember a patch replaces the
+targeted row's whole <code>config</code> instead of merging into it, so restate every field
+you want (see <a href="#configuration" target="_blank" rel="noopener noreferrer">Configuration</a>).</p>
+<p>Naming a bundle-less package in <code>dsh.profile.bundles</code> is a <strong>hard boot error</strong>
+(<code>declares no dsh.bundle in its package.json</code>), which is why the manifest above
+is required for this path.</p>
+<h3>Option B — mount from a path (dev loop, no install)</h3>
+<p>Clone this repo and add an <code>insert</code> entry to a profile (see
+<a href="#configuration" target="_blank" rel="noopener noreferrer">Configuration</a> for the full snippet), then boot with the
+overlay:</p>
+<pre><code class="language-bash">git clone https://github.com/snailium/dsh-repeat-tool-breaker.git
+</code></pre>
+<pre><code class="language-bash">dsh --profile &lt;name&gt; --patch /path/to/overlay.yml --dump-config   # resolve check, does not boot
+dsh --profile &lt;name&gt; --patch /path/to/overlay.yml "reply ok"      # real apply run
+</code></pre>
+<p>Here <code>name</code> must be an <strong>absolute path</strong> to this checkout's <code>index.js</code>, because
+the package is not resolvable from the profile directory.</p>
+<h3>Option C — install from npm, mount by hand</h3>
+<pre><code class="language-bash">dsh plugin --profile &lt;name&gt; add dsh-repeat-tool-breaker
+</code></pre>
+<p><code>dsh plugin add</code> forwards to the profile's package manager, so the plugin becomes
+a normal profile dependency and its <code>name</code> resolves to the package specifier
+<code>dsh-repeat-tool-breaker</code> from a hand-written <code>insert</code> row. The <code>files</code>/<code>exports</code>
+entries in <code>package.json</code> control what ships.</p>
+<h2>How it stops a loop</h2>
+<p>Tool dispatch on the DeepSeek Harness runs:</p>
+<pre><code>tool/call
+  → tools/pre-execute      (allow / deny / ask)
+  → tools/guard()          ← THIS plugin's gate
+  → tools/execute          (the real tool body)
+  → tools/post-execute
+  → tools/result
+</code></pre>
+<p>Returning a <code>string</code> from a guard is a <strong>final, monotonic denial</strong>: it cannot be
+re-allowed by listener ordering, and — critically — <strong>the tool body never runs</strong>.
+That is what distinguishes the gate from the official reminder, which only injects
+a softer "you repeated X" message after the call already executed. Since 0.4.0 the
+breaker also has its own two advisory stages, delivered on the same
+<code>tools/post-execute</code> channel (see <a href="#the-occurrence-track-three-stages" target="_blank" rel="noopener noreferrer">The occurrence track</a>),
+and since 0.5.0 the failure advisory rides it too.</p>
+<p>The guard is deliberately synchronous: no <code>await</code>, no DNS, no disk reads.</p>
+<h2>How a call is fingerprinted</h2>
+<p>Each call contributes a <em>set</em> of fingerprints. Any one of them reaching its cap
+denies the call, so dodging one (a new host spelling) still collides on another
+(a new <code>sink:</code> or <code>cmd:</code>).</p>
+<table>
+<thead>
+<tr>
+<th>Fingerprint</th>
+<th>Built from</th>
+<th>Catches</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>exact:&lt;tool&gt;:&lt;json&gt;</code></td>
+<td>tool name + arguments with decoy fields deleted, keys deep-sorted</td>
+<td>A, B</td>
+</tr>
+<tr>
+<td><code>cmd:&lt;verb&gt;:&lt;command&gt;</code></td>
+<td>verb + command with volatile flags (<code>--max-time</code>, <code>-s</code>, <code>--retry</code>, <code>timeout N</code>, <code>-sSL</code> clusters…) removed</td>
+<td>C, B</td>
+</tr>
+<tr>
+<td><code>net:&lt;host&gt;&lt;path&gt;?&lt;query&gt;</code></td>
+<td><code>http(s)</code> URL with the scheme defaulted, <code>www.</code> and default ports dropped, host aliases folded, the fragment discarded, a trailing slash trimmed, and the <strong>query kept</strong> (sorted, tracking parameters removed) — the query is what makes <code>?page=2</code> a different resource</td>
+<td>C, and it must NOT fire on pagination</td>
+</tr>
+<tr>
+<td><code>host:&lt;host&gt;</code></td>
+<td>normalized host of each URL, with no path and no query (new in 0.4.0)</td>
+<td>a fixed strategy: many <em>distinct</em> requests against one target, which <code>net:</code> cannot see because every query string differs. Local hosts are excluded by default (<code>includeLocal</code>)</td>
+</tr>
+<tr>
+<td><code>site:&lt;last-2-labels&gt;</code></td>
+<td>registrable-ish site of each URL (IP literals stand alone) — note this merges <code>api.github.com</code> into <code>github.com</code></td>
+<td>not capped by default: <code>siteOf()</code> collapses to two labels, so it merges unrelated services (<code>api.weather.gc.ca</code> → <code>gc.ca</code>); the <code>host:</code> measure is the discriminating one</td>
+</tr>
+<tr>
+<td><code>sink:&lt;path&gt;</code></td>
+<td><code>-o</code>/<code>--output</code>/<code>-O</code>/<code>&gt;</code>/<code>&gt;&gt;</code>/<code>tee</code> target of a shell command — except generic destinations (<code>/dev/null</code>, <code>-</code>, …), which say nothing about <em>which</em> resource was fetched</td>
+<td>C</td>
+</tr>
+<tr>
+<td><code>family:http-fetch</code></td>
+<td>every <code>curl</code> / <code>wget</code> / <code>http</code> / <code>httpie</code> / URL-taking tool call</td>
+<td>nothing by default — a volume budget no setting of which avoided false positives</td>
+</tr>
+<tr>
+<td><code>verb:&lt;cmd&gt;</code></td>
+<td>the first non-wrapper command word (<code>sudo</code>, <code>timeout 30</code>, <code>FOO=1</code> are transparent)</td>
+<td>tool-swapping within one verb</td>
+</tr>
+</tbody></table>
+<h3>Local addresses</h3>
+<p><code>localhost</code>, loopback, RFC1918 and link-local hosts are what a development loop
+talks to — a dev server, a local inference endpoint, a container — and a
+target-scoped fingerprint cannot tell them apart from a web crawl. <code>localHosts</code>
+decides whether local traffic is fingerprinted at all:</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>deny</code> (default)</td>
+<td>local calls are counted and blocked like any other host</td>
+</tr>
+<tr>
+<td><code>allow</code></td>
+<td>local traffic is never fingerprinted: no <code>net:</code>, <code>site:</code>, <code>host:</code>, <code>sink:</code>, <code>family:</code> or <code>verb:</code> is emitted, so only <code>exact:</code> and <code>cmd:</code> still identify the action</td>
+</tr>
+</tbody></table>
+<p>The <code>ask</code> value was <strong>removed in 0.4.0</strong>. Asking is no longer a local-only
+concern — it is what the gate does for every measure — so it moved to <code>onLimit</code>.
+A config still carrying <code>localHosts: ask</code> fails loud at load with the migration
+hint <code>use `onLimit: ask` </code>, the same way 0.2.0 handled a removed key; the only
+accepted values are <code>deny</code> and <code>allow</code>.</p>
+<p>Local hosts are also excluded from the <code>host:</code> measure by default
+(<code>includeLocal: false</code>). A development loop against localhost is the canonical
+legitimate case, and the documented <code>site:127.0.0.1</code> false positive came from
+exactly this class. <code>localHosts: allow</code> still wins — it emits no target
+fingerprints at all.</p>
+<pre><code class="language-yaml">- id: repeat-tool-breaker
+  config:
+    localHosts: deny          # deny | allow
+    includeLocal: false       # whether local hosts feed the `host:` measure
+</code></pre>
+<p>Because <code>exact</code> and <code>cmd</code> identify the ACTION rather than a target, <code>allow</code> does
+not relax them: a byte-identical repeat is a loop whether or not it points at
+localhost, and a call that mentions even one public URL is not a local call at
+all.</p>
+<h3>Counting rules</h3>
+<ul>
+<li>State is a <strong>per-agent sliding window</strong> (<code>window</code>, default 16 calls) held in a
+<code>WeakMap</code> keyed by the live <code>Agent</code> object — one agent's loop never trips
+another's, and subagents get their own budget.</li>
+<li>A call is denied when a fingerprint <strong>already appears <code>limit - 1</code> times</strong> in the
+window, i.e. when the current call would be the <code>limit</code>-th occurrence. The first
+occurrence of anything is therefore always allowed.</li>
+<li>The two advisory stages are computed <strong>before</strong> the commit, so the count they
+report includes the current call, and each fires only when the count equals its
+threshold.</li>
+<li>The guard <strong>commits on both outcomes</strong>, but <em>what</em> it commits differs, and that
+difference is load-bearing:<ul>
+<li>an <strong>allowed</strong> call commits every fingerprint it carries — the action really
+happened, so it owns its share of the budget;</li>
+<li>a <strong>denied</strong> call commits only the fingerprints that <strong>hit their cap</strong>. The
+action never ran, so it must not spend budget on a resource it never touched.
+A measured run showed the cost of getting this wrong: a denied
+<code>curl https://example.org</code> poisoned <code>net:example.org/</code>, after which the model
+could not fetch that URL through <em>any</em> tool for the rest of the turn. The
+hitting fingerprints are already at their cap, so re-attempting the blocked
+call stays blocked either way.</li>
+</ul>
+</li>
+<li>An approved <strong>exemption stops counting</strong>, not merely blocking: the exempted
+fingerprints are dropped at commit time, so they are not incremented and cannot
+escalate again for the rest of the turn. An exemption is per fingerprint and
+says nothing about any other measure. It applies to both tracks: an exempted
+fingerprint is not counted for the failure streak either.</li>
+<li>The failure track keeps its own per-fingerprint <code>failStreak</code>, separate from the
+window (see <a href="#the-failure-track-two-stages" target="_blank" rel="noopener noreferrer">The failure track</a>). A real user
+message clears it along with the window, the exemptions and the refusals.</li>
+<li>A real <strong>user message</strong> (<code>agent/pre-step</code> with source <code>kind: 'user'</code>) clears that
+agent's window — and with it the exemptions and the refusals. Plugin notices and
+tool results do <strong>not</strong> — otherwise the breaker's own denial would reset the
+budget it is enforcing.</li>
+<li>Excluded tools (<code>exclude</code>, default <code>todo_write</code>; <code>*</code>-wildcards supported) are
+fully transparent: they neither count nor reset.</li>
+</ul>
+<h2>Configuration</h2>
+<p>Mount via a profile bundle (Option A above — no <code>config:</code> in the bundle layer,
+defaults apply), a <code>--patch</code> overlay, or a profile's <code>cordis.patch.yml</code>. The
+plugin exports an object form (<code>{ name, inject: ['tools'], apply }</code>);
+<code>inject: ['tools']</code> defers <code>apply</code> until the real <code>ToolRuntime</code> service is live,
+at which point <code>ctx.tools.guard</code> is the genuine method.</p>
+<pre><code class="language-yaml">- insert:
+    - id: repeat-tool-breaker
+      name: dsh-repeat-tool-breaker
+      config:
+        window: 16                  # recent calls per agent that participate
+        onLimit: ask                # ask | deny — what happens at either gate
+        localHosts: deny            # deny | allow — see "Local addresses"
+        # Refuse HTTP made from the shell; send the model to web_fetch_file instead.
+        blockShellHttp: true        # refuse a shell call that fetches over HTTP; fail-safe (no-op without the tool)
+        blockLocalHttp: false       # local addresses stay in the shell — the fetch tool cannot reach them
+        shellHttpBlock:             # the verbs the block REFUSES; `[]` switches the block off entirely
+          - curl
+          - wget
+          - httpie
+          # the short HTTPie name is deliberately NOT a default: as a segment's first token it
+          # is almost always data (a status write-out format string, a JSON scheme value), and a
+          # refusal there has no address to exempt. Add it back here if you want it.
+        # web_fetch_file — registered only when the profile has ctx.web
+        outputDir: fetched          # relative to the workspace root; /tmp does NOT survive between shell calls
+        maxBytes: 8388608           # our own cap; the web provider caps first
+        warnAt: 7                   # occurrence stage 1; 0 / negative / null disables it
+        summarizeAt: 11             # occurrence stage 2; 0 / negative / null disables it
+        failWarnAt: 3               # failure stage 1; same off-switch as `warnAt`
+        failLimit: 5                # failure gate; null disables it, keeps the advisory
+        includeLocal: false         # whether local hosts feed the `host:` measure
+        previewChars: 400           # truncation for quoted fingerprints
+        resultPreviewChars: 800     # truncation for the quoted previous result
+        exclude: [todo_write]       # never counted, never resets (*-wildcards ok)
+        include: []                 # non-empty = ONLY these names/patterns count
+        ignoreArgs:                 # merged over the defaults
+          '*': [description, timeoutMs, run_in_background, justification, reason, title, comment]
+          bash: [description, timeoutMs, run_in_background, justification]
+        hostAliases:                # merged over the defaults
+          open-data.canada.ca: open.canada.ca
+        limits:                     # merged over the defaults; null disables BOTH tracks
+          # `limits` IS the occurrence stage-3 threshold — there is no `gateAt`.
+          exact: 12
+          cmd: 12
+          net: 12
+          sink: 12
+          host: 16                  # new in 0.4.0: one target, many distinct requests
+          site: null                # volume budgets: off by default, see "Tuning"
+          'family:http-fetch': null
+          'verb:curl': null
+          'verb:wget': null
+</code></pre>
+<p>Merge semantics, which matter when retuning:</p>
+<ul>
+<li><code>ignoreArgs</code>, <code>hostAliases</code> and <code>limits</code> merge <strong>one level deep</strong> over the
+defaults, so you can add one host alias or retune one cap without restating the
+table.</li>
+<li>Scalars replace; the arrays <code>exclude</code> and <code>include</code> <strong>replace outright</strong>, so a
+two-entry <code>exclude:</code> list is the whole list, not an addition to the default
+<code>todo_write</code> entry.</li>
+<li>A patch replaces the targeted row's whole <code>config</code>, so <code>config</code> keys are not
+inherited from the bundle layer.</li>
+</ul>
+<p>Every value is validated fail-loud in <code>apply</code>: <code>window &gt;= 4</code>; <code>onLimit</code> one of
+<code>ask</code>/<code>deny</code>; <code>localHosts</code> one of <code>deny</code>/<code>allow</code>; <code>includeLocal</code> a boolean; every
+limit either <code>null</code> or a finite number <code>&gt;= 2</code> (a cap below 2 would deny the
+<em>first</em> call); <code>failLimit</code> either <code>null</code> or a finite number <code>&gt;= 2</code>;
+<code>previewChars</code>/<code>resultPreviewChars</code> <code>&gt;= 1</code>; and an enabled stage — <code>warnAt</code>,
+<code>summarizeAt</code> or <code>failWarnAt</code> — a positive integer. <strong>No setting is checked
+against another</strong> — inverted stages simply fire in the other order, a <code>limits</code>
+entry below a stage means "no escalation for this measure", and the two failure
+settings are independent of each other and of the occurrence settings; all are
+legitimate ways to express intent. Config keys
+removed in 0.2.0 (<code>denyAfter</code>, <code>warnAfter</code>, <code>registerAdvisory</code>, <code>maxSamePath</code>,
+<code>readTools</code>, <code>matchReadBySubstring</code>) throw with a pointer at their replacement
+rather than being ignored, and <code>localHosts: ask</code> (removed in 0.4.0) throws with
+the <code>onLimit: ask</code> migration — so an upgraded profile cannot silently lose its
+tuning.</p>
+<p>(The <code>- insert:</code> list is required to <strong>add</strong> a new plugin; a flat <code>- id:</code> entry is
+a reconfig of an already-present id and fails with "entry not found" for a plugin
+that isn't yet in the composed tree.)</p>
+<h3>The settings box (Settings → Plugins)</h3>
+<p>The knobs an operator is most likely to want mid-session are editable in the Web UI,
+without a restart: open <strong>Settings → Plugins</strong>, and in the <strong>Installed</strong> list open
+<strong>dsh-repeat-tool-breaker</strong> — that package page is where the card lives. (It is deliberately
+<em>not</em> in the <strong>Official</strong> list: that list is built from the <code>plugins.item</code> slot, which is where
+dsh's own plugins live, so a third-party plugin claiming it would be presented as a shipped
+one.) Seven
+fields — <code>blockShellHttp</code>, <code>blockLocalHttp</code>, <code>shellHttpBlock</code>, <code>warnAt</code>, <code>summarizeAt</code>,
+<code>failWarnAt</code>, <code>failLimit</code> — are staged and written on <strong>Save</strong>; a per-field
+<code>Overridden</code> badge with a <code>Reset</code> stages a clear back to the composition layer. A
+refused write keeps the draft and reports the failure rather than dropping the edit.
+A saved value takes effect on the next call, without a remount: the namespace is the
+plugin's loader entry id, and the form is derived from the plugin's exported <code>Config</code>,
+whose fields are all marked volatile so dsh hands the loader live references rather than
+copies. A saved value lands in the <strong>profile's patch layer</strong> (<code>cordis.patch.yml</code> under
+<code>$DSH_HOME/profiles/web/</code>, measured), which dsh owns. A hand-written <code>$DSH_HOME/settings.yaml</code>
+is imported once and renamed <code>settings.yaml.imported</code>, so edit settings through the UI or the
+patch layer instead of writing that file yourself.</p>
+<p>The keyed slot's <code>key</code> is the <strong>package</strong> name, not the settings namespace, and a wrong value
+fails <strong>silently</strong>: the page's "configured" ledger is built from those entries' <code>key</code>, so a
+mismatch leaves the package un-configurable and renders no config section at all, with nothing
+logged. The name is a pinned constant in <code>lib/client.js</code>, asserted against <code>package.json</code> by
+the test suite so a rename fails there instead of quietly.</p>
+<p>This works because the plugin ships <strong>both halves</strong>, which is a requirement rather than
+an implementation detail. The Plugins page renders the <em>intersection</em> of two ledgers:</p>
+<table>
+<thead>
+<tr>
+<th>Half</th>
+<th>What it contributes</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Host</td>
+<td>the settings namespace and its schema</td>
+<td>the exported <code>Config</code>, read from <code>entry.fiber.runtime.Config</code></td>
+</tr>
+<tr>
+<td>Browser</td>
+<td>a card on the <strong>keyed</strong> <code>plugins.bundle.config</code> slot, keyed by the <strong>package</strong> name</td>
+<td><code>ctx.slots.inject</code> in <code>lib/client.js</code></td>
+</tr>
+</tbody></table>
+<p>the platform hard-codes its own official cards, so a third-party plugin must bring its own.
+Since <strong>dsh 0.1.7</strong> the namespace is the <strong>loader entry id</strong> and the schema comes from the
+plugin's exported <code>Config</code> — <code>ctx.settings.register</code> no longer exists, and a <code>Config</code> that is
+not on the module's <strong>default export</strong> is invisible to the settings service. A card likewise
+needs <code>volatile()</code> fields, or the entry is skipped and nothing renders, with no error anywhere.
+See the workspace skill <code>dsh-plugin-settings-card</code> for the full contract and its failure
+signatures.</p>
+<p>The bundle is hand-written plain JS rather than a TypeScript build. A client bundle is
+just a lazy-CJS factory behind <code>window.__ModuleLoader__.load</code>, and its only module-table
+dependency is <code>react</code> — <code>slots</code>, <code>locale</code> and <code>settingsScope</code> all arrive by injection.
+So there is no bundler, no generated artifact, and nothing to keep in sync.</p>
+<p>Two agreements across the wire are asserted by the test suite, because a drift renders
+nothing at all and no compiler sees the seam: the slot key must equal the Host namespace
+(C4), and the card must expose exactly the fields the Host schema declares (C5).</p>
+<p>The card needs the <strong>web</strong> surface (<code>dsh.client.platform: web</code>) and a profile that
+mounts <code>@deepseek-ai/dsh-client-ui-settings-plugins</code>. In a headless or TUI profile the
+bundle is simply never requested, and the namespace stays editable through
+<code>settings.yaml</code> as before — nothing about the guard depends on either half being present.</p>
+<h3>Re-deriving <code>shellHttpAllow</code></h3>
+<blockquote>
+<p>The measurement tools below live in the <strong>source repository</strong>, not in the published
+package — <code>files</code> ships only the plugin itself. Clone the repo to run them.</p>
+</blockquote>
+<p>The default <code>['git', 'docker', 'grep', 'rg']</code> is split across two reasons, and the tool
+below measures the first. Point the scan at one or more <code>sessions/</code> directories and it
+replays every recorded shell call through this plugin's own detector:</p>
+<pre><code class="language-bash">node tools/shell-http-allowlist-scan.mjs ~/.dsh/sessions ~/harness-home/sessions
+
+# logs=225 shell_calls=27539 calls_with_a_remote_url=4457
+# allowlist=["git","docker","grep","rg"]
+#
+# verb                      segments  exempt
+# curl                          3424  NO
+# git                            370  yes
+# docker                          12  yes
+# wget                             7  NO
+# ...
+#
+# refused CALLS: 4081
+#   TARGET (names curl/wget or an interpreter fetch): 4029
+#   INCIDENTAL (carries a URL, fetches nothing):      52
+</code></pre>
+<p>The verdict splits in two, which is the number that actually matters:</p>
+<ul>
+<li><strong><code>curl</code>, <code>git</code>, <code>docker</code> are the whole story.</strong> <code>wget</code> is the only other real
+downloader and is deliberately not exempt — it has the same fetch-to-file equivalent
+<code>curl</code> does. <code>npm</code>, <code>pip</code>, <code>uv</code>, <code>apt</code>, <code>go</code>, <code>cargo</code>, <code>npx</code> and <code>gh</code> never carried a
+remote URL at all; their URL-less forms (<code>npm install foo</code>) are not blocked either, so
+exempting them would be speculation rather than caution.</li>
+<li><strong>The rest of the verb table is detector noise, not evidence.</strong> The long tail — <code>old</code>,
+<code>new</code>, <code>the</code>, <code>for</code> — is Python variable names and shell fragments inside multi-line
+scripts, which is exactly why the block is described as a command-level rule with a
+known hole rather than a containment boundary.</li>
+<li><strong>The block's cost is 1.3%</strong>: 52 calls that carry a URL without fetching anything (an
+<code>echo "see https://…"</code>, a heredoc rewriting a README). A command-level rule cannot tell
+those from a real fetch. 0.6.1 cut this to 37 (0.9%) by reading regex-escaped and
+bracketed-IPv6 local addresses correctly.</li>
+</ul>
+<h3>Should verb X be exempt?</h3>
+<p>The block is destination-based, so a verb that cannot fetch is still refused when a URL
+appears in its arguments — a <code>grep</code> whose PATTERN is an address, an <code>echo</code> that prints
+one. That is a false positive by construction, and "just add it to the allowlist" is the
+obvious answer. It is also usually the wrong one, so it comes with a tool:</p>
+<pre><code class="language-bash">node tools/allowlist-candidate-scan.mjs ~/.dsh/sessions ~/harness-home/sessions
+</code></pre>
+<p>It reports, for each non-fetching verb, how many refused calls would flip to allowed if
+that verb were exempted — and how many of those also name a downloader elsewhere in the
+command, which makes the exemption a <strong>bypass</strong> rather than a fix.</p>
+<p>As of 0.6.2, over 28,333 shell calls:</p>
+<table>
+<thead>
+<tr>
+<th>verb</th>
+<th>calls that would flip</th>
+<th>of those, ones that also fetch</th>
+<th>verdict</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>grep</code></td>
+<td><strong>0</strong></td>
+<td>—</td>
+<td><strong>exempt</strong> (0.6.2) — see below</td>
+</tr>
+<tr>
+<td><code>echo</code></td>
+<td>2</td>
+<td>2</td>
+<td>refused: the exemption would swallow a real fetch</td>
+</tr>
+<tr>
+<td><code>head</code></td>
+<td>1</td>
+<td>1</td>
+<td>refused, same reason</td>
+</tr>
+</tbody></table>
+<p><code>grep</code> flips nothing, because it is never the only refused verb in a command. It is
+exempted <strong>anyway</strong>, and the measurement is not the reason — the rule is:</p>
+<blockquote>
+<p>A verb whose PRIMARY ARGUMENT is a pattern is searching text for that address. <code>grep</code>
+and <code>rg</code> have no network stack, so no amount of them can fetch. Refusing one does not
+redirect a fetch; it blocks a read, and the denial then claims the call "fetches over
+HTTP", which is false.</p>
+</blockquote>
+<p>The measurement decides the <em>other</em> direction: <code>echo</code>, <code>head</code>, <code>cat</code>, <code>sed</code> and <code>awk</code> stay
+out precisely because their flips all name a real downloader. So the line is
+<strong>pattern-position tools</strong>, not "everything without a network stack".</p>
+<p>Two consequences worth knowing:</p>
+<ul>
+<li><strong>A new residual.</strong> <code>grep -oE '&lt;url&gt;' f | xargs curl</code> is now allowed: the only segment
+carrying an address is the exempt grep, and <code>xargs</code> is not an HTTP verb so the no-URL
+clause misses it too. Narrow, and asserted in T48f. The variable form
+(<code>U=$(grep -oE '&lt;url&gt;' f); curl -s "$U"</code>) is still refused, by the no-URL clause.</li>
+<li><strong><code>shellHttpAllow: []</code> still refuses everything</strong>, including <code>grep</code> — the off-switch is
+unchanged.</li>
+</ul>
+<h4>Not in the box</h4>
+<p><code>window</code>, <code>limits</code>, <code>ignoreArgs</code>, <code>hostAliases</code>, <code>onLimit</code> and the rest stay in the
+patch layer. They are deployment decisions — a nested table is a poor form control, and
+<code>limits</code> in particular is the tune-everything surface that belongs with the profile
+that owns it. The four stage thresholds are in the box <em>and</em> absent from the exported
+<code>Config</code>: each accepts <code>null</code> as its documented off-switch, which a plain
+<code>z.number()</code>-based schema would reject at boot.</p>
+<h3>Tuning, and how these numbers were chosen</h3>
+<p>Every number in this subsection belongs to the <strong>occurrence track</strong>. The failure
+track's 3 / 5 are justified separately in
+<a href="#the-failure-track-two-stages" target="_blank" rel="noopener noreferrer">The failure track</a>.</p>
+<p>The table mixes <em>precise</em> caps with <em>broad</em> ones, and the difference matters:</p>
+<ul>
+<li><p><strong>precise, action-scoped, cap 12</strong>: <code>exact</code>, <code>cmd</code>, <code>net</code>, <code>sink</code>. These fire
+only when the same action actually happens again, and they are what catches
+loops. Every lower value was tried against real work and each produced a false
+positive. A cap of 2 leaves no room for the most common <em>non-loop</em> repeat: the
+first attempt fails for a reason that has nothing to do with looping — a
+precondition the harness enforces, a DNS failure — and the correct response is
+to retry the same call; at 2 that retry is what gets blocked, and the only way
+forward is to cosmetically change the call, which is exactly what this plugin
+exists to stop. At 3 the retry fits, but dense legitimate work still tripped,
+because <code>sink:</code> is path-only <strong>by design</strong> — its whole job is to catch one
+destination rewritten with ever-changing content — so a shell cycle that writes
+the same file several times while iterating looked exactly like a loop. At 5 an
+ordinary edit/test cycle fits. 0.4.0 moved the cap to <strong>9</strong> because two advisory
+stages now sit underneath the gate — 3 warned, 6 demanded a summary, 9 gated —
+so the hard break moved <em>later</em> instead of firing at the first threshold. 0.4.2
+retunes the stages and the cap together to <strong>7 / 11 / 12</strong>: measurement over 109
+recorded sessions showed the old stages firing on runs that succeeded (two
+known-good runs peaked at 4 and 6 repeats, both at or above the old
+<code>warnAt: 3</code>) and 10% of real sessions reaching a peak of 13, above the old cap
+of 9.</p>
+</li>
+<li><p><strong>the new <code>host:</code> measure is active, and it is not a volume budget</strong>: it counts
+one normalized host, with no path and no query, so it fires when an agent keeps
+going back to the same target with genuinely <em>different</em> requests. That is a
+failure mode repetition counting cannot see — <code>net:</code> keeps the query by design,
+so every page of one API is a different resource, and <code>site:</code> merges unrelated
+services. It is reconciled with the disabled volume budgets by the mechanism
+around it: its two lower stages are advisory, and its gate is operator-gated
+(and fail-closed when unattended), rather than an automatic volume cap. Its cap
+is <strong>16</strong> — the whole window — rather than the 12 the action-identity measures
+use, because <code>host:</code> is the coarser measure: it discards the path, so
+installing many packages from one mirror and re-fetching one broken URL look
+identical to it, and it accounted for 25 of the 48 <code>(session, fingerprint)</code>
+pairs that reached a cap under the old defaults. The measurement is in
+<a href="https://github.com/snailium/dsh-repeat-tool-breaker/blob/HEAD/docs/issue-b-thresholds.md" target="_blank" rel="noopener noreferrer"><code>docs/issue-b-thresholds.md</code></a>.</p>
+</li>
+<li><p><strong>not counter-based at all</strong>: file operations. There is no <code>readpath</code> or
+<code>writepath</code> limit. A file action is identified by its <strong>position</strong> through
+<code>exact:</code> — the same file at the same offset, or the same replacement string, is
+the same action and is denied; a different offset or a different region is a
+different action and is never blocked. 0.2.0 shipped path-only counters for
+these and they both had to be removed after blocking ordinary work on the
+reference deployment.</p>
+</li>
+<li><p><strong>volume budgets, off by default</strong>: <code>site</code>, <code>family:http-fetch</code>, <code>verb:curl</code>,
+<code>verb:wget</code>. These counted how MUCH one site or one verb was used. They are all
+<code>null</code> now, because a volume budget cannot tell a crawl from a session that is
+simply making progress, and every value tried produced a false positive on a
+real one:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>What it blocked</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>family:http-fetch: 4</code></td>
+<td>a task asking for the status code of <strong>four different URLs</strong> (blocked from the second)</td>
+</tr>
+<tr>
+<td><code>site: 3</code></td>
+<td>ordinary development calls that merely <em>mentioned</em> a loopback URL</td>
+</tr>
+<tr>
+<td><code>site: 3</code></td>
+<td>a session paginating a GitHub commit list — <code>api.github.com</code> and <code>github.com</code> share one budget, so it tripped after three fetches</td>
+</tr>
+</tbody></table>
+<p>The last one is the clearest argument: the agent's own comment in that session
+was <code># Fetch page 2 of openvino commits using a script file to avoid repeat detection</code> — a volume cap that pushes an agent to <em>work around the breaker</em>
+instead of changing approach is worse than no cap at all.</p>
+<p>Repetition is what this plugin detects, and the action-scoped caps do that:
+<code>exact</code>, <code>cmd</code>, <code>net</code>, and <code>sink</code> (one destination rewritten with changing
+content). <code>host:</code> extends it to a target that is revisited with changing paths
+and queries. If you do want a crawl budget, set one:</p>
+</li>
+</ul>
+<pre><code class="language-yaml">- id: repeat-tool-breaker
+  config:
+    limits:
+      site: 30                  # at most 30 fetches per site per window
+      'family:http-fetch': 60
+</code></pre>
+<h3>Deliberate deviations from the v2 specification</h3>
+<p>All of these came out of running the plugin against a live model on the reference
+deployment.</p>
+<ol>
+<li><strong>No path-only counter for file tools at all.</strong> The spec folded reads and
+writes of one path into a single <code>sink:</code> counter, which denies the second half
+of the ordinary pair <code>read foo.ts</code> → <code>write foo.ts</code>. 0.2.0 replaced it with
+separate <code>readpath</code>/<code>writepath</code> counters and 0.2.2 removed both, because a
+path-only counter cannot see POSITION: it blocked re-reading a file that was
+being edited, and blocked the third iteration on a single document. File
+actions are identified by <code>exact:</code> alone, which is position-aware by
+construction. <code>sink:</code> still means what §3.6 defined it as: where a <em>shell
+command</em> writes its bytes.</li>
+<li><strong><code>pathAliases</code> is gone (0.2.4).</strong> The spec's list (<code>path</code>, <code>filePath</code>,
+<code>file</code>, <code>target_file</code>) had to gain <code>file_path</code>, the key dsh's own file tools
+actually use — but that key existed only to feed the path-only <code>readpath</code>/
+<code>writepath</code> fingerprints, which 0.2.2 removed. 0.2.4 deletes the inert key and
+its <code>firstPathArg</code> helper, so the documented configuration is exactly what the
+code reads. A config that still lists <code>pathAliases</code> is accepted and ignored.</li>
+<li><strong>Generic sinks are not fingerprints.</strong> <code>curl -s -o /dev/null -w '%{http_code}'</code>
+is the idiomatic way to ask for a status code, and treating <code>/dev/null</code> as
+action identity made four <em>different</em> URLs collide on <code>sink:/dev/null</code> starting
+with the second.</li>
+<li><strong>The volume caps no longer ship at all</strong>, and <strong>a denied call commits only the
+fingerprints that hit.</strong> The first started as a deviation from the spec's <code>4</code>
+(it shipped <code>6</code>) and 0.3.2 turned it off entirely: no value could tell a crawl
+from progress, and every one tried produced a false positive on a live session
+— see <a href="#tuning-and-how-these-numbers-were-chosen" target="_blank" rel="noopener noreferrer">Tuning</a>. The second was changed
+because a denied <code>curl</code> was charging <code>net:</code> for a URL it never fetched, locking
+the model out of that URL entirely.</li>
+</ol>
+<h2>Development loop (dependency-free)</h2>
+<p><code>cordis.patch.yml</code> in this repo is a ready-made overlay — point its <code>name:</code> at the
+absolute path of this checkout, then:</p>
+<pre><code class="language-bash"># 1) prove the overlay + module resolve (prints the composed tree; does NOT boot)
+dsh --profile &lt;name&gt; --patch ./cordis.patch.yml --dump-config | grep repeat-tool-breaker
+
+# 2) real apply run on a SAFE profile
+dsh --profile &lt;name&gt; --patch ./cordis.patch.yml "reply ok"
+</code></pre>
+<p>Two things worth knowing:</p>
+<ul>
+<li><strong>Never point this at a profile that serves a live UI</strong> (in the reference
+deployment that is the <code>web</code> profile). Boot a headless test profile, or an
+isolated <code>DSH_HOME</code>, instead.</li>
+<li>Step 1 does not import the module, so a syntax or resolution error only surfaces
+in step 2. To confirm the gate really is wired in step 2, add a temporary
+<code>console.log(typeof ctx.tools.guard)</code> at the top of <code>apply</code> and remove it after
+— the shipped file intentionally logs nothing.</li>
+</ul>
+<h2>Acceptance</h2>
+<pre><code class="language-bash">npm test          # node --test test/*.test.js
+</code></pre>
+<p>105 tests, no model or endpoint required. The suite mirrors the v2 spec's table
+(T1 ping-pong, T2/T3 description decoys, T4 unrelated calls, T5 curl↔wget, T6
+exclusion, T7 per-agent isolation, T8 volatile flags, T9 normalizer units, T10
+read paths, T11 denied calls still spend budget), adds the plugin-level wiring
+(T12: the guard denies, quotes the previous result, survives a plugin notice,
+resets on a human turn; T12c: the fail-loud config contract), and documents the
+shipped defaults (T14: the 0.4.2 table; T14b/T14c: volume is not a loop signal,
+<code>?page=N</code> stays a new resource while <code>host:</code> is the convergence measure that
+accumulates across pages).</p>
+<p>The 0.4.0 occurrence escalation has its own tests:</p>
+<ul>
+<li><code>T24</code> — the three occurrence stages fire at <code>warnAt</code>, <code>summarizeAt</code> and the cap
+on one measure, with the assertions derived from the defaults rather than
+hard-coded (7, 11 and 12), and once per crossing rather than on every later
+call;</li>
+<li><code>T25</code> — <code>host:</code> accumulates on a public host across distinct paths and queries,
+while local hosts are excluded from it by default;</li>
+<li><code>T26</code> — an exemption covers only the measures that hit;</li>
+<li><code>T27</code> — a disabled stage is never delivered;</li>
+<li><code>T20</code>–<code>T23</code> — the gate end to end: an approved ask stops counting that measure
+for the turn, any measure can be asked about (not only local targets), a
+declined ask denies without re-prompting, and a human turn clears the exemption
+and the window;</li>
+<li><code>T14d</code>–<code>T14f</code> — the silent stage off-switch, no cross-setting validation, and
+the <code>localHosts: ask</code> migration error.</li>
+</ul>
+<p>The 0.5.0 failure track has its own tests, all asserting that <code>isError</code> is not
+the failure test:</p>
+<ul>
+<li><code>T30</code> — consecutive failures of one fingerprint warn at <code>failWarnAt</code>, quoting
+the failure reason and never the <code>exact:</code> command line, while the occurrence
+stage at 7 has not fired;</li>
+<li><code>T31</code> — the gate blocks the failing target but not the recovery call (a grep)
+and not a different target;</li>
+<li><code>T32</code> — a success of the failing fingerprint clears the streak, while a success
+of a different fingerprint does not;</li>
+<li><code>T33</code> — the plugin's own denial is never counted as a failure, so feeding the
+gate its own denials does not grow the streak;</li>
+<li><code>T34</code> — a <code>null</code>-capped measure is invisible to the failure track;</li>
+<li><code>T35</code> — <code>failLimit: null</code> drops the gate and keeps the advisory, which still
+fires exactly once;</li>
+<li><code>T36</code> — <code>failWarnAt: 0</code> disables the advisory but not the gate;</li>
+<li><code>T37</code> — <code>failLimit</code> validation is fail-loud and <code>failWarnAt</code> follows the same
+silent off-switch as <code>warnAt</code>.</li>
+</ul>
+<p>Assertions worth singling out, because they are the ones that would have caught
+v1 — or that caught v2's own defaults:</p>
+<ul>
+<li>every fingerprint of a <code>description: '1st'/'2nd'/'3rd'</code> call is asserted to
+contain neither the decoy text nor the <code>timeoutMs</code> value;</li>
+<li>the deny path is asserted to be reached for host-spelling ping-pong whose
+<code>exact:</code> fingerprints differ;</li>
+<li>one failed attempt is asserted to leave room for the identical retry (<code>T2b</code>),
+while a call that keeps failing is still blocked;</li>
+<li>the local-address matrix and the gate are asserted end to end (<code>T17</code>–<code>T23</code>):
+<code>localHosts: allow</code> emits no local target fingerprint, a mixed call (one local
+plus one public URL) is not a local call, an approval exempts exactly the
+measures that hit and no others, a refusal stops the asking until the next human
+turn, and the gate is not local-only;</li>
+<li>four <em>different</em> URLs writing to <code>/dev/null</code> are asserted to all be allowed, and
+a denied call is asserted <strong>not</strong> to spend <code>net:</code> budget on the URL it never
+fetched.</li>
+</ul>
+<h3>Verified on a real model</h3>
+<p>Beyond the unit suite, the plugin was driven end-to-end through the official
+<code>dsh-container</code> harness (<code>ghcr.io/snailium/dsh-container/dsh</code>) against a local
+Qwen3.8-27B on llama.cpp, in a throwaway <code>DSH_HOME</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>curl -s -o /tmp/od.html https://open-data.canada.ca/</code> (<code>description: '1st'</code>) then the same fetch of <code>https://open.canada.ca/</code> (<code>'2nd'</code>)</td>
+<td>1st executed; the 2nd <strong>collided</strong> on <code>net:open.canada.ca/</code> and <code>sink:/tmp/od.html</code> — it was denied then, under the cap in force at the time</td>
+</tr>
+<tr>
+<td><code>echo hello-repeat</code> twice, <code>description</code> <code>'1st'</code> / <code>'2nd'</code>, <code>timeoutMs</code> 60000 / 1000</td>
+<td>1st executed; the 2nd <strong>collided</strong> on the identical cleaned command</td>
+</tr>
+<tr>
+<td>four <strong>different</strong> URLs, one <code>curl</code> each</td>
+<td>all four allowed and returned 200</td>
+</tr>
+</tbody></table>
+<p>These runs predate 0.4.0, so the counts reflect the cap in force at the time (2,
+then 5) and there is no <code>host:</code> measure yet. What they establish is the
+<em>collision</em>: the alias spelling, the churning <code>--max-time</code> and the decoy
+<code>description</code> do not make a new action. Under the 0.4.2 defaults the same calls
+still collide, and the break lands at 12 with the two advisory stages before it.</p>
+<h3>Real-pipeline check (no model needed)</h3>
+<p><code>test/pipeline.e2e.mjs</code> drives the genuine <code>ToolRuntime</code> with a stub <code>bash</code> body,
+which proves the denied call's body is never entered — offline and deterministically.
+It covers both tracks: the occurrence gate, and (since 0.5.0) a failure scenario
+where the same command fails every call, so the stub returns a structured
+<code>exitCode</code> the failure classifier can read. It needs the dsh packages resolvable,
+so it is not part of CI:</p>
+<pre><code class="language-bash">DSH_NODE_MODULES=/path/to/dsh/node_modules/@deepseek-ai npm run test:pipeline
+</code></pre>
+<h3>Full-boot compatibility check (any dsh version)</h3>
+<p><code>test/compat/</code> boots a <strong>real</strong> <code>dsh</code> of the version under test with this plugin
+mounted as a profile bundle, and drives it with a scripted mock model — no GPU,
+no real endpoint. <code>mock-llm.py</code> speaks enough of the OpenAI streaming protocol to
+make the agent repeat a scripted <code>bash</code> call, and <code>run-compat.sh</code> reads the
+shipped cap out of the plugin's own <code>DEFAULTS</code> (so a retune does not break the
+harness) and asserts the resulting tool-result trajectory. It also covers a
+local-address loop with no answerer, where the fail-closed <code>onLimit: ask</code> must
+deny rather than stall, and pagination of one endpoint, which must never block.
+Since 0.5.0 it also drives the failure track — the same command failing every
+turn, stopped after <code>failLimit</code> consecutive failures, which lands well before the
+occurrence cap — and the two occurrence scenarios neutralise their exit status
+(<code>|| true</code>) so that they test the track they name.</p>
+<pre><code class="language-bash">DSH_PREFIX=/tmp/dsh-compat
+mkdir -p "$DSH_PREFIX" &amp;&amp; cd "$DSH_PREFIX" &amp;&amp; npm init -y
+npm install --no-audit --no-fund @deepseek-ai/dsh@&lt;version&gt;
+
+cd &lt;this repo&gt;
+DSH_PREFIX=$DSH_PREFIX ./test/compat/run-compat.sh
+</code></pre>
+<p>It checks what unit tests cannot: that the loader accepts the <code>dsh.bundle</code>
+manifest, that the bundle's patch layer mounts the row, that <code>apply()</code> runs with
+<code>inject: ['tools']</code> satisfied, and that a denial reaches the model as an
+<code>isError</code> tool result. Archived reference output, recorded on <code>@deepseek-ai/dsh</code>
+0.1.5-rc.2 with a shipped cap of 3:</p>
+<pre><code>=== dsh under test ===
+0.1.5-rc.2
+=== bundle mounts? ===
+ok
+=== cap for action identity: 3 (mock issues 4 identical calls) ===
+=== real headless run ===
+compat run complete
+=== trajectory ===
+  attempt 1: isError=False | compat-check
+  attempt 2: isError=False | compat-check
+  attempt 3: isError=True | Error: REPEAT_TOOL_BLOCKED: ...
+  attempt 4: isError=True | Error: REPEAT_TOOL_BLOCKED: ...
+
+COMPAT: PASS (2 executed, 2 denied, cap=3)
+</code></pre>
+<p>The attempt counts follow the cap the script derives from <code>DEFAULTS</code>, so the
+0.4.2 defaults move the whole trajectory (cap 12, <code>host</code> 16) without any change
+to the assertion shape.</p>
+<p><strong>What compat does NOT cover.</strong> The probe profile is
+<code>['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless', 'dsh-repeat-tool-breaker']</code>,
+and headless composes no client module system — so <code>dsh.client</code> is inert there and
+the browser half is never requested. Compat proves the Host half still installs,
+mounts and denies; it says nothing about the card. The card's own evidence is the
+15 client-seam tests (<code>C1</code>–<code>C15</code>), the manifest guard (<code>F17</code>), the tarball check in
+the release steps, and an end-to-end run against the real Web surface: a save that
+lands in <code>settings.yaml</code>, then a <code>Reset</code> that removes it.</p>
+<h2>Releasing</h2>
+<p>Publishing runs through <code>.github/workflows/publish.yml</code>, which is
+<code>workflow_dispatch</code>-only — nothing is published as a side effect of a push or a
+release, and the job refuses to republish a version that already exists.</p>
+<pre><code class="language-bash"># 1. bump the version and update CHANGELOG.md, commit, push
+# 2. confirm the tarball carries BOTH halves — see below
+# 3. trigger the release
+gh workflow run publish.yml -f dry-run=false
+</code></pre>
+<p><strong>Check the tarball before publishing.</strong> <code>files</code> decides what ships, and the browser half
+is an ordinary file inside <code>lib/</code> — so a narrowed <code>files</code> drops the card silently: the
+settings namespace still registers, the card never renders, and nothing reports an error
+until someone opens the page. F17 guards the manifest, but only the tarball proves the
+file is really in it:</p>
+<pre><code class="language-bash">npm_config_cache=/tmp/dsh-npm-cache npm pack --silent
+tar tzf dsh-repeat-tool-breaker-&lt;version&gt;.tgz | grep -E 'lib/client\.js|index\.js'
+</code></pre>
+<p>A <code>require()</code> of the extracted <code>lib/client.js</code> fails with <code>ReferenceError: window is not defined</code>. That is expected and not a defect: a client bundle is a classic script for the
+browser, never a Node module, and the first-party bundles under
+<code>@deepseek-ai/dsh-client-ui-*/lib/client.js</code> behave identically.</p>
+<p>Authentication uses <strong>npm Trusted Publishing (OIDC)</strong>: the workflow needs
+<code>id-token: write</code> (already set) and a matching trusted-publisher connection on the
+npm package page — repository <code>snailium/dsh-repeat-tool-breaker</code>, workflow
+filename <code>publish.yml</code>, environment empty. No long-lived token is required, and
+provenance is generated automatically.</p>
+<p>Two things that will save you time:</p>
+<ul>
+<li><strong>Allow the right action.</strong> A trusted-publisher connection created after
+2026-09-03 defaults to allowing only <code>npm stage publish</code>. If direct
+<code>npm publish</code> is not selected under "Allowed actions", the registry answers
+<code>403 ... OIDC permission denied for this action</code>. Connections cannot be edited:
+delete and recreate.</li>
+<li><strong>Debugging a 403.</strong> Run <code>gh workflow run publish.yml -f dry-run=true -f debug-oidc=true</code>
+to print the OIDC claims npm authorises against (<code>repository</code>,
+<code>job_workflow_ref</code>, <code>aud</code>, …) and compare them with the connection's fields.</li>
+</ul>
+<p>The npm CLI must be &gt;= 11.5.1 and Node &gt;= 22.14.0 for OIDC; the workflow upgrades
+the npm CLI explicitly because Node 22 bundles an older one.</p>
+<h2>Scope and verification status</h2>
+<p><strong>Verified</strong></p>
+<ul>
+<li><strong>Deterministic suite</strong> (<code>npm test</code>) — 105 tests covering the full fingerprint
+matrix, decoy stripping, host folding, sink extraction, the <code>host:</code> measure, the
+three occurrence stages, the two failure stages, window arithmetic, per-agent
+isolation, the user-message reset, the gate's ask/deny outcomes, the fail-loud
+config contract, and the two cross-half agreements that make the settings card
+render (the slot key and the field set). Runs in CI on Node 20 and 22 with no
+model or endpoint.</li>
+<li><strong>Loads and applies on a real DSH boot</strong>, including as a profile bundle (the
+<code>dsh.bundle</code> layer mounts the row by package specifier). Verified on
+<code>@deepseek-ai/dsh</code> <strong>0.1.2-rc.1</strong> (the reference deployment) and
+<strong>0.1.5-rc.2</strong> (via <code>test/compat/</code>, which boots the real CLI and asserts the
+denial in the trajectory).</li>
+<li><strong>API surface is unchanged between those two versions</strong>: <code>ToolGuard</code>,
+<code>guard()</code>, the <code>tools/pre-execute</code> / <code>tools/post-execute</code> signatures,
+<code>ToolExecutionInput</code>/<code>ToolExecution</code>, the decision unions and the
+<code>agent/pre-step</code> payload all diff clean, and the tool names the plugin keys on
+(<code>bash</code>/<code>pwsh</code>, <code>read</code>/<code>write</code>/<code>edit</code>, <code>web_fetch</code>/<code>web_search</code>) are stable.</li>
+<li><strong>Driven by a real model in the <code>dsh-container</code> harness</strong> (under the pre-0.4.0
+defaults) — the three scenarios in
+<a href="#verified-on-a-real-model" target="_blank" rel="noopener noreferrer">Verified on a real model</a>, plus the real
+<code>ToolRuntime</code> pipeline driven in-process with a stub tool body (which proves the
+denied call's body is never entered).</li>
+</ul>
+<p><strong>Not covered here</strong></p>
+<ul>
+<li>The live-model runs are manual, not part of CI: they need a local inference
+backend and the <code>dsh-container</code> image. <code>npm test</code> is the CI gate.</li>
+</ul>
+<p><strong>Intentional limits</strong></p>
+<ul>
+<li>The breaker is a safety net, not a semantic deduplicator. Two genuinely
+different commands that happen to write the same non-generic file collide on
+<code>sink:</code>, and that is by design — the denial message tells the model to work from
+what it has.</li>
+<li>Fingerprints are computed from the <em>arguments</em>, never from the tool's output, so
+a loop that varies only the working directory (<code>cd a &amp;&amp; curl X</code> vs
+<code>cd b &amp;&amp; curl X</code>) still collides on <code>net:</code> but not on <code>cmd:</code>.</li>
+</ul>
+<h2>Design notes</h2>
+<ul>
+<li><strong>Counting lives in the guard and nowhere else.</strong> That single locus is what
+prevents the guard/post-execute double count, the reset-your-own-budget hole,
+and the "denied call charges a resource it never fetched" hole.</li>
+<li><strong>Windows, not consecutive runs.</strong> v1's run counter reset as soon as a different
+signature arrived, which is exactly the <code>A, B, A, B</code> pattern class C exploited.
+The failure track is the one place a consecutive run <em>is</em> the signal, and it is
+scoped to one fingerprint rather than to every call in a row.</li>
+<li><strong>Two tracks, one gate.</strong> The occurrence and failure tracks are computed
+separately but merged into a single hit list before the exemption and refusal
+logic runs, so there is one ask, one refusal set and one way to get stuck. The
+failure hit is checked first because it is the more actionable of the two.</li>
+<li><strong>The failure track reuses the occurrence measure set</strong>, including the
+<code>null</code>-cap off-switch, so a measure disabled for repetition cannot leak back in
+through the failure channel.</li>
+<li><strong>Fail loud in <code>apply</code></strong>: no schemastery <code>Config</code> export (keeping the plugin
+dependency-free is deliberate — <code>cordis.resolveConfig</code> passes config through
+unchanged when a plugin exports no <code>Config</code>), but every load-bearing invariant
+is validated at load and throws rather than silently degrading.</li>
+<li><strong>The denial text is the model's only new information</strong>, so it names the
+fingerprints that hit with their counts, states explicitly that changing the
+description / <code>timeoutMs</code> / <code>--max-time</code> / host spelling is not a new action,
+and quotes the previous result inline (or says the previous result is already
+in the history). It contains no <code>&lt;tool_call&gt;</code>-shaped markup.</li>
+<li><strong>Escalation is advisory first.</strong> Every advisory stage — occurrence 1 and 2,
+and the failure track's stage 1 — rides <code>tools/post-execute</code>
+<code>additionalContexts</code> stamped <code>source.kind: 'plugin'</code>, because a guard can only
+return a denial — and an unlabeled context would render as a user prompt in
+derived history. At most one message per track is delivered on a call, and the
+failure one goes first when both fire. The gate itself is split across two
+hooks: <code>tools/pre-execute</code>
+can ask but cannot deny, and <code>ctx.tools.guard</code> can deny but cannot ask. A
+rejected ask never reaches the guard, so "the guard saw this execution" is
+exactly the approval signal.</li>
+<li><strong>State is in-memory only</strong>; a resumed session starts fresh (same tradeoff as
+the official reminder).</li>
+</ul>

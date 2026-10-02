@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { validateDshManifest } from "@/lib/validators/dsh";
 import { validateClaudeCodeManifest } from "@/lib/validators/claude-code";
 import { validateMcpManifest } from "@/lib/validators/mcp";
+import { parseFrontmatter, validateSkillManifest } from "@/lib/validators/skill";
 
 /** Spec requirement: 3 passing + 3 failing cases per ecosystem */
 
@@ -152,5 +153,76 @@ describe("MCP server.json spec validation", () => {
         version: "1.0.0",
       }).valid,
     ).toBe(false);
+  });
+});
+
+describe("Agent Skill (SKILL.md) spec validation", () => {
+  // ---- pass ----
+  it("✓ minimal valid frontmatter", () => {
+    const r = validateSkillManifest({
+      name: "tdd",
+      description: "Test-driven development with red-green-refactor cycles.",
+    });
+    expect(r.valid).toBe(true);
+    expect(r.extracted.name).toBe("tdd");
+  });
+  it("✓ full frontmatter with license and version", () => {
+    const r = validateSkillManifest({
+      name: "frontend-design",
+      description: "Guidance for distinctive, intentional visual design work.",
+      license: "MIT",
+      version: "1.2.0",
+    });
+    expect(r.valid).toBe(true);
+    expect(r.extracted.version).toBe("1.2.0");
+  });
+  it("✓ kebab-case multi-word name", () => {
+    expect(
+      validateSkillManifest({
+        name: "improve-codebase-architecture",
+        description: "Analyzes a codebase and proposes architecture improvements.",
+      }).valid,
+    ).toBe(true);
+  });
+  // ---- fail ----
+  it("✗ missing description", () => {
+    expect(validateSkillManifest({ name: "tdd" }).valid).toBe(false);
+  });
+  it("✗ name not kebab-case / too long", () => {
+    expect(
+      validateSkillManifest({ name: "My Skill!", description: "A skill that does things." }).valid,
+    ).toBe(false);
+    expect(
+      validateSkillManifest({ name: "a".repeat(70), description: "A skill that does things." }).valid,
+    ).toBe(false);
+  });
+  it("✗ description too short / null manifest", () => {
+    expect(validateSkillManifest({ name: "tdd", description: "short" }).valid).toBe(false);
+    expect(validateSkillManifest(null).valid).toBe(false);
+  });
+});
+
+describe("parseFrontmatter (SKILL.md)", () => {
+  it("parses flat key-value frontmatter and returns the body", () => {
+    const md = '---\nname: tdd\ndescription: "Test-driven development loop."\nlicense: MIT\n---\n# TDD\n\nBody text.';
+    const { frontmatter, body } = parseFrontmatter(md);
+    expect(frontmatter).toMatchObject({
+      name: "tdd",
+      description: "Test-driven development loop.",
+      license: "MIT",
+    });
+    expect(body.startsWith("# TDD")).toBe(true);
+  });
+  it("collects folded multi-line descriptions", () => {
+    const md = "---\nname: x-ray\ndescription: >-\n  First line of description\n  continues on second line\n---\nBody";
+    const { frontmatter } = parseFrontmatter(md);
+    expect(frontmatter?.description).toBe(
+      "First line of description continues on second line",
+    );
+  });
+  it("returns null frontmatter when the block is absent", () => {
+    const { frontmatter, body } = parseFrontmatter("# Just markdown\n\nNo frontmatter.");
+    expect(frontmatter).toBeNull();
+    expect(body).toContain("Just markdown");
   });
 });

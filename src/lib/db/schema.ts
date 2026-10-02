@@ -17,7 +17,7 @@ export const plugins = pgTable(
   "plugins",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    ecosystem: text("ecosystem", { enum: ["dsh", "claude-code", "mcp"] }).notNull(),
+    ecosystem: text("ecosystem", { enum: ["dsh", "claude-code", "mcp", "skills"] }).notNull(),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
     description: text("description"),

@@ -31,6 +31,12 @@ const STEPS: {
     extra:
       "Also publish to the official MCP Registry (server.json) to earn the registry-verified badge.",
   },
+  {
+    eco: "skills",
+    topic: "skills.sh",
+    extra:
+      "Ship SKILL.md (name + description frontmatter) in your repo and list it on skills.sh — we sync the top skills daily.",
+  },
 ];
 
 export default function SubmitPage() {

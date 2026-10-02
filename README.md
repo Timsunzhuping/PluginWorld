@@ -1,6 +1,6 @@
 # PluginWorld
 
-> **The cross-ecosystem AI plugin marketplace** — one search box for every plugin across DeepSeek Harness (dsh), Claude Code and MCP, with unified quality and security scores.
+> **The cross-ecosystem AI plugin marketplace** — one search box for every plugin and skill across DeepSeek Harness (dsh), Claude Code, MCP and Agent Skills, with unified quality and security scores.
 >
 > Plug in. The world is ready. · www.pluginworld.ai
 
@@ -18,6 +18,7 @@
   - Official MCP Registry (registry.modelcontextprotocol.io)
   - npm registry (keywords `dsh-plugin`, `cordis-plugin`, `claude-code`, `mcp-server`, ranked by monthly downloads)
   - Glama MCP directory (metaregistry)
+  - skills.sh leaderboard (top 500 Agent Skills by installs, SKILL.md validated)
 - **Pre-index security scan → rating**: every candidate is scanned BEFORE listing;
   grade D is quarantined, never indexed (see below)
 - **Public REST API** (`/api/v1/*`): built for AI agents, CORS open, 60 req/min rate limit

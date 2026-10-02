@@ -19,10 +19,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { fetchTopicRepos, manifestPaths, type GithubRepo } from "./github-topic";
+import {
+  fetchTopicRepos,
+  manifestPaths,
+  type GithubRepo,
+  type TopicEcosystem,
+} from "./github-topic";
 import { fetchRegistryServers, registryRepoFullName, type RegistryServer } from "./mcp-registry";
 import { fetchNpmPackages, type NpmPackage } from "./npm-registry";
 import { fetchGlamaServers } from "./glama";
+import { fetchSkillsShTop, type ResolvedSkill } from "./skills-sh";
 import {
   RAW_BASE,
   OFFICIAL_OWNERS,
@@ -36,7 +42,7 @@ import { validateManifest } from "../../src/lib/validators";
 import { computeScore, percentile, scanInstallScripts } from "../../src/lib/scoring";
 import { isBlocked, runSecurityScan } from "../../src/lib/security";
 import { deriveCategories } from "../../src/lib/categories";
-import { ECOSYSTEMS, type Ecosystem, type Plugin } from "../../src/lib/types";
+import type { Ecosystem, Plugin } from "../../src/lib/types";
 
 const SEED_DIR = path.join(process.cwd(), "src", "data", "seed");
 const README_DIR = path.join(SEED_DIR, "readmes");
@@ -66,6 +72,11 @@ interface RawEntry {
   npmDownloads: number;
   npmListed: boolean;
   glamaListed: boolean;
+  /** skills.sh enrichment (ecosystem "skills") */
+  skillsShListed: boolean;
+  skillsShOfficial: boolean;
+  skillFrontmatter: Record<string, unknown> | null;
+  skillBody: string | null;
 }
 
 function slugFor(e: RawEntry): string {
@@ -90,6 +101,10 @@ const RAW_DEFAULTS = {
   npmDownloads: 0,
   npmListed: false,
   glamaListed: false,
+  skillsShListed: false,
+  skillsShOfficial: false,
+  skillFrontmatter: null as Record<string, unknown> | null,
+  skillBody: null as string | null,
 };
 
 function repoToRaw(repo: GithubRepo, ecosystem: Ecosystem): RawEntry {
@@ -161,6 +176,34 @@ function npmToRaw(pkg: NpmPackage, ecosystem: Ecosystem): RawEntry {
   };
 }
 
+function skillToRaw(s: ResolvedSkill): RawEntry {
+  const description =
+    typeof s.frontmatter?.description === "string"
+      ? (s.frontmatter.description as string).slice(0, 300)
+      : null;
+  return {
+    ecosystem: "skills",
+    owner: s.owner,
+    name: s.skillId,
+    repoFullName: s.source,
+    description,
+    repoUrl: `https://github.com/${s.source}`,
+    homepage: `https://www.skills.sh/${s.source}/${s.skillId}`,
+    license: typeof s.frontmatter?.license === "string" ? (s.frontmatter.license as string) : null,
+    topics: [],
+    stars: 0,
+    forks: 0,
+    pushedAt: null,
+    createdAt: null,
+    ...RAW_DEFAULTS,
+    npmDownloads: s.installs, // real install counts from skills.sh
+    skillsShListed: true,
+    skillsShOfficial: Boolean(s.isOfficial),
+    skillFrontmatter: s.frontmatter,
+    skillBody: s.body,
+  };
+}
+
 function entryKey(e: RawEntry): string {
   return e.repoFullName?.toLowerCase() ?? `pkg:${(e.npmName ?? e.name).toLowerCase()}`;
 }
@@ -225,7 +268,7 @@ async function main() {
   const startedAt = new Date();
 
   // 1. Fetch all community sources in parallel
-  const [dsh, claudeCode, mcpTopic, registry, npmDsh, npmClaude, npmMcp, glama] =
+  const [dsh, claudeCode, mcpTopic, registry, npmDsh, npmClaude, npmMcp, glama, skillsSh] =
     await Promise.all([
       fetchTopicRepos("dsh", pages),
       fetchTopicRepos("claude-code", pages),
@@ -235,8 +278,9 @@ async function main() {
       fetchNpmPackages("claude-code"),
       fetchNpmPackages("mcp"),
       fetchGlamaServers(),
+      fetchSkillsShTop(500),
     ]);
-  const npmByEco: Record<Ecosystem, NpmPackage[]> = {
+  const npmByEco: Record<TopicEcosystem, NpmPackage[]> = {
     dsh: npmDsh.packages,
     "claude-code": npmClaude.packages,
     mcp: npmMcp.packages,
@@ -244,7 +288,7 @@ async function main() {
 
   // 2. Normalize + merge/dedupe across sources (keyed by repo, per ecosystem)
   const cap = <T,>(arr: T[]) => (limit > 0 ? arr.slice(0, limit) : arr);
-  const ecoMaps: Record<Ecosystem, Map<string, RawEntry>> = {
+  const ecoMaps: Record<TopicEcosystem, Map<string, RawEntry>> = {
     dsh: new Map(),
     "claude-code": new Map(),
     mcp: new Map(),
@@ -284,7 +328,7 @@ async function main() {
   // 2b. npm registry → enrich matches, add capped npm-only entries
   let npmMerged = 0;
   let npmOnly = 0;
-  for (const eco of ECOSYSTEMS) {
+  for (const eco of ["dsh", "claude-code", "mcp"] as const) {
     let added = 0;
     for (const pkg of npmByEco[eco]) {
       const key = pkg.repoFullName?.toLowerCase();
@@ -341,25 +385,41 @@ async function main() {
     }
   }
 
+  const skillEntries: RawEntry[] = [];
+  const seenSkillKeys = new Set<string>();
+  for (const s of skillsSh.skills) {
+    const key = `${s.owner.toLowerCase()}/${s.skillId.toLowerCase()}`;
+    if (seenSkillKeys.has(key)) continue; // leaderboard is installs-desc: first wins
+    seenSkillKeys.add(key);
+    skillEntries.push(skillToRaw(s));
+  }
+
   const entries: RawEntry[] = [
     ...ecoMaps.dsh.values(),
     ...ecoMaps["claude-code"].values(),
     ...ecoMaps.mcp.values(),
+    ...cap(skillEntries),
   ];
   console.log(
     `[sync] normalized ${entries.length} candidates ` +
-      `(registry: +${registryOnly}/~${registryMerged}, npm: +${npmOnly}/~${npmMerged}, glama: +${glamaOnly}/~${glamaMerged})`,
+      `(registry: +${registryOnly}/~${registryMerged}, npm: +${npmOnly}/~${npmMerged}, glama: +${glamaOnly}/~${glamaMerged}, skills: +${skillEntries.length})`,
   );
+
+  type RepoInfo = {
+    stars: number; forks: number; pushedAt: string | null; license: string | null;
+    createdAt: string | null;
+  } | null;
+  const repoInfoCache = new Map<string, Promise<RepoInfo>>();
 
   // 3. Manifest + README + validation (concurrency pool)
   fs.mkdirSync(README_DIR, { recursive: true });
   const now = new Date();
   const enriched = await pooled(entries, 12, async (entry, i) => {
     if (i > 0 && i % 200 === 0) console.log(`  …${i}/${entries.length}`);
-    const [manifest, readmeMd] = await Promise.all([
-      fetchManifest(entry),
-      fetchReadme(entry),
-    ]);
+    const [manifest, readmeMd] =
+      entry.ecosystem === "skills"
+        ? [entry.skillFrontmatter, entry.skillBody ?? (await fetchReadme(entry))]
+        : await Promise.all([fetchManifest(entry), fetchReadme(entry)]);
     const validation = validateManifest(entry.ecosystem, manifest);
     const readme = readmeMd ? renderReadme(readmeMd, entry.repoFullName) : null;
     const secretsRedacted = readmeMd != null && redactSecrets(readmeMd) !== readmeMd;
@@ -371,7 +431,7 @@ async function main() {
       ? null
       : (entry.npmName ?? validation.extracted.npmPackage ?? null);
     const registryStars =
-      entry.registryServer || entry.glamaListed || entry.npmListed
+      entry.registryServer || entry.glamaListed || entry.npmListed || entry.skillsShListed
         ? await fetchGithubStarsIfMissing(entry)
         : null;
     return {
@@ -389,13 +449,18 @@ async function main() {
   });
 
   // Backfill stars for secondary-source entries (only with a token, to respect core rate limits)
-  async function fetchGithubStarsIfMissing(entry: RawEntry): Promise<{
-    stars: number; forks: number; pushedAt: string | null; license: string | null;
-    createdAt: string | null;
-  } | null> {
+  async function fetchGithubStarsIfMissing(entry: RawEntry): Promise<RepoInfo> {
     if (entry.stars > 0 || !entry.repoFullName || !process.env.GITHUB_TOKEN) return null;
+    const key = entry.repoFullName.toLowerCase();
+    const cached = repoInfoCache.get(key);
+    if (cached) return cached;
+    const promise = fetchRepoInfo(entry.repoFullName);
+    repoInfoCache.set(key, promise);
+    return promise;
+  }
+  async function fetchRepoInfo(repoFullName: string): Promise<RepoInfo> {
     const repo = await fetchJson<GithubRepo>(
-      `https://api.github.com/repos/${entry.repoFullName}`,
+      `https://api.github.com/repos/${repoFullName}`,
       { headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } },
       1,
     );
@@ -471,7 +536,8 @@ async function main() {
     const createdAt = entry.createdAt ?? e.registryStars?.createdAt ?? null;
     const license = entry.license ?? e.registryStars?.license ?? null;
     const downloads = downloadsFor(e);
-    const officialOwner = OFFICIAL_OWNERS.has(entry.owner.toLowerCase());
+    const officialOwner =
+      OFFICIAL_OWNERS.has(entry.owner.toLowerCase()) || entry.skillsShOfficial;
     const registryListed = Boolean(entry.registryServer);
 
     // —— Security scan: runs BEFORE indexing; grade D is quarantined ——
@@ -567,6 +633,7 @@ async function main() {
         verifiedOwner: officialOwner,
         npmListed: entry.npmListed || undefined,
         glamaListed: entry.glamaListed || undefined,
+        skillsShListed: entry.skillsShListed || undefined,
       },
       securityGrade: security.grade,
       securityFindings: security.findings,
@@ -599,11 +666,13 @@ async function main() {
       dsh: dsh.totalCount + npmDsh.totalCount,
       "claude-code": claudeCode.totalCount + npmClaude.totalCount,
       mcp: mcpTopic.totalCount + registry.servers.size + npmMcp.totalCount,
+      skills: skillsSh.totalCount,
     },
     byEcosystem: {
       dsh: plugins.filter((p) => p.ecosystem === "dsh").length,
       "claude-code": plugins.filter((p) => p.ecosystem === "claude-code").length,
       mcp: plugins.filter((p) => p.ecosystem === "mcp").length,
+      skills: plugins.filter((p) => p.ecosystem === "skills").length,
     },
     securityGrades: gradeDist,
     quarantined: quarantine.length,

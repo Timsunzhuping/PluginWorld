@@ -17,7 +17,10 @@ export default async function HomePage() {
     listPlugins({ sort: "score", perPage: 8 }),
   ]);
   const sourceTotal =
-    stats.sourceTotals.dsh + stats.sourceTotals["claude-code"] + stats.sourceTotals.mcp;
+    stats.sourceTotals.dsh +
+    stats.sourceTotals["claude-code"] +
+    stats.sourceTotals.mcp +
+    (stats.sourceTotals.skills ?? 0);
   const universeLabel =
     sourceTotal > 0
       ? `${formatCount(Math.floor(sourceTotal / 1000) * 1000)}+`
@@ -29,7 +32,7 @@ export default async function HomePage() {
       <section className="border-b border-line bg-paper">
         <div className="mx-auto max-w-6xl px-5 pb-16 pt-20 sm:pt-28">
           <p className="label text-muted">
-            {universeLabel} PLUGINS TRACKED · 3 ECOSYSTEMS · ONE PORT
+            {universeLabel} PLUGINS TRACKED · 4 ECOSYSTEMS · ONE PORT
           </p>
           <h1 className="mt-5 max-w-3xl text-4xl font-bold leading-[1.1] tracking-[-0.02em] text-ink sm:text-6xl">
             The world&apos;s best plugins,
@@ -37,8 +40,9 @@ export default async function HomePage() {
             all through one port.
           </h1>
           <p className="mt-5 max-w-xl text-[16px] leading-relaxed text-muted">
-            One search box for every plugin across DeepSeek Harness, Claude Code
-            and MCP — with unified quality and security scores.
+            One search box for every plugin and skill across DeepSeek Harness,
+            Claude Code, MCP and Agent Skills — with unified quality and
+            security scores.
           </p>
           <div className="mt-8 max-w-2xl">
             <SearchBar />
@@ -62,7 +66,7 @@ export default async function HomePage() {
       <section className="mx-auto max-w-6xl px-5 py-14">
         <div className="flex items-end justify-between">
           <h2 className="text-2xl font-bold tracking-[-0.01em] text-ink sm:text-3xl">
-            Three ecosystems. One port.
+            Four ecosystems. One port.
           </h2>
           <Link
             href="/browse"
@@ -71,7 +75,7 @@ export default async function HomePage() {
             EXPLORE ALL →
           </Link>
         </div>
-        <div className="mt-7 grid gap-4 sm:grid-cols-3">
+        <div className="mt-7 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {ECOSYSTEMS.map((eco) => (
             <Link
               key={eco}

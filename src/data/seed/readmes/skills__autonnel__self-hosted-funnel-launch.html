@@ -1,0 +1,326 @@
+<h1>Self-Hosted Funnel Launch</h1>
+<p>Take a funnel from nothing to published on infrastructure the operator controls, using <a href="https://github.com/autonnel/autonnel" target="_blank" rel="noopener noreferrer">Autonnel</a> (Apache-2.0). This skill is the build step; design the funnel first with <code>sales-funnel-blueprint</code>, and confirm self-hosting is the right call with <code>funnel-platform-picker</code> if that is still open.</p>
+<h2>Step 1: choose how it runs</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Cost at low volume</th>
+<th>Ops burden</th>
+<th>Use it for</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Cloudflare Workers</strong></td>
+<td>Effectively $0 plus a Postgres</td>
+<td>No servers, no patching</td>
+<td><strong>Default for production.</strong> Funnel pages are mostly static assets, which Workers serves free and unmetered</td>
+</tr>
+<tr>
+<td>Docker</td>
+<td>Cost of one VPS or container host</td>
+<td>Yours: upgrades, backups, uptime</td>
+<td>Local evaluation in two minutes, or a server you already run and want the data on</td>
+</tr>
+<tr>
+<td>Source checkout (Node)</td>
+<td>Cost of one VPS or container host</td>
+<td>Yours</td>
+<td>Modifying Autonnel itself, or running the Node build directly</td>
+</tr>
+</tbody></table>
+<p>Recommend Workers unless the operator has a specific reason not to: the pricing model fits funnels almost exactly, and it removes the entire class of work that makes people avoid self-hosting.</p>
+<p>Use Docker for the first look regardless. It is the fastest way to see the product, and nothing you build locally is wasted: the same schema and the same admin UI back both paths.</p>
+<h2>Step 2a: Cloudflare Workers (the near-free production path)</h2>
+<h3>Why the cost is close to zero</h3>
+<p>Funnel traffic is overwhelmingly requests for pages, images and scripts. On Workers those are static asset requests, which are <strong>free and unlimited, with no storage cost</strong> - only requests that invoke the Worker (server-rendered pages, checkout, API) are billed. A funnel's dynamic surface is small: the order form, the upsell accept, the postback queue.</p>
+<p>Verified Cloudflare free-plan limits (checked 2026-08; confirm current numbers before you rely on them):</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Workers Free plan</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Static asset requests</td>
+<td>Free and unlimited, no storage charge</td>
+</tr>
+<tr>
+<td>Worker invocations</td>
+<td>100,000 requests/day</td>
+</tr>
+<tr>
+<td>Hyperdrive (Postgres pooling)</td>
+<td>Available on Free, 100,000 database queries/day</td>
+</tr>
+<tr>
+<td>Workers KV (page cache)</td>
+<td>100,000 reads/day, <strong>1,000 writes/day</strong>, 1 GB storage</td>
+</tr>
+<tr>
+<td>Cron Triggers</td>
+<td>Supported (the repo ships a <code>scheduled</code> handler)</td>
+</tr>
+</tbody></table>
+<p><strong>What is not free</strong>: Postgres. Hyperdrive pools connections to a database you supply, so you still need a Postgres provider. Managed providers have their own free tiers with their own limits, and that is the one line item to plan for.</p>
+<p><strong>The first ceiling you will actually hit is KV writes, not requests.</strong> 1,000 writes/day is generous for serving pages and thin for publishing them, because publishing invalidates and refreshes cached entries. A day of heavy editing can burn it while traffic is nowhere near any limit. If publishing starts failing before traffic does, that is this limit, not a bug.</p>
+<h3>Deploy</h3>
+<p>The repository ships the whole Workers toolchain: worker entry with the cron <code>scheduled</code> handler (<code>src/cf-worker.ts</code>), <code>wrangler.toml</code> generation, KV cache wiring and Hyperdrive for Postgres.</p>
+<pre><code class="language-bash">npx wrangler login
+npx wrangler kv namespace create CACHE_KV
+# $DATABASE_URL is the operator's own Postgres connection string, exported in their
+# shell - do not write the credentials into this command or into wrangler.toml.
+npx wrangler hyperdrive create autonnel-db --connection-string="$DATABASE_URL"
+</code></pre>
+<p>Each command prints an id. Put them in <code>.env</code> next to the project:</p>
+<pre><code class="language-bash">CF_WORKER_NAME=my-funnels
+CF_KV_NAMESPACE_ID=&lt;id from kv namespace create&gt;
+CF_HYPERDRIVE_CONFIG_ID=&lt;id from hyperdrive create&gt;
+</code></pre>
+<p>Then set the secrets and deploy:</p>
+<pre><code class="language-bash">npx wrangler secret put DATABASE_URL
+npx wrangler secret put AUTH_SESSION_SECRET            # openssl rand -hex 32
+npx wrangler secret put CREDENTIALS_ENCRYPTION_KEY     # openssl rand -base64 32
+npm run deploy:cf
+</code></pre>
+<p><code>deploy:cf</code> builds and generates <code>wrangler.toml</code> from the template first, so there is no separate generate step. Cron expressions are read from the app's cron registry rather than hand-written into the config - do not edit the generated <code>wrangler.toml</code> by hand, it is overwritten on every build.</p>
+<p>If a <code>CF_*</code> variable is missing, generation fails and names the variable. That is the intended behaviour; there are no silent defaults for these.</p>
+<p>Apply the database schema once against the same Postgres before the first visit, then open the Worker URL and complete the <code>/setup</code> wizard to create the admin account.</p>
+<p>Also available: <code>npm run dev:cf</code> (dev server on the Workers runtime) and <code>npm run preview:cf</code> (local preview via <code>wrangler dev</code>). Prefer these over plain <code>astro dev</code> when the target is Workers, because the runtime differs.</p>
+<h3>Operating it afterwards</h3>
+<p>The CLI commands below need database access, not a container. From a checkout with <code>DATABASE_URL</code> pointing at the same Postgres:</p>
+<pre><code class="language-bash">npx autonnel admin:create you@example.com 'a-strong-password'
+npx autonnel password:reset you@example.com
+</code></pre>
+<h2>Step 2b: Docker (local evaluation, or your own server)</h2>
+<p>Get the repository from <a href="https://github.com/autonnel/autonnel" target="_blank" rel="noopener noreferrer">https://github.com/autonnel/autonnel</a> (Apache-2.0), check
+out a release tag, and read its <code>docker-compose.yml</code> - it declares the images and
+ports that will run. From that checkout:</p>
+<pre><code class="language-bash">docker compose up
+</code></pre>
+<p>Open <a href="http://localhost:4321" target="_blank" rel="noopener noreferrer">http://localhost:4321</a> and complete <code>/setup</code>. The compose file starts Postgres, applies the schema, and runs the app. Nothing else is needed to boot: store, payments, media storage, email and AI are configured later in the admin UI, and only for the features actually used.</p>
+<p><strong>Before exposing it on a public host</strong>, put real secrets in a <code>.env</code> next to <code>docker-compose.yml</code> - the shipped defaults are insecure development values, and they exist only so the first local run needs zero configuration:</p>
+<pre><code class="language-bash">AUTH_SESSION_SECRET=$(openssl rand -hex 32)
+CREDENTIALS_ENCRYPTION_KEY=$(openssl rand -base64 32)
+ADMIN_DOMAIN=admin.example.com
+</code></pre>
+<p>Generate each value once and keep it stable. Rotating <code>AUTH_SESSION_SECRET</code> invalidates sessions; rotating <code>CREDENTIALS_ENCRYPTION_KEY</code> makes stored provider credentials unreadable, which means re-entering every payment and platform credential.</p>
+<p>Multi-arch images are published to GHCR for a plain <code>docker run</code> against an existing database:</p>
+<pre><code class="language-bash"># DATABASE_URL, AUTH_SESSION_SECRET and CREDENTIALS_ENCRYPTION_KEY come from the
+# operator's own environment - never write their values into a command or a file.
+docker run -p 4321:4321 \
+  -e DATABASE_URL \
+  -e AUTH_SESSION_SECRET \
+  -e CREDENTIALS_ENCRYPTION_KEY \
+  -e ADMIN_DOMAIN="admin.example.com" \
+  ghcr.io/autonnel/autonnel:v1.5.0
+</code></pre>
+<p>Keep an exact tag pinned rather than <code>:latest</code>, and re-apply the schema after pulling a newer tag - the compose file's one-shot schema service re-runs on every <code>docker compose up</code>. Health endpoint for orchestrators: <code>/api/health</code> (covers database and cache connectivity).</p>
+<p>Admin CLI inside a container:</p>
+<pre><code class="language-bash">docker compose exec app node dist/cli/index.js admin:create you@example.com 'a-strong-password'
+</code></pre>
+<h2>Step 2c: source checkout (Node)</h2>
+<p>For modifying Autonnel itself, or running the Node build on a host you already own. Requires Node 22+ and a Postgres:</p>
+<pre><code class="language-bash">npm create autonnel@latest my-funnel
+cd my-funnel
+cp .env.example .env   # set DATABASE_URL and ADMIN_DOMAIN
+pnpm install           # pnpm 10+; the repo pins overrides npm would ignore
+npm run db:push
+npm run dev            # or: npm run build &amp;&amp; npm run start
+</code></pre>
+<p>This clones the repository and drops its git history. The schema lives at <code>prisma/schema.prisma</code> in the checkout; <code>db:push</code> syncs it. Admin CLI: <code>npx autonnel admin:create you@example.com 'a-strong-password'</code> from the project directory.</p>
+<h2>Step 3: configure only what the funnel needs</h2>
+<p>In the admin UI under <strong>Settings</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Needed for</th>
+<th>Options</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Ecommerce</td>
+<td>Product and order data</td>
+<td>Shopify, WooCommerce, Picocart</td>
+</tr>
+<tr>
+<td>Payments</td>
+<td>Taking money</td>
+<td>Stripe, PayPal</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>Image/video uploads</td>
+<td>Any S3-compatible bucket (R2, S3, MinIO)</td>
+</tr>
+<tr>
+<td>Email</td>
+<td>Receipts, recall campaigns</td>
+<td>SMTP, Resend, AWS SES</td>
+</tr>
+<tr>
+<td>LLM</td>
+<td>AI page generation</td>
+<td>Any OpenAI-compatible endpoint</td>
+</tr>
+<tr>
+<td>Ad platforms</td>
+<td>Server-side conversions (all four); ad-level spend/click reporting (Facebook, Google Ads, TikTok only)</td>
+<td>Facebook, TikTok, Google Ads, Bing</td>
+</tr>
+</tbody></table>
+<p>Order of operations that avoids rework: catalog first (it constrains what the checkout can sell), then payments, then storage, then email, then ad platforms last - tracking is verified against real orders, so it needs the rest working first. Connecting an ad platform for spend reporting is a separate step from binding it to a funnel for postback (see <code>server-side-conversion-tracking</code>); do both if you want both.</p>
+<p>On Workers, R2 is the obvious storage choice: it is S3-compatible and keeps media egress inside Cloudflare.</p>
+<h2>Step 4: build the pages</h2>
+<p>Funnel roles map onto the funnel spec directly:</p>
+<table>
+<thead>
+<tr>
+<th>Role in funnel</th>
+<th>Purpose</th>
+<th>Multiple per funnel?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>LANDING</code></td>
+<td>Entry page(s), one per traffic angle</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td><code>CHECKOUT</code></td>
+<td>Order form</td>
+<td>No - one per funnel</td>
+</tr>
+<tr>
+<td><code>UPSELL</code></td>
+<td>Post-purchase offers, ordered into a chain</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td><code>THANKYOU</code></td>
+<td>Confirmation</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>ERROR</code></td>
+<td>Payment failure / fallback</td>
+<td>No</td>
+</tr>
+</tbody></table>
+<p>These are the roles a page takes <em>inside a funnel</em>. Over the API a page's own type is <code>CHECKOUT | THANKYOU | ERROR | UPSELL | CUSTOM</code> - landing pages are created as <code>CUSTOM</code> and become landing pages by being bound into a funnel as <code>LANDING</code>.</p>
+<p>Two editors are available: a component-based visual editor whose output is diffable JSON, and raw HTML for imported pages. Prefer the component editor for anything that will be A/B tested or edited by an agent later - JSON diffs review cleanly, HTML blobs do not.</p>
+<p>Build the checkout before the landing page. The checkout determines what can actually be sold and at what price, and a landing page written first will promise something the checkout cannot deliver.</p>
+<h2>Step 5: wire the funnel</h2>
+<ul>
+<li>Create the funnel, then attach pages with their role and order.</li>
+<li>The same page may be referenced by several funnels. The only uniqueness rule the domain enforces is that a <code>stepSlug</code> is unique within one funnel (and a page appears at most once per funnel) - there is no cross-funnel rejection to design around. Clone a landing page only when you want the two funnels to diverge, because an edit to a shared page lands on every funnel referencing it.</li>
+<li><code>THANKYOU</code> and <code>ERROR</code> are auto-bound from existing pages at creation if any exist; if the tenant has none, create them before going live. A funnel with no error page fails silently on declined payments.</li>
+<li>The URL that goes into ad campaigns is the landing page's own slug on a storefront host - <code>https://shop.example.com/{page.slug}</code> - never a <code>/n/</code> step URL. <code>/n/{funnelId}/{stepSlug}</code> redirects <em>forward</em> to the next step, so it belongs in a page's CTA link, not in an ad. Writing the CTA that way keeps the buyer's path stable when a step is swapped for another page.</li>
+<li>Publish is explicit and versioned per page and per funnel - publishing a page does not publish the funnel binding.</li>
+</ul>
+<h2>Step 6: instrument before sending traffic</h2>
+<p>Non-negotiable pre-launch checks:</p>
+<ol>
+<li><strong>One real end-to-end purchase</strong>, on a real payment provider, including: base order, one accepted upsell, one declined upsell, the thank-you page, the receipt email, and the order appearing in the connected store.</li>
+<li><strong>One refund</strong> on that order, to confirm the refund path works per charge.</li>
+<li><strong>Click id coverage</strong> - confirm <code>fbclid</code> / <code>ttclid</code> / <code>gclid</code> / <code>msclkid</code> reach the order record. See <code>server-side-conversion-tracking</code>.</li>
+<li><strong>Server-side conversion arriving</strong> in each ad platform's event debugger, with the click id attached and no duplicate against the browser event.</li>
+<li><strong>Error page reachable</strong> by forcing a declined card.</li>
+</ol>
+<p>On Workers, add one more: confirm the cron <code>scheduled</code> handler is firing (queued postbacks and recall campaigns depend on it). A deploy that silently lost its cron triggers looks healthy while background work quietly stops.</p>
+<p>Only then increase spend. A funnel that has not had a real transaction pushed through it has an unknown, not a low, failure rate.</p>
+<h2>Step 7: operate it from an agent over MCP</h2>
+<p>The instance exposes its admin API as MCP tools at <code>/api/mcp</code>, so an agent can build and change funnels without the UI.</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "autonnel": {
+      "transport": "http",
+      "url": "https://&lt;your-autonnel-host&gt;/api/mcp",
+      "headers": { "Authorization": "Bearer &lt;your-api-key&gt;" }
+    }
+  }
+}
+</code></pre>
+<p>Calling <code>/api/mcp</code> with raw HTTP rather than an MCP client has two transport requirements the SDK normally hides. The endpoint speaks Streamable HTTP: the request must carry <code>Accept: application/json, text/event-stream</code> - anything less is rejected with <code>406</code> before the tool layer is reached - and a success comes back as an SSE frame (<code>event: message</code> / <code>data: {...}</code>), so the JSON-RPC envelope has to be unwrapped from <code>data: </code> before parsing.</p>
+<p>One more trap in front of the app entirely: an instance behind Cloudflare with the default managed bot rules <strong>rejects the Python standard library's user agent</strong>. A <code>urllib</code> client sends <code>Python-urllib/3.x</code> and gets <code>403</code> with the plain-text body <code>error code: 1010</code> on <em>every</em> path including <code>/api/health</code>, which reads exactly like an auth or permission failure and is not JSON, so a client that parses the body throws before it can see the status. Only that agent string is blocked - <code>curl</code>, <code>python-requests</code>, <code>httpx</code>, <code>axios</code>, <code>node</code> and an empty UA all pass. If you script this in Python, set an explicit <code>User-Agent</code> or use <code>requests</code>/<code>httpx</code>; if every call including unauthenticated ones returns <code>403</code>, this is why, and no API key will fix it.</p>
+<p><code>.mcp.json</code> at the project root for Claude Code; <code>claude_desktop_config.json</code> for Claude Desktop. Generate the key in admin → <strong>Settings → API Keys</strong>. Every call is scoped to that key's tenant. Read tools work with any key; mutating tools need <code>writeAccess</code> toggled on. Treat a write key as production credentials: one per agent, read-only keys for reporting, revoke rather than share.</p>
+<p>Tools are self-describing - the client reads names, descriptions and input schemas on connect, so this skill does not repeat them. What follows is only what introspection cannot tell you.</p>
+<h3>A failed call still returns HTTP 200</h3>
+<p>This is the single thing most likely to make a client read a failure as a success.</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>What you actually get</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Blocked at the CDN edge (see the <code>Python-urllib</code> note above)</td>
+<td>HTTP 403 with a plain-text <code>error code: 1010</code> body and no JSON at all - the request never reached the app</td>
+</tr>
+<tr>
+<td>Missing or partial <code>Accept</code> header</td>
+<td>HTTP 406 with a JSON-RPC <code>error</code> object (<code>-32000</code>) - a transport rejection shaped exactly like a tool error, see above</td>
+</tr>
+<tr>
+<td>Auth failure</td>
+<td>HTTP 401, no JSON-RPC frame at all</td>
+</tr>
+<tr>
+<td>Unknown tool name</td>
+<td>HTTP 200 with a real JSON-RPC <code>error</code> object carrying a numeric code - the only in-band failure shaped that way, because it happens before dispatch</td>
+</tr>
+<tr>
+<td>Everything else: missing write access, validation failure, not found, conflict, server error</td>
+<td>HTTP 200 with <code>result.isError === true</code> and the message in <code>result.content[0].text</code>, and <strong>no</strong> JSON-RPC <code>error</code> object</td>
+</tr>
+</tbody></table>
+<p>So: if <code>error</code> is present, read the HTTP status before concluding anything - <code>406</code> is the transport rejecting your headers, <code>200</code> is an unknown tool name. Otherwise check <code>result.isError</code> before trusting <code>result.content</code>. Read the message rather than retrying blindly - a validation failure names the exact field path, and a conflict names the rule that was hit.</p>
+<h3>Rules that cause most failed writes</h3>
+<ul>
+<li><strong>A funnel step is <code>{ stepSlug, pageId }</code> and nothing else.</strong> Order is array order. A step's role in the flow is the referenced page's own <code>type</code>; there is no <code>pageType</code>, <code>order</code> or <code>subOrder</code> field. <code>stepSlug</code> is required on <code>add_funnel_page</code>, must be unique within the funnel, and forms <code>/n/{funnelId}/{stepSlug}</code> - which is a forward redirect, not the step's own URL (see Build order). The schemas are <code>.strict()</code>, so an extra field is rejected rather than ignored.</li>
+<li><strong>Steps are keyed by the page they reference</strong>, so a page appears at most once per funnel, but the same page may be referenced by several funnels. There is no "belongs to one funnel only" rule.</li>
+<li><strong>There is no <code>LANDING</code> page type.</strong> Page <code>type</code> is <code>CHECKOUT | THANKYOU | UPSELL | ERROR | CUSTOM</code>, stored uppercase. A landing page is a <code>CUSTOM</code> page that a funnel references.</li>
+<li><strong>Thank-you and error steps are live references, not snapshots.</strong> <code>create_funnel</code> adds steps for the tenant's existing thank-you and error pages, creating them from templates if none exist. Editing that page later changes every funnel referencing it - clone it if one funnel should diverge.</li>
+<li><strong>Draft and published are separate.</strong> Writes land in <code>draftData</code>; <code>publish: true</code> promotes it and invalidates the render cache. Write, verify with <code>get_page</code>, publish in a second call.</li>
+<li><strong><code>draftData</code> is not structurally validated.</strong> Nothing checks <code>root</code> / <code>content</code> / <code>zones</code>, required props, or component type names before saving. A malformed document is accepted and only breaks at render time.</li>
+<li><strong>Component types must come from <code>get_template({ key })</code></strong>, never from a remembered list. The component set is renamed and extended over releases, and because <code>draftData</code> is unvalidated, a stale component name saves cleanly and renders blank. A template's JSON is the authoritative shape.</li>
+<li><strong>Content must match the page's <code>editorType</code>.</strong> <code>editorType</code> is optional on <code>create_page</code> and <strong>defaults to <code>PUCK</code></strong>, so an HTML page created without it is silently a Puck page. <code>create_page</code> accepts only <code>draftData</code>; <code>update_page</code> accepts <code>draftData</code> on <code>PUCK</code> pages and <code>htmlContent</code> on <code>HTML</code> / <code>GRAPESJS</code> pages, and rejects the mismatch (<code>page &lt;id&gt; has editorType HTML; use htmlContent, not draftData</code>) rather than writing to a column the renderer never reads. Set <code>editorType</code> explicitly at create time - a page's editor type cannot be changed afterwards through these tools.</li>
+<li><strong>Media before pages.</strong> <code>upload_media</code> fetches a URL server-side and returns a CDN URL for component props. A local file has no URL to give it, so it goes over REST instead: <code>POST /api/v1.1/media/upload</code>, <code>multipart/form-data</code> with a <code>file</code> part, <code>201</code> with <code>{ assetId, url }</code>. Only <code>image/jpeg|png|webp|gif</code> and <code>video/mp4|webm</code> are accepted, and a key without <code>writeAccess</code> gets the same <code>403</code> write-denied envelope as every other write endpoint. If storage was never configured this returns <code>412</code> naming Settings -&gt; Storage, not a generic <code>500</code>.</li>
+<li><strong>There is no way to delete a page over the API.</strong> No <code>delete_page</code> tool, and no <code>DELETE</code> on <code>/api/v1.1/pages/{pageId}</code> - only <code>GET</code> and <code>PUT</code>. Funnels can be deleted (<code>delete_funnel</code>), pages cannot, so every abandoned or misnamed page is permanent until someone removes it in the admin UI. Pick slugs deliberately on the first try, and do trial runs on a throwaway instance rather than the tenant you are building.</li>
+<li><strong><code>get_stats</code> counts unique users, not views.</strong> Five visits by one visitor is 1.</li>
+<li><strong><code>list_orders</code> cannot filter by funnel</strong>, and its amounts divide minor units by 100 - correct for USD/EUR, wrong for JPY or BHD.</li>
+<li><strong>Ad spend is not available over MCP or REST.</strong> The admin UI has built-in ad-level spend, click and conversion reporting for Facebook, Google Ads and TikTok (connect under Settings → Ads, view under Analytics → Ads or a funnel's own Analytics tab), reconciled against your own orders - but none of it is an MCP tool or a <code>/api/v1.1/</code> endpoint. An agent driving this instance over MCP has no campaign or spend query available at all; a human has to open the admin UI for that. Bing has no spend/click reporting anywhere, UI included - it stays token-mode conversion postback only.</li>
+</ul>
+<h3>Build order</h3>
+<pre><code>list_products → list_templates → get_template
+  → media first:  remote URL → upload_media (MCP)
+                  local file → POST /api/v1.1/media/upload (REST, multipart)
+                  then swap the returned CDN url into the content you are about to write
+  → create_page × N (name, slug, type, editorType) → update_page (draftData or htmlContent)
+  → get_page (verify) → update_page({ publish: true })
+  → create_funnel → add_funnel_page × N (pageId + unique stepSlug) → get_funnel
+  → GET /storefront/{page.slug} → expect 200
+</code></pre>
+<p><strong>A <code>/n/</code> URL never renders the step it names.</strong> <code>/n/{funnelId}/{stepSlug}</code> is a forward redirect: it finds that step, <code>302</code>s to the <strong>next</strong> step's bare page slug with <code>?funnelId=</code> appended, and answers <code>404 No next step in funnel</code> on the last step. Point it at your landing step and you get the checkout, or a 404 if nothing follows - either way, not the landing page.</p>
+<p><strong><code>entryStepSlug</code> is not the URL to advertise either.</strong> It is literally <code>steps[0]</code>, and <code>create_funnel</code> appends the thank-you and error steps before you add anything, so on a funnel built this way <code>steps[0]</code> is the thank-you page.</p>
+<p><strong>The page is served at its own bare slug on a storefront host</strong>: <code>https://{storefront-host}/{page.slug}</code>. Read <code>steps</code> from <code>get_funnel</code>, pick the step whose <code>page.type</code> is <code>CUSTOM</code>, and advertise that step's <code>page.slug</code>. Append <code>?funnelId={id}</code> only when the page is bound to more than one funnel; with a single binding the funnel context resolves on its own.</p>
+<p><strong>Bare slugs work only on a non-admin host.</strong> The middleware rewrites <code>/{slug}</code> to the storefront renderer when the host does <em>not</em> match <code>ADMIN_DOMAIN</code>; on the admin host itself that path falls through to the admin app and 404s, which reads exactly like an unpublished page. A Workers deployment reachable only at its <code>*.workers.dev</code> admin hostname therefore has no clean landing-page URL until a storefront domain is attached - attach one before buying traffic.</p>
+<p><strong>To verify with nothing but an API key, request <code>/storefront/{slug}</code>.</strong> That prefix is public on every host including the admin one, and renders what a shopper gets. It serves PUBLISHED pages only - a draft 404s there while <code>get_page</code> still happily returns its <code>draftData</code>. <code>/preview/{slug}</code> does render drafts, but requires a logged-in session, so an API key cannot use it. Confirm a <code>200</code> and that the expected copy is in the body before spending money on it.</p>
+<p>To change a live page: <code>get_page</code> → edit only the props you mean to change → <code>update_page</code> without publish → <code>get_page</code> to diff → publish. Never regenerate a whole <code>draftData</code> blob for one headline; <code>update_page</code> replaces the document wholesale, and component JSON carries prop values you did not write and cannot reconstruct.</p>
+<h3>REST is not the same surface</h3>
+<p>REST takes the same <code>Authorization: Bearer &lt;api-key&gt;</code> header as MCP; without it you get a bare <code>401</code>.</p>
+<p>Thirteen tools are also reachable over REST through a bridge that runs the identical schema and handler, so those cannot drift. Seven are MCP-only: <code>list_funnels</code>, <code>get_funnel</code>, <code>list_pages</code>, <code>get_page</code>, <code>list_products</code>, <code>deliver_order</code>, <code>get_stats</code>. Some of those have an older, independently written REST endpoint at the same path with a different response shape or parameter name (<code>GET /products</code> takes <code>q</code>, not <code>search</code>). Do not assume a REST endpoint matches the tool of the same name.</p>
+<p>One path trap: <code>/api/v1.1/templates</code> lists <strong>email</strong> templates for Settings, not Puck page templates. Page templates are at <code>/api/v1.1/page-templates</code>.</p>
+<h2>Honest operational cost</h2>
+<p>Say this out loud rather than letting the user discover it after launch:</p>
+<ul>
+<li><strong>Workers path</strong>: no servers to patch, but you own the Postgres and its backups, and free-plan limits are daily caps that fail operations rather than billing you. Know which limit you are closest to before a traffic spike.</li>
+<li><strong>Docker path</strong>: upgrades, backups and uptime are yours. Schema changes ship with the image and must be applied on upgrade.</li>
+<li>Payment configuration and its PCI scope are the operator's responsibility on every path.</li>
+<li>There is no support SLA on the self-hosted build. Issues and Discussions on GitHub are the channel.</li>
+<li>Budget hours, not minutes, for the first production deployment. The two-minute number is the local Docker evaluation, not a launch.</li>
+</ul>
+<p>Documentation: <a href="https://autonnel.com/docs" target="_blank" rel="noopener noreferrer">https://autonnel.com/docs</a> · Issues and Discussions: <a href="https://github.com/autonnel/autonnel" target="_blank" rel="noopener noreferrer">https://github.com/autonnel/autonnel</a></p>

@@ -1,0 +1,125 @@
+<h1>日程待办摘要工作流</h1>
+<p><strong>CRITICAL — 开始前 MUST 先用 Read 工具读取 <a href="https://github.com/larksuite/cli/blob/HEAD/../lark-shared/SKILL.md" target="_blank" rel="noopener noreferrer"><code>../lark-shared/SKILL.md</code></a>，其中包含认证、权限处理</strong></p>
+<h2>适用场景</h2>
+<ul>
+<li>"今天有什么安排" / "今天的日程和待办"</li>
+<li>"明天有什么会" / "明日日程与未完成任务"</li>
+<li>"帮我看看今天要做什么" / "早报摘要"</li>
+<li>"开工摘要" / "standup report"</li>
+<li>"这周还有哪些安排"</li>
+</ul>
+<h2>前置条件</h2>
+<p>仅支持 <strong>user 身份</strong>。执行前确保已授权：</p>
+<pre><code class="language-bash">lark-cli auth login --domain calendar,task
+</code></pre>
+<h2>工作流</h2>
+<pre><code>{date} ─┬─► calendar +agenda [--start/--end]              ──► 日程列表（会议/事件）
+        └─► task +get-my-tasks --complete=false [--due-end] ──► 未完成待办列表
+                    │
+                    ▼
+              AI 汇总（时间转换 + 冲突检测 + 排序）──► 摘要
+</code></pre>
+<h3>Step 1: 获取日程</h3>
+<pre><code class="language-bash"># 今天（默认，无需额外参数）
+lark-cli calendar +agenda
+
+# 指定日期范围（必须使用 ISO 8601 格式，不支持 "tomorrow" 等自然语言）
+lark-cli calendar +agenda --start "2026-03-26T00:00:00+08:00" --end "2026-03-26T23:59:59+08:00"
+</code></pre>
+<blockquote>
+<p><strong>注意</strong>：<code>--start</code> / <code>--end</code> 仅支持 ISO 8601 格式（如 <code>2026-01-01</code> 或 <code>2026-01-01T15:04:05+08:00</code>）和 Unix timestamp，<strong>不支持</strong> <code>"tomorrow"</code>、<code>"next monday"</code> 等自然语言。需要 AI 根据当前日期自行计算目标日期。</p>
+</blockquote>
+<p>输出包含：event_id、summary、start_time（含 timestamp + timezone）、end_time、free_busy_status、self_rsvp_status。</p>
+<h3>Step 2: 获取未完成待办</h3>
+<pre><code class="language-bash"># 默认 pending 摘要：必须显式过滤未完成任务（最多 20 条）
+lark-cli task +get-my-tasks --complete=false
+
+# 只看指定日期前到期的未完成任务（推荐用于摘要场景，减少数据量）
+lark-cli task +get-my-tasks --complete=false --due-end "2026-03-27T23:59:59+08:00"
+
+# 获取全部未完成任务（超过 20 条时）
+lark-cli task +get-my-tasks --complete=false --page-all
+</code></pre>
+<blockquote>
+<p><strong>注意</strong>：<code>+get-my-tasks</code> 不带 <code>--complete</code> 时会<strong>同时返回已完成和未完成任务</strong>，会把已完成任务当成"待办"展示进摘要里。站会/日报这种 pending 汇总场景<strong>必须</strong>显式带上 <code>--complete=false</code>，不要省略。</p>
+<p>数据量层面也建议加过滤：</p>
+<ul>
+<li>用 <code>--due-end</code> 过滤出目标日期前到期的任务</li>
+<li>如果也需要无截止日期的任务，可不加 <code>--due-end</code>，但 AI 汇总时只展示<strong>近 30 天内创建的</strong>，其余折叠为"其他 N 项历史待办"</li>
+</ul>
+</blockquote>
+<h3>Step 3: AI 汇总</h3>
+<p>将 Step 1 和 Step 2 的结果整合，按以下结构输出：</p>
+<pre><code>## {日期}摘要（{YYYY-MM-DD 星期X}）
+
+### 日程安排
+| 时间 | 事件 | 组织者 | 状态 |
+|------|------|--------|------|
+| 09:00-10:00 | 产品需求评审 | 张三 | 已接受 |
+| 14:00-15:00 | 技术方案讨论 | 李四 | 待确认 |
+
+### 待办事项
+- [ ] {task_summary}（截止：{due_date}）
+- [ ] {task_summary}
+
+### 小结
+- 共 {n} 场会议，{m} 项待办
+- 冲突提醒：{列出时间重叠的日程}
+- 空闲时段：{free_slots}（根据日程推算）
+</code></pre>
+<p><strong>数据处理规则：</strong></p>
+<ol>
+<li><strong>时间转换</strong>：API 返回 Unix timestamp，需根据 <code>timezone</code> 字段（通常为 <code>Asia/Shanghai</code>）转换为 <code>HH:mm</code> 格式</li>
+<li><strong>RSVP 状态映射</strong>：<table>
+<thead>
+<tr>
+<th>API 值</th>
+<th>显示文案</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>accept</code></td>
+<td>已接受</td>
+</tr>
+<tr>
+<td><code>decline</code></td>
+<td>已拒绝</td>
+</tr>
+<tr>
+<td><code>needs_action</code></td>
+<td>待确认</td>
+</tr>
+<tr>
+<td><code>tentative</code></td>
+<td>暂定</td>
+</tr>
+</tbody></table>
+</li>
+<li><strong>日程排序</strong>：按开始时间升序排列</li>
+<li><strong>冲突检测</strong>：按时间排序后，检查相邻日程是否有时间重叠（前一个 end_time &gt; 后一个 start_time），有则在小结中列出冲突组</li>
+<li><strong>已拒绝日程</strong>：标注"已拒绝"但不计入忙碌时段和冲突检测</li>
+<li><strong>待办排序</strong>：按截止时间升序，已过期的标注"已过期"，无截止时间的排在最后</li>
+</ol>
+<h2>权限表</h2>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>所需 scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>calendar +agenda</code></td>
+<td><code>calendar:calendar.event:read</code></td>
+</tr>
+<tr>
+<td><code>task +get-my-tasks</code></td>
+<td><code>task:task:read</code></td>
+</tr>
+</tbody></table>
+<h2>参考</h2>
+<ul>
+<li><a href="https://github.com/larksuite/cli/blob/HEAD/../lark-shared/SKILL.md" target="_blank" rel="noopener noreferrer">lark-shared</a> — 认证、权限（必读）</li>
+<li><a href="https://github.com/larksuite/cli/blob/HEAD/../lark-calendar/SKILL.md" target="_blank" rel="noopener noreferrer">lark-calendar</a> — <code>+agenda</code> 详细用法</li>
+<li><a href="https://github.com/larksuite/cli/blob/HEAD/../lark-task/SKILL.md" target="_blank" rel="noopener noreferrer">lark-task</a> — <code>+get-my-tasks</code> 详细用法</li>
+</ul>

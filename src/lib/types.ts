@@ -1,4 +1,4 @@
-export const ECOSYSTEMS = ["dsh", "claude-code", "mcp"] as const;
+export const ECOSYSTEMS = ["dsh", "claude-code", "mcp", "skills"] as const;
 export type Ecosystem = (typeof ECOSYSTEMS)[number];
 
 export const ECOSYSTEM_META: Record<
@@ -22,6 +22,12 @@ export const ECOSYSTEM_META: Record<
     full: "Model Context Protocol",
     tagline: "The open protocol connecting AI to the world — servers as plugins.",
     color: "#7da300",
+  },
+  skills: {
+    label: "Skills",
+    full: "Agent Skills",
+    tagline: "Reusable procedural knowledge for AI agents — one install, any agent.",
+    color: "#16161a",
   },
 };
 
@@ -48,6 +54,7 @@ export interface TrustFlags {
   /** Additional community sources this plugin was found in */
   npmListed?: boolean;
   glamaListed?: boolean;
+  skillsShListed?: boolean;
 }
 
 export type SecurityGrade = "A+" | "A" | "B" | "C" | "D";

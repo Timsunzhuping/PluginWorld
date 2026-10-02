@@ -1,0 +1,97 @@
+<h1>XLSX creation, editing, and analysis</h1>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Approach</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Create</strong> or <strong>edit</strong> with formulas/formatting</td>
+<td><code>openpyxl</code> — see gotchas below</td>
+</tr>
+<tr>
+<td><strong>Bulk data</strong> in or out</td>
+<td><code>pandas</code> (<code>read_excel</code>, <code>to_excel</code>)</td>
+</tr>
+<tr>
+<td><strong>Quick look</strong> at a sheet</td>
+<td><code>markitdown file.xlsx</code> — <code>## SheetName</code> per sheet; reads <code>.xlsm</code> too. No cell coordinates, so don't plan edits from it</td>
+</tr>
+<tr>
+<td><strong>Read</strong> a model (formulas <em>and</em> values)</td>
+<td>two <code>load_workbook</code> passes — see gotchas</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p><code>openpyxl</code>, <code>pandas</code>, and <code>markitdown</code> are preinstalled — do not run <code>pip install</code> first; write the script and import directly. Only if an import fails (or the <code>markitdown</code> command is missing): <code>pip install</code> the missing package.</p>
+</blockquote>
+<blockquote>
+<p>Script paths below are relative to this skill's directory.</p>
+</blockquote>
+<h2>Requirements for every output</h2>
+<ul>
+<li><strong>Professional font</strong> (Arial, Times New Roman) throughout, unless the user says otherwise.</li>
+<li><strong>Zero formula errors.</strong> Never ship while <code>recalc.py</code> reports <code>errors_found</code>. If you think an error predates you, prove it: load the <em>original</em> with <code>data_only=True</code> and look at that cell. An error you introduced looks exactly like one you inherited.</li>
+<li><strong>Use formulas, never hardcoded results.</strong> Write <code>sheet['B10'] = '=SUM(B2:B9)'</code>, not the Python-computed total. The sheet must recalculate when its inputs change.</li>
+<li><strong>Follow the user's spec literally.</strong> Exact tab names, exact column headers, and the formula they spelled out. A redesign that computes something else fails, however elegant.</li>
+<li><strong>Document every assumption and hardcoded number</strong> where the reader will see it — a cell comment, or an adjacent cell at a table's end. Cite a real source when one exists (<code>Source: Company 10-K, FY2024, Page 45, Revenue Note, [SEC EDGAR URL]</code>); when the number came from the user, say so plainly.</li>
+<li><strong>A workbook <em>you create</em> for someone to fill in</strong> needs a short legend naming which cells to edit, and one example row of realistic values showing the expected format. Never add such a row to a file you were asked to edit.</li>
+<li><strong>Editing an existing file: match its conventions exactly.</strong> They override every guideline here. Find its designated input cells first — a distinct font color, fill, or shading marks them — write only there, and leave every existing formula untouched.</li>
+</ul>
+<h2>Recalculate (mandatory whenever the file contains formulas)</h2>
+<p>openpyxl writes formulas as strings with <strong>no cached values</strong>. Until you recalculate, every
+formula cell reads back as <code>None</code> to anything reading cached values — <code>pandas</code>,
+<code>load_workbook(data_only=True)</code>, and most previewers.</p>
+<pre><code class="language-bash">python scripts/recalc.py output.xlsx [timeout_seconds]   # default 30
+</code></pre>
+<p>LibreOffice computes every formula, the file is <strong>rewritten in place</strong>, and you get JSON:
+<code>status</code> (<code>success</code> | <code>errors_found</code>), <code>total_formulas</code>, <code>total_errors</code>, and an
+<code>error_summary</code> naming up to 100 cells per error type (<code>locations_truncated</code> says how many it
+withheld — trust <code>total_errors</code>, not the length of the list). Fix what it names and run it
+again. <strong>JSON with an <code>error</code> key instead of a <code>status</code> means nothing was recalculated</strong>, and
+only that case exits non-zero — <code>errors_found</code> exits 0, so never treat a clean exit as a clean
+workbook.</p>
+<p><strong>A green recalc proves your formulas <em>evaluate</em>, not that they are <em>right</em>.</strong> An off-by-one
+range or a reference to the wrong row yields a clean, error-free file with wrong numbers.
+Write 2–3 formulas first and check they pull the values you expect, before building out a grid.</p>
+<p><strong>A workbook that links to another file loses those links</strong> if you re-save it with openpyxl and
+then recalculate. Such a formula reads <code>='[1]Returns Analysis'!$B$2</code> — the <code>[1]</code> is an index
+into the workbook's external-reference list, naming a <em>separate file on disk</em>, not a sheet.
+That file is rarely present here, so the cell's cached value is the only thing holding its
+data. openpyxl strips that value on save; LibreOffice then has to resolve the reference for
+real, fails, writes <code>#NAME?</code>, and deletes every link. <code>recalc.py</code> refuses to run in that state
+— copy those cells' values out of the original before you save over them (<code>--force</code> overrides,
+and accepts the loss).</p>
+<h2>Choosing formulas that survive verification</h2>
+<p>LibreOffice implements fewer functions than Excel, and one it cannot evaluate becomes a
+literal <code>#NAME?</code> baked into the file you deliver.</p>
+<ul>
+<li><strong>Prefer Excel-2007-era functions</strong> — <code>SUMIFS</code>, <code>INDEX</code>, <code>MATCH</code>, <code>IFERROR</code>, <code>SUMPRODUCT</code> — which need no prefix.</li>
+<li><strong>Six post-2007 functions work, but only with an <code>_xlfn.</code> prefix</strong>, because openpyxl writes your formula into the XML verbatim and Excel stores post-2007 names prefixed (its UI hides the prefix): <code>_xlfn.TEXTJOIN</code>, <code>_xlfn.CONCAT</code>, <code>_xlfn.IFS</code>, <code>_xlfn.SWITCH</code>, <code>_xlfn.MAXIFS</code>, <code>_xlfn.MINIFS</code>. Written bare, each yields <code>#NAME?</code>.</li>
+<li><strong>Never use <code>XLOOKUP</code>, <code>XMATCH</code>, <code>SORT</code>, <code>FILTER</code>, <code>UNIQUE</code>, or <code>SEQUENCE</code>.</strong> The runtime's LibreOffice cannot evaluate them under <em>any</em> prefix. Newer builds do evaluate them, but they are spilling array functions and an openpyxl-written file has no spill metadata, so only the top-left cell of the range gets a value — and <code>recalc.py</code> reports <code>total_errors: 0</code> on the truncated result. Use <code>INDEX</code>/<code>MATCH</code> for lookups, and sort, filter, and de-duplicate in Python before writing the cells.</li>
+<li>A formula LibreOffice could not parse is written back <strong>lowercased</strong> — a quick tell beside a <code>#NAME?</code>.</li>
+</ul>
+<h2>openpyxl gotchas</h2>
+<ul>
+<li><strong>Reading a model takes two loads.</strong> <code>data_only=True</code> yields cached values with the formulas gone; the default yields formula strings with no values. One pass cannot give you both.</li>
+<li><strong><code>data_only=True</code> is destructive if you save.</strong> That workbook has no formulas left, so saving replaces every one with a literal — permanently.</li>
+<li><strong><code>data_only=True</code> on a file openpyxl just wrote returns <code>None</code> everywhere</strong> — run <code>recalc.py</code> first. (A formula whose result is <code>""</code> also reads back as <code>None</code>.)</li>
+<li><strong>Merged cells: write the top-left anchor only.</strong> Every other cell in the range is a <code>MergedCell</code> whose <code>.value</code> is read-only.</li>
+<li><strong><code>.xlsm</code> loses its macros unless you pass <code>keep_vba=True</code></strong> to <code>load_workbook</code>.</li>
+<li><strong>A sheet name containing a space must be quoted</strong> in a cross-sheet reference: <code>='Assumptions Inputs'!$B$5</code>. Unquoted, it evaluates to <code>#VALUE!</code>.</li>
+</ul>
+<h2>Financial models</h2>
+<p>Unless the user says otherwise, or the existing file already does something else.</p>
+<p><strong>Color:</strong> blue text (<code>0,0,255</code>) for hardcoded inputs and scenario levers · black for formulas ·
+green (<code>0,128,0</code>) for links to another sheet · red (<code>255,0,0</code>) for links to another file ·
+yellow fill (<code>255,255,0</code>) for key assumptions and cells the user should fill in.</p>
+<p><strong>Numbers:</strong> currency <code>$#,##0</code>, with the unit named in the header (<code>Revenue ($mm)</code>) · zeros
+render as <code>-</code>, including in percentages (<code>$#,##0;($#,##0);-</code>) · negatives in parentheses ·
+percentages <code>0.0%</code>, <strong>stored as fractions</strong> (<code>0.15</code> renders <code>15.0%</code>; storing <code>15</code> renders
+<code>1500.0%</code>) · valuation multiples <code>0.0x</code> · years as text (<code>"2024"</code>, never <code>2,024</code>).</p>
+<p><strong>Structure:</strong> every assumption in its own labeled cell, referenced by the formulas that use it
+(<code>=B5*(1+$B$6)</code>, never <code>=B5*1.05</code>) · formulas consistent across every projection period, since a
+lone edited cell mid-row is the commonest silent error · guard denominators that can be zero.</p>
+<h2>Dependencies</h2>
+<p><code>openpyxl</code>, <code>pandas</code>, <code>markitdown</code> (pip, preinstalled — install only if an import fails or the command is missing) · LibreOffice (<code>soffice</code>, auto-configured for sandboxed environments via <code>scripts/office/soffice.py</code>)</p>

@@ -1,0 +1,302 @@
+<h1>Convex Create Component</h1>
+<p>Create reusable Convex components with clear boundaries and a small app-facing
+API.</p>
+<h2>When to Use</h2>
+<ul>
+<li>Creating a new Convex component in an existing app</li>
+<li>Extracting reusable backend logic into a component</li>
+<li>Building a third-party integration that should own its own tables and
+workflows</li>
+<li>Packaging Convex functionality for reuse across multiple apps</li>
+</ul>
+<h2>When Not to Use</h2>
+<ul>
+<li>One-off business logic that belongs in the main app</li>
+<li>Thin utilities that do not need Convex tables or functions</li>
+<li>App-level orchestration that should stay in <code>convex/</code></li>
+<li>Cases where a normal TypeScript library is enough</li>
+</ul>
+<h2>Workflow</h2>
+<ol>
+<li>Ask the user what they are building and what the end goal is. If the repo
+already makes the answer obvious, say so and confirm before proceeding.</li>
+<li>Choose the shape using the decision tree below and read the matching
+reference file.</li>
+<li>Decide whether a component is justified. Prefer normal app code or a regular
+library if the feature does not need isolated tables, backend functions, or
+reusable persistent state.</li>
+<li>Make a short plan for:<ul>
+<li>what tables the component owns</li>
+<li>what public functions it exposes</li>
+<li>what data must be passed in from the app (auth, env vars, parent IDs)</li>
+<li>what stays in the app as wrappers or HTTP mounts</li>
+</ul>
+</li>
+<li>Create the component structure with <code>convex.config.ts</code>, <code>schema.ts</code>, and
+function files.</li>
+<li>Implement functions using the component's own <code>./_generated/server</code> imports,
+not the app's generated files.</li>
+<li>Wire the component into the app with <code>app.use(...)</code>. If the app does not
+already have <code>convex/convex.config.ts</code>, create it.</li>
+<li>Call the component from the app through <code>components.&lt;name&gt;</code> using
+<code>ctx.runQuery</code>, <code>ctx.runMutation</code>, or <code>ctx.runAction</code>.</li>
+<li>If React clients, HTTP callers, or public APIs need access, create wrapper
+functions in the app instead of exposing component functions directly.</li>
+<li>Run <code>npx convex dev</code> and fix codegen, type, or boundary issues before
+finishing.</li>
+</ol>
+<h2>Choose the Shape</h2>
+<p>Ask the user, then pick one path:</p>
+<table>
+<thead>
+<tr>
+<th>Goal</th>
+<th>Shape</th>
+<th>Reference</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Component for this app only</td>
+<td>Local</td>
+<td><code>references/local-components.md</code></td>
+</tr>
+<tr>
+<td>Publish or share across apps</td>
+<td>Packaged</td>
+<td><code>references/packaged-components.md</code></td>
+</tr>
+<tr>
+<td>User explicitly needs local + shared library code</td>
+<td>Hybrid</td>
+<td><code>references/hybrid-components.md</code></td>
+</tr>
+<tr>
+<td>Not sure</td>
+<td>Default to local</td>
+<td><code>references/local-components.md</code></td>
+</tr>
+</tbody></table>
+<p>Read exactly one reference file before proceeding.</p>
+<h2>Default Approach</h2>
+<p>Unless the user explicitly wants an npm package, default to a local component:</p>
+<ul>
+<li>Put it under <code>convex/components/&lt;componentName&gt;/</code></li>
+<li>Define it with <code>defineComponent(...)</code> in its own <code>convex.config.ts</code></li>
+<li>Install it from the app's <code>convex/convex.config.ts</code> with <code>app.use(...)</code></li>
+<li>Let <code>npx convex dev</code> generate the component's own <code>_generated/</code> files</li>
+</ul>
+<h2>Component Skeleton</h2>
+<p>A minimal local component with a table and two functions, plus the app wiring.</p>
+<pre><code class="language-ts">// convex/components/notifications/convex.config.ts
+import { defineComponent } from "convex/server";
+
+export default defineComponent("notifications");
+</code></pre>
+<pre><code class="language-ts">// convex/components/notifications/schema.ts
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export default defineSchema({
+  notifications: defineTable({
+    userId: v.string(),
+    message: v.string(),
+    read: v.boolean(),
+  }).index("by_user_read", ["userId", "read"]),
+});
+</code></pre>
+<pre><code class="language-ts">// convex/components/notifications/lib.ts
+import { v } from "convex/values";
+import { mutation, query } from "./_generated/server.js";
+
+export const send = mutation({
+  args: { userId: v.string(), message: v.string() },
+  returns: v.id("notifications"),
+  handler: async (ctx, args) =&gt; {
+    return await ctx.db.insert("notifications", {
+      userId: args.userId,
+      message: args.message,
+      read: false,
+    });
+  },
+});
+
+export const listUnread = query({
+  args: { userId: v.string() },
+  returns: v.array(
+    v.object({
+      _id: v.id("notifications"),
+      _creationTime: v.number(),
+      userId: v.string(),
+      message: v.string(),
+      read: v.boolean(),
+    }),
+  ),
+  handler: async (ctx, args) =&gt; {
+    return await ctx.db
+      .query("notifications")
+      .withIndex("by_user_read", (q) =&gt;
+        q.eq("userId", args.userId).eq("read", false),
+      )
+      .collect();
+  },
+});
+</code></pre>
+<pre><code class="language-ts">// convex/convex.config.ts
+import { defineApp } from "convex/server";
+import notifications from "./components/notifications/convex.config.js";
+
+const app = defineApp();
+app.use(notifications);
+
+export default app;
+</code></pre>
+<pre><code class="language-ts">// convex/notifications.ts  (app-side wrapper)
+import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
+import { components } from "./_generated/api";
+import { getAuthUserId } from "@convex-dev/auth/server";
+
+export const sendNotification = mutation({
+  args: { message: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) =&gt; {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+
+    await ctx.runMutation(components.notifications.lib.send, {
+      userId,
+      message: args.message,
+    });
+    return null;
+  },
+});
+
+export const myUnread = query({
+  args: {},
+  handler: async (ctx) =&gt; {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+
+    return await ctx.runQuery(components.notifications.lib.listUnread, {
+      userId,
+    });
+  },
+});
+</code></pre>
+<p>Note the reference path shape: a function in
+<code>convex/components/notifications/lib.ts</code> is called as
+<code>components.notifications.lib.send</code> from the app.</p>
+<h2>Critical Rules</h2>
+<ul>
+<li>Keep authentication in the app, because <code>ctx.auth</code> is not available inside
+components.</li>
+<li>Keep environment access in the app, because component functions cannot read
+<code>process.env</code>.</li>
+<li>Pass parent app IDs across the boundary as strings, because <code>Id</code> types become
+plain strings in the app-facing <code>ComponentApi</code>.</li>
+<li>Do not use <code>v.id("parentTable")</code> for app-owned tables inside component args or
+schema, because the component has no access to the app's table namespace.</li>
+<li>Import <code>query</code>, <code>mutation</code>, and <code>action</code> from the component's own
+<code>./_generated/server</code>, not the app's generated files.</li>
+<li>Do not expose component functions directly to clients. Create app wrappers
+when client access is needed, because components are internal and need
+auth/env wiring the app provides.</li>
+<li>If the component defines HTTP handlers, mount the routes in the app's
+<code>convex/http.ts</code>, because components cannot register their own HTTP routes.</li>
+<li>If the component needs pagination, use <code>paginator</code> from <code>convex-helpers</code>
+instead of built-in <code>.paginate()</code>, because <code>.paginate()</code> does not work across
+the component boundary.</li>
+<li>Define indexes for queried fields instead of using Convex <code>.filter()</code> after a
+database query.</li>
+<li>Add <code>args</code> and <code>returns</code> validators to all public component functions, because
+the component boundary requires explicit type contracts.</li>
+</ul>
+<h2>Patterns</h2>
+<h3>Authentication and environment access</h3>
+<pre><code class="language-ts">// Bad: component code cannot rely on app auth or env
+const identity = await ctx.auth.getUserIdentity();
+const apiKey = process.env.OPENAI_API_KEY;
+</code></pre>
+<pre><code class="language-ts">// Good: the app resolves auth and env, then passes explicit values
+const userId = await getAuthUserId(ctx);
+if (!userId) throw new Error("Not authenticated");
+
+await ctx.runAction(components.translator.translate, {
+  userId,
+  apiKey: process.env.OPENAI_API_KEY,
+  text: args.text,
+});
+</code></pre>
+<h3>Client-facing API</h3>
+<pre><code class="language-ts">// Bad: assuming a component function is directly callable by clients
+export const send = components.notifications.send;
+</code></pre>
+<pre><code class="language-ts">// Good: re-export through an app mutation or query
+export const sendNotification = mutation({
+  args: { message: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) =&gt; {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) throw new Error("Not authenticated");
+
+    await ctx.runMutation(components.notifications.lib.send, {
+      userId,
+      message: args.message,
+    });
+    return null;
+  },
+});
+</code></pre>
+<h3>IDs across the boundary</h3>
+<pre><code class="language-ts">// Bad: parent app table IDs are not valid component validators
+args: {
+  userId: v.id("users"),
+}
+</code></pre>
+<pre><code class="language-ts">// Good: treat parent-owned IDs as strings at the boundary
+args: {
+  userId: v.string(),
+}
+</code></pre>
+<h3>Advanced Patterns</h3>
+<p>For additional patterns including function handles for callbacks, deriving
+validators from schema, static configuration with a globals table, and
+class-based client wrappers, see <code>references/advanced-patterns.md</code>.</p>
+<h2>Validation</h2>
+<p>Try validation in this order:</p>
+<ol>
+<li><code>npx convex codegen --component-dir convex/components/&lt;name&gt;</code></li>
+<li><code>npx convex codegen</code></li>
+<li><code>npx convex dev</code></li>
+</ol>
+<p>Important:</p>
+<ul>
+<li>Fresh repos may fail these commands until <code>CONVEX_DEPLOYMENT</code> is configured.</li>
+<li>Until codegen runs, component-local <code>./_generated/*</code> imports and app-side
+<code>components.&lt;name&gt;...</code> references will not typecheck.</li>
+<li>If validation blocks on Convex login or deployment setup, stop and ask the
+user for that exact step instead of guessing.</li>
+</ul>
+<h2>Reference Files</h2>
+<p>Read exactly one of these after the user confirms the goal:</p>
+<ul>
+<li><code>references/local-components.md</code></li>
+<li><code>references/packaged-components.md</code></li>
+<li><code>references/hybrid-components.md</code></li>
+</ul>
+<p>Official docs:
+<a href="https://docs.convex.dev/components/authoring" target="_blank" rel="noopener noreferrer">Authoring Components</a></p>
+<h2>Checklist</h2>
+<ul>
+<li> Asked the user what they want to build and confirmed the shape</li>
+<li> Read the matching reference file</li>
+<li> Confirmed a component is the right abstraction</li>
+<li> Planned tables, public API, boundaries, and app wrappers</li>
+<li> Component lives under <code>convex/components/&lt;name&gt;/</code> (or package layout if
+publishing)</li>
+<li> Component imports from its own <code>./_generated/server</code></li>
+<li> Auth, env access, and HTTP routes stay in the app</li>
+<li> Parent app IDs cross the boundary as <code>v.string()</code></li>
+<li> Public functions have <code>args</code> and <code>returns</code> validators</li>
+<li> Ran <code>npx convex dev</code> and fixed codegen or type issues</li>
+</ul>

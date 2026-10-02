@@ -1,0 +1,459 @@
+<p><strong>Plugin installs:</strong> Before setup or freshness commands, follow <a href="https://github.com/heygen-com/hyperframes/blob/HEAD/../hyperframes/references/plugin-installation.md" target="_blank" rel="noopener noreferrer">plugin execution rules</a> when this skill is inside a HyperFrames plugin. Standalone installs keep the update instructions below.</p>
+<h1>HyperFrames Audio</h1>
+<p>A mix is a set of relationships, not a stack of processors. Two tracks that each
+sound right alone can be unlistenable together, and the fix is almost never "turn
+one down" — it is finding what they are fighting over and giving it to whichever
+one needs it. Every tool here exists to express one of those relationships.</p>
+<p>Effects live on the element as <code>data-fx-chain</code>, and preview and render run the
+same Web Audio graph — the studio in a live context, the engine in an offline one
+inside the browser it already drives. There is one implementation of each effect,
+so what you hear while scrubbing is what gets written. You never tune twice.</p>
+<p>Clip timing remains <code>/hyperframes-core</code>: audio/video trims and source ranges use
+<code>data-start</code>, <code>data-duration</code>, and <code>data-media-start</code>, and crossfades overlap
+clips on different tracks. This skill owns placed-track fade-in/fade-out,
+crossfade envelopes, track gain/track volume, volume and effect automation,
+ducking/voiceover carve, and the effect chain. <code>/media-use</code> owns sourcing,
+generation, and preprocessing.</p>
+<p>Constant <code>data-playback-rate</code> (<code>0.1..10</code>) is render-safe for picture and
+pitch-preserved sound when matching audio/video elements use the same timing,
+source offset, and rate. A speed ramp is a <code>rate</code> lane in <code>data-automation</code>
+(see <code>docs/reference/speed-ramps</code>); it wins over the constant and keeps pitch
+in preview and render. HyperFrames does not
+provide automatic waveform sync or drift correction.
+For copyable cut/crossfade/retime recipes, use <code>/hyperframes-core</code> → <code>references/creator-editing-recipes.md</code>.</p>
+<p>Three attributes carry everything, on the audio/video element itself — or, for
+the first two, on an <code>&lt;hf-audio-group&gt;</code> bus (see "One bus for many tracks"):</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Holds</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>data-fx-chain</code></td>
+<td>the effects, in signal order</td>
+</tr>
+<tr>
+<td><code>data-automation</code></td>
+<td>envelopes on this track's volume or its effect parameters</td>
+</tr>
+<tr>
+<td><code>data-fx-carve</code></td>
+<td>the carve's own settings, so it can be re-derived</td>
+</tr>
+</tbody></table>
+<p>The shipped effect families are gain, EQ (highpass, lowpass, peaking, shelves),
+compressor, limiter, gate, saturate, delay, reverb, chorus, phaser, and bitcrush.</p>
+<p>Exact JSON for each, and the rules a lane must satisfy: <code>references/attributes.md</code>.
+Every effect with its parameters, ranges and units: <code>references/fx-registry.md</code>.
+How to work out what is wrong with a file you cannot hear:
+<code>references/diagnosis.md</code>.
+<strong>Presets, named jobs and one-knob profiles, plus a symptom-to-fix table:
+<code>references/presets.md</code></strong> — read that before hand-building a chain, because one
+of the presets or named jobs usually already names the problem.</p>
+<h2>How it fits together</h2>
+<p>Two authoring surfaces write those attributes; two runtimes read them through the
+same builders. That shared middle is why preview predicts the render.</p>
+<pre><code class="language-mermaid">flowchart TB
+  voice["voice track&lt;br/&gt;media file"]
+  bed["music bed&lt;br/&gt;media file"]
+
+  subgraph AUTHOR["Authoring — the only things that write attributes"]
+    panel["Studio&lt;br/&gt;Voiceover carve control"]
+    script["scripts/carve.mjs&lt;br/&gt;detects the pair, dynamic by default"]
+    analysis["core/audioCarve.ts&lt;br/&gt;carveProfile · analyseCarveBands&lt;br/&gt;analyseCarveDuck · analyseCarveDynamics"]
+    panel --&gt; analysis
+    script --&gt; analysis
+  end
+
+  voice --&gt; analysis
+  bed --&gt; analysis
+
+  subgraph ATTRS["Written onto the bed element"]
+    carveAttr["data-fx-carve&lt;br/&gt;source · strength · dynamic"]
+    chainAttr["data-fx-chain&lt;br/&gt;peaking xN + gain, tagged fromCarve"]
+    autoAttr["data-automation&lt;br/&gt;a lane per carved parameter"]
+  end
+
+  analysis --&gt; carveAttr
+  analysis --&gt; chainAttr
+  analysis --&gt; autoAttr
+
+  subgraph SHARED["One implementation, read by both"]
+    build["audioFxGraph.ts · buildFxChain"]
+    sched["audioFxAutomation.ts · scheduleChainAutomation"]
+  end
+
+  chainAttr --&gt; build
+  autoAttr --&gt; sched
+
+  build --&gt; preview["Preview&lt;br/&gt;live AudioContext&lt;br/&gt;attachElementFxChain"]
+  sched --&gt; preview
+  build --&gt; render["Render&lt;br/&gt;OfflineAudioContext in the headless browser&lt;br/&gt;applyAudioFxChain"]
+  sched --&gt; render
+
+  preview --&gt; heard["what you hear while scrubbing"]
+  render --&gt; wav["processed WAV&lt;br/&gt;+ chainTailSeconds so the mix lets the tail through"]
+  wav --&gt; mix["engine · audioMixer&lt;br/&gt;volume lane baked into the PCM here, not in the graph"]
+  mix --&gt; out["the rendered mix"]
+
+  edit["editing the attribute mid-playback"] -.-&gt;|MutationObserver| preview
+</code></pre>
+<p>The carve's own settings are never read at playback — the chain and lanes it
+produced are what play. <code>data-fx-carve</code> exists so strength can be changed on an
+existing carve instead of guessed back out of the filters.</p>
+<p>Inside a carved bed the signal runs through the dips first, then the level match,
+then anything you built yourself — which is why a limiter you add still acts as
+the last ceiling:</p>
+<pre><code class="language-mermaid">flowchart LR
+  src["decoded bed"] --&gt; p1["peaking&lt;br/&gt;400 Hz"]
+  p1 --&gt; p2["peaking&lt;br/&gt;1 kHz"]
+  p2 --&gt; p3["peaking&lt;br/&gt;1.6 kHz"]
+  p3 --&gt; g["gain&lt;br/&gt;level match"]
+  g --&gt; hand["your own effects&lt;br/&gt;e.g. limiter"]
+  hand --&gt; dest["track gain, then out"]
+
+  l1["lane fx.n1.gain"] -.-&gt;|"envelope of the voice's&lt;br/&gt;level in that band"| p1
+  l4["lane fx.n4.gain"] -.-&gt;|"how far the bed&lt;br/&gt;ducks overall"| g
+</code></pre>
+<p>A static carve is the same graph with fixed values and no lanes at all.</p>
+<h2>First, work out what is wrong</h2>
+<p>The table below starts from "it sounds boomy" — which presumes somebody already
+listened and said so. Handed a file and "fix this", you have no such sentence
+and you cannot listen, so you have to measure. One rule governs all of it:</p>
+<blockquote>
+<p><strong>The absolute spectrum of a single unknown voice cannot be diagnosed.</strong>
+Formants are ±10 dB, fundamentals run 85–255 Hz, and sentences decline 5–6 dB
+as they end. Every one of those reads as a defect on its own, and every one of
+them is the speaker.</p>
+</blockquote>
+<p>So compare, and compare against something <strong>inside the same file</strong>: the clean
+original if it exists, otherwise the pauses — whatever is audible in a gap is
+additive, and the gap's spectrum is the channel rather than the voice. Comparing
+against a published average spectrum or a synthesised control voice does not
+work: two speakers differ by more than most defects, and both wrong answers in
+the evaluation behind this guidance came from exactly that.</p>
+<p>When there is no original and no usable silence, a static tonal defect is
+genuinely under-determined. Say so and offer the readings that fit, rather than
+picking one and building a chain on it.</p>
+<p>Commands, traps and worked recipes: <strong><code>references/diagnosis.md</code></strong>. Read it
+before diagnosing a file nobody has described.</p>
+<h2>Start from the symptom</h2>
+<p>Once you know the band and the kind, name what is wrong with the audio. Most bad audio is
+one or two of these, and each has a shipped answer:</p>
+<table>
+<thead>
+<tr>
+<th>It sounds like</th>
+<th>Reach for</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Hum or thump underneath</td>
+<td><code>rumble-cut</code>, or a <code>highpass</code> at 80 Hz</td>
+</tr>
+<tr>
+<td>Boomy, chesty</td>
+<td><strong>Tame Boominess</strong> job (200 Hz)</td>
+</tr>
+<tr>
+<td>Muffled, behind cardboard</td>
+<td><strong>Reduce Mud</strong> job (250 Hz)</td>
+</tr>
+<tr>
+<td>Words hard to make out</td>
+<td><strong>Add Clarity</strong> job (3 kHz), or carve the bed</td>
+</tr>
+<tr>
+<td>Harsh and tiring</td>
+<td><strong>Soften Harshness</strong> job (3.2 kHz)</td>
+</tr>
+<tr>
+<td>Some words much louder than others</td>
+<td><strong>Evenness</strong> on a compressor, or Even Out Levels</td>
+</tr>
+<tr>
+<td>Room tone between sentences</td>
+<td><code>room-gate</code></td>
+</tr>
+<tr>
+<td>Voice and music fighting</td>
+<td><strong>Voiceover carve</strong> — not an EQ on either</td>
+</tr>
+<tr>
+<td>Dry, recorded nowhere</td>
+<td><code>room-tight</code> or <code>room-natural</code></td>
+</tr>
+<tr>
+<td>Just "amateur"</td>
+<td><code>voice-clean</code>, which is four of the above in order</td>
+</tr>
+</tbody></table>
+<p>Full catalogue, what each preset contains, the band vocabulary, and what is
+deliberately NOT covered (de-essing, noise removal, tone match):
+<code>references/presets.md</code>.</p>
+<p>Subtract before you add, level after you filter, relationships after level,
+character and ceiling last. Each step changes what the next one hears — a
+compressor set before a high-pass spends its time chasing rumble.</p>
+<h2>Reach for a family by the problem, not the name</h2>
+<p><strong>Filters</strong> (<code>highpass</code>, <code>lowpass</code>, <code>peaking</code>, <code>lowshelf</code>, <code>highshelf</code>) decide
+which frequencies a track is allowed to occupy. This is the first tool for two
+sources colliding, because collisions happen in bands: a bed and a voice both
+want 1–3 kHz, and taking that from the bed costs the bed far less than turning
+the whole thing down costs the mix. A high-pass on a voice is the standard fix
+for rumble; a low-pass darkens or muffles deliberately.</p>
+<p><strong>Dynamics</strong> (<code>gain</code>, <code>compressor</code>, <code>limiter</code>, <code>gate</code>) decide how a track's level
+behaves over time. Compression narrows the distance between loud and quiet so the
+quiet parts can come up. A limiter is a ceiling — it does not shape anything, it
+guarantees nothing gets past. A gate removes what is below a threshold, which is
+how you silence room tone between phrases. <code>gain</code> is a plain level stage, and it
+is what an automation lane rides when a track has to move out of the way.</p>
+<p><strong>Nonlinear</strong> (<code>saturate</code>, <code>bitcrush</code>) changes the waveform's shape, which adds
+harmonics that were not there. Reach for it when a track needs character or
+grit rather than correction — and remember it is generative: it makes a thin
+source denser, not cleaner.</p>
+<p><strong>Time</strong> (<code>delay</code>, <code>reverb</code>, <code>chorus</code>, <code>phaser</code>) puts a track in a space or gives
+it width. These are the ones that most easily wreck a mix, because a tail or a
+detuned copy occupies the same room a voice needs. Use them on the thing that
+should sit <em>behind</em> something else, and keep the wet amount lower than sounds
+right in isolation.</p>
+<p>The chain is serial: each effect processes what the one before it produced. So
+corrective filtering goes early, character in the middle, and a limiter last
+where it can actually act as a ceiling.</p>
+<h2>Voiceover carve</h2>
+<p><strong>The problem it solves.</strong> A music bed under a voice makes the voice hard to
+follow. The reflex is to duck the whole bed, which works and costs the bed all of
+its presence — the music goes limp for the entire voiceover. But the voice does
+not need the whole spectrum. It needs the few bands it actually occupies. Carve
+takes only those, and the bed keeps its low end and its top, so it is still music
+while the voice is still intelligible.</p>
+<p><strong>It is a relationship, not an effect.</strong> The settings live on the <em>bed</em> — the
+track that gets processed — and they name the voices to listen to, exactly as a
+sidechain compressor does: you select the track that gets quieter and pick what
+makes it quieter. <strong>Never put a carve on a voice track.</strong> A voice carved against
+itself is a bug, not a subtle mix choice.</p>
+<p><strong>Every voice, not one of them.</strong> <code>sources</code> is a list, because a bed usually runs
+under a whole sequence — a narrator, an interview answer, a second presenter. They
+are summed onto the bed's own clock before anything is measured (<code>mixCarveSources</code>),
+so one analysis covers all of them: the bands come from all the speech there is, and
+the envelopes rise wherever any of it is happening. Voices that never play while the
+bed does are left out; they cannot mask it.</p>
+<p><strong>A carve against more than one clip id is wrong. Group the clips and carve
+against the group.</strong> This is an invariant, not a tip. Naming clips one by one has
+to be exhaustively right and stays right only until the next edit — a fourth
+narration clip added later plays outside the carve's awareness, and the bed
+fails to duck under it silently. Naming the group instead resolves membership at
+analysis time, so a clip added to the group later is covered without touching
+<code>sources</code> at all:</p>
+<pre><code class="language-html">&lt;!-- group the narration, then carve the bed against the group --&gt;
+&lt;audio id="vo-intro" data-audio-group="voiceover" …&gt;&lt;/audio&gt;
+&lt;audio id="vo-middle" data-audio-group="voiceover" …&gt;&lt;/audio&gt;
+&lt;audio id="vo-outro" data-audio-group="voiceover" …&gt;&lt;/audio&gt;
+
+&lt;audio id="music" data-fx-carve='{"enabled":true,"sources":["voiceover"],"strength":0.8}' …&gt;&lt;/audio&gt;
+</code></pre>
+<p>A <code>sources</code> list naming two or more plain clip ids instead of a group is caught
+by the <code>audio_carve_ungrouped_sources</code> lint rule — it still works, but it is the
+version that silently rots when a clip is added.</p>
+<p><strong>Keep the carve group a voice group: no bed, no SFX, no music.</strong> A group id in
+<code>sources</code> resolves to every <em>current</em> member on <em>every</em> analysis, so the group
+you name is the group you get later — not the tracks that were measured when it
+was written. Two ways that bites:</p>
+<ul>
+<li><strong>The bed in its own source group.</strong> It is handed to itself as a voice and
+carved against its own content — the "never carve a track against itself" rule
+arriving one re-analysis later.</li>
+<li><strong>An SFX or music clip in the voice group.</strong> It enters the sidechain on the
+next analysis and the bed starts ducking under a whoosh, even though the run
+that wrote the attribute never measured it.</li>
+</ul>
+<p>Both are invisible at the moment the carve is written: the analysis sums the
+voices it detected and never round-trips through group resolution, so the first
+pass is genuinely correct and only the next one is wrong. So give each role its
+own group — <code>music</code> for the bed, <code>voiceover</code> for the narration, <code>sfx</code> for the
+hits — and keep the group named in <code>sources</code> holding nothing but voices.</p>
+<p><code>carve.mjs</code> refuses to write the group form when it sees either case, records
+clip ids, and says on stderr which member blocked it. The
+<code>audio_carve_ungrouped_sources</code> rule then points at the arrangement instead of
+the CLI quietly persisting a wider carve than it measured.</p>
+<p>A voice that this run left out is <strong>not</strong> one of these cases and does not block
+the group form: <code>carve.mjs</code> only analyses voices that overlap the bed, and
+picking up a clip that plays later without an edit to <code>sources</code> is the whole
+reason to name the group.</p>
+<h3>One bus for many tracks</h3>
+<p>Membership alone is enough to carve against, as above — but add an
+<code>&lt;hf-audio-group&gt;</code> element with that id and the group becomes a real submix bus:
+one chain, one fader, one automation clock for every member.</p>
+<pre><code class="language-html">&lt;hf-audio-group
+  id="voiceover"
+  data-label="Voiceover"
+  data-volume="0.9"
+  data-fx-chain='{"version":1,"nodes":[
+    {"type":"compressor","id":"g1","params":{"threshold":-18,"ratio":3}},
+    {"type":"peaking","id":"g2","params":{"frequency":3000,"gain":2,"q":1}}]}'
+&gt;&lt;/hf-audio-group&gt;
+
+&lt;audio id="vo-intro" data-audio-group="voiceover" …&gt;&lt;/audio&gt;
+&lt;audio id="vo-middle" data-audio-group="voiceover" …&gt;&lt;/audio&gt;
+</code></pre>
+<p><strong>Reach for the bus when the same treatment belongs on several tracks.</strong> Four
+narration clips that each want the same compressor is four chains to keep in
+step, and they drift the moment one is edited; on the bus it is one chain, and
+the compressor sees the whole voice rather than each clip in isolation — which is
+the point, since a compressor cannot ride a sequence it only hears a third of.
+Per-clip chains remain right for what is genuinely per-clip: one noisy take that
+needs its own de-esser.</p>
+<table>
+<thead>
+<tr>
+<th>On the bus</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>data-fx-chain</code></td>
+<td>one chain over the summed members</td>
+</tr>
+<tr>
+<td><code>data-automation</code></td>
+<td>envelopes on the bus, in COMPOSITION time</td>
+</tr>
+<tr>
+<td><code>data-volume</code></td>
+<td>one fader for every member (default 1)</td>
+</tr>
+<tr>
+<td><code>data-label</code></td>
+<td>the display name; falls back to the id</td>
+</tr>
+<tr>
+<td><code>data-hidden</code></td>
+<td>drops every member from the mix</td>
+</tr>
+</tbody></table>
+<p><strong>Group automation is composition time, not clip time.</strong> A bus has no
+<code>data-start</code> — members are already at their composition positions when they
+reach it — so <code>t: 0</code> in a group lane is the start of the composition, not of any
+clip. A lane on a clip is clip-local; the same numbers mean different instants on
+the two, which is the one thing to get right when moving an envelope from a clip
+up onto its bus.</p>
+<p><strong>A carve stays on the clip.</strong> <code>data-fx-carve</code> is not a group attribute. The bed
+being carved is a single track, and it is that track which carries
+<code>data-fx-carve</code> — pointed AT a group, per the rule above. Group and carve meet in
+<code>sources</code>, not on one element. A carve written onto a bus is half an effect
+applied twice: the level half measures the bed's own audio, which a bus has none
+of, so only the filters survive — and a bus and its members are one signal path,
+so the bed then runs through the bus's filters AND its own. The
+<code>audio_group_carve_attr</code> lint rule catches it.</p>
+<p><strong>One clip is not a bus.</strong> A group exists to give several tracks one chain, one
+fader and one clock. Wrapping a single clip in a bus buys nothing the clip's own
+<code>data-fx-chain</code> does not already do, and it doubles the places a later edit has
+to land. The one reason to do it anyway: a bus's automation clock is composition
+time, so a single-member bus is how a lane on that clip gets composition-time
+timing.</p>
+<p><strong>One knob.</strong> <code>strength</code> is 0..1 and derives everything: how deep to cut, how
+many bands, how wide, how far to favour intelligibility over raw voice energy,
+how far the level may drop, how far under the voice to aim. Those six move
+together in any real mix — a gentle carve is a shallow cut in few bands with
+little ducking, a hard one is deeper in more bands with more — so they are one
+relationship written once, in <code>carveProfile</code>. <code>carve.mjs</code> defaults to <code>0.8</code> —
+six bands from 250 Hz to 2.5 kHz cut about 7 dB each and 15 dB at 1.6 kHz, with
+19 dB of level room — because a bed under narration has to get out of the way
+first and be music second; <code>0.25</code> (a 6 dB dip in three bands, 6 dB of room) kept
+the bed present but still let it fight the voice, and was judged too weak in
+practice. At <code>0.5</code> the dip reaches 10 dB, which is where a carve starts being
+heard as an effect rather than as room for the voice. Drop the strength when the
+bed is the point and the voice is sparse. <code>0</code> is spectral only — one band, no
+level match at all.</p>
+<p><strong>Carve by default — required whenever music plays under a voice.</strong> A bed
+under any voice track (narration, avatar speech, interview, voiceover) gets a
+carve as part of finishing the mix, not as a polish step to get to if there is
+time. Place both tracks, run the command below (default strength <code>0.8</code>; add
+<code>--bed</code> / <code>--voice</code> when detection picks wrong), confirm the written
+<code>data-fx-carve</code>, <code>data-fx-chain</code> and <code>data-automation</code> with <code>npx hyperframes check</code>,
+and only then render. A volume duck on its own is not a finished mix: it leaves
+the voice and the bed fighting in the 1–3 kHz band and costs the bed all of its
+presence for the whole voiceover. Skip the carve only when there is no voice for
+the music to sit under — a music video, a title card, a montage cut to the track.</p>
+<p><strong>It always follows the voice.</strong> There is no static mode: a fixed depth thins the
+bed through every pause, and once you have heard both there is no reason to want it.
+Every value becomes an envelope of the speech's own level — silence leaves the bed
+alone, a loud passage pushes the carve to full depth — written as ordinary automation,
+which is why the lanes show up in the timeline and can be edited afterwards.</p>
+<p><strong>Level matching is part of it.</strong> Spectral carving cannot fix a bed that is
+simply louder than the voice. So the carve also measures how far over the voice
+the bed sits and writes a <code>gain</code> stage: held at one value for a static carve,
+driven by an envelope for a dynamic one. That envelope releases slowly on
+purpose — music that snaps back to full the instant a word ends sounds like a
+machine doing it.</p>
+<p><strong>Running it.</strong> In Studio the carve is one module at the top of a track's effect
+rack — voice, strength, dynamic, and the analysis it produced, in one card. It is
+there whenever another track could be the voice, and a bed with exactly <strong>one</strong>
+candidate above it is carved by default, dynamically, at the default strength:
+that is what a bed under narration wants, and the module is where you change or
+switch it off. Several candidates leaves the picker waiting rather than guessing.
+Headless —
+which is the path when you are authoring a composition rather than editing one:</p>
+<pre><code class="language-bash">node &lt;SKILL_DIR&gt;/scripts/carve.mjs --comp index.html
+</code></pre>
+<p>That is the whole command. It finds the voice and the bed itself, carves
+dynamically at the default strength, and prints what it decided:</p>
+<pre><code>bed    music-bed (name looks like music)
+voice  narration (only track left)
+carve  strength 0.8 dynamic
+bands  250Hz -7.4dB q2.06, 400Hz -7.4dB q2.06, 630Hz -7.4dB q2.06, 1000Hz -7.4dB q2.06, 1600Hz -14.8dB q2.06, 2500Hz -7.4dB q2.06
+level  273-point envelope, floor -19.2 dB
+</code></pre>
+<p>Name the tracks with <code>--bed</code> / <code>--voice</code> (repeatable) when the automatic choice is
+wrong, <code>--strength</code> to push it, <code>--dry-run</code> to see that report and write nothing.</p>
+<p><strong>How it picks the tracks.</strong> Names first, because that is what you already told it
+and the answer is explainable — <code>classifyAudioName</code> in core, the same classifier
+Studio's own picker uses, so the two cannot disagree. A track whose id or filename
+looks like music (<code>music</code>, <code>bgm</code>, <code>bed</code>, <code>score</code>…) is the bed; everything else that
+plays over it and is not SFX-shaped is a voice. Audio elements are preferred: video
+counts only when no audio track is left to be the voice, or every B-roll clip in the
+composition would read as somebody talking. <strong>It refuses when it cannot tell which
+track is the bed</strong> rather than carving the wrong one — typing one id is cheap.</p>
+<p>Same analysis functions as the panel, so the result is identical. Needs <code>ffmpeg</code>
+on PATH and <code>@hyperframes/core</code> installed in the project (<code>npm i -D @hyperframes/core</code>) — the CLI inlines core rather than shipping it, so it cannot
+be borrowed from there.</p>
+<p><strong>What it writes</strong> is an ordinary chain of peaking filters plus a gain stage,
+tagged <code>fromCarve</code>. That tagging is the whole trick: a re-run replaces the
+previous carve and leaves every effect you built by hand — and every lane you
+drew by hand — exactly where it was. So re-carving at a new strength is safe and
+repeatable, and <code>data-fx-carve</code> exists so the settings can be read back rather
+than guessed from the filters.</p>
+<h2>Automation</h2>
+<p>A lane is a set of breakpoints on one parameter: <code>{t, v}</code> in clip-local seconds
+and the parameter's own units. Targets are <code>volume</code> for the track's level, or
+<code>fx.&lt;nodeId&gt;.&lt;param&gt;</code> for an effect's knob.</p>
+<p><strong>Only some parameters can be automated, and a lane on the others is silently
+inert.</strong> A knob is automatable when a Web Audio <code>AudioParam</code> backs it. The four
+worklet-based effects — <code>compressor</code>, <code>limiter</code>, <code>gate</code>, <code>bitcrush</code> — expose
+none at all, so no lane on any of their parameters will ever move: to make a
+compressor's behaviour change over time, automate a <code>gain</code> stage before it
+instead. <code>references/fx-registry.md</code> marks every parameter.</p>
+<h2>Verify</h2>
+<p>Almost no static gate covers the mix. The linter reads <code>data-automation</code> for
+exactly one conflict — <code>audio_volume_double_automation</code>, a volume lane on a track
+that also has a GSAP tween on <code>volume</code>, where the lane wins and the tween is
+ignored — plus <code>audio_volume_tween_overrides_gain</code>, an authored <code>data-volume</code>
+on a track whose <code>volume</code> is tweened, where the tween's values are absolute and
+replace that gain instead of scaling it. Nothing validates the
+chain or the effect lanes at all. What
+enforces those is the render: a chain it cannot parse fails the whole mix rather
+than quietly writing the dry signal, because a mix that sounds plausible and is
+wrong is worse than a refusal. Preview is the opposite by design: an unreadable
+chain plays dry so the composition stays workable.</p>
+<p>A lane pointing at a node the chain does not have is pruned on read, not an
+error — so a typo'd <code>nodeId</code> costs you the envelope silently. Read the ids back
+out of the chain rather than assuming what was minted.</p>
+<p>Effects with a tail (<code>reverb</code>, <code>delay</code>) make the rendered track <strong>longer</strong> than
+its source, and the mix is told how much by the chain. So a bed with reverb no
+longer ends exactly at its <code>data-duration</code>; that is expected, not a bug.</p>
+<p>Beyond that, a mix is verified by rendering and listening. For a carve: the voice
+should be legible without the bed sounding hollowed, and with <code>dynamic</code> the bed
+should come back up between phrases rather than staying flat. If the bed sounds
+notched rather than simply quieter under the voice, the strength is too high —
+that is the one failure mode with an obvious sound.</p>

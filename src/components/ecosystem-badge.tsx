@@ -5,6 +5,7 @@ const STYLES: Record<Ecosystem, string> = {
   dsh: "bg-volt-tint text-volt-deep border-transparent",
   "claude-code": "bg-signal/10 text-signal border-transparent",
   mcp: "bg-paper text-charcoal border-line",
+  skills: "bg-ink text-volt border-transparent",
 };
 
 export function EcosystemBadge({

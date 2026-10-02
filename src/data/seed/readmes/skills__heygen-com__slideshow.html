@@ -1,0 +1,473 @@
+<p><strong>Plugin installs:</strong> Before setup or freshness commands, follow <a href="https://github.com/heygen-com/hyperframes/blob/HEAD/../hyperframes/references/plugin-installation.md" target="_blank" rel="noopener noreferrer">plugin execution rules</a> when this skill is inside a HyperFrames plugin. Standalone installs keep the update instructions below.</p>
+<blockquote>
+<p><strong>First, keep this skill fresh — confirm with the user before running:</strong> <code>npx hyperframes skills update slideshow</code>. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.</p>
+</blockquote>
+<blockquote>
+<p><strong>figma source</strong>: If the deck's content or storyboard comes from a figma.com URL, run <code>/figma</code> first — asset export, brand tokens, and storyboard reconstruction if the source is a strip of scene frames — then build from its output. Don't drive Figma via raw MCP tools directly: that skips SVG sanitization, <code>.media/manifest.jsonl</code> provenance, and brand-token <code>var()</code> binding, so a later brand change can't propagate without a full re-import.</p>
+</blockquote>
+<h1>Slideshow authoring contract</h1>
+<p>A HyperFrames slideshow is a normal HyperFrames composition — scenes, clips, GSAP timelines — with one extra ingredient: a <strong>JSON island</strong> that declares which scenes are slides and how they connect. The player's <code>SlideshowController</code> reads the island and turns the continuous GSAP timeline into a discrete, navigable deck.</p>
+<p><strong>Read <code>/hyperframes-core</code> first</strong> for the base composition contract (clips, tracks, <code>data-*</code> attributes, determinism rules). This skill covers only what is new: the island schema, slide writing rules, fragments, branching, validation, and the wrapping component.</p>
+<h2>Output — a navigable deck, not a linear MP4</h2>
+<p>A slideshow's output is the <strong>running deck</strong>: serve it with <code>hyperframes present &lt;project-dir&gt;</code> (or Studio present mode) — the player's <code>SlideshowController</code> reads the island and drives navigation, fragments, branching, and presenter mode. See <strong>Presenting and handoff</strong> below.</p>
+<p><strong>Do not <code>hyperframes render</code> a slideshow into a single MP4.</strong> A deck is authored as several top-level scene compositions (one <code>data-composition-id</code> per slide) with <strong>no master-root composition</strong> wrapping them, so <code>render</code> resolves only the <strong>first</strong> composition and emits a <strong>silently truncated</strong> MP4 (e.g. 6s of a 40-second deck). A linear main-line export (main slides only, branch sequences excluded) is <strong>deferred</strong> — until it ships, the supported outputs are the live <code>present</code> deck and per-slide <code>snapshot</code> stills. If a user needs a linear MP4 today, surface this limitation rather than pointing <code>render</code> at the deck.</p>
+<h2>Intent confirmation</h2>
+<p>If the user explicitly asks for a slideshow, slide show, or HyperFrames slideshow, proceed with this skill. When the request arrived through <code>/hyperframes</code>, the intent layer's triage owns this confirmation — routed here means already confirmed, so don't re-ask; the layer's run-shape questions don't apply (the deliverable is a deck, not a rendered video). A <code>BRIEF.md</code>, when present, carries the confirmed intent — read it.</p>
+<p>If the skill triggered from an adjacent request such as "presentation", "pitch deck", "deck", "interactive deck", or "convert this page", pause before authoring and frame the choice before asking for confirmation. Briefly explain that a HyperFrames slideshow means a runnable deck with discrete slides, built-in navigation and presenter mode, editable speaker notes, shared media handling, and validation before handoff. For source-page conversions, also mention that the goal is to preserve the original page's visual design, interactions, motion, and media behavior while translating page movement into slide-to-slide transitions.</p>
+<p>Then ask a short confirmation question:</p>
+<blockquote>
+<p>Do you want this as a HyperFrames slideshow?</p>
+</blockquote>
+<p>Use a yes/no choice UI when the environment provides one; otherwise ask the question in plain text.</p>
+<p>Do not implement the slideshow until the user says yes. If they say no, stop using this skill — read <code>/hyperframes</code> and let the intent layer re-route. This confirmation is a <strong>routing decision</strong>, not a preference gate — per <code>../hyperframes/references/brief-contract.md</code> § 1 it survives autonomous mode ("surprise me" does not skip it): building the wrong deliverable type is a quality failure, not a creative call.</p>
+<hr />
+<h2>The two pieces</h2>
+<h3>1. Scenes — declared the normal way</h3>
+<p>Every slide is backed by a scene. Declare scenes with <code>data-composition-id</code>, <code>data-start</code>, <code>data-duration</code>, and <code>data-label</code>:</p>
+<pre><code class="language-html">&lt;div
+  data-composition-id="problem"
+  data-start="0"
+  data-duration="8"
+  data-label="The problem"
+  data-width="1920"
+  data-height="1080"
+&gt;
+  &lt;!-- clips go here --&gt;
+&lt;/div&gt;
+</code></pre>
+<p>Branch slides (reachable only via a hotspot, excluded from the main line) are declared exactly the same way — they just appear only in a <code>slideSequences</code> entry in the island, not in the main <code>slides</code> array.</p>
+<h3>2. The JSON island — one script block per composition</h3>
+<p>Add exactly one <code>&lt;script type="application/hyperframes-slideshow+json"&gt;</code> block to the composition HTML. It holds all slideshow metadata:</p>
+<pre><code class="language-html">&lt;script type="application/hyperframes-slideshow+json"&gt;
+  {
+    "slides": [...],
+    "slideSequences": [...]
+  }
+&lt;/script&gt;
+</code></pre>
+<p>The island is the single source of truth for slide order, notes, fragment hold-points, hotspots, and branch sequences. Keep it near the top of the <code>&lt;body&gt;</code>, before the scene divs, so it is easy to find.</p>
+<p>Do not hide the slideshow manifest behind an alternate <code>&lt;script type="application/json"&gt;</code> block plus runtime code that creates the island. The <code>present</code> command reads the composition HTML statically and expects the real <code>application/hyperframes-slideshow+json</code> island to already be present.</p>
+<hr />
+<h2>Schema</h2>
+<h3><code>SlideshowManifest</code> (the top-level island object)</h3>
+<pre><code class="language-json">{
+  "slides": [
+    /* SlideRef[] — the main line, in order */
+  ],
+  "slideSequences": [
+    /* SlideSequence[] — off-line branch sequences */
+  ]
+}
+</code></pre>
+<h3><code>SlideRef</code></h3>
+<pre><code class="language-json">{
+  "sceneId": "problem",
+  "notes": "Lead with the pain, not the company.",
+  "fragments": [3.5, 5.2, 7.0],
+  "hotspots": [
+    /* SlideHotspot[] */
+  ],
+
+  "ttsScript": null,
+  "ttsAudioUrl": null,
+  "ttsDurationMs": null
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sceneId</code></td>
+<td>yes</td>
+<td>Must match a scene's <code>data-composition-id</code> exactly (or provide explicit <code>startTime</code>/<code>endTime</code>). The lint rule resolves scenes by <code>data-composition-id</code>.</td>
+</tr>
+<tr>
+<td><code>notes</code></td>
+<td>no</td>
+<td>Presenter-only text. Never shown to the audience.</td>
+</tr>
+<tr>
+<td><code>fragments</code></td>
+<td>no</td>
+<td>Array of times (seconds) within the slide's <code>[start, end]</code> range — see Fragments below.</td>
+</tr>
+<tr>
+<td><code>hotspots</code></td>
+<td>no</td>
+<td>Interactive overlays that trigger a branch — see Branching below.</td>
+</tr>
+<tr>
+<td><code>startTime</code></td>
+<td>no</td>
+<td>Optional. Override the matched scene's time bounds; defaults to the scene's start/end.</td>
+</tr>
+<tr>
+<td><code>endTime</code></td>
+<td>no</td>
+<td>Optional. Override the matched scene's time bounds; defaults to the scene's start/end.</td>
+</tr>
+<tr>
+<td><code>ttsScript</code>, <code>ttsAudioUrl</code>, <code>ttsDurationMs</code></td>
+<td>no</td>
+<td><strong>Reserved.</strong> Schema fields exist but TTS playback is not yet wired. Omit unless you are pre-populating for a future build.</td>
+</tr>
+</tbody></table>
+<h3><code>SlideHotspot</code></h3>
+<pre><code class="language-json">{
+  "id": "h1",
+  "label": "How did we calculate this?",
+  "target": "market-deep-dive",
+  "region": { "x": 60, "y": 10, "w": 35, "h": 20 }
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>id</code></td>
+<td>yes</td>
+<td>Unique within the slide.</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>yes</td>
+<td>Tooltip / button text shown to the audience.</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td>yes</td>
+<td>Must match a <code>SlideSequence.id</code> in <code>slideSequences</code>.</td>
+</tr>
+<tr>
+<td><code>region</code></td>
+<td>no</td>
+<td>Percentage-of-slide bounding box: <code>{x, y, w, h}</code> in <code>0–100</code>. Omit to render the hotspot as a full-slide labeled button instead.</td>
+</tr>
+</tbody></table>
+<h3><code>SlideSequence</code></h3>
+<pre><code class="language-json">{
+  "id": "market-deep-dive",
+  "label": "Market sizing methodology",
+  "slides": [{ "sceneId": "mkt-1" }, { "sceneId": "mkt-2" }]
+}
+</code></pre>
+<p><code>slides</code> inside a sequence uses the same <code>SlideRef</code> shape as the main line. Fragments and nested hotspots are allowed.</p>
+<hr />
+<h2>Slide writing rules</h2>
+<p>These are hard constraints, not suggestions. A slide that violates them will be outright replaced when a reviewer sees it.</p>
+<ul>
+<li><strong>Headline is a complete-sentence claim, not a label.</strong> Write "SMBs spend 14 hours/week on manual scheduling" not "Scheduling problem". The sentence should stand alone if the visual is ignored.</li>
+<li><strong>One idea + one visual per slide.</strong> If you are tempted to add a second bullet cluster or a second chart, split the slide.</li>
+<li><strong>Lead with the punchline.</strong> The strongest point goes first — on the slide and in the deck order. Investors read left-to-right, top-to-bottom, and they stop.</li>
+<li><strong>Bottom-up market sizing only.</strong> Never write "$50B TAM" without showing the math. Build from unit economics up: accounts × ACV, or transactions × take-rate.</li>
+<li><strong>Font minimum 30pt equivalent.</strong> At 1920×1080, a headline is 72–96px; body copy is 48px. Never go below 40px for any text the audience must read.</li>
+<li><strong>Search the live catalog before hand-building any named visual.</strong> For every look, effect, chart, treatment or transition a slide needs — "CRT scanlines", "glitch", "bar chart race", "shimmer sweep", "terminal window" — run <code>npx hyperframes catalog --query "&lt;the visual, in plain English&gt;" --json</code> and read the top results before you author the slide's clips. The search needs <strong>nothing installed</strong>: no project, no prior <code>add</code>, no account. It ranks the whole hosted registry (~400 blocks and components) from any directory. <code>npx hyperframes add &lt;name&gt;</code> drops the block's source into the deck, where you customize it in place. This applies with extra force when porting a source page: a real block beats the simplified approximation the porting rules below forbid.</li>
+</ul>
+<h2>Porting source pages</h2>
+<p>When converting an existing page into a slideshow, source fidelity is part of the contract. Do not replace source-specific widgets with simplified approximations unless the user explicitly asks for a redesign.</p>
+<ul>
+<li>Preserve the original page's visual design, motion language, interactive behavior, media behavior, and presentation affordances as closely as practical. When the slideshow system supports presenter mode, include speaker notes using the shared editable-notes behavior rather than a deck-specific implementation.</li>
+<li>Port mechanical visuals from the source DOM/CSS/JS as exactly as practical: custom players, canvas visualizers, timelines, playheads, stems, expanding circles, hover states, and other interactive details should survive the conversion.</li>
+<li>Treat native <code>&lt;video&gt;</code> / <code>&lt;audio&gt;</code> elements as the source of truth for any custom media chrome, canvas visualizer, waveform, beat grid, or playhead. Wire the source's media events (<code>play</code>, <code>pause</code>, <code>timeupdate</code>, <code>seeking</code>, <code>seeked</code>, <code>ended</code>, <code>ratechange</code>, <code>volumechange</code>) and derive visual state from <code>media.currentTime</code>; do not run a separate timer that can drift away from actual playback.</li>
+<li>Every copied <code>&lt;video&gt;</code> or <code>&lt;audio&gt;</code> with <code>src</code> must have HyperFrames timing attributes before lint: <code>data-start</code> and <code>data-duration</code>, plus <code>data-has-audio="true"</code> when audible native audio should be preserved. Use the scene's time range for slide-specific media; for user-controlled evidence videos that may be played from multiple focused slides, use a deck-wide range. Do not leave <code>preload="none"</code> on media; use <code>metadata</code> or <code>auto</code>.</li>
+<li>Resolve source font tokens before validation. If preserving custom source fonts, add <code>@font-face</code> rules for local/captured font files. If using system fallbacks, replace tokenized declarations such as <code>font-family: var(--f-body)</code> with concrete render-safe stacks such as <code>system-ui, sans-serif</code> or <code>ui-monospace, monospace</code>; do not leave <code>var(...)</code> as the font family value.</li>
+<li>Audit the source for atypical page movement, especially behavior driven by scroll, wheel, touch, hash state, resize, or a requestAnimationFrame loop. Treat fixed viewports with translated/scaled "world" layers, parallax, pinned panels, horizontal scrollers, scroll-scrubbed timelines, section snapping, and zoom-to-element cameras as source behavior. Scroll is often the source's transition trigger, so preserve the transition by extracting its progress stops, easing, and camera/focus states, then re-host that motion on slideshow navigation through timeline positions, fragments, or a reusable player/harness hook. Standalone wrappers that jump to slide hold-points still need an explicit navigation-camera transition hook; computing per-slide camera transforms is not enough. Do not simulate a literal page-scroll-down transition inside the slide; the viewer should feel camera travel/zoom from one focal point to another, not see a webpage being scrolled. Keep each slide-to-slide camera move continuous: avoid intermediate route stops that reverse x/y direction or zoom unless the source visibly does that at the same boundary. A transition that darts around before landing is worse than a simpler direct focal move.</li>
+<li>Preserve the source's media crop semantics. Treat screenshots, tweets/social posts, product UI captures, charts, docs, code, leaderboards, and any image with readable text as content evidence, not decorative media: use the source aspect ratio (<code>height: auto</code>) or <code>object-fit: contain</code> inside a stable frame. Use <code>object-fit: cover</code> only when the source did, or for intentionally decorative/background/cinematic thumbnails. After fitting these captures into a slide, inspect all four edges for truncated text, logos, controls, or captions; a visible crop on meaningful content is a bug unless the source itself cropped it.</li>
+<li>If a behavior is generic to slideshows, put it in the player/controller or in a reusable skill snippet. Do not solve it with one-off deck scripts.</li>
+<li>Stacked scene frames must never block interaction on the active slide. Hidden frames need both visual hiding and event gating:</li>
+</ul>
+<pre><code class="language-css">.scene-frame {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.scene-frame.is-active {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+</code></pre>
+<p>If visibility is driven imperatively, set all three properties (<code>opacity</code>, <code>visibility</code>, and <code>pointerEvents</code>) in the visibility controller. <code>opacity: 0</code> alone still leaves an invisible layer that can swallow clicks.</p>
+<hr />
+<h2>Fragments: reveal hold-points within a slide</h2>
+<p>A fragment is an absolute composition-timeline time (seconds) within a slide's <code>[start, end]</code> range where the controller should hold a reveal state.</p>
+<p><strong>How it works:</strong></p>
+<ol>
+<li>Player enters a fragmented slide — seeks directly to <code>fragments[0]</code> and holds there.</li>
+<li>User presses Next (or →) — controller seeks to <code>fragments[1]</code> and holds.</li>
+<li>After the last fragment, Next advances to the next slide.</li>
+<li>A slide without fragments enters at a rest frame inside the slide, usually its midpoint, not exactly at <code>slide.end</code>.</li>
+</ol>
+<p>Fragment times must fall within <code>[start, end]</code> (inclusive of both bounds). The lint rule rejects only fragments outside that range (<code>time &lt; start</code> or <code>time &gt; end</code>).</p>
+<p>Fragment times are <strong>absolute composition-timeline positions</strong> — the same coordinate space as <code>data-start</code> — not offsets relative to the scene's start.</p>
+<p>Navigation is seek-driven, not play-driven. The controller never starts playback just to move between fragments; each navigation command is a deterministic seek to the target hold time. Design fragment states so they are correct at the target timeline time.</p>
+<hr />
+<h2>Branching: hotspots and slide sequences</h2>
+<p>Branch slides are real scenes in the same composition timeline. They are listed only under <code>slideSequences</code> and are excluded from main-line navigation — the player never visits them unless a hotspot fires.</p>
+<p><strong>Navigation model:</strong></p>
+<ul>
+<li>Clicking a hotspot pushes <code>{sequenceId, slideIndex: 0}</code> onto the nav stack and enters the branch's first slide.</li>
+<li><strong>back()</strong> pops the stack and returns to the exact parent slide (the one that held the hotspot).</li>
+<li><strong>backToMain()</strong> clears the entire stack and returns to the root slide.</li>
+<li>Breadcrumb renders from the stack: <code>Main deck › Market sizing methodology › Slide 2</code>.</li>
+<li>The slide counter inside a branch is scoped to that sequence (<code>1 of 2</code>, not the main-deck total).</li>
+</ul>
+<p><strong>What to avoid:</strong></p>
+<ul>
+<li>Do not add branch scene IDs to the main <code>slides</code> array. They must appear only inside a <code>slideSequences</code> entry. The lint rule flags overlap.</li>
+<li>Branch scenes are included in the continuous timeline, so a naive linear video export would include them. Export reads main-line slides only (deferred; flagged in the spec).</li>
+</ul>
+<hr />
+<h2>Worked example: 3-slide deck with fragments and a branch</h2>
+<h3>Scene HTML (skeleton)</h3>
+<pre><code class="language-html">&lt;body style="margin: 0"&gt;
+  &lt;script type="application/hyperframes-slideshow+json"&gt;
+    {
+      "slides": [
+        {
+          "sceneId": "hook",
+          "notes": "Open with the stat. Pause on the $40B number."
+        },
+        {
+          "sceneId": "problem",
+          "notes": "Walk through each pain point one at a time.",
+          "fragments": [11.0, 15.0],
+          "hotspots": [
+            {
+              "id": "h1",
+              "label": "Where does the $40B figure come from?",
+              "target": "market-detail",
+              "region": { "x": 55, "y": 60, "w": 40, "h": 20 }
+            }
+          ]
+        },
+        {
+          "sceneId": "solution",
+          "notes": "One sentence: what we do and who it is for."
+        }
+      ],
+      "slideSequences": [
+        {
+          "id": "market-detail",
+          "label": "Market sizing methodology",
+          "slides": [{ "sceneId": "mkt-math", "notes": "Bottom-up: 2.3M SMBs × $17k ACV." }]
+        }
+      ]
+    }
+  &lt;/script&gt;
+
+  &lt;!-- Slide 1 — hook --&gt;
+  &lt;div
+    data-composition-id="hook"
+    data-start="0"
+    data-duration="6"
+    data-label="The hook"
+    data-width="1920"
+    data-height="1080"
+    style="position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #0a0a0a"
+  &gt;
+    &lt;section
+      class="clip"
+      data-start="0"
+      data-duration="6"
+      data-track-index="1"
+      style="position: absolute; inset: 0; display: grid; place-items: center"
+    &gt;
+      &lt;h1 id="hook-headline" style="font-size: 80px; color: #fff; font-family: sans-serif"&gt;
+        SMBs lose $40B/year to manual scheduling
+      &lt;/h1&gt;
+    &lt;/section&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Slide 2 — problem (3 fragments) --&gt;
+  &lt;div
+    data-composition-id="problem"
+    data-start="6"
+    data-duration="15"
+    data-label="The problem"
+    data-width="1920"
+    data-height="1080"
+    style="position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #0a0a0a"
+  &gt;
+    &lt;section
+      class="clip"
+      data-start="6"
+      data-duration="15"
+      data-track-index="1"
+      style="position: absolute; inset: 0; padding: 120px 160px; box-sizing: border-box"
+    &gt;
+      &lt;h2 id="pain-headline" style="font-size: 64px; color: #fff; font-family: sans-serif"&gt;
+        Three gaps operators can not close
+      &lt;/h2&gt;
+      &lt;p id="pain-1" style="font-size: 48px; color: #ccc; opacity: 0; font-family: sans-serif"&gt;
+        No-shows cost 23% of booked revenue
+      &lt;/p&gt;
+      &lt;p id="pain-2" style="font-size: 48px; color: #ccc; opacity: 0; font-family: sans-serif"&gt;
+        Manual reminders take 4h/week per staff
+      &lt;/p&gt;
+      &lt;p id="pain-3" style="font-size: 48px; color: #ccc; opacity: 0; font-family: sans-serif"&gt;
+        Rescheduling friction drives 40% churn
+      &lt;/p&gt;
+    &lt;/section&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Slide 3 — solution --&gt;
+  &lt;div
+    data-composition-id="solution"
+    data-start="21"
+    data-duration="8"
+    data-label="The solution"
+    data-width="1920"
+    data-height="1080"
+    style="position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #0a0a0a"
+  &gt;
+    &lt;section
+      class="clip"
+      data-start="21"
+      data-duration="8"
+      data-track-index="1"
+      style="position: absolute; inset: 0; display: grid; place-items: center"
+    &gt;
+      &lt;h2 id="solution-headline" style="font-size: 72px; color: #fff; font-family: sans-serif"&gt;
+        Acme automates scheduling for service SMBs — no-shows down 80% in 90 days
+      &lt;/h2&gt;
+    &lt;/section&gt;
+  &lt;/div&gt;
+
+  &lt;!-- Branch slide — excluded from main line --&gt;
+  &lt;div
+    data-composition-id="mkt-math"
+    data-start="29"
+    data-duration="7"
+    data-label="Market math"
+    data-width="1920"
+    data-height="1080"
+    style="position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #111"
+  &gt;
+    &lt;section
+      class="clip"
+      data-start="29"
+      data-duration="7"
+      data-track-index="1"
+      style="position: absolute; inset: 0; display: grid; place-items: center"
+    &gt;
+      &lt;p id="mkt-formula" style="font-size: 56px; color: #fff; font-family: sans-serif"&gt;
+        2.3M SMBs × $17k ACV = $39B serviceable market
+      &lt;/p&gt;
+    &lt;/section&gt;
+  &lt;/div&gt;
+
+  &lt;script&gt;
+    window.__timelines = window.__timelines || {};
+
+    // Slide 2 fragment entrance animations
+    gsap.registerPlugin(); // load any plugins before use
+
+    const tl = gsap.timeline({ paused: true });
+    window.__timelines["problem"] = tl;
+
+    // Insert positions are absolute composition-timeline times (same as data-start / fragment values).
+    tl.from("#pain-1", { opacity: 0, y: 20, duration: 0.4 }, 11.0);
+    tl.from("#pain-2", { opacity: 0, y: 20, duration: 0.4 }, 15.0);
+    // pain-3 lands at end of slide
+    tl.from("#pain-3", { opacity: 0, y: 20, duration: 0.4 }, 13.0);
+  &lt;/script&gt;
+&lt;/body&gt;
+</code></pre>
+<h3>Key points in the example</h3>
+<ul>
+<li>The island <code>sceneId</code> values (<code>"hook"</code>, <code>"problem"</code>, <code>"solution"</code>, <code>"mkt-math"</code>) exactly match <code>data-composition-id</code> values on scene divs.</li>
+<li><code>mkt-math</code> appears only in <code>slideSequences</code> — it is never in the top-level <code>slides</code> array.</li>
+<li>Fragment times (<code>11.0</code>, <code>15.0</code>) are within the <code>problem</code> scene's <code>[6, 21]</code> range (times are absolute composition-timeline positions).</li>
+<li>The hotspot <code>region</code> (<code>x: 55, y: 60, w: 40, h: 20</code>) positions the clickable area in the lower-right quadrant of the problem slide.</li>
+<li>GSAP timelines are registered on <code>window.__timelines</code> and are paused — the HyperFrames engine drives playback; do not call <code>.play()</code> at construction time.</li>
+</ul>
+<hr />
+<h2>Wrapping component</h2>
+<p>Wrap the composition in <code>&lt;hyperframes-slideshow&gt;</code> around <code>&lt;hyperframes-player&gt;</code> in any embedding context:</p>
+<pre><code class="language-html">&lt;hyperframes-slideshow&gt;
+  &lt;hyperframes-player src="deck.html"&gt;&lt;/hyperframes-player&gt;
+&lt;/hyperframes-slideshow&gt;
+</code></pre>
+<p><code>&lt;hyperframes-slideshow&gt;</code> provides the navigation chrome (Present, Prev / Next, counter, global mute when <code>sound</code> is present, fullscreen), keyboard handling (← / →, Space / Backspace, and P for Present), touch swipe, and hotspot overlays.</p>
+<p>The slideshow automatically sets the <code>interactive</code> attribute on every inner <code>&lt;hyperframes-player&gt;</code> at mount time, so clickable controls, links, native media controls, and custom players inside the composition iframe receive pointer events as expected. (Outside a slideshow wrapper, you must add <code>interactive</code> manually on <code>&lt;hyperframes-player&gt;</code> — the player defaults to <code>pointer-events: none</code> on the iframe so clicks on the player host don't get hijacked into toggling timeline playback.)</p>
+<p><strong>Presenter mode:</strong> use the built-in Present icon button in the slideshow nav capsule, or press P. It calls <code>window.open('?mode=audience')</code> for a fullscreen audience tab; the originating tab becomes the presenter view (current slide reduced, next-slide preview, notes, elapsed timer). The two tabs sync via <code>BroadcastChannel('hf-slideshow:' + location.pathname)</code>. Do not add a custom wrapper-level Present button; the shared component owns its placement, icon, styling, and audience-mode hiding.</p>
+<p><strong>Presenting over Google Meet / Zoom (screen share):</strong> share the <em>audience</em> surface, keep the presenter view on your own screen.</p>
+<ul>
+<li><strong>Google Meet (or any in-Chrome share):</strong> Present → in Meet choose <strong>Share screen → A tab</strong> → pick the audience tab → switch back to the presenter tab. Chrome keeps a captured tab rendering while backgrounded, so animations and slide nav stay live. Do <strong>not</strong> share "A window" or "Entire screen" — a fully covered window stops rendering (frozen slides for viewers), and entire-screen exposes your notes.</li>
+<li><strong>Zoom (desktop app):</strong> drag the audience tab out into its own window and share that window. Zoom captures via the OS, so if the audience window becomes <em>fully</em> covered it freezes — use a second monitor, or keep a sliver of the audience window visible behind the presenter view.</li>
+</ul>
+<p>Presenter-driven media playback has an autoplay-policy constraint: <code>BroadcastChannel</code> can sync intent, time, and state, but it cannot transfer the presenter's user activation to the audience tab. The shared slideshow player mirrors native media events and starts remote audience playback muted first; only fall back to the standalone harness's audience unlock behavior if muted <code>media.play()</code> is rejected or if the deck specifically requires audible audience playback. Do not keep applying remote <code>timeupdate</code> messages after a rejected play, or the audience will silently seek through the video without playback.</p>
+<p>Presenter notes are editable in the presenter view. Edits are stored in <code>localStorage</code> per deck and slide, layered over the manifest notes without rewriting the composition file. Do not add one-off note-editing scripts to decks; rely on the shared slideshow player behavior. If a standalone/custom wrapper truly needs to implement this outside the shared player, use the deterministic storage snippet in <code>skills/slideshow/references/standalone-harness.md</code>.</p>
+<h3>Media cleanup on slide exit</h3>
+<p>The slideshow controller owns slide-exit media cleanup. When navigation changes slide or sequence, it calls <code>hyperframes-player.stopMedia()</code> before entering the next slide. That command:</p>
+<ul>
+<li>posts <code>stop-media</code> to the iframe runtime, which stops WebAudio and pauses native <code>&lt;video&gt;</code> / <code>&lt;audio&gt;</code> elements;</li>
+<li>pauses same-origin iframe media directly as a fallback; and</li>
+<li>pauses parent-frame proxies adopted from iframe media.</li>
+</ul>
+<p>Same-slide fragment navigation does <strong>not</strong> stop media. Global/deck-level parent audio, such as a background track wired through <code>audio-src</code>, is not treated as slide media.</p>
+<p>Do not add per-slide cleanup scripts for normal media players. Keep slide video/audio as normal media in the composition; use <code>data-has-audio="true"</code> only when the player should preserve audible native video audio instead of treating it as silent visual media.</p>
+<p>If the source page has custom controls or visualizations attached to media, those controls must listen to the same native element the slideshow player stops and mutes. A pause caused by slide exit, presenter sync, native controls, custom controls, or the global mute button should all update the visible custom UI through media events, not through parallel state.</p>
+<p>When implementing direct iframe fallback cleanup, treat iframe media as cross-realm DOM. Do not test iframe nodes with the parent page's <code>el instanceof HTMLMediaElement</code>; that returns false in real browsers. Use <code>el.ownerDocument.defaultView.HTMLMediaElement</code> (or an equivalent tag/duck-type guard) before setting <code>muted</code> or calling <code>pause()</code>.</p>
+<h3>Global nav mute</h3>
+<p>When <code>&lt;hyperframes-slideshow sound&gt;</code> renders the nav mute button, that button is the global mute control for the page. It must mute:</p>
+<ul>
+<li>child <code>&lt;hyperframes-player&gt;</code> instances, including same-origin iframe media;</li>
+<li>top-level page <code>&lt;audio&gt;</code> / <code>&lt;video&gt;</code> elements; and</li>
+<li>wrapper-owned SFX/global <code>Audio</code> objects via the <code>hf-sound</code> event.</li>
+</ul>
+<p>Do not add a second mute button inside the composition. If a wrapper script creates <code>new Audio(...)</code> objects that are not attached to the DOM, it must listen for <code>hf-sound</code> and set <code>clip.muted = detail.muted</code> on each object, not merely skip future plays.</p>
+<p>The same cross-realm rule applies here: global mute must reach iframe <code>&lt;video&gt;</code> / <code>&lt;audio&gt;</code> elements through the child frame's DOM realm. A passing unit test in a single DOM realm is not enough; verify in a browser that the actual iframe media elements report <code>muted: true</code> after clicking the nav mute button.</p>
+<p><code>hyperframes present</code> serves built bundles from <code>packages/player/dist</code>. After changing player or slideshow chrome behavior, run <code>bun run build</code> in <code>packages/player</code> and restart the present server before testing in a browser.</p>
+<hr />
+<h2>Running a slideshow standalone (interim)</h2>
+<p>The <strong>durable answer</strong> is engine-hosted: <code>hyperframes preview --slideshow</code> / studio present mode will host the composition over the real HyperFrames engine, which drives seek-timelines, owns the gesture frame, and reads the island from the composition. That path is coming; prefer it once it ships.</p>
+<p>Until then, standalone demos (a composition opened via the bare player bundle in a browser, without the engine) require workarounds for three gaps: the composition must expose a seekable root timeline, the island must be duplicated into the wrapper, and wrapper-owned SFX/global audio should live in the parent frame. These patterns are documented in:</p>
+<pre><code>skills/slideshow/references/standalone-harness.md
+</code></pre>
+<p>Do not treat the patterns there as the blessed model — they exist only to bridge the gap until the engine-hosted path lands.</p>
+<h2>Handoff</h2>
+<p>For a public or user-facing slideshow project, the root <code>index.html</code> should be a runnable slideshow entrypoint. Opening it in a browser should show slideshow navigation and respond to Next/Prev; it should not expose only the raw composition and require the user to know about Studio or an internal wrapper file. If the raw HyperFrames composition must remain separate for CLI compatibility, put it in a subdirectory such as <code>composition/index.html</code> and point scripts/commands at that directory.</p>
+<p>The direct-open wrapper must rely on the built-in Present icon button rendered by <code>&lt;hyperframes-slideshow&gt;</code>. Do not add a bespoke <code>#present-btn</code>, fixed-position button, or wrapper-specific Present styling. The shared component owns the control bar, hides Present in <code>?mode=audience</code>, and supports P as a keyboard shortcut.</p>
+<p>Validate the direct-open path before handoff. If <code>file://</code> browser restrictions break iframe media, local scripts, or same-origin player access, use a self-contained wrapper or make the handoff command start a local server and open the working URL; do not leave <code>index.html</code> in a broken or ambiguous state.</p>
+<p>For a completed slideshow deck, the primary user-facing next step is presenter mode, not Studio. Run or provide:</p>
+<pre><code class="language-bash">npx hyperframes present &lt;project-dir&gt;
+</code></pre>
+<p>Studio/<code>preview</code> is useful for editing a composition, but it is not a clear final destination for a slideshow user. If you create a <code>package.json</code> for a slideshow project where the raw composition lives in <code>composition/</code>, make the default runnable script start presenter mode:</p>
+<pre><code class="language-json">{
+  "scripts": {
+    "dev": "npx hyperframes present ./composition",
+    "studio": "npx hyperframes preview ./composition --background"
+  }
+}
+</code></pre>
+<p>At handoff, include the local presenter URL printed by the command and the minimal instruction: "Click Present, or press P, to open the audience tab." If the user will present over Google Meet or Zoom, also pass on the screen-share guidance from the Presenting section above (share the audience tab in Meet; a dragged-out audience window in Zoom). Keep the server running if the user asked you to start it.</p>
+<hr />
+<h2>Validation</h2>
+<p>After authoring or editing a slideshow composition, run:</p>
+<pre><code class="language-bash">npx hyperframes lint
+</code></pre>
+<p>Then run runtime validation:</p>
+<pre><code class="language-bash">npx hyperframes check
+</code></pre>
+<p>Treat lint errors and validation <code>StaticGuard</code> contract messages as blockers even if a command exits successfully. Fix the file and rerun until lint reports <code>0 error(s)</code> and validation reports no runtime errors.</p>
+<p>The slideshow lint rule checks:</p>
+<ul>
+<li>Every <code>slide.sceneId</code> resolves to an existing scene (by <code>data-composition-id</code>).</li>
+<li>Every <code>hotspot.target</code> references a defined <code>slideSequence</code> id.</li>
+<li>Fragment times fall within each slide's <code>[start, end]</code> range.</li>
+<li>No two main-line slides overlap in time.</li>
+</ul>
+<p>Fix all violations before previewing. A composition that fails lint will not parse correctly in the player.</p>

@@ -1,0 +1,392 @@
+<h1>Agent Evaluation Guide</h1>
+<blockquote>
+<p><strong>Requires:</strong> <code>agents-cli</code> (<code>uv tool install google-agents-cli</code>) — <a href="https://docs.astral.sh/uv/getting-started/installation/index.md" target="_blank" rel="noopener noreferrer">install uv</a> first if needed.</p>
+</blockquote>
+<blockquote>
+<p><strong>Scaffolded project?</strong> If you used <code>/google-agents-cli-scaffold</code>, dataset and a custom metric are already scaffolded in <code>tests/eval/</code> (Python projects) or <code>eval/</code> (Go projects). For simplicity, this skill and its references use the Python directory layout; adjust accordingly if you've scaffolded a Go agent.
+You already have <code>agents-cli eval run</code> (chains <code>generate</code> + <code>grade</code>), <code>tests/eval/datasets/</code>, and <code>tests/eval/eval_config.yaml</code>. Start with executing <code>eval run</code> and iterate from there.</p>
+</blockquote>
+<h2>Reference Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>references/dataset_schema.md</code></td>
+<td>Canonical EvaluationDataset schema — all field types, JSON examples for single-turn / multi-turn / multi-agent, common mistakes</td>
+</tr>
+<tr>
+<td><code>references/metrics-guide.md</code></td>
+<td>Complete metrics reference — all built-in metrics, match types, custom metrics, judge model config</td>
+</tr>
+<tr>
+<td><code>references/user-simulation.md</code></td>
+<td>Dynamic conversation testing — <code>eval dataset synthesize</code> flags, what scenarios are, compatible metrics</td>
+</tr>
+<tr>
+<td><code>references/builtin-tools-eval.md</code></td>
+<td>google_search and model-internal tools — trajectory behavior, metric compatibility</td>
+</tr>
+<tr>
+<td><code>references/advanced-commands.md</code></td>
+<td>Opt-in commands: <code>eval analyze</code>, <code>eval optimize</code>, <code>eval submit</code> / <code>eval results</code></td>
+</tr>
+<tr>
+<td><code>references/multimodal-eval.md</code></td>
+<td>Multimodal inputs — eval dataset schema, built-in metric limitations, custom evaluator pattern</td>
+</tr>
+<tr>
+<td><code>references/live-eval.md</code></td>
+<td>Live and voice agents — <code>--mode adk_live</code>, what gets graded, user-only turn authoring, the Live-model and region traps</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>The Quality Flywheel</h2>
+<p>Improving agent quality is iterative. The 4 stages below describe the loop. Each stage has a Default path (you, the coding agent, do the work directly) and an Opt-in CLI command that delegates to the Agent Platform Eval Service for better quality and scale.</p>
+<h3>1. Prepare Data</h3>
+<p><strong>Default:</strong> Use or edit the scaffolded <code>tests/eval/datasets/basic-dataset.json</code> to define single-turn eval inputs. Start with 1–2 cases.</p>
+<p><strong>Opt-in (ADK projects):</strong> <code>agents-cli eval dataset synthesize</code>: user-simulate multi-turn datasets when you lack data; its output already includes traces, so Stage 2 collapses to <code>agents-cli eval grade</code> alone. See <em>Eval Commands</em> and <code>references/user-simulation.md</code>.</p>
+<h3>2. Run the Eval (always run)</h3>
+<p><strong>Default:</strong> <code>agents-cli eval run</code> runs the agent over the dataset and grades the traces, writing <code>results_&lt;ts&gt;.{json,html}</code> to <code>artifacts/grade_results/</code>.</p>
+<p><strong>Decoupled form:</strong> <code>eval generate</code> then <code>eval grade</code>, for a custom traces location, re-grading without re-running the agent, or traces from <code>synthesize</code> (<code>eval grade</code> alone).</p>
+<h3>3. Analyze Failures</h3>
+<p><strong>Default:</strong> Open the latest <code>artifacts/grade_results/results_&lt;ts&gt;.html</code> (or <code>.json</code>) and identify failed metrics — see <em>What to fix when scores fail</em> below for the fix table.</p>
+<p><strong>Opt-in:</strong> <code>agents-cli eval analyze</code>, LLM-based failure clustering; prefer when you have 10+ failing cases and want categorized failure modes. See <code>references/advanced-commands.md</code>.</p>
+<h3>4. Optimize &amp; Code Fix</h3>
+<p><strong>Default:</strong> Edit the agent — adjust prompts, tool descriptions, instructions, or eval dataset based on the failure analysis. See <em>What to fix when scores fail</em> below for the failure → fix mapping.</p>
+<p><strong>Opt-in (ADK projects):</strong> <code>agents-cli eval optimize</code> runs ADK GEPA prompt optimization against a target metric (see <code>references/advanced-commands.md</code>). Suitable for prompt-only failures. The optimized prompt appears in the command output; capture it and apply it to the agent. For the full per-iteration trace, set <code>print_detailed_results: true</code> in your optimization config file.</p>
+<blockquote>
+<p><strong>Long-running and expensive.</strong> GEPA optimization makes many LLM calls and can take a long time. Do not run it unless the user explicitly asks for prompt optimization. When you do run it, iterate as far as possible with manual fixes first, then run a <strong>single</strong> final <code>eval optimize</code> — never loop on this command.</p>
+</blockquote>
+<h3>Running the loop</h3>
+<p>Iterate stages 2 → 3 → 4 → 2 (with <code>synthesize</code>, re-run Stage 1 each pass, then <code>eval grade</code>). After each fix, run <code>agents-cli eval compare &lt;prev_results&gt;.json &lt;new_results&gt;.json</code> to confirm the target metric improved without regressing others. Expect 5–10+ iterations per case before it passes, which is normal. Only after a case passes should you expand coverage with more eval cases.</p>
+<p>When doing 5+ iterations, maintain a task list of which cases are fixed, which are still failing, and what fixes you've tried. Prevents re-attempting the same fix.</p>
+<p><strong>Hold cases back.</strong> Keep a slice of cases out of the loop and grade them only when you think you're done — otherwise you can't tell a fix that generalizes from one fitted to the cases you iterated against.</p>
+<h3>Shortcuts That Waste Time</h3>
+<p>Recognize these rationalizations and push back — they always cost more time than they save:</p>
+<table>
+<thead>
+<tr>
+<th>Shortcut</th>
+<th>Why it fails</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>"I'll lower the bar so it passes"</td>
+<td>Lowering the bar hides real failures. If the agent can't meet the bar, fix the agent, don't move the bar.</td>
+</tr>
+<tr>
+<td>"This eval case is flaky, I'll skip it"</td>
+<td>Flaky evals reveal non-determinism in your agent. Fix with <code>temperature=0</code>, rubric-based metrics, or more specific instructions — don't delete the signal.</td>
+</tr>
+<tr>
+<td>"I just need to fix the eval dataset, not the agent"</td>
+<td>If you're always adjusting expected outputs, your agent has a behavior problem. Fix the instructions or tool logic first.</td>
+</tr>
+<tr>
+<td>"I'll iterate until every case I have passes"</td>
+<td>Nothing is left to detect overfitting to your own cases. See <em>Hold cases back</em> above.</td>
+</tr>
+</tbody></table>
+<h2>Choosing the Right Metrics</h2>
+<p>Pick built-in metrics by what you want to measure. Only <code>multi_turn_task_success</code>, <code>multi_turn_trajectory_quality</code>, and <code>multi_turn_tool_use_quality</code> accept multi-turn traces; every other built-in 400s on one. When no built-in fits, write a custom metric (see <em>Evaluation Configuration Schema</em> below).</p>
+<table>
+<thead>
+<tr>
+<th>Goal</th>
+<th>Recommended built-in metrics</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Did the agent achieve the user's goal?</strong> (catch-all for multi-turn agents)</td>
+<td><code>multi_turn_task_success</code></td>
+</tr>
+<tr>
+<td><strong>Was the agent's reasoning path logical and efficient?</strong></td>
+<td><code>multi_turn_trajectory_quality</code></td>
+</tr>
+<tr>
+<td><strong>Quality of tool / function calling across turns</strong></td>
+<td><code>multi_turn_tool_use_quality</code></td>
+</tr>
+<tr>
+<td><strong>Final response quality</strong> (no ground-truth reference needed)</td>
+<td><code>final_response_quality</code></td>
+</tr>
+<tr>
+<td><strong>Factual grounding</strong> (catch hallucinated claims, e.g., RAG agents)</td>
+<td><code>hallucination</code>, or <code>grounding</code> when the case carries a <code>context</code> field</td>
+</tr>
+<tr>
+<td><strong>Safety policy compliance</strong></td>
+<td><code>safety</code></td>
+</tr>
+<tr>
+<td><strong>Match against a golden answer</strong></td>
+<td><code>final_response_match</code> (needs <code>reference</code> on the case)</td>
+</tr>
+<tr>
+<td><strong>Different pass/fail criteria per case</strong></td>
+<td>Put them on the case as <code>rubric_groups</code> and grade with a managed rubric metric. See <code>references/dataset_schema.md</code> (<em>Per-Case Rubrics</em>).</td>
+</tr>
+<tr>
+<td><strong>Domain-specific check no built-in covers</strong></td>
+<td>Write a custom <code>LLMMetric</code> (LLM-judge) or <code>CodeExecutionMetric</code> (deterministic Python). See <em>Evaluation Configuration Schema</em> below.</td>
+</tr>
+</tbody></table>
+<p>Run <code>agents-cli eval metric list</code> to see all available built-ins. For full metric definitions and rubric details, see the <a href="https://cloud.google.com/gemini-enterprise-agent-platform/optimize/evaluation/manage-metrics" target="_blank" rel="noopener noreferrer">Agent Platform metric docs</a> and <code>references/metrics-guide.md</code>.</p>
+<hr />
+<h2>What to fix when scores fail</h2>
+<p>After <code>agents-cli eval run</code> completes, inspect the latest <code>artifacts/grade_results/results_&lt;timestamp&gt;.json</code> (or open the <code>.html</code> file) for per-case scores and judge rationales, the input to every fix decision below.</p>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>What to change</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>multi_turn_task_success</code> low</td>
+<td>The agent isn't completing the user's goal — fix orchestration, missing tool calls, premature termination, or wrong tool selection</td>
+</tr>
+<tr>
+<td><code>multi_turn_trajectory_quality</code> low</td>
+<td>The agent reaches the goal inefficiently or takes wrong steps — refine planning prompts, tighten instruction order, or remove redundant tool calls</td>
+</tr>
+<tr>
+<td><code>multi_turn_tool_use_quality</code> low</td>
+<td>Fix tool descriptions, parameter docstrings, or agent instructions for tool selection</td>
+</tr>
+<tr>
+<td><code>final_response_quality</code> low</td>
+<td>Read the auto-generated rubric verdicts; refine agent instructions to address the worst-scoring criterion (often clarity, completeness, or instruction-following)</td>
+</tr>
+<tr>
+<td><code>hallucination</code> low</td>
+<td>Tighten agent instructions to stay grounded in tool output; verify the tool actually returned the data the agent claimed</td>
+</tr>
+<tr>
+<td><code>safety</code> low</td>
+<td>Add safety guardrails to instructions; review the violating content category in the rubric verdict</td>
+</tr>
+<tr>
+<td>Agent calls wrong tools</td>
+<td>Fix tool descriptions, agent instructions, or the model's tool-choice config (<strong>ADK:</strong> <code>tool_config</code>)</td>
+</tr>
+<tr>
+<td>Agent calls extra tools</td>
+<td>Add strict stop instructions, or switch to <code>multi_turn_tool_use_quality</code></td>
+</tr>
+</tbody></table>
+<p>After applying a fix, rerun <code>agents-cli eval run</code> and use <code>agents-cli eval compare &lt;prev_results&gt;.json &lt;new_results&gt;.json</code> to confirm the fix improved the target metric without regressing others.</p>
+<hr />
+<h2>Eval Commands</h2>
+<p><code>agents-cli eval &lt;subcommand&gt; --help</code> is the authoritative flag list; the examples below are the common invocations.</p>
+<h3><code>eval run</code> (default)</h3>
+<p>Runs the agent over the dataset and grades the traces in one command.</p>
+<pre><code class="language-bash"># Basic: dataset from tests/eval/datasets/, results to artifacts/grade_results/,
+# metrics from tests/eval/eval_config.yaml
+agents-cli eval run
+
+# Advanced: pick the dataset, metrics, and output dir
+agents-cli eval run --dataset tests/eval/datasets/custom.json --metrics final_response_quality,safety --output ./out/
+</code></pre>
+<h3><code>eval generate</code></h3>
+<p>Runs an agent over an evaluation dataset and writes traces to disk.</p>
+<p>By default, runs the agent locally and records a trace per evaluation case. You can generate traces from an already-running agent by passing its HTTP endpoint and app name to <code>--url</code> and <code>--app-name</code>.</p>
+<blockquote>
+<p><strong>ADK projects.</strong> The built-in generator serves the agent over HTTP and drives it over ADK's <code>/apps/...</code> and <code>/run_sse</code> routes — the same shape <code>--url</code> / <code>--app-name</code> expect. What it launches depends on the project's language: Python uses the project's <code>fast_api_app.py</code> if it exists, else <code>adk api_server</code>; Go runs <code>go run ...</code>. Extensions for other frameworks replace <code>eval generate</code> with their own generator, which may not serve HTTP at all; <code>--url</code> and <code>--app-name</code> are then unsupported.</p>
+</blockquote>
+<pre><code class="language-bash"># Basic — uses tests/eval/datasets/, writes to artifacts/traces/
+agents-cli eval generate
+
+# Advanced — custom dataset and output dir
+agents-cli eval generate --dataset tests/eval/datasets/custom.json -o ./custom_traces/
+
+# Against a deployed agent (or one you started manually)
+agents-cli eval generate --url https://my-agent.run.app --app-name app
+
+# Live agent — stream each case over ADK's /run_live WebSocket
+agents-cli eval generate --mode adk_live
+</code></pre>
+<h4>Evaluating Live agents</h4>
+<p>Live agents run over a WebSocket, not <code>/run_sse</code>: add <code>--mode adk_live</code> to <code>generate</code> or <code>run</code>. The dataset, the traces, and grading are unchanged, and the audio reply is transcribed so the transcript is what gets graded. Two things must already be true or the socket connects and <em>then</em> fails mid-session: the agent uses a Live model (the scaffold default is not one), and on Vertex its region is pinned on the model rather than left to <code>GOOGLE_CLOUD_LOCATION</code>. Both, plus dataset authoring rules: <code>references/live-eval.md</code>.</p>
+<h3><code>eval grade</code></h3>
+<p>Scores traces (from <code>eval generate</code>, <code>eval dataset synthesize</code>, or hand-authored) against built-in or custom metrics. Writes timestamped <code>results_&lt;YYYYMMDD_HHMMSS&gt;.json</code> (consumed by <code>eval compare</code>) and <code>.html</code> (open in a browser) into the output dir, and prints a summary table to the console.</p>
+<pre><code class="language-bash"># Basic — defaults: traces from artifacts/traces/, results to artifacts/grade_results/,
+# metrics from tests/eval/eval_config.yaml's metrics_to_run
+agents-cli eval grade
+
+# Advanced 1 — grade traces from a non-default location (the canonical
+# pairing for `eval generate --output custom_traces/`)
+agents-cli eval grade --traces custom_traces/
+
+# Advanced 2: load metrics to run from a config file (YAML or JSON) on a specified trace file.
+agents-cli eval grade --traces ./artifacts/traces/trace_1.json --config tests/eval/eval_config.yaml
+
+# Advanced 3: dispatch rate, 15 metric computations per second by default. Lower it when the
+# judge model or the eval service rate-limits you, raise it when they have headroom.
+agents-cli eval grade --qps 5
+</code></pre>
+<p>See <em>Evaluation Configuration Schema</em> below for the config file format.</p>
+<h3><code>eval compare</code></h3>
+<p>Diffs two <code>results_*.json</code> files from an eval run. Run it after a fix to confirm the target metric improved without regressing others.</p>
+<pre><code class="language-bash">agents-cli eval compare baseline.json candidate.json
+</code></pre>
+<h3><code>eval dataset synthesize</code></h3>
+<blockquote>
+<p><strong>ADK projects.</strong> It loads and runs the agent through ADK, so it is unavailable on other frameworks.</p>
+</blockquote>
+<p>Generates user scenarios from your agent's tools and instructions, plays each against an LLM-backed user simulator, and writes graded-ready traces to <code>artifacts/traces/</code> (feed straight to <code>eval grade</code>, skip <code>eval generate</code>). Invocations, flags, and compatible metrics: <code>references/user-simulation.md</code>.</p>
+<h3>Advanced commands</h3>
+<p><code>eval analyze</code> (cluster failure modes), <code>eval optimize</code> (GEPA prompt tuning), and <code>eval submit</code> / <code>eval results</code> (managed cloud-side runs for CI or large datasets) are documented in <code>references/advanced-commands.md</code>.</p>
+<hr />
+<h2>Evaluation Dataset Format</h2>
+<p>An <code>EvaluationDataset</code> is a JSON file with an <code>eval_cases</code> array. Cases come in two shapes depending on how they're used:</p>
+<ul>
+<li><strong>Inference input</strong> (what you give to <code>eval generate</code>) — a single user prompt, or a multi-turn set of <strong>user turns</strong> (for live) / a continuation ending in a user turn (for SSE). The agent runs and produces traces. Don't pre-author agent replies for live inference.</li>
+<li><strong>Grading input</strong> (what you give to <code>eval grade</code>) — a complete trace including the agent's responses and tool calls. Normally produced by <code>eval generate</code> or <code>eval dataset synthesize</code>; you don't write these by hand.</li>
+</ul>
+<p>See <code>references/dataset_schema.md</code> for the full canonical schema, all field types, and common mistakes.</p>
+<h3>Inference input format</h3>
+<p>Two shapes are supported.</p>
+<p><strong>(a) Simple single-turn prompt</strong> — what the scaffolded <code>tests/eval/datasets/basic-dataset.json</code> uses. The agent runs from scratch.</p>
+<pre><code class="language-json">{
+  "eval_cases": [
+    {
+      "eval_case_id": "greeting",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "Hello, what can you help me with?"}]
+      }
+    }
+  ]
+}
+</code></pre>
+<p><strong>(b) Multi-turn via <code>agent_data</code></strong> — the shape depends on the transport:</p>
+<ul>
+<li><strong>Live (<code>--mode adk_live</code>):</strong> author <strong>user-only</strong> turns; the agent generates every reply over one live session (authored agent turns are ignored, with a warning).</li>
+<li><strong>SSE:</strong> continuation form — prior turns are seeded as history and only the trailing user turn is answered.</li>
+</ul>
+<p>See <code>references/dataset_schema.md</code> (<em>Multi-Turn / Multi-Agent Dataset</em>) for the JSON shapes.</p>
+<h3>Grading input format (traces)</h3>
+<p>A complete trace — agent responses plus <code>function_call</code> / <code>function_response</code> parts — normally produced by <code>eval generate</code> / <code>eval dataset synthesize</code> (you don't write these by hand). Authors are <code>"user"</code>, an agent ID from the <code>agents</code> map, or <code>"tool"</code>. See <code>references/dataset_schema.md</code> for the trace shape, multi-agent examples, and the full type reference.</p>
+<hr />
+<h2>Evaluation Configuration Schema</h2>
+<p><code>agents-cli eval run --config &lt;path&gt;</code> (and <code>eval grade --config &lt;path&gt;</code>) accepts a single configuration file in either <strong>YAML</strong> (<code>.yaml</code> / <code>.yml</code>) or <strong>JSON</strong> (<code>.json</code>). The file declares two parts:</p>
+<ul>
+<li><code>metrics_to_run</code>: the <strong>selection list</strong> of metric names to execute on this run. A name resolves to a <code>custom_metrics</code> entry when one matches, otherwise to the built-in metric of that name.</li>
+<li><code>custom_metrics</code> — a <strong>definition pool</strong> of custom metrics available to this project. Defining a metric here does <strong>not</strong> run it; it must also appear in <code>metrics_to_run</code> (or be passed via <code>--metrics name1,name2</code> on the CLI, which is equivalent to overriding <code>metrics_to_run</code> for that invocation).</li>
+</ul>
+<p><strong>Minimal example (YAML preferred — human-readable, no JSON escaping for prompts and Python):</strong></p>
+<pre><code class="language-yaml">metrics_to_run:
+  - multi_turn_task_success     # built-in
+  - example_llm_metric          # selected from custom_metrics pool below
+  - agent_turn_count            # selected from custom_metrics pool below
+
+custom_metrics:
+  - name: example_llm_metric
+    prompt_template: |
+      Rate the agent's response 1-5 for helpfulness and accuracy.
+      Prompt: {prompt}
+      Final response: {response}
+      Full trace (for tool-call and reasoning context): {agent_data}
+      Return JSON: {"score": &lt;1|2|3|4|5&gt;, "explanation": "&lt;reason&gt;"}
+
+  - name: agent_turn_count
+    custom_function: |
+      def evaluate(instance):
+          turns = (instance.get("agent_data") or {}).get("turns", [])
+          return {'score': len(turns)}
+</code></pre>
+<p>JSON is also accepted (same field names, with <code>prompt_template</code> and <code>custom_function</code> as escaped strings) — but <strong>always prefer YAML</strong> for human-readable configs.</p>
+<p>Dispatch by field: <code>custom_function</code> → Python metric; <code>prompt_template</code> → <code>LLMMetric</code> (LLM-as-judge); neither, on a built-in name → parameterizes that built-in (e.g. <code>metric_spec_parameters.rubric_group_key</code>). Field reference: <code>references/metrics-guide.md</code>.</p>
+<p><strong>Agent trace field model.</strong> For datasets produced by <code>agents-cli eval generate</code> (or <code>eval dataset synthesize</code>), each eval case exposes three standard fields to a metric:</p>
+<ul>
+<li><code>{prompt}</code> — the user message (or first user turn).</li>
+<li><code>{response}</code> — the agent's final text response, extracted from the last text-bearing event. In <code>custom_function</code> callbacks this is <code>instance['response']</code> with shape <code>{"role": "model", "parts": [{"text": "..."}]}</code>.</li>
+<li><code>{agent_data}</code> — the full structured <code>turns</code>/<code>events</code> trace, useful when the judge needs to reason about tool calls or intermediate reasoning.</li>
+</ul>
+<p><code>reference</code>, <code>context</code>, and <code>rubric_groups</code> are yours to author on the case: <code>eval generate</code> carries them onto the trace but never invents them, so <code>{reference}</code> / <code>{context}</code> resolve only where you wrote them. <code>rubric_groups</code> is not a placeholder at all: managed rubric metrics read it off the case, and a <code>custom_function</code> sees <code>instance['rubric_groups']</code>. See <code>references/dataset_schema.md</code> (<em>Per-Case Rubrics</em>).</p>
+<p>Code-based metrics default to <strong>local in-process execution</strong> (no GCP project or region required, but the <code>evaluate(instance)</code> function runs with the CLI's privileges). Set <code>execution: "remote"</code> on the metric to run it server-side in Vertex AI's <code>CodeExecutionMetric</code> sandbox instead — that path requires a configured GCP project + region.</p>
+<hr />
+<h2>Common Gotchas</h2>
+<h3>Use Rubric-Based Tool Evaluation instead of Hardcoded Sequences</h3>
+<p>Evaluating agent tool usage using strict sequence matching is fragile because agents may call helper tools (like searches or geocoding) in different orders or perform extra proactive steps.</p>
+<p>Instead, use <strong><code>multi_turn_tool_use_quality</code></strong> / <strong><code>multi_turn_trajectory_quality</code></strong>. These metrics automatically generate content-based and intent-based adaptive rubrics, assessing technical correctness and technical sequence logic semantically using an LLM judge rather than forcing a rigid match.</p>
+<h3>App name must match directory name</h3>
+<blockquote>
+<p><strong>ADK projects.</strong></p>
+</blockquote>
+<p>The <code>App</code> object's <code>name</code> parameter MUST match the directory containing your agent:</p>
+<pre><code class="language-python"># CORRECT - matches the "app" directory
+app = App(root_agent=root_agent, name="app")
+
+# WRONG - causes "Session not found" errors
+app = App(root_agent=root_agent, name="flight_booking_assistant")
+</code></pre>
+<h3>Vertex eval region</h3>
+<p><code>eval run</code>, <code>eval grade</code>, and <code>eval submit</code> <strong>default to the <code>global</code> endpoint</strong>. They don't inherit the manifest <code>region</code> (the eval services support only a subset of regions), and <code>eval analyze</code> is <code>global</code>-only. Override these per run with <code>--region &lt;REGION&gt;</code> (e.g. data residency); the service rejects an unsupported one:</p>
+<pre><code>400 FAILED_PRECONDITION: Unsupported region for Vertex Evaluation Service: &lt;region&gt;
+</code></pre>
+<p><code>eval generate</code> (without the <code>--url</code> flag) and <code>eval dataset synthesize</code> run your agent locally, so they honor the agent's own <code>.env</code> — notably <code>GOOGLE_CLOUD_LOCATION</code>, which selects the model endpoint <strong>when the agent uses Vertex AI</strong> (<code>GOOGLE_GENAI_USE_VERTEXAI=true</code>); it's unused with a <code>GEMINI_API_KEY</code> (AI Studio). They take <strong>no</strong> <code>--region</code> and never override your <code>.env</code> with the manifest <code>region</code>; change the model region by editing <code>.env</code> — or, better for a single agent, pin it in code with <code>Gemini(model=…, client_kwargs={"location": …})</code>, which beats the env var and leaves it free for everything else. One caveat for <code>synthesize</code>: its scenario-generation step is a <strong>server-side</strong> eval call at <code>GOOGLE_CLOUD_LOCATION</code>, so keep that an eval-supported region (<code>global</code> by default) even though the agent itself could run elsewhere.</p>
+<p><strong>No eval region fits your data-residency rules?</strong> Fall back to <strong>local custom metrics</strong> — a <code>custom_metrics</code> entry with a <code>custom_function</code> (<code>execution: local</code>, the default) grades in-process with no GCP region required. You lose the managed built-in metrics, but your <code>custom_function</code> can still call an LLM judge in a compliant region itself — so LLM-as-judge grading stays available anywhere.</p>
+<h3>The <code>before_agent_callback</code> Pattern (State Initialization)</h3>
+<blockquote>
+<p><strong>ADK projects.</strong></p>
+</blockquote>
+<p>Always use a callback to initialize session state variables used in your instruction template. This prevents <code>KeyError</code> crashes on the first turn:</p>
+<pre><code class="language-python">async def initialize_state(callback_context: CallbackContext) -&gt; None:
+    state = callback_context.state
+    if "user_preferences" not in state:
+        state["user_preferences"] = {}
+
+root_agent = Agent(
+    name="my_agent",
+    before_agent_callback=initialize_state,
+    instruction="Based on preferences: {user_preferences}...",
+)
+</code></pre>
+<h3>Model thinking mode may bypass tools</h3>
+<p>Models with "thinking" enabled may skip tool calls. Force tool usage through the model's tool-choice config (<strong>ADK:</strong> <code>tool_config</code> with <code>mode="ANY"</code>), or switch to a non-thinking model for predictable tool calling.</p>
+<hr />
+<h2>Common Eval Failure Causes</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Cause</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Score fluctuates between runs</td>
+<td>Non-deterministic model</td>
+<td>Set <code>temperature=0</code> or use rubric-based eval with multiple samples</td>
+</tr>
+<tr>
+<td>LLM judge ignores image/audio in eval</td>
+<td><code>get_text_from_content()</code> skips non-text parts</td>
+<td>Use custom metric with vision-capable judge (see <code>references/multimodal-eval.md</code>)</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>Proving Your Work</h2>
+<p>Don't assert that eval passes — show the evidence. Concrete output prevents false confidence and catches issues early.</p>
+<ul>
+<li><strong>After running eval:</strong> Paste the scores table output so the user can see exactly what passed and failed.</li>
+<li><strong>After fixing a failure:</strong> Show before/after scores for the specific case you fixed, and confirm no other cases regressed.</li>
+<li><strong>Before deploy:</strong> Rerun <code>agents-cli eval run</code> and show the scores for every case, not just the one you fixed. <code>eval run</code> exits 0 whatever the scores are, so the numbers you paste are the gate, not the exit code.</li>
+</ul>
+<hr />
+<h2>Related Skills</h2>
+<ul>
+<li><code>/google-agents-cli-workflow</code> — Development workflow and the spec-driven build-evaluate-deploy lifecycle</li>
+<li><code>/google-agents-cli-adk-code</code> — ADK API quick reference for writing agent code (ADK projects only)</li>
+<li><code>/google-agents-cli-scaffold</code> — Project creation and enhancement with <code>agents-cli scaffold create</code> / <code>scaffold enhance</code></li>
+<li><code>/google-agents-cli-deploy</code> — Deployment targets, CI/CD pipelines, and production workflows</li>
+<li><code>/google-agents-cli-observability</code> — Cloud Trace, logging, and monitoring for debugging agent behavior</li>
+</ul>

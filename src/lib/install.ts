@@ -56,6 +56,21 @@ export function installOptions(plugin: Plugin): InstallOption[] {
       }
       return opts;
     }
+    case "skills": {
+      const opts: InstallOption[] = [];
+      if (repo) {
+        opts.push({
+          label: "skills CLI",
+          command: `npx skills add https://github.com/${repo} --skill ${plugin.name}`,
+          note: "Works with Claude Code, Cursor, Codex and 20+ agents",
+        });
+        opts.push({
+          label: "git",
+          command: `git clone https://github.com/${repo}.git`,
+        });
+      }
+      return opts;
+    }
     case "mcp": {
       const opts: InstallOption[] = [];
       const remotes = extractRemotes(plugin.manifest);

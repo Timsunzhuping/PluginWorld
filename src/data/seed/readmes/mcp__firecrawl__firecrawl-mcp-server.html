@@ -379,7 +379,8 @@ export FIRECRAWL_API_KEY=your-api-key  # If your instance requires auth
 }
 </code></pre>
 <p><strong>Branding format:</strong> Extracts comprehensive brand identity (colors, fonts, typography, spacing, logo, UI components) for design analysis or style replication.
-<strong>Privacy:</strong> Set <code>redactPII: true</code> to return content with personally identifiable information redacted.</p>
+<strong>Privacy:</strong> Set <code>redactPII: true</code> to return content with personally identifiable information redacted.
+<strong>Hosted server:</strong> On the hosted server (<code>CLOUD_SERVICE=true</code>) scrape is read-only. It takes no browser <code>actions</code> and cannot accept provider terms. A named <code>profile</code> loads saved browser state without saving changes to it. An organization admin accepts terms in the dashboard.</p>
 <p><strong>Returns:</strong></p>
 <ul>
 <li>JSON structured data, markdown, branding profile, or other formats as specified.</li>
@@ -650,7 +651,7 @@ and small metadata objects. Do not include raw scrape/parse outputs.</p>
 <li><code>enabled</code>, <code>toolkits</code> (up to 5 provider slugs), <code>maxCalls</code> (1 to 30), <code>requireApproval</code> (paid calls end the turn with a <code>pendingApproval</code>; needs <code>mode: "chat"</code> on the same call, even on a follow-up)</li>
 <li><code>onTermsRequired</code>: what to do when an Alexandria provider the agent would use needs data terms your team has not accepted. Gated providers are never called in any mode. Omitted on a follow-up keeps the previous turn's value.<ul>
 <li><code>"skip"</code> (default): answer with accepted providers only. <code>exchange.skippedProviders</code> on the status result lists the gated providers that would have helped.</li>
-<li><code>"ask"</code>: the same, plus a terms <code>pendingApproval</code> and <code>exchange.requiresAction</code> with the exact <code>terms/show</code> and <code>terms/accept</code> calls for each provider. Each provider's <code>digest</code> is always present and is <code>string | null</code>; when it is <code>null</code>, <code>terms/show</code> returns the current digest to send.</li>
+<li><code>"ask"</code>: the same, plus a terms <code>pendingApproval</code> and <code>exchange.requiresAction</code> with the approval ID and provider requirements. Read terms with <code>terms/show</code>; an organization admin accepts them in the Firecrawl dashboard.</li>
 </ul>
 </li>
 <li><code>approve</code>: <code>{ approvalId, callIds?, always? }</code> answers yes to the <code>pendingApproval</code> the previous turn ended on. <code>callIds</code> and <code>always</code> apply to paid-call approvals only.</li>
@@ -659,12 +660,12 @@ and small metadata objects. Do not include raw scrape/parse outputs.</p>
 </ul>
 </li>
 </ul>
-<p><strong>Provider terms (ask mode):</strong> there is no auto-accept mode. When a turn ends on a terms offer, the status result carries <code>pendingApproval</code> (<code>kind: "terms"</code>) and <code>exchange.requiresAction</code> with the <code>approvalId</code> and the exact <code>terms/show</code> and <code>terms/accept</code> calls. To use the provider:</p>
+<p><strong>Provider terms (ask mode):</strong> there is no auto-accept mode. When a turn ends on a terms offer, the status result carries <code>pendingApproval</code> (<code>kind: "terms"</code>) and <code>exchange.requiresAction</code> with the <code>approvalId</code> and provider requirements. Any <code>terms/accept</code> descriptor in that API payload is unavailable through MCP. To use the provider:</p>
 <ol>
 <li>Show the user the terms (<code>terms/show</code> through <code>firecrawl_scrape</code> with <code>alexandria</code>).</li>
-<li>Get the user's explicit consent to that provider's terms. A data request is not consent.</li>
-<li>Run the <code>terms/accept</code> call through <code>firecrawl_scrape</code>.</li>
-<li>Continue the same thread: call <code>firecrawl_agent</code> with the same <code>threadId</code> and <code>exchange.approve: { "approvalId": "..." }</code>.</li>
+<li>Direct an organization admin to accept the terms at the provider's URL, or <a href="https://www.firecrawl.dev/app/settings?tab=data-sources" target="_blank" rel="noopener noreferrer">data sources settings</a>. A data request is not consent.</li>
+<li>Wait for the admin to confirm acceptance in the dashboard.</li>
+<li>Continue the same thread: call <code>firecrawl_agent</code> with the same <code>threadId</code> and <code>exchange.approve: { "approvalId": "..." }</code>. This resumes research and does not accept terms.</li>
 </ol>
 <p>If the user says no, call <code>firecrawl_agent</code> with the same <code>threadId</code> and <code>exchange.decline: { "approvalId": "..." }</code> instead.</p>
 <p><strong>Prompt Example:</strong></p>
@@ -714,11 +715,11 @@ and small metadata objects. Do not include raw scrape/parse outputs.</p>
   }
 }
 </code></pre>
-<p><strong>Usage Example (continue the thread after the user accepted a provider's terms):</strong></p>
+<p><strong>Usage Example (continue the thread after an admin confirmed dashboard acceptance):</strong></p>
 <pre><code class="language-json">{
   "name": "firecrawl_agent",
   "arguments": {
-    "prompt": "I accepted the Apollo terms. Continue.",
+    "prompt": "The admin confirmed acceptance of the Apollo terms in the dashboard. Continue.",
     "threadId": "0199a1b2-0000-7000-8000-000000000031",
     "exchange": { "approve": { "approvalId": "0199a1b2-0000-7000-8000-000000000033" } }
   }
@@ -959,16 +960,14 @@ HTTP 403 and this body:</p>
 <p>The tool result relays it as an error with <code>structuredContent</code> carrying <code>code</code>,
 <code>status: 403</code>, <code>requestId</code>, the <code>requiresAction</code> object unchanged, and
 <code>next_actions</code> (<code>human_action_required</code> then <code>retry_same_request</code>). Accepting
-terms is a legal act. Use the returned <code>nextTool</code> call to read the agreement through <code>firecrawl_scrape</code>
-with <code>alexandria: [{provider: "firecrawl", capability: "terms/show", options: {provider: "&lt;provider&gt;"}}]</code>.
-Present it to the user and obtain explicit authorization to bind their organization
-before calling <code>firecrawl_scrape</code> with capability <code>terms/accept</code> under provider <code>firecrawl</code>.
-Its options are <code>provider</code>, the exact reviewed <code>version</code>
-and 64-character lowercase hexadecimal <code>digest</code>, and <code>confirmed: true</code>. A request
-for data is not consent. Authority or eligibility errors may require an organization
-admin to use <code>requiresAction.url</code>. No automatic acceptance or uncertain retries occur.
-Send terms calls separately from execution. These are nested capabilities, not top-level MCP tools.
-No credits are charged for the blocked retrieval. After confirmed acceptance, call the same
+terms is a legal act, so an organization admin accepts them in the Firecrawl dashboard, not
+through MCP. Use the returned <code>nextTool</code> call to read the agreement through <code>firecrawl_scrape</code>
+with <code>alexandria: [{provider: "firecrawl", capability: "terms/show", options: {provider: "&lt;provider&gt;"}}]</code>,
+sent separately from provider execution, and present it to the user. An organization admin then
+accepts it at <code>requiresAction.url</code>, or at <a href="https://www.firecrawl.dev/app/settings?tab=data-sources" target="_blank" rel="noopener noreferrer">https://www.firecrawl.dev/app/settings?tab=data-sources</a>.
+<code>firecrawl_scrape</code> refuses every other <code>terms/*</code> capability, so it makes no account changes. A request
+for data is not consent, and no automatic acceptance or uncertain retries occur.
+No credits are charged for the blocked retrieval. After the admin confirms acceptance, call the same
 tool again with the identical payload and <code>requestId</code>.</p>
 <h3>16. Credit Usage Tool</h3>
 <p>The tool requires an authenticated Firecrawl account and is read-only.</p>

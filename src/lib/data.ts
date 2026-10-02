@@ -35,7 +35,7 @@ function loadSnapshot(): { plugins: Plugin[]; stats: MarketStats } {
     ? JSON.parse(fs.readFileSync(statsPath, "utf-8"))
     : {
         totalIndexed: plugins.length,
-        sourceTotals: { dsh: 0, "claude-code": 0, mcp: 0 },
+        sourceTotals: { dsh: 0, "claude-code": 0, mcp: 0, skills: 0 },
         byEcosystem: countByEcosystem(plugins),
         categories: [],
         lastSyncedAt: new Date(0).toISOString(),
@@ -45,7 +45,7 @@ function loadSnapshot(): { plugins: Plugin[]; stats: MarketStats } {
 }
 
 function countByEcosystem(plugins: Plugin[]): Record<Ecosystem, number> {
-  const out = { dsh: 0, "claude-code": 0, mcp: 0 } as Record<Ecosystem, number>;
+  const out = { dsh: 0, "claude-code": 0, mcp: 0, skills: 0 } as Record<Ecosystem, number>;
   for (const p of plugins) out[p.ecosystem]++;
   return out;
 }
@@ -229,7 +229,7 @@ export async function getStats(): Promise<MarketStats> {
     .select({ ecosystem: p.ecosystem, count: sql<number>`count(*)::int` })
     .from(p)
     .groupBy(p.ecosystem);
-  const byEcosystem = { dsh: 0, "claude-code": 0, mcp: 0 } as Record<Ecosystem, number>;
+  const byEcosystem = { dsh: 0, "claude-code": 0, mcp: 0, skills: 0 } as Record<Ecosystem, number>;
   for (const r of rows) byEcosystem[r.ecosystem as Ecosystem] = r.count;
   const catRows = await db.execute(
     sql`SELECT unnest(categories) AS name, count(*)::int AS count FROM plugins GROUP BY 1 ORDER BY 2 DESC LIMIT 30`,
@@ -237,7 +237,7 @@ export async function getStats(): Promise<MarketStats> {
   const sourceRows = await db
     .select({ status: schema.syncSources.status, lastRunAt: schema.syncSources.lastRunAt })
     .from(schema.syncSources);
-  const sourceTotals = { dsh: 0, "claude-code": 0, mcp: 0 } as Record<Ecosystem, number>;
+  const sourceTotals = { dsh: 0, "claude-code": 0, mcp: 0, skills: 0 } as Record<Ecosystem, number>;
   let lastSyncedAt = new Date(0);
   for (const s of sourceRows) {
     const st = s.status as { ecosystem?: Ecosystem; sourceTotal?: number } | null;

@@ -9,6 +9,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
       { label: "dsh plugins", href: "/browse?ecosystem=dsh" },
       { label: "Claude Code plugins", href: "/browse?ecosystem=claude-code" },
       { label: "MCP servers", href: "/browse?ecosystem=mcp" },
+      { label: "Agent Skills", href: "/browse?ecosystem=skills" },
     ],
   },
   {
@@ -28,6 +29,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
       },
       { label: "Claude Code", href: "https://code.claude.com" },
       { label: "Model Context Protocol", href: "https://modelcontextprotocol.io" },
+      { label: "skills.sh", href: "https://www.skills.sh" },
     ],
   },
 ];
@@ -82,7 +84,7 @@ export function Footer() {
             © {new Date().getFullYear()} PLUGINWORLD · ONE PORT FOR EVERY PLUGIN
           </p>
           <p className="font-mono text-[11px] tracking-wide text-faint">
-            DSH · CLAUDE CODE · MCP
+            DSH · CLAUDE CODE · MCP · SKILLS
           </p>
         </div>
       </div>

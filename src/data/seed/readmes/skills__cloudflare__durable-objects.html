@@ -1,0 +1,188 @@
+<h1>Durable Objects</h1>
+<p>Build stateful, coordinated applications on Cloudflare's edge using Durable Objects.</p>
+<h2>Retrieval Sources</h2>
+<p>Your knowledge of Durable Objects APIs and configuration may be outdated. <strong>Prefer retrieval over pre-training</strong> for any Durable Objects task.</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>URL</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Docs</td>
+<td><a href="https://developers.cloudflare.com/durable-objects/index.md" target="_blank" rel="noopener noreferrer">https://developers.cloudflare.com/durable-objects/index.md</a></td>
+</tr>
+<tr>
+<td>API Reference</td>
+<td><a href="https://developers.cloudflare.com/durable-objects/api/index.md" target="_blank" rel="noopener noreferrer">https://developers.cloudflare.com/durable-objects/api/index.md</a></td>
+</tr>
+<tr>
+<td>Best Practices</td>
+<td><a href="https://developers.cloudflare.com/durable-objects/best-practices/index.md" target="_blank" rel="noopener noreferrer">https://developers.cloudflare.com/durable-objects/best-practices/index.md</a></td>
+</tr>
+<tr>
+<td>Examples</td>
+<td><a href="https://developers.cloudflare.com/durable-objects/examples/index.md" target="_blank" rel="noopener noreferrer">https://developers.cloudflare.com/durable-objects/examples/index.md</a></td>
+</tr>
+<tr>
+<td>Roles and permissions</td>
+<td><a href="https://developers.cloudflare.com/workers/authorization/durable-objects/index.md" target="_blank" rel="noopener noreferrer">https://developers.cloudflare.com/workers/authorization/durable-objects/index.md</a></td>
+</tr>
+</tbody></table>
+<p>Fetch the relevant doc page when implementing features.</p>
+<h2>When to Use</h2>
+<ul>
+<li>Creating new Durable Object classes for stateful coordination</li>
+<li>Implementing RPC methods, alarms, or WebSocket handlers</li>
+<li>Reviewing existing DO code for best practices</li>
+<li>Configuring wrangler.jsonc/toml for DO bindings and migrations</li>
+<li>Writing tests with Cloudflare’s Vitest integration</li>
+<li>Designing sharding strategies and parent-child relationships</li>
+</ul>
+<h2>Reference Documentation</h2>
+<ul>
+<li><code>./references/rules.md</code> - Core rules, storage, concurrency, RPC, alarms</li>
+<li><a href="https://github.com/cloudflare/skills/blob/HEAD/references/testing.md" target="_blank" rel="noopener noreferrer">Testing reference</a> - Current Vitest documentation, migration choices, and test selection</li>
+<li><code>./references/workers.md</code> - Workers handlers, types, wrangler config, observability</li>
+</ul>
+<p>Search: <code>blockConcurrencyWhile</code>, <code>idFromName</code>, <code>getByName</code>, <code>setAlarm</code>, <code>sql.exec</code></p>
+<h2>Core Principles</h2>
+<h3>Use Durable Objects For</h3>
+<table>
+<thead>
+<tr>
+<th>Need</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Coordination</td>
+<td>Chat rooms, multiplayer games, collaborative docs</td>
+</tr>
+<tr>
+<td>Strong consistency</td>
+<td>Inventory, booking systems, turn-based games</td>
+</tr>
+<tr>
+<td>Per-entity storage</td>
+<td>Multi-tenant SaaS, per-user data</td>
+</tr>
+<tr>
+<td>Persistent connections</td>
+<td>WebSockets, real-time notifications</td>
+</tr>
+<tr>
+<td>Scheduled work per entity</td>
+<td>Subscription renewals, game timeouts</td>
+</tr>
+</tbody></table>
+<h3>Do NOT Use For</h3>
+<ul>
+<li>Stateless request handling (use plain Workers)</li>
+<li>Maximum global distribution needs</li>
+<li>High fan-out independent requests</li>
+</ul>
+<h2>Quick Reference</h2>
+<h3>Wrangler Configuration</h3>
+<pre><code class="language-jsonc">// wrangler.jsonc
+{
+  "durable_objects": {
+    "bindings": [{ "name": "MY_DO", "class_name": "MyDurableObject" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MyDurableObject"] }]
+}
+</code></pre>
+<h3>Basic Durable Object Pattern</h3>
+<pre><code class="language-typescript">import { DurableObject } from "cloudflare:workers";
+
+export interface Env {
+  MY_DO: DurableObjectNamespace&lt;MyDurableObject&gt;;
+}
+
+export class MyDurableObject extends DurableObject&lt;Env&gt; {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    ctx.blockConcurrencyWhile(async () =&gt; {
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          data TEXT NOT NULL
+        )
+      `);
+    });
+  }
+
+  async addItem(data: string): Promise&lt;number&gt; {
+    const result = this.ctx.storage.sql.exec&lt;{ id: number }&gt;(
+      "INSERT INTO items (data) VALUES (?) RETURNING id",
+      data
+    );
+    return result.one().id;
+  }
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise&lt;Response&gt; {
+    const stub = env.MY_DO.getByName("my-instance");
+    const id = await stub.addItem("hello");
+    return Response.json({ id });
+  },
+};
+</code></pre>
+<h2>Critical Rules</h2>
+<ol>
+<li><strong>Model around coordination atoms</strong> - One DO per chat room/game/user, not one global DO</li>
+<li><strong>Use <code>getByName()</code> for deterministic routing</strong> - Same input = same DO instance</li>
+<li><strong>Use SQLite storage</strong> - Configure <code>new_sqlite_classes</code> in migrations</li>
+<li><strong>Initialize in constructor</strong> - Use <code>blockConcurrencyWhile()</code> for schema setup only</li>
+<li><strong>Use RPC methods</strong> - Not fetch() handler (compatibility date &gt;= 2024-04-03)</li>
+<li><strong>Persist first, cache second</strong> - Always write to storage before updating in-memory state</li>
+<li><strong>One alarm per DO</strong> - <code>setAlarm()</code> replaces any existing alarm</li>
+</ol>
+<h2>Authorization</h2>
+<p>Durable Objects do not have separate roles or permissions; access follows the Worker that implements them. Retrieve the current <a href="https://developers.cloudflare.com/workers/authorization/durable-objects/index.md" target="_blank" rel="noopener noreferrer">Durable Objects authorization guidance</a> before granting observability or Data Studio access, and scope the Workers role to the intended Worker or Workers product.</p>
+<h2>Anti-Patterns (NEVER)</h2>
+<ul>
+<li>Single global DO handling all requests (bottleneck)</li>
+<li>Using <code>blockConcurrencyWhile()</code> on every request (kills throughput)</li>
+<li>Storing critical state only in memory (lost on eviction/crash)</li>
+<li>Using <code>await</code> between related storage writes (breaks atomicity)</li>
+<li>Holding <code>blockConcurrencyWhile()</code> across <code>fetch()</code> or external I/O</li>
+</ul>
+<h2>Stub Creation</h2>
+<pre><code class="language-typescript">// Deterministic - preferred for most cases
+const stub = env.MY_DO.getByName("room-123");
+
+// From existing ID string
+const id = env.MY_DO.idFromString(storedIdString);
+const stub = env.MY_DO.get(id);
+
+// New unique ID - store mapping externally
+const id = env.MY_DO.newUniqueId();
+const stub = env.MY_DO.get(id);
+</code></pre>
+<h2>Storage Operations</h2>
+<pre><code class="language-typescript">// SQL (synchronous, recommended)
+this.ctx.storage.sql.exec("INSERT INTO t (c) VALUES (?)", value);
+const rows = this.ctx.storage.sql.exec&lt;Row&gt;("SELECT * FROM t").toArray();
+
+// KV (async)
+await this.ctx.storage.put("key", value);
+const val = await this.ctx.storage.get&lt;Type&gt;("key");
+</code></pre>
+<h2>Alarms</h2>
+<pre><code class="language-typescript">// Schedule (replaces existing)
+await this.ctx.storage.setAlarm(Date.now() + 60_000);
+
+// Handler
+async alarm(): Promise&lt;void&gt; {
+  // Process scheduled work
+  // Optionally reschedule: await this.ctx.storage.setAlarm(...)
+}
+
+// Cancel
+await this.ctx.storage.deleteAlarm();
+</code></pre>
+<h2>Testing</h2>
+<p>Read the <a href="https://github.com/cloudflare/skills/blob/HEAD/references/testing.md" target="_blank" rel="noopener noreferrer">testing reference</a> before configuring a suite or writing Durable Object tests. It routes to current setup, APIs, and examples and identifies the behavior to cover.</p>

@@ -41,7 +41,7 @@ export default function OgImage() {
         </div>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <span style={{ color: "#9a988f", fontSize: 26, letterSpacing: 2 }}>
-            DSH · CLAUDE CODE · MCP — ONE PORT
+            DSH · CLAUDE CODE · MCP · SKILLS — ONE PORT
           </span>
           <span style={{ color: "#9a988f", fontSize: 26, letterSpacing: 2 }}>
             WWW.PLUGINWORLD.AI

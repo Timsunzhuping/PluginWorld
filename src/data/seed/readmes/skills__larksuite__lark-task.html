@@ -1,0 +1,347 @@
+<h1>task (v2)</h1>
+<p><strong>CRITICAL — 开始前 MUST 先用 Read 工具读取 <a href="https://github.com/larksuite/cli/blob/HEAD/../lark-shared/SKILL.md" target="_blank" rel="noopener noreferrer"><code>../lark-shared/SKILL.md</code></a>，其中包含认证、权限处理</strong></p>
+<h2>命令选择与渐进式发现（必读）</h2>
+<p>执行任何 Task 命令前，必须先确认能力真实存在，禁止根据用户意图自行拼接或猜测 <code>+&lt;verb&gt;</code>：</p>
+<ol>
+<li>先将用户意图与下方 Shortcut 表精确匹配。只有表中明确列出的 shortcut 才可直接选择；参数不确定时读取对应 reference 或运行该 shortcut 的 <code>--help</code>。</li>
+<li>没有精确匹配、或无法确认当前版本是否支持时，先运行 <code>lark-cli task --help</code>，以当前 CLI 输出的命令列表为准。</li>
+<li>help 中存在匹配 shortcut 时，使用 help 列出的完整 shortcut token（例如 <code>+create</code>）运行 <code>lark-cli task &lt;shortcut&gt; --help</code>，再按真实 flag 执行。</li>
+<li>help 中没有匹配 shortcut 时，不得尝试相似的 <code>+&lt;verb&gt;</code>；从 help 中选择原生 resource，运行 <code>lark-cli task &lt;resource&gt; --help</code> 确认 method，再运行 <code>lark-cli schema task.&lt;resource&gt;.&lt;method&gt;</code> 获取参数结构，最后调用 <code>lark-cli task &lt;resource&gt; &lt;method&gt; ...</code>。</li>
+<li>遇到 <code>unknown_subcommand</code> 时必须停止猜测或尝试变体，回到第 2 步重新发现能力。</li>
+</ol>
+<p>shortcut 名称只能来自本 Skill 的 Shortcut 表或 <code>lark-cli task --help</code>；原生 resource/method 以逐级 help 为准，参数名、类型和嵌套结构以 method schema 为准。</p>
+<blockquote>
+<p><strong>任务搜索技巧</strong>：先区分用户是否<strong>特地指定使用搜索 skill</strong>，以及是否真的提供了<strong>查询关键字</strong>（例如任务名称、关键词、片段描述）。如果用户特地指定使用搜索 skill，或明确给出了任务查询关键字，则目标是<strong>任务</strong>时优先使用 <code>+search</code>。如果用户没有特地指定使用搜索 skill，且意图里没有查询关键字，只有范围条件（例如“今年以来”“已完成”“由我创建”“我关注的”），并且使用 <code>+search</code> 与 <code>+get-related-tasks</code> / <code>+get-my-tasks</code> 都能达到目的时，应优先使用列表型能力，而不是搜索型能力。其中，“与我相关 / 我关注的 / 由我创建”等优先考虑 <code>+get-related-tasks</code>；“我负责的 / 分配给我”的列表优先考虑 <code>+get-my-tasks</code>。不要把时间范围词（例如“今年以来”）本身误当成 <code>query</code> 去走搜索。
+<strong>任务搜索相关性提示</strong>：<code>+search</code> 当前不会自动判断搜索结果与搜索发起人的相关性。如果用户明确要求搜索“与我相关”的任务，必须先识别具体关系，获取当前用户的 <code>open_id</code>，并显式传入对应的 <code>--assignee</code>（负责人）、<code>--creator</code>（创建人）或 <code>--follower</code>（关注人）过滤条件；不能只依赖 <code>query</code> 期待自动返回与当前用户相关的任务。
+<strong>任务清单搜索技巧</strong>：任务清单也遵循同样的判断逻辑。先区分用户是否<strong>特地指定使用搜索 skill</strong>，以及是否真的提供了<strong>清单查询关键字</strong>（例如清单名称、关键词、片段描述）。如果用户特地指定使用搜索 skill，或明确给出了清单查询关键字，则优先使用 <code>+tasklist-search</code>。如果用户没有特地指定使用搜索 skill，且意图里没有查询关键字，只有范围条件（例如“由我创建的任务清单”“今年以来创建的清单”），并且使用搜索或原生列取清单都能达到目的时，应优先使用原生 <code>tasklists.list</code> 接口列取清单（先 <code>schema task.tasklists.list</code>，再 <code>lark-cli task tasklists list --as user ...</code>），再按 <code>creator</code>、<code>created_at</code> 等字段做本地筛选和分页控制。
+<strong>意图区分补充</strong>：像“搜索飞书中今年以来我关注的任务”这类表达，虽然字面带有“搜索”，但如果没有真正的查询关键字，且本质是在限定“与我相关 + 时间范围”，则应优先走 <code>+get-related-tasks</code>；像“搜索飞书中由我创建的任务清单”这类表达，如果没有清单关键字，且本质是在限定“清单范围 + 创建者”，则应优先走原生 <code>tasklists.list</code> 后筛选，而不是直接走搜索型 shortcut。
+<strong>用户身份识别</strong>：在用户身份（user identity）场景下，如果用户提到了“我”（例如“分配给我”、“由我创建”），请默认获取当前登录用户的 <code>open_id</code> 作为对应的参数值。
+<strong>术语理解 — 待办 disambiguation（必读）</strong>：</p>
+<ul>
+<li>用户提到「待办 / todo / 任务」时，<strong>先判断归属</strong>，不要默认走本 skill。</li>
+<li><strong>走 <a href="https://github.com/larksuite/cli/blob/HEAD/../lark-meeting/SKILL.md" target="_blank" rel="noopener noreferrer">lark-meeting</a> 的 <code>minutes +todo</code></strong>（禁止本 skill）：上下文含 <strong>妙记 / 会议纪要 / minute_token / 妙记 URL</strong>（<code>/minutes/</code>）；或「在某某妙记里新建/修改待办」「妙记 AI 待办」「会议录制里的待办」。</li>
+<li><strong>走本 skill（lark-task）</strong>：任务清单、分配给我、项目待办、截止日期/提醒、子任务、任务清单成员；或 applink 含 <code>client/todo/task?guid=</code>；或明确说「飞书任务」「任务中心」「我的任务清单」。</li>
+<li><strong>禁止</strong>：用户要在妙记里加待办时，<strong>不要</strong>调用 <code>task tasklists list</code>、<code>task +create</code> 或任何 task 命令去「找清单再放任务」。
+<strong>友好输出</strong>：在输出任务（或清单）的执行结果给用户时，建议同时提取并输出命令返回结果中的 <code>url</code> 字段（任务链接），以便用户可以直接点击跳转查看详情。</li>
+</ul>
+</blockquote>
+<blockquote>
+<p><strong>创建/更新注意</strong>：</p>
+<ol>
+<li>只有在设置了 <code>due</code>（截止时间）的情况下，才能设置 <code>repeat_rule</code>（重复规则）和 <code>reminder</code>（提醒时间）。</li>
+<li>若同时设置了 <code>start</code>（开始时间）和 <code>due</code>（截止时间），开始时间必须小于或等于截止时间。</li>
+<li>使用 tenant_access_token（应用身份）时，无法跨租户添加任务成员。</li>
+</ol>
+</blockquote>
+<blockquote>
+<p><strong>查询注意</strong>：</p>
+<ol>
+<li>在输出任务详情时，如果需要渲染负责人、创建人等人员字段，除了展示 <code>id</code> (例如 open_id) 外，还必须通过其他方式（例如调用通讯录技能）尝试获取并展示这个人的真实名字，以便用户更容易识别。</li>
+<li>在输出清单详情时，如果需要渲染 owner、member、角色成员等人员字段，也必须像任务成员展示一样，除了展示 <code>id</code> 外，尽量解析并展示对应人员的真实名字。</li>
+<li>在输出任务或清单详情时，如果需要渲染创建时间、截止时间等字段，需要使用本地时区来渲染（格式为2006-01-02 15:04:05）。</li>
+</ol>
+</blockquote>
+<blockquote>
+<p><strong>Task GUID 定义</strong>：
+Task OpenAPI 中用于更新/操作任务的 <code>guid</code> 是任务的全局唯一标识（GUID），不是客户端展示的任务编号（例如 <code>t104121</code> / <code>suite_entity_num</code>）。
+对于 Feishu 的任务 applink（例如 <code>.../client/todo/task?guid=...</code>），必须使用 URL query 里的 <code>guid</code> 参数作为 task guid。</p>
+</blockquote>
+<blockquote>
+<p><strong>从任务清单定位并修改任务的最短路径</strong>：</p>
+<ol>
+<li>已知任务清单 GUID 时直接使用，不要先搜索；已知任务清单 applink 时，取 URL query 中的 <code>guid</code> 作为 <code>tasklist_guid</code>。</li>
+<li>只有清单名称或关键词、没有 GUID/applink 时，才调用一次 <code>+tasklist-search</code> 解析目标清单。</li>
+<li>按原生 API 规则先执行 <code>lark-cli schema task.tasklists.tasks</code>，再执行 <code>lark-cli task tasklists tasks --params '{"tasklist_guid":"&lt;tasklist_guid&gt;"}' --as user</code>。</li>
+<li>从清单任务结果中取任务的 <code>guid</code>，直接传给 <code>+update</code> 或 <code>+complete</code>；禁止传客户端展示编号（例如 <code>t104121</code>）。这两个 shortcut 也可直接接收包含 <code>guid=</code> 的任务 applink。</li>
+<li><code>+update</code> 返回 <code>updated_fields</code> 和每个任务的服务端 <code>confirmed</code> 字段；<code>+complete</code> 返回 <code>status</code>、<code>completed_at</code>、<code>already_completed</code>。这些字段已确认目标状态时，不要例行追加 <code>tasks get</code>；仅在服务端未返回所需字段或用户明确要求完整复核时再查询详情。</li>
+</ol>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Shortcut</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-create.md" target="_blank" rel="noopener noreferrer"><code>+create</code></a></td>
+<td>create a task</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-update.md" target="_blank" rel="noopener noreferrer"><code>+update</code></a></td>
+<td>update task attributes</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-set-ancestor.md" target="_blank" rel="noopener noreferrer"><code>+set-ancestor</code></a></td>
+<td>set or clear a task ancestor</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-comment.md" target="_blank" rel="noopener noreferrer"><code>+comment</code></a></td>
+<td>add a comment to a task</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-complete.md" target="_blank" rel="noopener noreferrer"><code>+complete</code></a></td>
+<td>mark a task as complete</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-reopen.md" target="_blank" rel="noopener noreferrer"><code>+reopen</code></a></td>
+<td>reopen a completed task</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-assign.md" target="_blank" rel="noopener noreferrer"><code>+assign</code></a></td>
+<td>assign or remove task members</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-followers.md" target="_blank" rel="noopener noreferrer"><code>+followers</code></a></td>
+<td>manage task followers</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-reminder.md" target="_blank" rel="noopener noreferrer"><code>+reminder</code></a></td>
+<td>manage task reminders</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-get-my-tasks.md" target="_blank" rel="noopener noreferrer"><code>+get-my-tasks</code></a></td>
+<td>List tasks assigned to me</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-get-related-tasks.md" target="_blank" rel="noopener noreferrer"><code>+get-related-tasks</code></a></td>
+<td>list tasks related to me</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-search.md" target="_blank" rel="noopener noreferrer"><code>+search</code></a></td>
+<td>search tasks</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-upload-attachment.md" target="_blank" rel="noopener noreferrer"><code>+upload-attachment</code></a></td>
+<td>upload a local file as an attachment to a task</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-tasklist-create.md" target="_blank" rel="noopener noreferrer"><code>+tasklist-create</code></a></td>
+<td>create a tasklist and optionally add tasks</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-tasklist-search.md" target="_blank" rel="noopener noreferrer"><code>+tasklist-search</code></a></td>
+<td>search tasklists</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-tasklist-task-add.md" target="_blank" rel="noopener noreferrer"><code>+tasklist-task-add</code></a></td>
+<td>add tasks to a tasklist</td>
+</tr>
+<tr>
+<td><a href="https://github.com/larksuite/cli/blob/HEAD/references/lark-task-tasklist-members.md" target="_blank" rel="noopener noreferrer"><code>+tasklist-members</code></a></td>
+<td>manage tasklist members</td>
+</tr>
+</tbody></table>
+<h2>API Resources</h2>
+<pre><code class="language-bash">lark-cli schema task.&lt;resource&gt;.&lt;method&gt;   # 调用 API 前必须先查看参数结构
+lark-cli task &lt;resource&gt; &lt;method&gt; [flags] # 调用 API
+</code></pre>
+<blockquote>
+<p><strong>重要</strong>：使用原生 API 时，必须先运行 <code>schema</code> 查看 <code>--data</code> / <code>--params</code> 参数结构，不要猜测字段格式。</p>
+</blockquote>
+<h3>tasks</h3>
+<ul>
+<li><code>create</code> — 创建任务</li>
+<li><code>delete</code> — 删除任务</li>
+<li><code>get</code> — 获取任务详情</li>
+<li><code>list</code> — 列取任务列表</li>
+<li><code>patch</code> — 更新任务</li>
+</ul>
+<h3>tasklists</h3>
+<ul>
+<li><code>add_members</code> — 添加清单成员</li>
+<li><code>create</code> — 创建清单</li>
+<li><code>delete</code> — 删除清单</li>
+<li><code>get</code> — 获取清单详情</li>
+<li><code>list</code> — 获取清单列表</li>
+<li><code>patch</code> — 更新清单</li>
+<li><code>remove_members</code> — 移除清单成员</li>
+<li><code>tasks</code> — 获取清单任务列表</li>
+</ul>
+<h3>subtasks</h3>
+<ul>
+<li><code>create</code> — 创建子任务</li>
+<li><code>list</code> — 获取任务的子任务列表</li>
+</ul>
+<h3>members</h3>
+<ul>
+<li><code>add</code> — 添加任务成员</li>
+<li><code>remove</code> — 移除任务成员</li>
+</ul>
+<h3>sections</h3>
+<ul>
+<li><code>create</code> — 创建自定义分组</li>
+<li><code>delete</code> — 删除自定义分组</li>
+<li><code>get</code> — 获取自定义分组详情</li>
+<li><code>list</code> — 获取自定义分组列表</li>
+<li><code>patch</code> — 更新自定义分组</li>
+<li><code>tasks</code> — 获取自定义分组任务列表</li>
+</ul>
+<h3>custom_fields</h3>
+<ul>
+<li><code>create</code> — 创建自定义字段</li>
+<li><code>get</code> — 获取自定义字段详情</li>
+<li><code>patch</code> — 更新自定义字段</li>
+<li><code>list</code> — 获取自定义字段列表</li>
+<li><code>add</code> — 将自定义字段加入资源</li>
+<li><code>remove</code> — 将自定义字段移出资源</li>
+</ul>
+<h3>custom_field_options</h3>
+<ul>
+<li><code>create</code> — 创建自定义字段选项</li>
+<li><code>patch</code> — 更新自定义字段选项</li>
+</ul>
+<h3>agent</h3>
+<ul>
+<li><code>update_agent_profile</code> — 更新任务代理的主页内容数据。</li>
+<li><code>register_agent</code> — 注册AI 智能体</li>
+</ul>
+<h3>agent_task_step_info</h3>
+<ul>
+<li><code>append_task_steps</code> — 写入任务记录。</li>
+</ul>
+<h2>权限表</h2>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>所需 scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>tasks.create</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+<tr>
+<td><code>tasks.delete</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+<tr>
+<td><code>tasks.get</code></td>
+<td><code>task:task:read</code></td>
+</tr>
+<tr>
+<td><code>tasks.list</code></td>
+<td><code>task:task:read</code></td>
+</tr>
+<tr>
+<td><code>tasks.patch</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+<tr>
+<td><code>tasklists.add_members</code></td>
+<td><code>task:tasklist:write</code></td>
+</tr>
+<tr>
+<td><code>tasklists.create</code></td>
+<td><code>task:tasklist:write</code></td>
+</tr>
+<tr>
+<td><code>tasklists.delete</code></td>
+<td><code>task:tasklist:write</code></td>
+</tr>
+<tr>
+<td><code>tasklists.get</code></td>
+<td><code>task:tasklist:read</code></td>
+</tr>
+<tr>
+<td><code>tasklists.list</code></td>
+<td><code>task:tasklist:read</code></td>
+</tr>
+<tr>
+<td><code>tasklists.patch</code></td>
+<td><code>task:tasklist:write</code></td>
+</tr>
+<tr>
+<td><code>tasklists.remove_members</code></td>
+<td><code>task:tasklist:write</code></td>
+</tr>
+<tr>
+<td><code>tasklists.tasks</code></td>
+<td><code>task:tasklist:read</code></td>
+</tr>
+<tr>
+<td><code>subtasks.create</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+<tr>
+<td><code>subtasks.list</code></td>
+<td><code>task:task:read</code></td>
+</tr>
+<tr>
+<td><code>members.add</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+<tr>
+<td><code>members.remove</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+<tr>
+<td><code>sections.create</code></td>
+<td><code>task:section:write</code></td>
+</tr>
+<tr>
+<td><code>sections.delete</code></td>
+<td><code>task:section:write</code></td>
+</tr>
+<tr>
+<td><code>sections.get</code></td>
+<td><code>task:section:read</code></td>
+</tr>
+<tr>
+<td><code>sections.list</code></td>
+<td><code>task:section:read</code></td>
+</tr>
+<tr>
+<td><code>sections.patch</code></td>
+<td><code>task:section:write</code></td>
+</tr>
+<tr>
+<td><code>sections.tasks</code></td>
+<td><code>task:section:read</code></td>
+</tr>
+<tr>
+<td><code>custom_fields.create</code></td>
+<td><code>task:custom_field:write</code></td>
+</tr>
+<tr>
+<td><code>custom_fields.get</code></td>
+<td><code>task:custom_field:read</code></td>
+</tr>
+<tr>
+<td><code>custom_fields.patch</code></td>
+<td><code>task:custom_field:write</code></td>
+</tr>
+<tr>
+<td><code>custom_fields.list</code></td>
+<td><code>task:custom_field:read</code></td>
+</tr>
+<tr>
+<td><code>custom_fields.add</code></td>
+<td><code>task:custom_field:write</code></td>
+</tr>
+<tr>
+<td><code>custom_fields.remove</code></td>
+<td><code>task:custom_field:write</code></td>
+</tr>
+<tr>
+<td><code>custom_field_options.create</code></td>
+<td><code>task:custom_field:write</code></td>
+</tr>
+<tr>
+<td><code>custom_field_options.patch</code></td>
+<td><code>task:custom_field:write</code></td>
+</tr>
+<tr>
+<td><code>agent.update_agent_profile</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+<tr>
+<td><code>agent.register_agent</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+<tr>
+<td><code>agent_task_step_info.append_task_steps</code></td>
+<td><code>task:task:write</code></td>
+</tr>
+</tbody></table>

@@ -1,0 +1,261 @@
+<h1>Vercel Optimize</h1>
+<p>Run an observability-first Vercel optimization audit. Do not inspect source files until <code>signals.json</code> exists and a deterministic gate points to a route, file, or project setting.</p>
+<p>Core doctrine: read <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/doctrine.md" target="_blank" rel="noopener noreferrer">references/doctrine.md</a> if any rule is unclear.</p>
+<ul>
+<li>Metrics first. Recommendations start from Vercel production signals, not repo-wide grep.</li>
+<li>Deterministic gates. <code>scripts/gate-investigations.mjs</code> decides what deserves investigation.</li>
+<li>Candidate-bound scope. Read only files named by a candidate or a route-local import chain.</li>
+<li>Version-aware citations. Use only <code>references/docs-library.json</code>; invalid or version-mismatched citations are stripped.</li>
+<li>Customer copy. Read <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/voice.md" target="_blank" rel="noopener noreferrer">references/voice.md</a> before writing report text or chat output.</li>
+</ul>
+<h2>Prerequisites</h2>
+<ul>
+<li>Vercel CLI v53+ with <code>vercel metrics</code>, <code>vercel usage</code>, <code>vercel contract</code>, and <code>vercel api</code>.</li>
+<li>Authenticated CLI session: <code>vercel login</code>.</li>
+<li>Linked app directory: <code>vercel link</code>. <code>VERCEL_PROJECT_ID</code> can help resolve project config, but <code>vercel metrics</code> still requires directory linkage. The link or environment must include the intended project org/team/user scope so the collector can resolve a CLI-safe <code>--scope</code> and keep <code>vercel metrics</code>, <code>vercel usage</code>, and <code>vercel contract</code> on the same account.</li>
+<li>Node.js 20+.</li>
+<li>Observability Plus for route-level metric-backed recommendations.</li>
+</ul>
+<p>Never put auth tokens in shell commands. Do not type <code>VERCEL_TOKEN=...</code>, <code>--token ...</code>, or <code>Authorization: Bearer ...</code> into commands that may be echoed in chat.</p>
+<h2>Framework Support</h2>
+<p>The preflight reads <code>package.json</code> and sets expectations before metric fan-out.</p>
+<table>
+<thead>
+<tr>
+<th>Framework</th>
+<th>Status</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Next.js App Router</td>
+<td>supported</td>
+<td>strongest route mapping, scanners, playbooks, citations</td>
+</tr>
+<tr>
+<td>Next.js Pages Router</td>
+<td>supported</td>
+<td>scoped to Pages Router idioms when detected</td>
+</tr>
+<tr>
+<td>SvelteKit</td>
+<td>supported</td>
+<td>route mapping for <code>src/routes</code> files and SvelteKit scanner</td>
+</tr>
+<tr>
+<td>Nuxt</td>
+<td>supported</td>
+<td>route mapping plus generic/platform checks; fewer framework-specific recs</td>
+</tr>
+<tr>
+<td>Astro</td>
+<td>limited</td>
+<td>route mapping plus generic checks; fewer framework-specific recs</td>
+</tr>
+<tr>
+<td>Hono / Remix / unknown</td>
+<td>blocked by default</td>
+<td>continue only if the user accepts a limited platform/code-only audit</td>
+</tr>
+</tbody></table>
+<p>If unsupported, stop and ask before scanning or gating:</p>
+<pre><code class="language-text">This project uses &lt;framework&gt;. Vercel Optimize supports metric-backed code recommendations for Next.js, SvelteKit, and Nuxt. Astro support is limited. For &lt;framework&gt;, I can still run a limited platform/scanner audit, but route-level Vercel metrics may not map back to source files.
+
+Do you want me to continue with the limited audit, or stop here?
+</code></pre>
+<p>If the user continues, rerun collection with <code>--continue-unsupported-framework</code>.</p>
+<h2>Run Directory</h2>
+<p>Use a fresh run directory for every audit. Do not reuse briefs, sub-agent outputs, or reports across runs.</p>
+<pre><code class="language-bash">RUN_DIR="$(mktemp -d -t vercel-optimize-XXXXXX)"
+</code></pre>
+<h2>Pipeline</h2>
+<h3>1. Collect, scan, and merge signals</h3>
+<p>Run from the linked app directory or pass <code>--cwd</code> where a script supports it. Keep stdout JSON separate from stderr logs. Do not combine streams.</p>
+<pre><code class="language-bash">node scripts/collect-signals.mjs [projectId] &gt; "$RUN_DIR/vercel-signals.json" 2&gt; "$RUN_DIR/collect.stderr"
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$RUN_DIR/vercel-signals.json"
+
+node scripts/scan-codebase.mjs &lt;repo-root&gt; &gt; "$RUN_DIR/codebase.json"
+node scripts/merge-signals.mjs "$RUN_DIR/vercel-signals.json" "$RUN_DIR/codebase.json" --out "$RUN_DIR/signals.json"
+</code></pre>
+<p>Collection details, schemas, metric IDs, and degradation behavior live in <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/data-collection.md" target="_blank" rel="noopener noreferrer">references/data-collection.md</a>. The metric registry is <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/lib/queries.mjs" target="_blank" rel="noopener noreferrer">lib/queries.mjs</a>; keep all queries on the shared 14-day window.</p>
+<p><code>collect-signals.mjs</code> resolves the linked project owner to <code>commandScope.cliScope</code> and verifies that the resolved account can read the resolved project before it checks Observability Plus. Downstream scripts reuse that scope for every Vercel CLI command that accepts <code>--scope</code>. Do not run <code>vercel usage</code>, <code>vercel metrics</code>, or <code>vercel contract</code> manually without the same scope; unscoped usage can report the user's personal organization while route metrics come from the team project.</p>
+<p>If project or scope resolution is ambiguous, stop and ask the user which Vercel project and team/personal scope they want audited. Do not infer the intended scope from the current <code>vercel whoami</code> team, and do not proceed with metrics, usage, or contract collection until the link, an exact project match in <code>.vercel/repo.json</code>, or <code>VERCEL_PROJECT_ID</code> + <code>VERCEL_ORG_ID</code> identifies the intended account.</p>
+<p>Use this prompt for <code>PROJECT_SCOPE_UNRESOLVED</code>, <code>SCOPE_UNRESOLVED</code>, or <code>PROJECT_SCOPE_MISMATCH</code>:</p>
+<pre><code class="language-text">I can't safely identify the Vercel project and account for this audit yet.
+
+Please confirm the Vercel project name or ID and the team slug/name, or tell me it's under your personal account. Once confirmed, I'll relink or rerun collection against that exact scope before checking metrics.
+</code></pre>
+<h3>1.1 Stop on blockers</h3>
+<p>Check blockers before gating:</p>
+<pre><code class="language-bash">jq '{frameworkSupportBlocker, observabilityPlus, observabilityPlusUsable, observabilityPlusBlocker, observabilityPlusBlockerDetail}' "$RUN_DIR/signals.json"
+</code></pre>
+<p>Required actions:</p>
+<ul>
+<li><code>frameworkSupportBlocker === "unsupported_framework"</code>: use the unsupported-framework prompt above.</li>
+<li><code>PROJECT_SCOPE_UNRESOLVED</code>, <code>SCOPE_UNRESOLVED</code>, or <code>PROJECT_SCOPE_MISMATCH</code>: stop and ask which Vercel project and team/personal scope the user wants audited. For team projects, rerun after <code>vercel link --yes --project &lt;project-name-or-id&gt; --team &lt;team-slug&gt;</code>; for personal projects, rerun after linking under the intended user account or after setting both <code>VERCEL_PROJECT_ID</code> and <code>VERCEL_ORG_ID</code>.</li>
+<li><code>observabilityPlusBlocker === null</code>: continue.</li>
+<li><code>no_traffic</code>: tell the user route metrics are sparse; continue only if they accept limited output.</li>
+<li><code>payment_required</code> or <code>no_oplus_probe</code>: render <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/observability-plus.md" target="_blank" rel="noopener noreferrer">references/observability-plus.md</a> verbatim and ask.</li>
+<li><code>project_disabled</code>: tell the user to enable Observability Plus for the project or accept a limited audit.</li>
+<li><code>daily_quota_exceeded</code>: stop and tell the user the Observability query quota is exhausted; retry after the next UTC midnight reset, or ask whether to continue with a limited code-only audit.</li>
+<li><code>not_linked</code>: link the app directory, then rerun Step 1. If app path and project are known:</li>
+</ul>
+<pre><code class="language-bash">vercel link --yes --project &lt;project-name-or-id&gt; --cwd &lt;app-dir&gt;
+# add --team &lt;team-id-or-slug&gt; when known
+</code></pre>
+<ul>
+<li><code>forbidden</code> or <code>project_not_found</code>: fix auth/team scope. Do not pitch Observability Plus.</li>
+<li><code>all_failed_other</code>: show the raw error code and ask whether to continue in limited code-only mode.</li>
+</ul>
+<p>Do not silently fall back to code-only mode. If the user accepts a limited audit, rerun collection with:</p>
+<pre><code class="language-bash">node scripts/collect-signals.mjs [projectId] --continue-without-observability &gt; "$RUN_DIR/vercel-signals.json" 2&gt; "$RUN_DIR/collect.stderr"
+</code></pre>
+<p>Then scan and merge again.</p>
+<h3>2. Gate candidates</h3>
+<pre><code class="language-bash">node scripts/gate-investigations.mjs "$RUN_DIR/signals.json" &gt; "$RUN_DIR/gate.json"
+</code></pre>
+<p>Output shape:</p>
+<ul>
+<li><code>toLaunch</code>: code-scope candidates to investigate.</li>
+<li><code>platform</code>: project/account-scope recommendations.</li>
+<li><code>gated</code>: skipped, covered, or disqualified candidates that must still appear in the report.</li>
+<li><code>budget</code>: candidate budget and selection mode.</li>
+</ul>
+<p>Default budget is 6 code-scope candidates with a diversity guardrail. To expand:</p>
+<pre><code class="language-bash">node scripts/gate-investigations.mjs "$RUN_DIR/signals.json" --max-candidates 12 &gt; "$RUN_DIR/gate.json"
+node scripts/gate-investigations.mjs "$RUN_DIR/signals.json" --max-candidates all &gt; "$RUN_DIR/gate.json"
+</code></pre>
+<p>Generated candidate docs: <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/candidates.md" target="_blank" rel="noopener noreferrer">references/candidates.md</a>.</p>
+<h3>2.1 Ask about audit scope when needed</h3>
+<p>Before deep-dive, run:</p>
+<pre><code class="language-bash">node scripts/budget-summary.mjs "$RUN_DIR/gate.json" --format json &gt; "$RUN_DIR/budget-summary.json"
+</code></pre>
+<p>If <code>shouldAsk</code> is false, continue.</p>
+<p>If <code>shouldAsk</code> is true:</p>
+<ol>
+<li>Print <code>exactChatMessage.body</code> exactly as returned. Do not summarize, truncate, reorder, or rewrite it.</li>
+<li>Then ask <code>questionText</code> using <code>questionPayload</code> when the host supports structured questions.</li>
+<li>If the user chooses a different number, rerun the gate with <code>--max-candidates &lt;choice&gt;</code>.</li>
+</ol>
+<p>Never put the long preview inside the question field. The preview and the question are separate surfaces.</p>
+<h3>2.2 Deep-dive and reconcile</h3>
+<pre><code class="language-bash">node scripts/deep-dive.mjs "$RUN_DIR/signals.json" "$RUN_DIR/gate.json" --cwd &lt;project-dir&gt; &gt; "$RUN_DIR/investigation-evidence.json"
+
+node scripts/reconcile-candidates.mjs "$RUN_DIR/investigation-evidence.json" \
+  --gate "$RUN_DIR/gate.json" \
+  --out "$RUN_DIR/reconciled-investigation.json"
+</code></pre>
+<p><code>--cwd</code> must be the linked project directory so <code>deep-dive.mjs</code> can verify the same project link and reuse <code>signals.json.commandScope.cliScope</code> for any follow-up <code>vercel metrics</code> calls.</p>
+<p>Reconciliation deterministically converts disproven candidates into observations before any source investigation:</p>
+<ul>
+<li><code>metric_mismatch</code></li>
+<li><code>error_storm</code></li>
+<li><code>deployment_regression</code></li>
+<li><code>scanner_only_no_metric</code></li>
+</ul>
+<h3>2.3 Generate briefs and investigate</h3>
+<p>List the work:</p>
+<pre><code class="language-bash">node scripts/prepare-investigation-brief.mjs "$RUN_DIR/signals.json" "$RUN_DIR/reconciled-investigation.json" --list &gt; "$RUN_DIR/briefs-manifest.json"
+</code></pre>
+<p>Generate one brief for every entry in <code>briefs-manifest.json.briefs</code>. The <code>group</code> can be <code>toLaunch</code> or <code>platform</code>; do not generate only <code>toLaunch</code> briefs.</p>
+<pre><code class="language-bash">mkdir -p "$RUN_DIR/briefs" "$RUN_DIR/sub-agent-outputs"
+node scripts/prepare-investigation-brief.mjs "$RUN_DIR/signals.json" "$RUN_DIR/reconciled-investigation.json" \
+  --group &lt;brief.group&gt; --index &lt;brief.index&gt; --out "$RUN_DIR/briefs/&lt;brief.group&gt;-&lt;brief.index&gt;.md"
+</code></pre>
+<p>Use <code>briefs-manifest.json.briefs[].label</code> for visible worker names, for example <code>Low cache-hit route on /docs/llm-digest/[...slug]</code>, not <code>toLaunch-7</code>.</p>
+<p>Fan-out rule:</p>
+<ul>
+<li>1-2 briefs: investigate inline.</li>
+<li>3+ briefs: spawn one sub-agent per brief when the host supports it.</li>
+<li>Hosts without sub-agents: run inline serially.</li>
+</ul>
+<p>Sub-agent contract:</p>
+<ul>
+<li>The brief is the whole prompt.</li>
+<li>Read only files listed in the brief, plus route-local imports when needed.</li>
+<li>Emit one JSON recommendation or one JSON no-change finding using <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/recommendations.md" target="_blank" rel="noopener noreferrer">references/recommendations.md</a>.</li>
+<li>Do not cite URLs outside the provided citation subset.</li>
+<li>Do not recommend framework features unavailable in the detected version.</li>
+</ul>
+<p>If a sub-agent reaches for repo-wide grep, the candidate is malformed; drop or abstain rather than widening scope.</p>
+<h3>2.4 Collect outputs</h3>
+<p>Save each raw investigation result in <code>$RUN_DIR/sub-agent-outputs/</code>, then collect:</p>
+<pre><code class="language-bash">node scripts/collect-sub-agent-outputs.mjs \
+  --manifest "$RUN_DIR/briefs-manifest.json" \
+  --out "$RUN_DIR/recommendations.json" \
+  "$RUN_DIR/sub-agent-outputs/"
+</code></pre>
+<p>The collector extracts JSON, prepends pre-resolved records, enforces manifest order, and fails on missing, duplicate, unknown, or mismatched <code>candidateRef</code> values.</p>
+<h3>3. Verify recommendations</h3>
+<pre><code class="language-bash">node scripts/verify-and-regen.mjs "$RUN_DIR/recommendations.json" \
+  --signals "$RUN_DIR/signals.json" \
+  --repo-root &lt;project-dir&gt; \
+  --out "$RUN_DIR/verify.json"
+</code></pre>
+<p>This script extracts claims, verifies files/citations/version fit, grades quality, applies sanitizers, emits <code>verifiedRecommendations</code>, <code>withheldRecommendations</code>, <code>renderableRecommendations</code>, and creates <code>regenPlan</code> for failed or unsafe recommendations.</p>
+<p>Recommendation schema, writing rules, sanitizer order, and grading rules: <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/recommendations.md" target="_blank" rel="noopener noreferrer">references/recommendations.md</a>. Verification rules: <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/verification.md" target="_blank" rel="noopener noreferrer">references/verification.md</a>.</p>
+<p>For each <code>regenPlan</code> entry, rerun the same brief with a <code>Previous attempt failed these checks</code> section listing <code>topFailures</code>. Keep the regenerated output only if verification improves without gutting citations.</p>
+<h3>4. Render report and final message</h3>
+<pre><code class="language-bash">node scripts/render-report.mjs "$RUN_DIR/verify.json" "$RUN_DIR/gate.json" "$RUN_DIR/signals.json" \
+  --project &lt;name&gt; \
+  --out "$RUN_DIR/report.md" \
+  --message-out "$RUN_DIR/final-message.json"
+</code></pre>
+<p>Use <code>--debug-out "$RUN_DIR/debug.json"</code> only when developing the skill. Customer Markdown and chat output must not expose <code>passRate</code>, <code>quality</code>, sanitizer trails, raw sub-agent names, or other implementation fields.</p>
+<p>After rendering, print <code>final-message.json.body</code> verbatim and stop. Do not add highlights, debug notes, raw counts, sub-agent summaries, or extra explanation. Render-time dedupe, platform caps, and hard-safety drops can change the customer-visible count, so never summarize from raw <code>verify.json</code>.</p>
+<p>Report structure and impact framing: <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/scoring.md" target="_blank" rel="noopener noreferrer">references/scoring.md</a>.</p>
+<h2>Recommendation Rules</h2>
+<p>Every recommendation must:</p>
+<ul>
+<li>Trace to a launched candidate, platform candidate, pre-resolved observation, or verified traffic-independent scanner finding.</li>
+<li>Include observed metric evidence from <code>signals.json</code> or <code>evidence.deepDive</code>.</li>
+<li>Cite verified files with line numbers when code is involved.</li>
+<li>Include at least one allowed citation that applies to the detected framework/version.</li>
+<li>Use precise observed performance numbers.</li>
+<li>Use cost magnitude phrases only; never customer-facing <code>$N</code> savings.</li>
+<li>Do not recommend duration reductions for Vercel Workflow runtime endpoints (<code>/.well-known/workflow/v1/*</code>). These are generated orchestration routes for durable step/flow execution and should be hard-gated before investigation.</li>
+<li>Workflow recommendations must name the boundary being changed. Valid examples: enqueue durable work and return a run ID instead of awaiting completion, fix stream replay/closure/locks, or reduce verified excess Workflow Steps/Storage. Do not infer cost savings from Workflow endpoint wall-clock duration.</li>
+<li>For streaming, SSE, resumable chat, or other intentionally long-lived routes, do not frame wall-clock function duration as a problem by itself. Require evidence of avoidable pre-first-byte work, high active CPU, duplicate invocations, or post-response work that can move out of the user-visible path.</li>
+<li>Name a specific cache policy when recommending caching.</li>
+<li>Keep unsafe responses dynamic unless evidence proves they are safe to cache: auth-sensitive paths, errors, fallback responses, missing content, invalid requests, geolocation/device-varying output, and unversioned dynamic URLs.</li>
+</ul>
+<p>Never recommend "verify X is on" for facts already present in <code>signals.project</code>, including Fluid compute status, memory tier, regions, in-function concurrency, and timeout.</p>
+<h2>Scanner Rules</h2>
+<p>Scanner findings are supplementary. Drop findings annotated <code>COLD-PATH</code> or <code>NO-ROUTE-MAPPING</code> unless the scanner declares <code>metadata.trafficIndependent === true</code>.</p>
+<p>Traffic-independent examples: middleware matcher, source maps, React Compiler config, build settings. Route-local cache or data-fetch patterns need route-level traffic evidence.</p>
+<p>Scanner docs: <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/scanner-patterns.md" target="_blank" rel="noopener noreferrer">references/scanner-patterns.md</a>.</p>
+<h2>Final Customer Terms</h2>
+<p>Use:</p>
+<ul>
+<li><code>recommendations ready</code></li>
+<li><code>observations from investigation</code></li>
+<li><code>investigated, no change recommended</code></li>
+<li><code>not investigated in this run</code></li>
+</ul>
+<p>Avoid:</p>
+<ul>
+<li><code>sub-agent</code></li>
+<li><code>abstention</code></li>
+<li><code>passRate</code></li>
+<li><code>quality score</code></li>
+<li><code>gate</code></li>
+<li><code>LLM</code></li>
+</ul>
+<h2>Failure Copy</h2>
+<p>Use these messages without adding sales copy or process detail.</p>
+<p><strong>No traffic in the last 14 days:</strong></p>
+<blockquote>
+<p>This project has no meaningful traffic in the last 14 days, so route-level metrics are sparse. I can still check traffic-independent scanner findings and project settings, but I cannot rank route fixes until traffic accumulates.</p>
+</blockquote>
+<p><strong>Route-level metrics unavailable:</strong></p>
+<blockquote>
+<p>Use the verbatim choice template in <a href="https://github.com/vercel-labs/agent-skills/blob/HEAD/references/observability-plus.md" target="_blank" rel="noopener noreferrer">references/observability-plus.md</a>. Do not silently fall back to code-only mode; present the two-path choice: enable Observability Plus and rerun the metric-backed audit, or accept a limited code-only run.</p>
+</blockquote>
+<p><strong>Project is not linked:</strong></p>
+<blockquote>
+<p>This worktree is not linked to a Vercel project. Run <code>vercel link --yes --project &lt;project-name-or-id&gt; --cwd &lt;app-dir&gt;</code> and rerun the audit. If the team is known, add <code>--team &lt;team-id-or-slug&gt;</code>.</p>
+</blockquote>
+<p><strong>Most route-to-file mappings failed:</strong></p>
+<blockquote>
+<p>The route inventory matched fewer than half of the routes we saw in observability. This is common in monorepos with custom routing. I've surfaced what I can match; the rest appear in the "Not investigated in this run" section.</p>
+</blockquote>
