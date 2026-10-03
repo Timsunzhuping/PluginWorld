@@ -1,0 +1,166 @@
+<p><strong>Persona:</strong> You are a Go CLI engineer building command trees that feel native to the Unix shell. You design the user-facing surface first, then wire behavior into the right hook.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Build</strong> — creating a new CLI from scratch: follow command tree setup, hook wiring, and flag sections sequentially.</li>
+<li><strong>Extend</strong> — adding subcommands, flags, or completions to an existing CLI: read the current command tree first, then apply changes consistent with the existing structure.</li>
+<li><strong>Review</strong> — auditing an existing CLI: check the Common Mistakes table, verify <code>RunE</code> usage, <code>OutOrStdout()</code>, hook chain ordering, and args validation.</li>
+</ul>
+<h1>Using spf13/cobra for CLI command trees in Go</h1>
+<p>Cobra is the de facto standard for Go CLI applications. It provides the command/subcommand tree, flag parsing (via <code>pflag</code>), args validation, shell completion generation, and documentation generation. It does <strong>not</strong> handle configuration layering — that's viper's job.</p>
+<p><strong>Official Resources:</strong></p>
+<ul>
+<li><a href="https://pkg.go.dev/github.com/spf13/cobra" target="_blank" rel="noopener noreferrer">pkg.go.dev/github.com/spf13/cobra</a></li>
+<li><a href="https://github.com/spf13/cobra" target="_blank" rel="noopener noreferrer">github.com/spf13/cobra</a></li>
+<li><a href="https://cobra.dev" target="_blank" rel="noopener noreferrer">cobra.dev</a></li>
+</ul>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<pre><code class="language-bash">go get github.com/spf13/cobra@latest
+</code></pre>
+<h2>Cobra vs. viper</h2>
+<p>These libraries do fundamentally different things and can be used independently.</p>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>cobra</th>
+<th>viper</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Owns</td>
+<td>Command tree, flags, arg validation, completions</td>
+<td>Configuration value resolution</td>
+</tr>
+<tr>
+<td>User-facing?</td>
+<td>Yes — subcommands, flags, help text</td>
+<td>No — purely a key-value resolver</td>
+</tr>
+<tr>
+<td>Without the other?</td>
+<td>Yes — a CLI with flags only needs cobra</td>
+<td>Yes — a daemon reading YAML + env needs only viper</td>
+</tr>
+<tr>
+<td>Integration seam</td>
+<td>Hands <code>pflag.Flag</code> to viper via <code>BindPFlag</code></td>
+<td>Treats the cobra flag as the highest-precedence layer</td>
+</tr>
+</tbody></table>
+<p><strong>Use cobra alone</strong> when your binary takes flags and args but needs no config file or env resolution. <strong>Use viper alone</strong> when you have a long-running service reading config from YAML + env with no CLI subcommands. Use both when you need both — bind at <code>PersistentPreRunE</code> on the root command.</p>
+<p>→ See <code>samber/cc-skills-golang@golang-spf13-viper</code> for the viper side of this integration.</p>
+<h2>Command tree</h2>
+<p>Every cobra CLI has a root command plus zero or more subcommands registered with <code>AddCommand</code>. The root command name is the binary name.</p>
+<pre><code class="language-go">var rootCmd = &amp;cobra.Command{
+    Use:          "myapp",
+    Short:        "One-line summary",
+    SilenceUsage: true,  // ✓ prevents usage wall on every error
+    SilenceErrors: true, // ✓ lets you control error output format
+}
+</code></pre>
+<p>Use <code>AddGroup</code> to label subcommands in help output — register groups <strong>before</strong> the <code>AddCommand</code> calls that reference them; cobra does not retroactively assign groups.</p>
+<h2>The Run* family</h2>
+<p>Cobra commands have five run hooks executed in order:</p>
+<pre><code>PersistentPreRunE → PreRunE → RunE → PostRunE → PersistentPostRunE
+</code></pre>
+<p>Always use <code>*E</code> variants — the non-<code>E</code> forms cannot return errors. Key rules:</p>
+<ul>
+<li><code>PersistentPreRunE</code> on the root runs before <strong>every</strong> subcommand — use it for config init and auth checks.</li>
+<li>A child <code>PersistentPreRunE</code> <strong>replaces</strong> the parent's entirely — call the parent explicitly if you need both.</li>
+<li><code>PostRunE</code> runs only if <code>RunE</code> succeeded.</li>
+</ul>
+<p>For the full lifecycle and inheritance rules, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/commands-and-args.md" target="_blank" rel="noopener noreferrer">commands-and-args.md</a>.</p>
+<h2>Args validators</h2>
+<p>Cobra validates positional arguments before <code>RunE</code> runs. Never write <code>len(args)</code> checks inside <code>RunE</code> — that bypasses cobra's standard error messages and arg count tracking.</p>
+<p>Built-ins: <code>NoArgs</code>, <code>ExactArgs(n)</code>, <code>MinimumNArgs(n)</code>, <code>MaximumNArgs(n)</code>, <code>RangeArgs(min,max)</code>, <code>OnlyValidArgs</code>, <code>ExactValidArgs(n)</code>. Compose with <code>MatchAll(v1, v2)</code>. Custom validator: <code>func(cmd *cobra.Command, args []string) error</code>.</p>
+<p>For the full validator set with examples and <code>MatchAll</code> patterns, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/commands-and-args.md" target="_blank" rel="noopener noreferrer">commands-and-args.md</a>.</p>
+<h2>Flags primer</h2>
+<p>Cobra delegates flag parsing to <code>pflag</code>. <strong>Persistent flags</strong> (<code>PersistentFlags()</code>) are inherited by all subcommands; <strong>local flags</strong> (<code>Flags()</code>) apply only to the declaring command.</p>
+<pre><code class="language-go">rootCmd.PersistentFlags().StringVar(&amp;cfgFile, "config", "", "config file path") // inherited by all subcommands
+serveCmd.Flags().IntVar(&amp;port, "port", 8080, "listen port")                     // local to serveCmd only
+serveCmd.MarkFlagRequired("port")
+serveCmd.MarkFlagsMutuallyExclusive("json", "yaml")
+</code></pre>
+<p>For pflag types, custom flag values, flag groups, and viper binding, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/flags.md" target="_blank" rel="noopener noreferrer">flags.md</a>.</p>
+<h2>Completions primer</h2>
+<p>Cobra generates shell completions automatically. Extend them with:</p>
+<ul>
+<li><strong><code>ValidArgs []string</code></strong> — static positional arg completion.</li>
+<li><strong><code>ValidArgsFunction</code></strong> — dynamic: <code>func(cmd, args, toComplete string) ([]string, ShellCompDirective)</code>. Return <code>ShellCompDirectiveNoFileComp</code> to suppress file fallback.</li>
+<li><strong><code>RegisterFlagCompletionFunc(name, fn)</code></strong> — flag value completion.</li>
+</ul>
+<p>For <code>ShellCompDirective</code> values, annotations, and testing, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/completions.md" target="_blank" rel="noopener noreferrer">completions.md</a>.</p>
+<h2>Testing commands</h2>
+<p>Test commands by executing them programmatically. <strong>Never use <code>os.Stdout</code> / <code>os.Stderr</code> directly</strong> in command handlers — use <code>cmd.OutOrStdout()</code> / <code>cmd.ErrOrStderr()</code> so tests can redirect output.</p>
+<pre><code class="language-go">func TestServeCmd(t *testing.T) {
+    buf := new(bytes.Buffer)
+    rootCmd.SetOut(buf)
+    rootCmd.SetArgs([]string{"serve", "--port", "9090"})
+    require.NoError(t, rootCmd.Execute())
+    assert.Contains(t, buf.String(), "listening on :9090")
+}
+</code></pre>
+<p>Cobra accumulates flag state across <code>Execute()</code> calls — build a fresh command tree per test. For isolation patterns, golden files, and testing completions, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/testing.md" target="_blank" rel="noopener noreferrer">testing.md</a>.</p>
+<h2>Best Practices</h2>
+<ol>
+<li><strong>Always use <code>RunE</code>, never <code>Run</code></strong> — <code>Run</code> cannot return an error; the only escape is <code>os.Exit</code> or panic, bypassing defers.</li>
+<li><strong>Put config initialization in <code>PersistentPreRunE</code></strong> — it runs before every subcommand; the right place for viper binding and auth checks.</li>
+<li><strong>Validate positional args with <code>Args</code>, not inside <code>RunE</code></strong> — <code>Args</code> gives cobra's standard error messages; <code>MatchAll</code> composes validators.</li>
+<li><strong>Use <code>cmd.OutOrStdout()</code> / <code>cmd.ErrOrStderr()</code> for all output</strong> — direct <code>os.Stdout</code> writes cannot be captured by tests.</li>
+<li><strong>Re-create the command tree per test</strong> — cobra accumulates flag state across <code>Execute()</code> calls on the same instance.</li>
+</ol>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Why it fails</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Using <code>Run</code> instead of <code>RunE</code></td>
+<td>Cannot return an error — only escape is <code>os.Exit</code> or panic, bypassing defers</td>
+<td>Use <code>RunE</code> — return the error, let cobra handle the exit</td>
+</tr>
+<tr>
+<td>Writing <code>len(args)</code> checks in <code>RunE</code></td>
+<td>Bypasses cobra's standard error messages ("accepts 1 arg, received 2")</td>
+<td>Declare <code>Args: cobra.ExactArgs(1)</code> on the command</td>
+</tr>
+<tr>
+<td>Writing to <code>os.Stdout</code> directly</td>
+<td>Tests cannot capture output — os-level file handles can't be redirected</td>
+<td>Use <code>cmd.OutOrStdout()</code> / <code>cmd.ErrOrStderr()</code></td>
+</tr>
+<tr>
+<td>Child <code>PersistentPreRunE</code> silently drops parent's</td>
+<td>Cobra does not chain — the child replaces the parent's hook entirely</td>
+<td>Call <code>parent.PersistentPreRunE(cmd, args)</code> from the child's hook</td>
+</tr>
+<tr>
+<td>Reusing a root command across tests</td>
+<td>Cobra accumulates flag state; second <code>Execute()</code> sees flags from the first</td>
+<td>Build a fresh command tree per test</td>
+</tr>
+</tbody></table>
+<h2>Further Reading</h2>
+<ul>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/commands-and-args.md" target="_blank" rel="noopener noreferrer">commands-and-args.md</a> — full PreRun*/PostRun* chain, every Args validator, PersistentPreRunE inheritance rules</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/flags.md" target="_blank" rel="noopener noreferrer">flags.md</a> — pflag types, required/exclusive/oneRequired groups, custom value types, viper binding</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/completions.md" target="_blank" rel="noopener noreferrer">completions.md</a> — ShellCompDirective set, annotation-based completions, testing completions</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/generators.md" target="_blank" rel="noopener noreferrer">generators.md</a> — man page, markdown, YAML, RST doc generation; <code>cobra-cli</code> scaffolder</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-cobra/references/testing.md" target="_blank" rel="noopener noreferrer">testing.md</a> — isolation patterns, golden files, testing completions, table-driven command tests</li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-cli</code> skill for general CLI architecture — project layout, exit codes, signal handling, I/O patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-spf13-viper</code> skill for configuration layering alongside cobra (flag → env → file → default precedence)</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for general Go testing patterns</li>
+</ul>
+<p>If you encounter a bug or unexpected behavior in spf13/cobra, open an issue at <a href="https://github.com/spf13/cobra/issues" target="_blank" rel="noopener noreferrer">https://github.com/spf13/cobra/issues</a>.</p>

@@ -1,0 +1,184 @@
+<h1>brydge-mcp</h1>
+<p>Check whether your agent's work actually happened.</p>
+<p>This is <a href="https://www.brydge-ai.com" target="_blank" rel="noopener noreferrer">BRYDGE</a> as an MCP server. Before an agent acts, BRYDGE decides whether it may. Afterwards, BRYDGE reads the destination system's own records, such as your payment processor or ticket system, using its own credential. It then reports whether the work happened as permitted. What the agent says happened is kept beside that finding and never decides it.</p>
+<h2>Tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>brydge_supervise</code></td>
+<td>Asks before acting. <code>ALLOWED</code> returns an authorization id for the agent to write into the record the action creates. <code>ESCALATED</code> means a person decides, and the agent must not act; asked again with the same <code>idempotency_key</code>, it returns their answer.</td>
+</tr>
+<tr>
+<td><code>brydge_report_outcome</code></td>
+<td>Reports what the agent believes happened.</td>
+</tr>
+<tr>
+<td><code>brydge_verify</code></td>
+<td>Reads the destination's records now and says whether the work happened.</td>
+</tr>
+<tr>
+<td><code>brydge_get_finding</code></td>
+<td>Returns what BRYDGE has found so far, without reading the records again. Free.</td>
+</tr>
+<tr>
+<td><code>brydge_get_headroom</code></td>
+<td>Says how many actions the agent may take in any 24 hours before a person is asked.</td>
+</tr>
+</tbody></table>
+<p>The server also gives the model its instructions: ask first, cite the authorization, report, then verify before saying the work is done.</p>
+<h2>Set up BRYDGE first</h2>
+<p>Do these once, in BRYDGE:</p>
+<ol>
+<li><strong>Issue an API key</strong> on the Connect page.</li>
+<li><strong>Declare what the action is worth.</strong> BRYDGE charges a share of that value, and it will not check an action nobody has priced.</li>
+<li><strong>Register a destination</strong> for the action: where BRYDGE reads the records, and the read-only credential it uses. BRYDGE has a preset for Stripe refunds.</li>
+<li><strong>Issue a mandate</strong> to the agent for the action, on the agent's page in BRYDGE. Without one, every call goes to a person, and the agent acts only once they allow it (see <a href="#when-a-person-decides" target="_blank" rel="noopener noreferrer">When a person decides</a>).</li>
+</ol>
+<p>A mandate says what the agent may do; headroom says how much of it, in any 24 hours. A new agent starts with room for one action a day, and every report BRYDGE checks and finds true raises that.</p>
+<h2>Add it to your MCP client</h2>
+<p>Most clients take this configuration (Claude Desktop, Cursor, Windsurf and others):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "brydge": {
+      "command": "npx",
+      "args": ["-y", "brydge-mcp"],
+      "env": {
+        "BRYDGE_API_KEY": "brydge_sk_...",
+        "BRYDGE_ACTOR": "agent:refund-ops"
+      }
+    }
+  }
+}
+</code></pre>
+<p>On Windows, <code>npx</code> is a <code>.cmd</code> file, and only clients that start commands through a shell or through the MCP SDK can launch it by name. If your client reports <code>spawn npx ENOENT</code>, start it through the command shell instead:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "brydge": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "brydge-mcp"],
+      "env": {
+        "BRYDGE_API_KEY": "brydge_sk_...",
+        "BRYDGE_ACTOR": "agent:refund-ops"
+      }
+    }
+  }
+}
+</code></pre>
+<p>In Claude Code:</p>
+<pre><code class="language-bash">claude mcp add brydge -e BRYDGE_API_KEY=brydge_sk_... -e BRYDGE_ACTOR=agent:refund-ops -- npx -y brydge-mcp
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>BRYDGE_API_KEY</code></td>
+<td>Your BRYDGE API key. Required.</td>
+</tr>
+<tr>
+<td><code>BRYDGE_ACTOR</code></td>
+<td>The name BRYDGE knows this agent by, such as <code>agent:refund-ops</code>. Mandates are issued to this name. Required.</td>
+</tr>
+<tr>
+<td><code>BRYDGE_URL</code></td>
+<td>Where BRYDGE runs. Leave it unset for BRYDGE's hosted service.</td>
+</tr>
+</tbody></table>
+<p>The agent's name comes from this configuration, never from the model, so an agent cannot borrow another agent's permissions. Run one server per agent.</p>
+<h2>How an agent uses it</h2>
+<ol>
+<li><strong>Ask first.</strong> Before a refund, payment or other change, the agent calls <code>brydge_supervise</code> with the action, the target and the facts, such as <code>{"amount": 4200}</code>.</li>
+<li><strong>Cite the authorization.</strong> If the answer is <code>ALLOWED</code>, the agent carries the action out and writes the authorization id where the destination keeps it. For a Stripe refund, that is <code>metadata.brydge_authorization</code>. BRYDGE finds the work by this id, and by nothing else.</li>
+<li><strong>Report.</strong> The agent calls <code>brydge_report_outcome</code> with what it believes happened.</li>
+<li><strong>Verify.</strong> Before saying the work is done, the agent calls <code>brydge_verify</code>.</li>
+</ol>
+<p><code>brydge_supervise</code> takes an <code>idempotency_key</code>, a name for one intended action such as <code>refund:ch_123</code>. Asking again with the same key and the same details is the same request: a retry gets the same answer, and once a person has answered an escalated one, it gets their answer. A key reused for a different action never gets another action's answer, because the server also hashes in what is being asked.</p>
+<h2>When a person decides</h2>
+<p>An escalated action waits for a person, in BRYDGE. The server does not wait with it: the model is told not to act, and to ask again once they have answered:</p>
+<pre><code class="language-text">ESCALATED. Do not carry this out: a person decides. No mandate lets agent:refund-ops refund yet, so a person decides. A person has been asked. Ask again with the same idempotency key once they have answered: if they allow it, the answer is ALLOWED. Authorization: cmurkt5mw000i7dev66vu5afm.
+</code></pre>
+<p>When the model calls <code>brydge_supervise</code> again with the same <code>idempotency_key</code>, action, target and facts, BRYDGE answers with the person's decision:</p>
+<table>
+<thead>
+<tr>
+<th>The person</th>
+<th><code>decision</code></th>
+<th><code>settled</code></th>
+<th>The model is told</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>has not answered yet</td>
+<td><code>ESCALATED</code></td>
+<td><code>null</code></td>
+<td>Do not act yet; ask again once they have answered. The person is not asked twice.</td>
+</tr>
+<tr>
+<td>allowed it</td>
+<td><code>ALLOWED</code></td>
+<td><code>"ALLOWED"</code></td>
+<td>Carry it out, citing the same authorization.</td>
+</tr>
+<tr>
+<td>refused it</td>
+<td><code>ESCALATED</code></td>
+<td><code>"REFUSED"</code></td>
+<td><code>REFUSED. A person refused this: do not carry it out.</code>, with their reason.</td>
+</tr>
+</tbody></table>
+<p>A request with different details is a different action, so allowing a £42 refund never lets the agent refund £420.</p>
+<p>Each authorization is for one action. A retry of an action already carried out gets the same <code>ALLOWED</code> back, and the model is told that if it already carried the action out, it must not do it again. If an action does run twice under one authorization, a check reports <code>MISMATCH</code> with <code>DUPLICATE_EXECUTION</code>.</p>
+<h2>What a check can find</h2>
+<table>
+<thead>
+<tr>
+<th><code>state</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>VERIFIED</code></td>
+<td>The records show the work, as it was permitted.</td>
+</tr>
+<tr>
+<td><code>FAILED</code></td>
+<td>The records show it was attempted and did not succeed.</td>
+</tr>
+<tr>
+<td><code>MISMATCH</code></td>
+<td>The records show something other than what was permitted. <code>reason</code> says what: <code>AMOUNT</code>, <code>TARGET</code>, <code>ACTOR</code>, <code>ACTION</code>, <code>DUPLICATE_EXECUTION</code>, <code>UNAUTHORISED_EXECUTION</code> or <code>CORRELATION</code>.</td>
+</tr>
+<tr>
+<td><code>UNKNOWN</code></td>
+<td>BRYDGE could not tell. <code>NO_MATCH</code> means the records hold nothing for this authorization; the other reasons mean BRYDGE could not read the records. Unknown is not the same as failed.</td>
+</tr>
+<tr>
+<td><code>PENDING</code></td>
+<td>The destination says the work is still in progress.</td>
+</tr>
+</tbody></table>
+<p><code>brydge_verify</code> reads the records when it is called. A check that finds something new is billed; asking again when nothing has changed is free. BRYDGE also checks every action by itself once the destination's reporting window has passed (60 minutes unless you set another), and <code>brydge_get_finding</code> reads that for free.</p>
+<h2>Protocol</h2>
+<p>The server speaks MCP over stdio. It serves clients on the 2026-07-28 revision and on the 2025 revisions from the same process, built on the official TypeScript SDK. When BRYDGE cannot be asked (a bad key, an action with no declared value, a rate limit, or BRYDGE being unreachable), the tool returns an error the model can read, and nothing is carried out.</p>
+<h2>Limits</h2>
+<ul>
+<li>BRYDGE treats a target as one piece of work. A second record for the same target that carries a different authorization, such as a second partial refund of one charge, is reported as a <code>MISMATCH</code>.</li>
+<li>The server does not wait for a person. An escalated action ends with the model being told a person decides, and their answer reaches the agent only when the model asks again with the same <code>idempotency_key</code> and the same details. A request under a new key is decided afresh.</li>
+<li>The server does not see the action itself, so it cannot stop a second one. Whether an action was already carried out is for the model to remember; the server tells it when BRYDGE has answered the same request before.</li>
+</ul>
+<h2>Development</h2>
+<pre><code class="language-bash">npm install
+npm test          # a real MCP client against the server in both protocol eras, and the built command over stdio
+npm run test:int  # against a running BRYDGE; see tests/integration
+npm run build
+</code></pre>
+<h2>License</h2>
+<p>MIT</p>

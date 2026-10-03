@@ -1,0 +1,207 @@
+<p><strong>Persona:</strong> You are a Go architect using wire for compile-time DI. You let the compiler catch missing dependencies, treat <code>wire_gen.go</code> as committed source, and re-run <code>wire ./...</code> after every graph change.</p>
+<p><strong>Dependencies:</strong></p>
+<ul>
+<li>wire: <code>go install github.com/google/wire/cmd/wire@latest</code></li>
+</ul>
+<h1>Using google/wire for Compile-Time Dependency Injection in Go</h1>
+<p>Code-generation DI toolkit. Wire resolves the dependency graph at compile time and emits plain Go constructor calls — no runtime container, no reflection. Errors appear when you run <code>wire ./...</code>, not at first request.</p>
+<p>Note: <code>google/wire</code> was archived in August 2025 (feature-complete; bug fixes still accepted).</p>
+<p><strong>Official Resources:</strong> <a href="https://pkg.go.dev/github.com/google/wire" target="_blank" rel="noopener noreferrer">pkg.go.dev</a> · <a href="https://github.com/google/wire" target="_blank" rel="noopener noreferrer">github.com/google/wire</a> · <a href="https://github.com/google/wire/blob/main/docs/guide.md" target="_blank" rel="noopener noreferrer">User Guide</a> · <a href="https://github.com/google/wire/blob/main/docs/best-practices.md" target="_blank" rel="noopener noreferrer">Best Practices</a></p>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<pre><code class="language-bash">go get -tool github.com/google/wire/cmd/wire@latest
+go get github.com/google/wire
+</code></pre>
+<h2>wire vs. Runtime DI</h2>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>wire</th>
+<th>dig / fx / samber/do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Resolution</td>
+<td>Compile time (codegen)</td>
+<td>Runtime (reflection)</td>
+</tr>
+<tr>
+<td>Error detection</td>
+<td><code>wire ./...</code> fails</td>
+<td>First <code>Invoke</code>/startup</td>
+</tr>
+<tr>
+<td>Runtime container</td>
+<td>None — plain Go calls</td>
+<td>Present</td>
+</tr>
+<tr>
+<td>Lifecycle hooks</td>
+<td>Not built in</td>
+<td>fx: OnStart/OnStop</td>
+</tr>
+<tr>
+<td>Generated files</td>
+<td><code>wire_gen.go</code> (committed)</td>
+<td>None</td>
+</tr>
+</tbody></table>
+<p>For lifecycle, lazy loading, and a full matrix see <code>samber/cc-skills-golang@golang-dependency-injection</code>.</p>
+<h2>Providers</h2>
+<p>A provider is any Go function — inputs are dependencies, outputs are provided types. Three return forms:</p>
+<pre><code class="language-go">func NewConfig() *Config                          { return &amp;Config{Addr: ":8080"} }
+func NewDB(cfg *Config) (*sql.DB, error)          { return sql.Open("postgres", cfg.DSN) }
+func NewRedis(cfg *Config) (*redis.Client, func(), error) { // cleanup chained in reverse order
+    c := redis.NewClient(&amp;redis.Options{Addr: cfg.RedisAddr})
+    return c, func() { c.Close() }, nil
+}
+</code></pre>
+<h2>Provider Sets</h2>
+<p><code>wire.NewSet</code> groups providers for reuse. Sets can reference other sets.</p>
+<pre><code class="language-go">// infra/wire.go
+var InfraSet = wire.NewSet(
+    NewConfig,
+    NewDB,
+    NewRedis,
+)
+
+// service/wire.go
+var ServiceSet = wire.NewSet(
+    NewUserRepo,
+    NewUserService,
+    wire.Bind(new(UserStore), new(*UserRepo)), // interface binding
+)
+</code></pre>
+<p>Keep sets small: library sets expose a stable surface (adding inputs or removing outputs breaks downstream injectors). One set per package is a useful default.</p>
+<h2>Injectors and <code>//go:build wireinject</code></h2>
+<p>The injector file declares the initialization function. Wire generates its body into <code>wire_gen.go</code> and replaces the stub.</p>
+<pre><code class="language-go">//go:build wireinject
+
+package main
+
+import "github.com/google/wire"
+
+// Wire generates the body of this function.
+func InitApp() (*App, func(), error) {
+    wire.Build(InfraSet, ServiceSet, NewApp)
+    return nil, nil, nil // replaced by codegen
+}
+</code></pre>
+<p>The <code>//go:build wireinject</code> tag prevents the stub from being compiled into the binary — only <code>wire_gen.go</code> (which has no such tag) makes it through <code>go build</code>. Without this tag, both files define the same function, causing a compile error.</p>
+<p>Alternative syntax when a dummy return is inconvenient:</p>
+<pre><code class="language-go">func InitApp() (*App, func(), error) {
+    panic(wire.Build(InfraSet, ServiceSet, NewApp))
+}
+</code></pre>
+<h2>Interface Bindings</h2>
+<p>Wire forbids implicit interface satisfaction — you must declare bindings explicitly so the graph is unambiguous when multiple types implement the same interface.</p>
+<pre><code class="language-go">var Set = wire.NewSet(
+    NewPostgresUserRepo,
+    wire.Bind(new(UserStore), new(*PostgresUserRepo)), // tell wire: *PostgresUserRepo satisfies UserStore
+)
+</code></pre>
+<p>Explicit bindings prevent graph breakage when a new type implementing the same interface is added elsewhere.</p>
+<h2>Struct Providers and Values</h2>
+<p><code>wire.Struct</code> fills struct fields from the graph without a manual constructor. Tag fields <code>wire:"-"</code> to exclude them.</p>
+<pre><code class="language-go">wire.Struct(new(Server), "Logger", "DB") // inject named fields
+wire.Struct(new(Server), "*")            // inject all non-excluded fields
+wire.Value(Foo{X: 42})                   // constant expression (no fn calls / channels)
+wire.InterfaceValue(new(io.Reader), os.Stdin) // interface-typed literal
+wire.FieldsOf(new(Config), "DSN", "Addr")    // promote struct fields as graph nodes
+</code></pre>
+<p>See <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-google-wire/references/advanced.md" target="_blank" rel="noopener noreferrer">advanced.md</a> for the <code>wire:"-"</code> exclusion tag and <code>wire.FieldsOf</code> details.</p>
+<h2>Disambiguating Duplicate Types</h2>
+<p>Wire forbids two providers for the same type. Wrap the underlying type in distinct named types so each has exactly one provider:</p>
+<pre><code class="language-go">type PrimaryDSN string
+type ReplicaDSN string
+</code></pre>
+<h2>Full Application Example</h2>
+<pre><code class="language-go">// wire.go — injector, excluded from binary via build tag
+//go:build wireinject
+
+package main
+
+func InitApp() (*App, func(), error) {
+    wire.Build(config.ConfigSet, infra.InfraSet, service.ServiceSet, NewApp)
+    return nil, nil, nil
+}
+
+// main.go
+func main() {
+    app, cleanup, err := InitApp()
+    if err != nil { log.Fatal(err) }
+    defer cleanup()
+    app.Run()
+}
+</code></pre>
+<p>Wire generates <code>wire_gen.go</code> (plain Go, committed, DO NOT EDIT). For a full example with per-package sets, cleanup-heavy graphs, and generated output, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-google-wire/references/recipes.md" target="_blank" rel="noopener noreferrer">recipes.md</a>.</p>
+<h2>Codegen Workflow</h2>
+<pre><code class="language-bash">wire ./...           # regenerate all injectors in the module
+wire check ./...     # validate graph without regenerating (fast CI check)
+</code></pre>
+<p>Run <code>wire ./...</code> after every constructor signature change. Add <code>//go:generate go run github.com/google/wire/cmd/wire</code> to injector files so <code>go generate ./...</code> also works. Commit <code>wire_gen.go</code> — it must stay in sync for CI builds.</p>
+<h2>Best Practices</h2>
+<ol>
+<li>Never edit <code>wire_gen.go</code> — it is overwritten on every <code>wire ./...</code> run. Treat it as a build artifact that happens to be committed; source of truth is the provider and injector files.</li>
+<li>Always add <code>//go:build wireinject</code> to injector files — omitting it causes duplicate-symbol compile errors because both the stub and the generated file define the same function.</li>
+<li>Use named types to distinguish values of the same underlying type — wire enforces one provider per type; named types like <code>type DSN string</code> let you have <code>PrimaryDSN</code> and <code>ReplicaDSN</code> coexist.</li>
+<li>Keep library provider sets minimal and backward-compatible — adding new required inputs breaks downstream injectors; removing outputs does too. Introduce only newly-created types in the same release.</li>
+<li>Return <code>(T, func(), error)</code> from cleanup providers and let wire chain them — wire generates the correct reverse-order cleanup and handles partial failures (if construction fails midway, only already-built cleanups run).</li>
+<li>Keep injector files focused — one function per file, one package import at a time. Fat injectors with dozens of <code>wire.Build</code> arguments are hard to reason about; delegate to per-package sets.</li>
+</ol>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Editing <code>wire_gen.go</code> manually</td>
+<td>Never edit it. Change providers or injectors and re-run <code>wire ./...</code>.</td>
+</tr>
+<tr>
+<td>Missing <code>//go:build wireinject</code></td>
+<td>Add the tag as the very first line of every injector file.</td>
+</tr>
+<tr>
+<td>Two providers returning <code>*sql.DB</code></td>
+<td>Wrap with a named struct type: <code>type PrimaryDB struct { *sql.DB }</code> — Wire does not distinguish pointer type aliases.</td>
+</tr>
+<tr>
+<td>Injecting an interface without <code>wire.Bind</code></td>
+<td>Add <code>wire.Bind(new(MyInterface), new(*MyImpl))</code> to the provider set.</td>
+</tr>
+<tr>
+<td>Forgetting to re-run <code>wire ./...</code> after changes</td>
+<td>Run wire before <code>go build</code>; add it to <code>go generate</code> or a Makefile target.</td>
+</tr>
+<tr>
+<td>Calling <code>cleanup()</code> without guarding for nil</td>
+<td>Wire returns nil cleanup on construction error; guard with <code>if cleanup != nil { defer cleanup() }</code>.</td>
+</tr>
+</tbody></table>
+<h2>Testing</h2>
+<p>Wire generates plain Go constructors, so unit tests use manual injection — no container to clone or reset. For testing patterns (test injectors swapping real providers for fakes, CI stale-check for <code>wire_gen.go</code>), see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-google-wire/references/testing.md" target="_blank" rel="noopener noreferrer">testing.md</a>.</p>
+<h2>Further Reading</h2>
+<ul>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-google-wire/references/advanced.md" target="_blank" rel="noopener noreferrer">advanced.md</a> — cleanup chains, multiple injectors, set nesting, error catalogue, codegen flags, quick reference</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-google-wire/references/recipes.md" target="_blank" rel="noopener noreferrer">recipes.md</a> — HTTP server, multi-injector build, cleanup-heavy graph, CLI embedding</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-google-wire/references/testing.md" target="_blank" rel="noopener noreferrer">testing.md</a> — test injectors, fake bindings, CI stale check</li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-dependency-injection</code> skill for DI concepts and library comparison</li>
+<li>→ See <code>samber/cc-skills-golang@golang-uber-dig</code> skill for runtime reflection-based DI without lifecycle</li>
+<li>→ See <code>samber/cc-skills-golang@golang-uber-fx</code> skill for runtime DI with lifecycle hooks, modules, and signal-aware Run()</li>
+<li>→ See <code>samber/cc-skills-golang@golang-samber-do</code> skill for generics-based DI without reflection</li>
+<li>→ See <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill for interface design patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for general testing patterns</li>
+</ul>
+<p>If you encounter a bug or unexpected behavior in google/wire, open an issue at <a href="https://github.com/google/wire/issues" target="_blank" rel="noopener noreferrer">https://github.com/google/wire/issues</a>.</p>

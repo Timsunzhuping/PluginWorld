@@ -1,0 +1,144 @@
+<h1>TypeGPU / WebGPU for HyperFrames</h1>
+<p>HyperFrames supports TypeGPU and raw WebGPU through its <code>typegpu</code> runtime adapter. The adapter does not own your pipeline. It publishes HyperFrames time and dispatches a seek event so your composition can render the exact GPU frame.</p>
+<h2>Contract</h2>
+<ul>
+<li>Initialize WebGPU asynchronously (<code>await navigator.gpu.requestAdapter()</code>), but register all GSAP tweens <strong>synchronously</strong> — before any <code>await</code>. The HyperFrames player reads the timeline immediately at page load.</li>
+<li>Render from HyperFrames time, not <code>performance.now()</code>.</li>
+<li>Listen for the <code>hf-seek</code> event and re-render at exactly that time.</li>
+<li>Guard against environments where WebGPU is unavailable — the adapter does not check for you.</li>
+<li>For video renders, call <code>await device.queue.onSubmittedWorkDone()</code> after submitting GPU work to ensure the canvas is flushed before the frame is captured.</li>
+</ul>
+<p>The adapter sets <code>window.__hfTypegpuTime</code> and dispatches <code>new CustomEvent("hf-seek", { detail: { time } })</code> on each seek.</p>
+<h2>Basic Pattern</h2>
+<pre><code class="language-html code-highlight">&lt;canvas id="gpu-layer"&gt;&lt;/canvas&gt;
+&lt;script&gt;
+  (async () =&gt; {
+    if (!navigator.gpu) return;
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return;
+    const device = await adapter.requestDevice();
+    const canvas = document.getElementById("gpu-layer");
+    canvas.width = 1920;
+    canvas.height = 1080;
+    const ctx = canvas.getContext("webgpu");
+    const fmt = navigator.gpu.getPreferredCanvasFormat();
+    ctx.configure({ device, format: fmt, alphaMode: "opaque" });
+
+    // Build your pipeline, buffers, bind groups...
+    const timeUniform = new Float32Array([0]);
+    const timeBuf = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    function render(t) {
+      timeUniform[0] = t;
+      device.queue.writeBuffer(timeBuf, 0, timeUniform);
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginRenderPass({
+        colorAttachments: [
+          {
+            view: ctx.getCurrentTexture().createView(),
+            loadOp: "clear",
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            storeOp: "store",
+          },
+        ],
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
+
+    render(0);
+    window.addEventListener("hf-seek", (e) =&gt; render(e.detail.time));
+  })();
+&lt;/script&gt;
+</code></pre>
+<h2>Timeline Registration</h2>
+<p>GSAP tweens that drive text, captions, or HTML elements must be registered <strong>synchronously</strong> — before any <code>await</code>:</p>
+<pre><code class="language-js code-highlight">const tl = gsap.timeline({ paused: true });
+
+// Caption tweens: synchronous, added before WebGPU init
+gsap.set(".cap", { opacity: 0 });
+tl.to("#cap-1", { opacity: 1, duration: 0.3 }, 1.0);
+tl.to("#cap-1", { opacity: 0, duration: 0.2 }, 3.5);
+
+window.__timelines["my-comp"] = tl;
+
+// GPU-dependent tweens can go inside the async IIFE
+(async () =&gt; {
+  // ... WebGPU init ...
+  const proxy = { value: 0 };
+  tl.to(proxy, { value: 1, duration: 2, onUpdate: render }, 0.5);
+})();
+</code></pre>
+<h2>Video-Backed Effects (Liquid Glass, Distortion)</h2>
+<p>To use a <code>&lt;video&gt;</code> as the GPU input texture:</p>
+<pre><code class="language-js code-highlight">const videoEl = document.getElementById("aroll");
+
+// Wait for video metadata before creating the texture
+await new Promise((r) =&gt; {
+  if (videoEl.readyState &gt;= 1) r();
+  else videoEl.addEventListener("loadedmetadata", r, { once: true });
+});
+
+// Create texture at the video's NATIVE resolution
+const vw = videoEl.videoWidth,
+  vh = videoEl.videoHeight;
+const bgTex = device.createTexture({
+  size: [vw, vh],
+  format: "rgba8unorm",
+  usage:
+    GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+});
+
+function render(t) {
+  try {
+    device.queue.copyExternalImageToTexture({ source: videoEl }, { texture: bgTex }, [vw, vh]);
+  } catch (_) {
+    /* frame not decoded yet */
+  }
+  // ... draw ...
+}
+</code></pre>
+<p><strong>Render-mode caveat:</strong> headless Chrome may fail <code>copyExternalImageToTexture</code> for video elements. For production renders, pre-extract key frames via FFmpeg as PNGs and load them as image textures instead.</p>
+<h2>Frosted Blur via Downsample Pass</h2>
+<p>A single-pass Gaussian kernel is too weak for glass-like frosted blur. Use a two-pass approach:</p>
+<ol>
+<li><strong>Pass 1 — Downsample:</strong> render the full-res texture to a small texture (1/6 resolution). Bilinear filtering during the downsample naturally averages pixels.</li>
+<li><strong>Pass 2 — Glass composite:</strong> sample the small texture for the frosted interior (bilinear upscale = heavy smooth blur) and the full-res texture for sharp areas and chromatic refraction.</li>
+</ol>
+<p>This matches TypeGPU's <code>textureSampleBias</code> mip-level approach without generating mipmaps.</p>
+<h2>Transparent vs Opaque Canvas</h2>
+<ul>
+<li><strong><code>alphaMode: 'opaque'</code></strong> — the GPU canvas renders the full frame (video + effect). Use when the GPU pipeline handles all visual content.</li>
+<li><strong><code>alphaMode: 'premultiplied'</code></strong> — the GPU canvas is transparent where alpha = 0, letting HTML elements below show through. Use for overlays (particles, path animations) on top of a regular <code>&lt;video&gt;</code> element.</li>
+</ul>
+<h2>WGSL Full-Screen Triangle</h2>
+<p>The standard vertex shader for full-screen effects (no vertex buffer needed):</p>
+<pre><code class="language-wgsl code-highlight">struct Vo { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+@vertex fn vs(@builtin(vertex_index) vi: u32) -&gt; Vo {
+  let ps = array&lt;vec2f, 3&gt;(vec2f(-1., -1.), vec2f(3., -1.), vec2f(-1., 3.));
+  let ts = array&lt;vec2f, 3&gt;(vec2f(0., 1.), vec2f(2., 1.), vec2f(0., -1.));
+  return Vo(vec4f(ps[vi], 0., 1.), ts[vi]);
+}
+</code></pre>
+<p>Draw with <code>pass.draw(3)</code> — one triangle that covers the viewport.</p>
+<h2>Rounded-Rect SDF (Liquid Glass Pill)</h2>
+<pre><code class="language-wgsl code-highlight">fn sdf_box(p: vec2f, half_size: vec2f, corner_radius: f32) -&gt; f32 {
+  let d = abs(p) - half_size + vec2f(corner_radius);
+  return length(max(d, vec2f(0.))) + min(max(d.x, d.y), 0.) - corner_radius;
+}
+</code></pre>
+<p>Use this to define inside/ring/outside zones for glass effects. Negative values are inside the shape.</p>
+<h2>Deterministic Rendering</h2>
+<ul>
+<li>No <code>Math.random()</code> — use a seeded PRNG.</li>
+<li>No <code>requestAnimationFrame</code> for the render loop — render only in response to <code>hf-seek</code>.</li>
+<li>No <code>performance.now()</code> for animation time — read <code>window.__hfTypegpuTime</code> or <code>e.detail.time</code>.</li>
+<li>After GPU submit, call <code>await device.queue.onSubmittedWorkDone()</code> for render-mode frame capture.</li>
+</ul>

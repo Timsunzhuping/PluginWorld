@@ -1,0 +1,137 @@
+<h1>PostgreSQL Table Design</h1>
+<h2>When to Use</h2>
+<ul>
+<li>Designing a new PostgreSQL schema, or reviewing one before it ships.</li>
+<li>Choosing column types, keys, constraints, or indexes for PostgreSQL specifically.</li>
+<li>Deciding whether and how to partition a large table, or how to store semi-structured data.</li>
+<li>Planning a schema change on a live database without downtime.</li>
+</ul>
+<p>The rules and decision points for a PostgreSQL schema. The full data-type catalog, workload
+patterns (update-heavy, insert-heavy, upsert, schema evolution), extensions, JSONB indexing,
+and worked DDL examples are in <code>references/details.md</code>; open it when a section below points there.</p>
+<h2>Core Rules</h2>
+<ul>
+<li>Define a <strong>PRIMARY KEY</strong> for reference tables (users, orders, etc.). Not always needed for time-series/event/log data. When used, prefer <code>BIGINT GENERATED ALWAYS AS IDENTITY</code>; use <code>UUID</code> only when global uniqueness/opacity is needed.</li>
+<li><strong>Normalize first (to 3NF)</strong> to eliminate data redundancy and update anomalies; denormalize <strong>only</strong> for measured, high-ROI reads where join performance is proven problematic.</li>
+<li>Add <strong>NOT NULL</strong> everywhere it is semantically required; use <strong>DEFAULT</strong>s for common values.</li>
+<li>Create <strong>indexes for access paths you actually query</strong>: PK/unique (auto), <strong>FK columns (manual!)</strong>, frequent filters/sorts, and join keys.</li>
+<li>Prefer <strong>TIMESTAMPTZ</strong> for event time; <strong>NUMERIC</strong> for money; <strong>TEXT</strong> for strings; <strong>BIGINT</strong> for integers; <strong>DOUBLE PRECISION</strong> for floats (or <code>NUMERIC</code> for exact decimal arithmetic).</li>
+</ul>
+<h2>PostgreSQL Gotchas</h2>
+<ul>
+<li><strong>Identifiers</strong>: unquoted → lowercased. Avoid quoted/mixed-case names; use <code>snake_case</code>.</li>
+<li><strong>Unique + NULLs</strong>: UNIQUE allows multiple NULLs. Use <code>UNIQUE NULLS NOT DISTINCT (...)</code> (PG15+) to restrict to one NULL.</li>
+<li><strong>FK indexes</strong>: PostgreSQL <strong>does not</strong> auto-index FK columns. Add them.</li>
+<li><strong>No silent coercions</strong>: length/precision overflows error out (no truncation). Inserting 999 into <code>NUMERIC(2,0)</code> fails, unlike databases that silently truncate or round.</li>
+<li><strong>Sequences/identity have gaps</strong> (normal; don't "fix"). Rollbacks, crashes, and concurrent transactions leave gaps (1, 2, 5, 6...).</li>
+<li><strong>Heap storage</strong>: no clustered PK by default; <code>CLUSTER</code> is a one-off reorganization, not maintained on later inserts.</li>
+<li><strong>MVCC</strong>: updates/deletes leave dead tuples; vacuum handles them—design to avoid hot wide-row churn.</li>
+</ul>
+<h2>Data Types</h2>
+<ul>
+<li><strong>IDs</strong>: <code>BIGINT GENERATED ALWAYS AS IDENTITY</code>; <code>UUID</code> for distributed or opaque IDs, generated with <code>uuidv7()</code> (PG18+) or <code>gen_random_uuid()</code>.</li>
+<li><strong>Numbers</strong>: <code>BIGINT</code> unless storage is critical; <code>DOUBLE PRECISION</code> over <code>REAL</code>; <code>NUMERIC(p,s)</code> for money and exact decimals.</li>
+<li><strong>Strings</strong>: <code>TEXT</code>, with <code>CHECK (LENGTH(col) &lt;= n)</code> when a limit is needed; <code>BYTEA</code> for binary. Case-insensitive lookups: expression index on <code>LOWER(col)</code>, or <code>CITEXT</code> when a constraint must be case-insensitive.</li>
+<li><strong>Time</strong>: <code>TIMESTAMPTZ</code>, <code>DATE</code>, <code>INTERVAL</code>. <code>now()</code> is transaction start; <code>clock_timestamp()</code> is wall clock.</li>
+<li><strong>Booleans</strong>: <code>BOOLEAN NOT NULL</code> unless tri-state is required.</li>
+<li><strong>Enums</strong>: <code>CREATE TYPE ... AS ENUM</code> only for small, stable sets; evolving business values get <code>TEXT</code> + <code>CHECK</code> or a lookup table.</li>
+<li><strong>JSONB</strong> over JSON, indexed with GIN, for optional/semi-structured attributes only.</li>
+<li>Arrays, ranges, network, geometric, full-text, domain, composite, and vector types, plus TOAST storage and collation control: see <code>references/details.md</code>.</li>
+</ul>
+<h3>Types to avoid</h3>
+<table>
+<thead>
+<tr>
+<th>Avoid</th>
+<th>Use instead</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>timestamp</code> (without time zone)</td>
+<td><code>timestamptz</code></td>
+</tr>
+<tr>
+<td><code>char(n)</code>, <code>varchar(n)</code></td>
+<td><code>text</code> (+ <code>CHECK</code> on length if needed)</td>
+</tr>
+<tr>
+<td><code>money</code></td>
+<td><code>numeric</code></td>
+</tr>
+<tr>
+<td><code>timetz</code></td>
+<td><code>timestamptz</code></td>
+</tr>
+<tr>
+<td><code>timestamptz(0)</code> or any precision</td>
+<td><code>timestamptz</code></td>
+</tr>
+<tr>
+<td><code>serial</code></td>
+<td><code>generated always as identity</code></td>
+</tr>
+</tbody></table>
+<h2>Constraints</h2>
+<ul>
+<li><strong>PK</strong>: implicit UNIQUE + NOT NULL; creates a B-tree index.</li>
+<li><strong>FK</strong>: specify <code>ON DELETE/UPDATE</code> (<code>CASCADE</code>, <code>RESTRICT</code>, <code>SET NULL</code>, <code>SET DEFAULT</code>). Index the referencing column. Use <code>DEFERRABLE INITIALLY DEFERRED</code> for circular dependencies checked at commit.</li>
+<li><strong>UNIQUE</strong>: creates a B-tree index; allows multiple NULLs unless <code>NULLS NOT DISTINCT</code> (PG15+). Prefer <code>NULLS NOT DISTINCT</code> unless duplicate NULLs are wanted.</li>
+<li><strong>CHECK</strong>: row-local; NULL passes (three-valued logic). Combine with <code>NOT NULL</code>: <code>price NUMERIC NOT NULL CHECK (price &gt; 0)</code>.</li>
+<li><strong>EXCLUDE</strong>: prevents overlaps with operators, e.g. <code>EXCLUDE USING gist (room_id WITH =, booking_period WITH &amp;&amp;)</code> stops double-booking. Needs a GiST-capable type.</li>
+</ul>
+<h2>Indexing</h2>
+<ul>
+<li><strong>B-tree</strong>: default for equality/range (<code>=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>BETWEEN</code>, <code>ORDER BY</code>).</li>
+<li><strong>Composite</strong>: leftmost-prefix rule (<code>WHERE a = ? AND b &gt; ?</code> uses <code>(a,b)</code>; <code>WHERE b = ?</code> does not). Most selective columns first.</li>
+<li><strong>Covering</strong>: <code>CREATE INDEX ON tbl (id) INCLUDE (name, email)</code> for index-only scans.</li>
+<li><strong>Partial</strong>: hot subsets, <code>CREATE INDEX ON tbl (user_id) WHERE status = 'active'</code>.</li>
+<li><strong>Expression</strong>: <code>CREATE INDEX ON tbl (LOWER(email))</code>; the query must use the same expression.</li>
+<li><strong>GIN</strong>: JSONB containment/existence, arrays, full-text search. <strong>GiST</strong>: ranges, geometry, exclusion constraints.</li>
+<li><strong>BRIN</strong>: large, naturally ordered data (time-series) at minimal storage cost; effective when disk order correlates with the indexed column.</li>
+</ul>
+<h2>Partitioning</h2>
+<ul>
+<li>Use for large tables (&gt;100M rows) whose queries consistently filter on the partition key, or where maintenance (pruning, bulk replacement) follows a key.</li>
+<li><strong>RANGE</strong> for time-series (<code>PARTITION BY RANGE (created_at)</code>; <strong>TimescaleDB</strong> automates it with retention and compression), <strong>LIST</strong> for discrete values, <strong>HASH</strong> for even distribution without a natural key.</li>
+<li><strong>Constraint exclusion</strong>: the planner prunes partitions through their <code>CHECK</code> constraints; declarative partitioning (PG10+) creates them for you.</li>
+<li>Prefer declarative partitioning or hypertables. Do NOT use table inheritance.</li>
+<li><strong>Limitations</strong>: no global UNIQUE constraints—include the partition key in PK/UNIQUE. FKs from partitioned tables need PG11+, FKs referencing a partitioned table need PG12+; on older versions, use triggers.</li>
+</ul>
+<h2>Examples</h2>
+<pre><code class="language-sql">CREATE TABLE users (
+  user_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ON users (LOWER(email));
+CREATE INDEX ON users (created_at);
+</code></pre>
+<pre><code class="language-sql">CREATE TABLE orders (
+  order_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(user_id),
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','PAID','CANCELED')),
+  total NUMERIC(10,2) NOT NULL CHECK (total &gt; 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ON orders (user_id);
+CREATE INDEX ON orders (created_at);
+</code></pre>
+<pre><code class="language-sql">-- JSONB attributes with a generated, indexable scalar
+CREATE TABLE profiles (
+  user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
+  attrs JSONB NOT NULL DEFAULT '{}',
+  theme TEXT GENERATED ALWAYS AS (attrs-&gt;&gt;'theme') STORED
+);
+CREATE INDEX profiles_attrs_gin ON profiles USING GIN (attrs);
+</code></pre>
+<h2>Going deeper</h2>
+<p><code>references/details.md</code> holds the material this file only names:</p>
+<ul>
+<li>The full data-type catalog: TOAST storage, collations, arrays, ranges, network, geometric, text search, domains, composites, vectors.</li>
+<li>Table types (<code>TEMPORARY</code>, <code>UNLOGGED</code>) and row-level security.</li>
+<li>Constraint and index notes, and partitioning DDL for RANGE, LIST, and HASH.</li>
+<li>Workload patterns: update-heavy, insert-heavy, upsert design, safe schema evolution.</li>
+<li>Generated columns and extensions (<code>pg_trgm</code>, <code>citext</code>, <code>timescaledb</code>, <code>postgis</code>, <code>pgvector</code>, and more).</li>
+<li>JSONB indexing strategies, including <code>jsonb_path_ops</code> and extracted B-tree columns.</li>
+</ul>

@@ -58,7 +58,7 @@ export function SecurityPanel({ plugin }: { plugin: Plugin }) {
       {plugin.securityFindings.length === 0 ? (
         <p className="mt-3 text-[13px] leading-relaxed text-charcoal">
           <span className="font-mono text-volt-dark">✓</span> No findings —
-          install scripts, docs URLs and publishing signals all came back clean.
+          the automated checks found no matching risk signals.
         </p>
       ) : (
         <ul className="mt-3 space-y-2.5">
@@ -80,7 +80,8 @@ export function SecurityPanel({ plugin }: { plugin: Plugin }) {
       <p className="mt-4 border-t border-line pt-3 text-[11.5px] leading-relaxed text-faint">
         Scanned before indexing on every daily sync: install-script patterns,
         obfuscation, typosquatting, suspicious URLs, leaked secrets, star
-        velocity. Grade D is never listed.
+        velocity. Grade D is never listed. Third-party code is not executed;
+        this scan does not guarantee runtime safety.
       </p>
     </div>
   );

@@ -8,7 +8,7 @@ export interface InstallOption {
 
 /** Generate install commands per ecosystem (brand voice: "plug in") */
 export function installOptions(plugin: Plugin): InstallOption[] {
-  const repo = plugin.repoUrl?.replace(/^https:\/\/github\.com\//, "") ?? null;
+  const repo = plugin.repoUrl?.match(/^https:\/\/github\.com\/([a-zA-Z0-9-]+\/[a-zA-Z0-9_.-]+)$/)?.[1] ?? null;
   switch (plugin.ecosystem) {
     case "dsh": {
       const opts: InstallOption[] = [];
@@ -58,12 +58,17 @@ export function installOptions(plugin: Plugin): InstallOption[] {
     }
     case "skills": {
       const opts: InstallOption[] = [];
-      if (repo) {
+      if (plugin.skillDocumentAvailable === false) return opts;
+      const source = plugin.sourceUrl ?? plugin.repoUrl;
+      if (source?.startsWith("https://")) {
+        const quote = (s: string) => /^[a-zA-Z0-9_./:@-]+$/.test(s) ? s : "'" + s.replaceAll("'", "'\\''") + "'";
         opts.push({
           label: "skills CLI",
-          command: `npx skills add https://github.com/${repo} --skill ${plugin.name}`,
+          command: `npx skills add ${quote(source)} --skill ${quote(plugin.name)}`,
           note: "Works with Claude Code, Cursor, Codex and 20+ agents",
         });
+      }
+      if (repo) {
         opts.push({
           label: "git",
           command: `git clone https://github.com/${repo}.git`,

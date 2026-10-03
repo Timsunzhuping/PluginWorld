@@ -1,0 +1,209 @@
+<p><strong>Persona:</strong> You are a Go architect wiring an application graph with dig. You keep the container at the composition root, depend on interfaces not concrete types, and treat constructor errors as first-class failures.</p>
+<h1>Using uber-go/dig for Dependency Injection in Go</h1>
+<p>Reflection-based DI toolkit, designed to power application frameworks (it is the engine behind <code>uber-go/fx</code>) and resolve object graphs during startup.</p>
+<p><strong>Official Resources:</strong></p>
+<ul>
+<li><a href="https://pkg.go.dev/go.uber.org/dig" target="_blank" rel="noopener noreferrer">pkg.go.dev/go.uber.org/dig</a></li>
+<li><a href="https://github.com/uber-go/dig" target="_blank" rel="noopener noreferrer">github.com/uber-go/dig</a></li>
+</ul>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<pre><code class="language-bash">go get go.uber.org/dig
+</code></pre>
+<h2>dig vs. fx</h2>
+<p>fx is built on dig and shares the same container engine — the DI primitives (<code>Provide</code>, <code>Invoke</code>, <code>In</code>/<code>Out</code> structs, named values, value groups) are identical. <code>fx.In</code>/<code>fx.Out</code> are re-exports of <code>dig.In</code>/<code>dig.Out</code>.</p>
+<p>What fx adds on top of dig:</p>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>dig</th>
+<th>fx</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DI container</td>
+<td>✅ <code>dig.New()</code></td>
+<td>✅ (embedded)</td>
+</tr>
+<tr>
+<td>Lifecycle hooks</td>
+<td>❌</td>
+<td>✅ <code>fx.Lifecycle</code> OnStart/OnStop</td>
+</tr>
+<tr>
+<td>Module system</td>
+<td>❌</td>
+<td>✅ <code>fx.Module</code> with scoped decorators</td>
+</tr>
+<tr>
+<td>Signal-aware run loop</td>
+<td>❌</td>
+<td>✅ <code>app.Run()</code> blocks on SIGINT/SIGTERM</td>
+</tr>
+<tr>
+<td>Structured event logging</td>
+<td>❌</td>
+<td>✅ <code>fx.WithLogger</code> / <code>fxevent</code></td>
+</tr>
+<tr>
+<td>Startup/shutdown timeout</td>
+<td>❌</td>
+<td>✅ <code>fx.StartTimeout</code> / <code>fx.StopTimeout</code></td>
+</tr>
+</tbody></table>
+<p><strong>Choose dig</strong> when you need the wiring graph only: CLI tools, libraries exposing a container to callers, test harnesses, or embedding DI into an existing app that manages its own lifecycle.</p>
+<p><strong>Choose fx</strong> for long-running services (HTTP servers, workers, daemons) — lifecycle and signal handling are non-negotiable there. See <code>samber/cc-skills-golang@golang-uber-fx</code> skill.</p>
+<h2>Container</h2>
+<pre><code class="language-go">import "go.uber.org/dig"
+
+c := dig.New()
+</code></pre>
+<p>Useful options: <code>dig.DeferAcyclicVerification()</code> (faster startup), <code>dig.RecoverFromPanics()</code> (turn panics into <code>dig.PanicError</code>), <code>dig.DryRun(true)</code> (validate without invoking).</p>
+<h2>Provide and Invoke</h2>
+<pre><code class="language-go">// Register a constructor — lazy, only runs when its output is needed
+err := c.Provide(func(cfg *Config) (*sql.DB, error) {
+    return sql.Open("postgres", cfg.DSN)
+})
+
+// Pull a service out of the container by asking for it as a function parameter
+err = c.Invoke(func(db *sql.DB) error {
+    return db.Ping()
+})
+</code></pre>
+<p>Constructors are <strong>lazy</strong> and <strong>memoized</strong>: each output type is built once and shared (singleton per container). <code>Provide</code> errors at registration if the constructor is malformed; <code>Invoke</code> returns the constructor's error wrapped with the dependency path that triggered it.</p>
+<p>A dig constructor is any function whose inputs are dependencies and whose outputs are provided types. <code>error</code> (last return) signals construction failure. Follow "accept interfaces, return structs".</p>
+<h2>Parameter Objects with <code>dig.In</code></h2>
+<p>Once a constructor has 4+ dependencies, embed <code>dig.In</code> to group them as struct fields and tag fields:</p>
+<pre><code class="language-go">type HandlerParams struct {
+    dig.In
+
+    Logger *zap.Logger
+    DB     *sql.DB
+    Cache  *redis.Client `optional:"true"`           // zero value if not provided
+    DBRO   *sql.DB       `name:"readonly"`           // named dependency
+    Routes []http.Handler `group:"routes"`           // value group
+}
+
+func NewHandler(p HandlerParams) *Handler { /* ... */ }
+</code></pre>
+<p>Tags: <code>name:"..."</code>, <code>optional:"true"</code>, <code>group:"..."</code>.</p>
+<h2>Result Objects with <code>dig.Out</code></h2>
+<p>Return several values from one constructor and attach <code>name</code>/<code>group</code> tags to results:</p>
+<pre><code class="language-go">type ConnResult struct {
+    dig.Out
+
+    ReadWrite *sql.DB `name:"primary"`
+    ReadOnly  *sql.DB `name:"readonly"`
+}
+
+func NewConnections(cfg *Config) (ConnResult, error) { /* ... */ }
+</code></pre>
+<h2>Named Values</h2>
+<p>Two providers of the same type collide. Disambiguate with <code>dig.Name</code>:</p>
+<pre><code class="language-go">c.Provide(NewPrimaryDB,  dig.Name("primary"))
+c.Provide(NewReadOnlyDB, dig.Name("readonly"))
+</code></pre>
+<p>Consume by adding <code>name:"primary"</code> / <code>name:"readonly"</code> to a <code>dig.In</code> field.</p>
+<h2>Value Groups</h2>
+<p>Many providers, one consumer slice — typical for HTTP handlers, health checks, migrations:</p>
+<pre><code class="language-go">type RouteResult struct {
+    dig.Out
+    Handler http.Handler `group:"routes"`
+}
+
+func NewUserHandler(db *sql.DB) RouteResult { /* ... */ }
+func NewPostHandler(db *sql.DB) RouteResult { /* ... */ }
+
+type ServerParams struct {
+    dig.In
+    Routes []http.Handler `group:"routes"`
+}
+</code></pre>
+<p><strong>Flatten</strong> — append <code>,flatten</code> (e.g. <code>group:"routes,flatten"</code>) to unwrap a slice instead of nesting it. Group order is <strong>not guaranteed</strong>; if order matters, provide an explicit ordered slice from a single constructor.</p>
+<h2>Provide as Interface (<code>dig.As</code>)</h2>
+<p>Register a concrete constructor and expose it under one or more interfaces without a separate adapter:</p>
+<pre><code class="language-go">c.Provide(NewPostgresDB, dig.As(new(Database), new(io.Closer)))
+// Consumers ask for Database or io.Closer; *PostgresDB stays hidden.
+</code></pre>
+<h2>Full Application Example</h2>
+<pre><code class="language-go">func main() {
+    c := dig.New()
+
+    must(c.Provide(NewConfig))
+    must(c.Provide(NewLogger))
+    must(c.Provide(NewDatabase))
+    must(c.Provide(NewServer))
+
+    err := c.Invoke(func(srv *http.Server) error {
+        return srv.ListenAndServe()
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+
+func must(err error) { if err != nil { panic(err) } }
+</code></pre>
+<p>dig has <strong>no built-in lifecycle</strong>. If you need OnStart/OnStop hooks, signal handling, and graceful shutdown, use fx — see <code>samber/cc-skills-golang@golang-uber-fx</code> skill.</p>
+<p>For Decorate, Scopes, optional deps, error helpers, and Visualize, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-uber-dig/references/advanced.md" target="_blank" rel="noopener noreferrer">advanced.md</a>.</p>
+<h2>Best Practices</h2>
+<ol>
+<li>Keep the container at the composition root — never pass <code>*dig.Container</code> as a parameter; treat it like a plumbing detail of <code>main()</code>. Service-locator patterns defeat the testability gains of DI.</li>
+<li>Depend on interfaces, not concrete types — lets you swap implementations in tests without touching production code, and lets you use <code>dig.As</code> to expose narrow interfaces from wide structs.</li>
+<li>Prefer parameter objects (<code>dig.In</code> structs) once a constructor has 4+ dependencies — call sites stay readable and adding a new dependency is a one-line change instead of a signature break.</li>
+<li>Group registration by module (one file per module that calls <code>c.Provide</code> for its types) — review and refactoring become a per-module concern, and you can extract a module into a fx.Module later without rewriting wiring.</li>
+<li>Validate the graph eagerly in tests — call <code>c.Invoke</code> against the composition root in CI to surface missing providers at boot time, not at first request. <code>DryRun(true)</code> skips constructor execution.</li>
+<li>Return errors from constructors instead of panicking — dig wraps them with the dependency path, which makes the failure point obvious.</li>
+</ol>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Passing the container into services</td>
+<td>The container belongs to <code>main()</code>. Inject the typed dependencies a service needs; otherwise tests need to build a real container.</td>
+</tr>
+<tr>
+<td>Two providers for the same type without <code>Name</code></td>
+<td>dig errors at <code>Provide</code> time. Either name them, or merge into a single provider that returns a <code>dig.Out</code> result struct.</td>
+</tr>
+<tr>
+<td>Ignoring <code>Provide</code> errors</td>
+<td>Wrap each <code>Provide</code> with a <code>must</code> helper. A silent registration error becomes a missing-type error far later.</td>
+</tr>
+<tr>
+<td>Using groups when ordering matters</td>
+<td>Groups are unordered. If order matters (middleware chain, migration sequence), provide an explicit ordered slice with one constructor.</td>
+</tr>
+<tr>
+<td>Constructors with side effects on import</td>
+<td>Keep <code>init()</code> empty — start work only inside the constructor, after the graph is built.</td>
+</tr>
+</tbody></table>
+<h2>Testing</h2>
+<p>dig containers are cheap — build a fresh one per test, override providers with <code>Decorate</code>, and call <code>Invoke</code> to drive the system. For full patterns (per-test wiring, shared helpers, graph validation in CI, asserting wire-time errors, recovering from constructor panics), see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-uber-dig/references/testing.md" target="_blank" rel="noopener noreferrer">testing.md</a>.</p>
+<h2>Further Reading</h2>
+<ul>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-uber-dig/references/advanced.md" target="_blank" rel="noopener noreferrer">advanced.md</a> — Decorate, Scopes, optional deps, error helpers, Visualize, full Quick Reference</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-uber-dig/references/recipes.md" target="_blank" rel="noopener noreferrer">recipes.md</a> — end-to-end examples: HTTP server with route group, two databases, request scopes, decorators, dry-run validation</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-uber-dig/references/testing.md" target="_blank" rel="noopener noreferrer">testing.md</a> — testing patterns and graph validation</li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-uber-fx</code> skill for application lifecycle, modules, and signal-aware Run() built on top of dig</li>
+<li>→ See <code>samber/cc-skills-golang@golang-dependency-injection</code> skill for DI concepts and library comparison</li>
+<li>→ See <code>samber/cc-skills-golang@golang-samber-do</code> skill for a generics-based alternative without reflection</li>
+<li>→ See <code>samber/cc-skills-golang@golang-google-wire</code> skill for compile-time DI (no runtime container)</li>
+<li>→ See <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill for interface design patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for general testing patterns</li>
+</ul>
+<p>If you encounter a bug or unexpected behavior in uber-go/dig, open an issue at <a href="https://github.com/uber-go/dig/issues" target="_blank" rel="noopener noreferrer">https://github.com/uber-go/dig/issues</a>.</p>

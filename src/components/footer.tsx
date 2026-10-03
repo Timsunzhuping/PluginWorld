@@ -18,6 +18,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
       { label: "API docs", href: "/docs/api" },
       { label: "Submit a plugin", href: "/submit" },
       { label: "Quality score", href: "/docs/api#quality-score" },
+      { label: "Sync status", href: "/admin/sync" },
     ],
   },
   {

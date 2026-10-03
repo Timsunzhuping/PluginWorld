@@ -1,0 +1,234 @@
+<h1>Core Web Vitals optimization</h1>
+<p>Targeted optimization for the three Core Web Vitals using field data to identify user impact and browser traces to diagnose causes.</p>
+<h2>Measure before optimizing</h2>
+<p>When a runnable URL is available, read <a href="https://github.com/addyosmani/web-quality-skills/blob/HEAD/skills/performance/references/MEASUREMENT.md" target="_blank" rel="noopener noreferrer">the performance measurement workflow</a>. Prefer this sequence:</p>
+<ol>
+<li>Check page-level CrUX p75 data, with a clearly labeled origin fallback when page data is unavailable.</li>
+<li>Record a browser performance trace under stated conditions. With Chrome DevTools MCP, trace summaries can include CrUX alongside the observed lab metrics.</li>
+<li>Analyze only the insights associated with the failing metric, then inspect the implicated code and resources.</li>
+<li>Re-run equivalent lab measurements after the fix. Do not claim an immediate field improvement; CrUX and first-party RUM need new user visits.</li>
+</ol>
+<p>If only source code is available, identify likely causes but do not claim that LCP, INP, or CLS is failing without runtime evidence.</p>
+<h2>The three metrics</h2>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Measures</th>
+<th>Good</th>
+<th>Needs work</th>
+<th>Poor</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>LCP</strong></td>
+<td>Loading</td>
+<td>≤ 2.5s</td>
+<td>2.5s – 4s</td>
+<td>&gt; 4s</td>
+</tr>
+<tr>
+<td><strong>INP</strong></td>
+<td>Interactivity</td>
+<td>≤ 200ms</td>
+<td>200ms – 500ms</td>
+<td>&gt; 500ms</td>
+</tr>
+<tr>
+<td><strong>CLS</strong></td>
+<td>Visual Stability</td>
+<td>≤ 0.1</td>
+<td>0.1 – 0.25</td>
+<td>&gt; 0.25</td>
+</tr>
+</tbody></table>
+<p>Google measures at the <strong>75th percentile</strong> — 75% of page visits must meet "Good" thresholds.</p>
+<hr />
+<h2>LCP: Largest Contentful Paint</h2>
+<p>LCP measures when the largest visible content element renders. Usually this is:</p>
+<ul>
+<li>Hero image or video</li>
+<li>Large text block</li>
+<li>Background image</li>
+<li><code>&lt;svg&gt;</code> element</li>
+</ul>
+<h3>Common LCP issues</h3>
+<p><strong>1. Slow server response (TTFB &gt; 800ms)</strong></p>
+<pre><code>Fix: CDN, caching, optimized backend, edge rendering
+</code></pre>
+<p><strong>2. Render-blocking resources</strong></p>
+<pre><code class="language-html">&lt;!-- ❌ Blocks rendering --&gt;
+&lt;link rel="stylesheet" href="/all-styles.css"&gt;
+
+&lt;!-- ✅ Critical CSS inlined, rest deferred --&gt;
+&lt;style&gt;/* Critical above-fold CSS */&lt;/style&gt;
+&lt;link rel="preload" href="/styles.css" as="style" 
+      onload="this.onload=null;this.rel='stylesheet'"&gt;
+</code></pre>
+<p><strong>3. Slow resource load times</strong></p>
+<pre><code class="language-html">&lt;!-- ❌ LCP image is discovered only after a stylesheet loads --&gt;
+&lt;div class="hero"&gt;&lt;/div&gt;
+
+&lt;!-- ✅ Discoverable in initial HTML and prioritized --&gt;
+&lt;link rel="preload" href="/hero.webp" as="image" fetchpriority="high"&gt;
+&lt;img src="/hero.webp" alt="Hero" fetchpriority="high"&gt;
+</code></pre>
+<p>Prefer a discoverable <code>&lt;img&gt;</code> with <code>fetchpriority="high"</code>. Add the preload only when the trace shows that the resource would otherwise be discovered late; duplicate or speculative preloads can compete for bandwidth.</p>
+<p><strong>4. Client-side rendering delays</strong></p>
+<pre><code class="language-javascript">// ❌ Content loads after JavaScript
+useEffect(() =&gt; {
+  fetch('/api/hero-text').then(r =&gt; r.json()).then(setHeroText);
+}, []);
+
+// ✅ Server-side or static rendering
+// Use SSR, SSG, or streaming to send HTML with content
+export async function getServerSideProps() {
+  const heroText = await fetchHeroText();
+  return { props: { heroText } };
+}
+</code></pre>
+<p><strong>5. Make navigations instant with the Speculation Rules API</strong></p>
+<p>For sites with predictable same-origin journeys, prerendering a likely next page can make a successful subsequent navigation much faster. Treat this as a measured navigation optimization, not a substitute for fixing the current page's LCP.</p>
+<pre><code class="language-html">&lt;script type="speculationrules"&gt;
+{
+  "prerender": [{
+    "where": { "href_matches": "/*" },
+    "eagerness": "moderate"
+  }]
+}
+&lt;/script&gt;
+</code></pre>
+<p>Current Chrome behavior is specific enough to guide the choice:</p>
+<table>
+<thead>
+<tr>
+<th><code>eagerness</code></th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>conservative</code></td>
+<td>Pointer or touch down</td>
+</tr>
+<tr>
+<td><code>moderate</code></td>
+<td>Desktop: 200ms hover, or earlier pointer down; mobile: viewport heuristics</td>
+</tr>
+<tr>
+<td><code>eager</code></td>
+<td>Chrome 143+: desktop 10ms hover; mobile 50ms after the anchor enters the viewport</td>
+</tr>
+<tr>
+<td><code>immediate</code></td>
+<td>As soon as the rules are observed</td>
+</tr>
+</tbody></table>
+<p>Start conservatively and measure prediction hit rate, transferred bytes, server load, and navigation improvement before expanding the rules. Recheck <a href="https://developer.chrome.com/docs/web-platform/prerender-pages#eagerness" target="_blank" rel="noopener noreferrer">Chrome's maintained eagerness documentation</a> before hardcoding timing-sensitive behavior.</p>
+<p>Caveats:</p>
+<ul>
+<li><strong>Bandwidth/CPU cost.</strong> Each prerender is roughly a full page load. Scope <code>where</code> carefully (<code>href_matches</code> patterns, exclude logout/checkout) and avoid <code>immediate</code> outside small sites.</li>
+<li><strong>Side effects fire early.</strong> Analytics, ads, and any code that runs on load will fire when the prerender starts, not when the user navigates. Gate side effects on the <a href="https://developer.chrome.com/docs/web-platform/prerender-pages#detect_when_a_page_is_prerendered_or_used_for_a_full_navigation" target="_blank" rel="noopener noreferrer"><code>prerenderingchange</code> event</a> or <code>document.prerendering</code>.</li>
+<li><strong>Chromium-only.</strong> Safari and Firefox ignore the script — it's a progressive enhancement, never a regression.</li>
+</ul>
+<h3>LCP optimization checklist</h3>
+<pre><code class="language-markdown">- [ ] TTFB &lt; 800ms (use CDN, edge caching)
+- [ ] LCP resource is discoverable in initial HTML and prioritized; preload only if the trace shows late discovery
+- [ ] LCP image optimized (WebP/AVIF, correct size)
+- [ ] Critical CSS inlined (&lt; 14KB)
+- [ ] No render-blocking JavaScript in &lt;head&gt;
+- [ ] Fonts don't block text rendering (font-display: swap)
+- [ ] LCP element in initial HTML (not JS-rendered)
+- [ ] Speculation Rules added for likely-next navigations (moderate eagerness)
+</code></pre>
+<h3>LCP element identification</h3>
+<p>This snippet diagnoses the current page session. It is not field data.</p>
+<pre><code class="language-javascript">// Find your LCP element
+new PerformanceObserver((list) =&gt; {
+  const entries = list.getEntries();
+  const lastEntry = entries[entries.length - 1];
+  console.log('LCP element:', lastEntry.element);
+  console.log('LCP time:', lastEntry.startTime);
+}).observe({ type: 'largest-contentful-paint', buffered: true });
+</code></pre>
+<hr />
+<h2>INP: Interaction to Next Paint</h2>
+<p>INP measures responsiveness across clicks, taps, and key presses during a visit. Diagnose its input delay, processing time, and presentation delay separately; a slow interaction may involve main-thread contention before the handler, expensive application work, or delayed rendering after it.</p>
+<p>When field INP is poor or a trace identifies a slow interaction, read <a href="https://github.com/addyosmani/web-quality-skills/blob/HEAD/skills/core-web-vitals/references/INP.md" target="_blank" rel="noopener noreferrer">the INP reference</a> for trace interpretation, yielding patterns, third-party and rendering causes, a single-session observer, and first-party attribution.</p>
+<hr />
+<h2>CLS: Cumulative Layout Shift</h2>
+<p>CLS measures unexpected layout shifts across a page visit. Use field attribution or a trace to identify the shifted node and the trigger; do not assume the visible victim caused the shift.</p>
+<p>When field CLS is poor or a trace reports shifts, read <a href="https://github.com/addyosmani/web-quality-skills/blob/HEAD/skills/core-web-vitals/references/CLS.md" target="_blank" rel="noopener noreferrer">the CLS reference</a> for reserved-space patterns, dynamic content, font and animation fixes, a debugging observer, and a verification checklist.</p>
+<hr />
+<h2>Measurement sources</h2>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Browser performance trace (Chrome DevTools MCP: <code>performance_start_trace</code>)</td>
+<td>Observe one load or interaction and diagnose focused insights; use included CrUX context when available</td>
+</tr>
+<tr>
+<td>CrUX or Search Console</td>
+<td>Prioritize aggregated real-user outcomes at p75</td>
+</tr>
+<tr>
+<td>Lighthouse CLI or PageSpeed Insights</td>
+<td>Controlled lab fallback when DevTools tools are unavailable</td>
+</tr>
+<tr>
+<td>First-party RUM</td>
+<td>Segment current production experience by route, device, release, and attribution</td>
+</tr>
+<tr>
+<td>Raw <code>PerformanceObserver</code></td>
+<td>Inspect one page session during debugging</td>
+</tr>
+</tbody></table>
+<p>Do not route performance through Chrome DevTools MCP's <code>lighthouse_audit</code>; that capability intentionally covers non-performance Lighthouse categories. Do not compare a single lab value directly with a field p75 as if they were equivalent samples.</p>
+<p>When adding or reviewing production collection, read <a href="https://github.com/addyosmani/web-quality-skills/blob/HEAD/skills/performance/references/RUM.md" target="_blank" rel="noopener noreferrer">the first-party RUM reference</a>. Prefer the <code>web-vitals</code> library because raw browser APIs do not by themselves implement every Core Web Vital's lifecycle and reporting rules.</p>
+<hr />
+<h2>Framework quick fixes</h2>
+<h3>Next.js</h3>
+<pre><code class="language-jsx">// LCP: Use next/image with priority
+import Image from 'next/image';
+&lt;Image src="/hero.jpg" priority fill alt="Hero" /&gt;
+
+// INP: Use dynamic imports
+const HeavyComponent = dynamic(() =&gt; import('./Heavy'), { ssr: false });
+
+// CLS: Image component handles dimensions automatically
+</code></pre>
+<h3>React</h3>
+<pre><code class="language-jsx">// LCP: Preload in head
+&lt;link rel="preload" href="/hero.jpg" as="image" fetchpriority="high" /&gt;
+
+// INP: Memoize and useTransition
+const [isPending, startTransition] = useTransition();
+startTransition(() =&gt; setExpensiveState(newValue));
+
+// CLS: Always specify dimensions in img tags
+</code></pre>
+<h3>Vue/Nuxt</h3>
+<pre><code class="language-vue">&lt;!-- LCP: Use nuxt/image with preload --&gt;
+&lt;NuxtImg src="/hero.jpg" preload loading="eager" /&gt;
+
+&lt;!-- INP: Use async components --&gt;
+&lt;component :is="() =&gt; import('./Heavy.vue')" /&gt;
+
+&lt;!-- CLS: Use aspect-ratio CSS --&gt;
+&lt;img :style="{ aspectRatio: '16/9' }" /&gt;
+</code></pre>
+<h2>References</h2>
+<ul>
+<li><a href="https://github.com/addyosmani/web-quality-skills/blob/HEAD/skills/core-web-vitals/references/LCP.md" target="_blank" rel="noopener noreferrer">Detailed LCP optimization</a> — read when an LCP trace points to discovery, loading, or render delay</li>
+<li><a href="https://github.com/addyosmani/web-quality-skills/blob/HEAD/skills/core-web-vitals/references/INP.md" target="_blank" rel="noopener noreferrer">Detailed INP optimization</a> — read when a trace or field attribution identifies a slow interaction</li>
+<li><a href="https://github.com/addyosmani/web-quality-skills/blob/HEAD/skills/core-web-vitals/references/CLS.md" target="_blank" rel="noopener noreferrer">Detailed CLS optimization</a> — read when a trace or field attribution identifies unexpected shifts</li>
+<li><a href="https://web.dev/articles/lcp" target="_blank" rel="noopener noreferrer">web.dev LCP</a></li>
+<li><a href="https://web.dev/articles/inp" target="_blank" rel="noopener noreferrer">web.dev INP</a></li>
+<li><a href="https://web.dev/articles/cls" target="_blank" rel="noopener noreferrer">web.dev CLS</a></li>
+<li><a href="https://github.com/addyosmani/web-quality-skills/blob/HEAD/skills/performance/SKILL.md" target="_blank" rel="noopener noreferrer">Performance skill</a></li>
+</ul>

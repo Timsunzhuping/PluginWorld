@@ -1,0 +1,243 @@
+<p><strong>Persona:</strong> You are a Go concurrency engineer. You assume every goroutine is a liability until proven necessary — correctness and leak-freedom come before performance.</p>
+<p><strong>Orchestration mode:</strong> Fan out the five sub-agents described in the "Parallelizing Concurrency Audits" section for auditing concurrent code across a large codebase, and consolidate their findings into one report. On Claude Code, use <code>ultracode</code> to opt into multi-agent orchestration explicitly.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Write mode</strong> — implement concurrent code (goroutines, channels, sync primitives, worker pools, pipelines). Follow the sequential instructions below.</li>
+<li><strong>Review mode</strong> — reviewing a PR's concurrent code changes. Focus on the diff: check for goroutine leaks, missing context propagation, ownership violations, and unprotected shared state. Sequential.</li>
+<li><strong>Audit mode</strong> — auditing existing concurrent code across a codebase. Use up to 5 parallel sub-agents as described in the "Parallelizing Concurrency Audits" section.</li>
+</ul>
+<blockquote>
+<p><strong>Community default.</strong> A company skill that explicitly supersedes <code>samber/cc-skills-golang@golang-concurrency</code> skill takes precedence.</p>
+</blockquote>
+<h1>Go Concurrency Best Practices</h1>
+<p>Go's concurrency model is built on goroutines and channels. Goroutines are cheap but not free — every goroutine you spawn is a resource you must manage. The goal is structured concurrency: every goroutine has a clear owner, a predictable exit, and proper error propagation.</p>
+<h2>Core Principles</h2>
+<ol>
+<li><strong>Every goroutine must have a clear exit</strong> — without a shutdown mechanism (context, done channel, WaitGroup), they leak and accumulate until the process crashes</li>
+<li><strong>Share memory by communicating</strong> — channels transfer ownership explicitly; mutexes protect shared state but make ownership implicit</li>
+<li><strong>Send copies, not pointers</strong> on channels — sending pointers creates invisible shared memory, defeating the purpose of channels</li>
+<li><strong>Only the sender closes a channel</strong> — closing from the receiver side panics if the sender writes after close</li>
+<li><strong>Specify channel direction</strong> (<code>chan&lt;-</code>, <code>&lt;-chan</code>) — the compiler prevents misuse at build time</li>
+<li><strong>Default to unbuffered channels</strong> — larger buffers mask backpressure; use them only with measured justification</li>
+<li><strong>Always include <code>ctx.Done()</code> in select</strong> — without it, goroutines leak after caller cancellation</li>
+<li><strong>Avoid repeated <code>time.After</code> in hot loops</strong> — each call allocates a timer and creates unnecessary churn; use <code>time.NewTimer</code> + <code>Reset</code> for long-running loops</li>
+<li><strong>Track goroutine leaks in tests</strong> with <code>go.uber.org/goleak</code></li>
+</ol>
+<p>For detailed channel/select code examples, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-concurrency/references/channels-and-select.md" target="_blank" rel="noopener noreferrer">Channels and Select Patterns</a>.</p>
+<h2>Channel vs Mutex vs Atomic</h2>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Use</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Passing data between goroutines</td>
+<td>Channel</td>
+<td>Communicates ownership transfer</td>
+</tr>
+<tr>
+<td>Coordinating goroutine lifecycle</td>
+<td>Channel + context</td>
+<td>Clean shutdown with select</td>
+</tr>
+<tr>
+<td>Protecting shared struct fields</td>
+<td><code>sync.Mutex</code> / <code>sync.RWMutex</code></td>
+<td>Simple critical sections</td>
+</tr>
+<tr>
+<td>Simple counters, flags</td>
+<td><code>sync/atomic</code></td>
+<td>Lock-free, lower overhead</td>
+</tr>
+<tr>
+<td>Many readers, few writers on a map</td>
+<td><code>sync.Map</code></td>
+<td>Optimized for read-heavy workloads. <strong>Concurrent map read/write causes a hard crash</strong></td>
+</tr>
+<tr>
+<td>Caching expensive computations</td>
+<td><code>sync.Once</code> / <code>singleflight</code></td>
+<td>Execute once or deduplicate</td>
+</tr>
+</tbody></table>
+<h2>WaitGroup vs errgroup</h2>
+<table>
+<thead>
+<tr>
+<th>Need</th>
+<th>Use</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Wait for goroutines, errors not needed</td>
+<td><code>sync.WaitGroup</code></td>
+<td>Fire-and-forget</td>
+</tr>
+<tr>
+<td>Wait + collect first error</td>
+<td><code>errgroup.Group</code></td>
+<td>Error propagation</td>
+</tr>
+<tr>
+<td>Wait + cancel siblings on first error</td>
+<td><code>errgroup.WithContext</code></td>
+<td>Context cancellation on error</td>
+</tr>
+<tr>
+<td>Wait + limit concurrency</td>
+<td><code>errgroup.SetLimit(n)</code></td>
+<td>Built-in worker pool</td>
+</tr>
+</tbody></table>
+<h2>Sync Primitives Quick Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Primitive</th>
+<th>Use case</th>
+<th>Key notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sync.Mutex</code></td>
+<td>Protect shared state</td>
+<td>Keep critical sections short; never hold across I/O</td>
+</tr>
+<tr>
+<td><code>sync.RWMutex</code></td>
+<td>Many readers, few writers</td>
+<td>Never upgrade RLock to Lock (deadlock)</td>
+</tr>
+<tr>
+<td><code>sync/atomic</code></td>
+<td>Simple counters, flags</td>
+<td>Prefer typed atomics (Go 1.19+): <code>atomic.Int64</code>, <code>atomic.Bool</code></td>
+</tr>
+<tr>
+<td><code>sync.Map</code></td>
+<td>Concurrent map, read-heavy</td>
+<td>No explicit locking; use <code>RWMutex</code>+map when writes dominate</td>
+</tr>
+<tr>
+<td><code>sync.Pool</code></td>
+<td>Reuse temporary objects</td>
+<td>Always <code>Reset()</code> before <code>Put()</code>; reduces GC pressure</td>
+</tr>
+<tr>
+<td><code>sync.Once</code></td>
+<td>One-time initialization</td>
+<td>Go 1.21+: <code>OnceFunc</code>, <code>OnceValue</code>, <code>OnceValues</code></td>
+</tr>
+<tr>
+<td><code>sync.WaitGroup</code></td>
+<td>Waiting for simple goroutines</td>
+<td>Go 1.25+: prefer <code>wg.Go(func(){ ... })</code> for fire-and-wait tasks that do not panic and do not need error propagation. For Go &lt;1.25 use <code>Add</code>/<code>Done</code>. For errors/cancellation/limits, use <code>errgroup</code> with context.</td>
+</tr>
+<tr>
+<td><code>x/sync/singleflight</code></td>
+<td>Deduplicate concurrent calls</td>
+<td>Cache stampede prevention</td>
+</tr>
+<tr>
+<td><code>x/sync/errgroup</code></td>
+<td>Goroutine group + errors</td>
+<td><code>SetLimit(n)</code> replaces hand-rolled worker pools</td>
+</tr>
+</tbody></table>
+<p>For detailed examples and anti-patterns, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-concurrency/references/sync-primitives.md" target="_blank" rel="noopener noreferrer">Sync Primitives Deep Dive</a>.</p>
+<h2>Concurrency Checklist</h2>
+<p>Before spawning a goroutine, answer:</p>
+<ul>
+<li> <strong>How will it exit?</strong> — context cancellation, channel close, or explicit signal</li>
+<li> <strong>Can I signal it to stop?</strong> — pass <code>context.Context</code> or done channel</li>
+<li> <strong>Can I wait for it?</strong> — <code>sync.WaitGroup</code> or <code>errgroup</code></li>
+<li> <strong>Who owns the channels?</strong> — creator/sender owns and closes</li>
+<li> <strong>Should this be synchronous instead?</strong> — don't add concurrency without measured need</li>
+</ul>
+<h2>Pipelines and Worker Pools</h2>
+<p>For pipeline patterns (fan-out/fan-in, bounded workers, generator chains, Go 1.23+ iterators, <code>samber/ro</code>), see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-concurrency/references/pipelines.md" target="_blank" rel="noopener noreferrer">Pipelines and Worker Pools</a>.</p>
+<h2>Parallelizing Concurrency Audits</h2>
+<p>When auditing concurrency across a large codebase, use up to 5 parallel sub-agents:</p>
+<ol>
+<li>Find all goroutine spawns (<code>go func</code>, <code>go method</code>) and verify shutdown mechanisms</li>
+<li>Search for mutable globals and shared state without synchronization</li>
+<li>Audit channel usage — ownership, direction, closure, buffer sizes</li>
+<li>Find <code>time.After</code> in loops, missing <code>ctx.Done()</code> in select, unbounded spawning</li>
+<li>Check mutex usage, <code>sync.Map</code>, atomics, and thread-safety documentation</li>
+</ol>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Fire-and-forget goroutine</td>
+<td>Provide stop mechanism (context, done channel)</td>
+</tr>
+<tr>
+<td>Closing channel from receiver</td>
+<td>Only the sender closes</td>
+</tr>
+<tr>
+<td><code>time.After</code> in hot loop</td>
+<td>Reuse <code>time.NewTimer</code> + <code>Reset</code></td>
+</tr>
+<tr>
+<td>Missing <code>ctx.Done()</code> in select</td>
+<td>Always select on context to allow cancellation</td>
+</tr>
+<tr>
+<td>Unbounded goroutine spawning</td>
+<td>Use <code>errgroup.SetLimit(n)</code> or semaphore</td>
+</tr>
+<tr>
+<td>Sharing pointer via channel</td>
+<td>Send copies or immutable values</td>
+</tr>
+<tr>
+<td><code>wg.Add</code> inside goroutine</td>
+<td>Call <code>Add</code> before <code>go</code> — <code>Wait</code> may return early otherwise</td>
+</tr>
+<tr>
+<td>Forgetting <code>-race</code> in CI</td>
+<td>Always run <code>go test -race ./...</code></td>
+</tr>
+<tr>
+<td>Mutex held across I/O</td>
+<td>Keep critical sections short</td>
+</tr>
+</tbody></table>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-performance</code> skill for false sharing, cache-line padding, <code>sync.Pool</code> hot-path patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-context</code> skill for cancellation propagation and timeout patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-safety</code> skill for concurrent map access and race condition prevention</li>
+<li>→ See <code>samber/cc-skills-golang@golang-troubleshooting</code> skill for debugging goroutine leaks and deadlocks</li>
+<li>→ See <code>samber/cc-skills-golang@golang-design-patterns</code> skill for graceful shutdown patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-continuous-integration</code> skill for automated AI-driven code review in CI using these guidelines</li>
+</ul>
+<h3>Goroutine leak profile</h3>
+<p>The goroutine leak profile (experimental behind <code>GOEXPERIMENT=goroutineleakprofile</code> in Go 1.26) is generally available in <code>runtime/pprof</code> since Go 1.27 — no build flag required. It is a useful production-oriented leak signal alongside the existing tools below.</p>
+<pre><code class="language-bash">curl http://localhost:6060/debug/pprof/goroutineleak?debug=2
+go tool pprof http://localhost:6060/debug/pprof/goroutineleak
+</code></pre>
+<p>Keep existing tools:</p>
+<ul>
+<li>tests: <code>go.uber.org/goleak</code></li>
+<li>runtime count: <code>runtime.NumGoroutine()</code></li>
+<li>stack dump: <code>/debug/pprof/goroutine?debug=2</code></li>
+<li>race checks: <code>go test -race ./...</code></li>
+</ul>
+<h2>References</h2>
+<ul>
+<li><a href="https://go.dev/blog/pipelines" target="_blank" rel="noopener noreferrer">Go Concurrency Patterns: Pipelines</a></li>
+<li><a href="https://go.dev/doc/effective_go#concurrency" target="_blank" rel="noopener noreferrer">Effective Go: Concurrency</a></li>
+</ul>

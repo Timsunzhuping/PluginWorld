@@ -1,0 +1,199 @@
+<h1>Migrate stable → Sandbox SDK 1.0 preview (<code>@next</code>)</h1>
+<p><strong>Perform</strong> the port. Follow the steps in order. Depth lives in docs—fetch the linked page when a step needs detail.</p>
+<p>Human guide: <a href="https://developers.cloudflare.com/sandbox/sdk/migrate/index.md" target="_blank" rel="noopener noreferrer">Migrate</a> · <a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">1.0 preview</a></p>
+<p><strong>New projects</strong> should start on <code>@next</code> (<strong><code>sandbox-next</code></strong>), not this skill. <strong>Day-to-day stable work</strong> → <strong><code>sandbox-stable</code></strong>. Deprecated-API cleanup <strong>without</strong> moving to <code>@next</code> → <a href="https://developers.cloudflare.com/sandbox/sdk/migrate/index.md" target="_blank" rel="noopener noreferrer">2026 deprecation guide</a> first if needed.</p>
+<p>Existing apps should migrate <strong>when you can</strong>, so you are ready when 1.0 becomes the stable release. Do <strong>not</strong> force production cutover without the user agreeing.</p>
+<p><strong>Prefer installed <code>@next</code> types and the migrate doc over memory.</strong></p>
+<h2>Workflow</h2>
+<ol>
+<li><strong>Review</strong> hard rules and the replacement map  </li>
+<li><strong>Audit</strong> the codebase; list hits and target shapes  </li>
+<li><strong>Clarify</strong> with the user (cutover, bridge, Python image, unclear sites)  </li>
+<li><strong>Upgrade</strong> package, image, and code  </li>
+<li><strong>Validate</strong></li>
+</ol>
+<p>Stop after any step that needs a user decision.</p>
+<h2>Hard rules</h2>
+<ul>
+<li>Worker package and container image must be the <strong>same</strong> <code>@next</code> line.  </li>
+<li>Production cutover uses <strong>immediate</strong> container rollout. Stable and <code>@next</code> control protocols are incompatible both ways; gradual rollout leaves a broken mixed window. In-flight container work can stop.  </li>
+<li>After cutover, <code>await sandbox.exec(...)</code> means process <strong>started</strong>, not command <strong>finished</strong>.  </li>
+<li>Argv is as-is (no implicit shell). Shell syntax needs an explicit shell binary.  </li>
+<li>Process handles have <strong>no stdin</strong> → terminals for interactive input.  </li>
+<li>Observation <code>timeout</code> / <code>AbortSignal</code> cancel the <strong>wait only</strong>, not the process.  </li>
+<li>No single retry loop for every error.  </li>
+<li>Do not invent APIs (<code>gitCheckout</code> on core, process stdin, string-exec completion helper).  </li>
+<li>Self-deployed bridge stays on <strong>stable</strong> (not part of the preview line yet).</li>
+</ul>
+<h2>Replacement map</h2>
+<table>
+<thead>
+<tr>
+<th>Stable</th>
+<th><code>@next</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SANDBOX_TRANSPORT</code> / <code>transport</code> / <code>setTransport</code></td>
+<td>Remove — RPC only</td>
+</tr>
+<tr>
+<td><code>await sandbox.exec("cmd")</code> → buffered result</td>
+<td><code>await sandbox.exec(argv)</code> → handle, then <code>output</code> / waits</td>
+</tr>
+<tr>
+<td><code>execStream</code> / <code>startProcess</code></td>
+<td>Same handle: <code>logs</code>, <code>waitFor*</code>, <code>kill</code></td>
+</tr>
+<tr>
+<td>Default / named sessions</td>
+<td>Gone — <code>cwd</code>/<code>env</code> per launch, or one shell script</td>
+</tr>
+<tr>
+<td><code>sandbox.terminal(request)</code> / session terminal</td>
+<td><code>createTerminal</code> + <code>terminal.connect(request)</code></td>
+</tr>
+<tr>
+<td>xterm <code>sessionId</code></td>
+<td><code>terminalId</code></td>
+</tr>
+<tr>
+<td>Interpreter methods on <code>Sandbox</code></td>
+<td><code>withInterpreter</code> → <code>sandbox.interpreter.*</code></td>
+</tr>
+<tr>
+<td><code>gitCheckout</code></td>
+<td>argv <code>git</code> via <code>exec</code></td>
+</tr>
+<tr>
+<td>String kill signals</td>
+<td>Numeric only</td>
+</tr>
+<tr>
+<td>Files, mounts, backups, ports, tunnels, <code>proxyToSandbox</code></td>
+<td>Mostly unchanged (ignore session/transport bits on stable pages)</td>
+</tr>
+</tbody></table>
+<p>Depth: <a href="https://developers.cloudflare.com/sandbox/sdk/migrate/index.md" target="_blank" rel="noopener noreferrer">Migrate</a> · after port, day-to-day → <strong><code>sandbox-next</code></strong></p>
+<h2>Audit</h2>
+<pre><code class="language-sh">rg 'SANDBOX_TRANSPORT|transport:|setTransport|enableDefaultSession|createSession|getSession|deleteSession|execStream\(|startProcess\(|killProcess\(|sandbox\.terminal\(|sessionId|gitCheckout\(|SandboxTransport|ExecutionSession'
+</code></pre>
+<p>Also: string <code>exec(</code>, <code>cd</code> then a later <code>exec</code>, bare <code>createCodeContext</code> / <code>runCode</code> on <code>Sandbox</code>.</p>
+<h2>Clarify (ask when needed)</h2>
+<ul>
+<li>OK to cut production with <code>--containers-rollout=immediate</code> (live processes/terminals/streams may stop)?  </li>
+<li>Self-deployed bridge? Leave on stable.  </li>
+<li>Python interpreter → <strong><code>-python</code></strong> image variant?  </li>
+<li>Call sites not covered by the map?</li>
+</ul>
+<h2>Upgrade</h2>
+<h3>Package and image</h3>
+<pre><code class="language-sh">npm install @cloudflare/sandbox@next
+</code></pre>
+<pre><code class="language-dockerfile">FROM cloudflare/sandbox:next
+# Python: cloudflare/sandbox:next-python
+</code></pre>
+<p>Same prerelease tag on Worker and image when not on floating <code>next</code>.</p>
+<h3>Code by area</h3>
+<p>Apply replacements from the map. For each area, implement from the doc—not from stable habits:</p>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Doc</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Commands / handles / waits</td>
+<td><a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">Processes</a> · <a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">Processes API</a></td>
+</tr>
+<tr>
+<td><code>cwd</code> / <code>env</code> / secrets</td>
+<td><a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">Environment</a> · <a href="https://developers.cloudflare.com/sandbox/sdk/guides/outbound-traffic/index.md" target="_blank" rel="noopener noreferrer">Outbound traffic</a></td>
+</tr>
+<tr>
+<td>Drop sessions</td>
+<td><a href="https://developers.cloudflare.com/sandbox/sdk/migrate/index.md" target="_blank" rel="noopener noreferrer">Migrate</a> · <a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">Lifecycle</a></td>
+</tr>
+<tr>
+<td>Terminals</td>
+<td><a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">Terminals</a></td>
+</tr>
+<tr>
+<td>Interpreter</td>
+<td><a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">Interpreter</a></td>
+</tr>
+<tr>
+<td>Errors</td>
+<td><a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">Errors</a></td>
+</tr>
+<tr>
+<td>Durable job across requests</td>
+<td><a href="https://developers.cloudflare.com/sandbox/index.md" target="_blank" rel="noopener noreferrer">Process execution — lifetime / durability</a></td>
+</tr>
+</tbody></table>
+<p><strong>Commands (shape):</strong></p>
+<pre><code class="language-ts">// Before (stable)
+const result = await sandbox.exec("npm test");
+
+// After (@next)
+const process = await sandbox.exec(["/bin/bash", "-lc", "npm test"]);
+const result = await process.output({ encoding: "utf8" });
+</code></pre>
+<pre><code class="language-ts">const server = await sandbox.exec(["/bin/bash", "-lc", "npm run dev"], {
+  cwd: "/workspace/app",
+});
+await server.waitForPort(3000, { timeout: 60_000 });
+await server.kill(); // numeric; default 15
+</code></pre>
+<p><strong>Terminals (shape):</strong></p>
+<pre><code class="language-ts">const terminal = await sandbox.createTerminal({ command: ["bash"], cwd: "/workspace" });
+const t = await sandbox.getTerminal(terminal.id);
+if (!t) return new Response("terminal gone", { status: 410 });
+return t.connect(request, { cursor, cols, rows });
+</code></pre>
+<p><strong>Interpreter (shape):</strong></p>
+<pre><code class="language-ts">import { Sandbox as BaseSandbox } from "@cloudflare/sandbox";
+import { withInterpreter } from "@cloudflare/sandbox/interpreter";
+
+export class Sandbox extends BaseSandbox&lt;Env&gt; {
+  interpreter = withInterpreter(this);
+}
+</code></pre>
+<p><strong>Git (shape):</strong></p>
+<pre><code class="language-ts">const clone = await sandbox.exec(
+  ["git", "clone", "--depth", "1", "--", repoUrl, "/workspace/repo"],
+  { cwd: "/workspace" },
+);
+const result = await clone.output({ encoding: "utf8" });
+</code></pre>
+<p>Delete transport settings entirely. Remove session APIs. Isolate users with <strong>separate sandbox IDs</strong>.</p>
+<h3>Deploy cutover</h3>
+<p>Staging/branch first. Production is <strong>one</strong> deploy of matching Worker + image:</p>
+<pre><code class="language-sh">npx wrangler deploy --containers-rollout=immediate
+</code></pre>
+<p>Leave <code>rollout_active_grace_period</code> at default <code>0</code> (or set <code>0</code> if raised). After cutover, pre-deploy process/terminal IDs are invalid. Details: <a href="https://developers.cloudflare.com/sandbox/sdk/migrate/index.md" target="_blank" rel="noopener noreferrer">Migrate</a> · <a href="https://developers.cloudflare.com/containers/configuration/rollouts/index.md" target="_blank" rel="noopener noreferrer">Container rollouts</a></p>
+<h2>Validate</h2>
+<ol>
+<li>Lockfile + Dockerfile on the same <code>@next</code> line  </li>
+<li>Typecheck against <code>@next</code>  </li>
+<li>Smoke argv <code>exec</code> + <code>output({ encoding: "utf8" })</code>  </li>
+<li>Smoke long process / terminal / interpreter if used  </li>
+<li>Errors distinguished: unavailable / interrupted-RPC / stale / local wait  </li>
+<li>No live secrets in sandbox env  </li>
+<li>Grep again for removed APIs  </li>
+<li>Production used <code>--containers-rollout=immediate</code></li>
+</ol>
+<p>Then day-to-day work uses <strong><code>sandbox-next</code></strong>.</p>
+<h2>Red flags — stop and fix</h2>
+<ul>
+<li>Mixing <code>@next</code> Worker with stable image (or reverse)  </li>
+<li>Gradual container rollout for this cutover  </li>
+<li>Treating <code>await exec</code> as command completion  </li>
+<li>Assuming <code>cd</code> / exports persist across <code>exec</code> calls  </li>
+<li>One retry wrapper for every error  </li>
+<li>Inventing <code>gitCheckout</code>, process stdin, or undocumented APIs  </li>
+<li>Keeping pre-cutover process/terminal IDs after deploy  </li>
+<li>Forcing production cutover without user agreement  </li>
+<li>Putting live secrets in <code>setEnvVars</code> / launch <code>env</code></li>
+</ul>

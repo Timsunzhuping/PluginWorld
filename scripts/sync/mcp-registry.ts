@@ -41,23 +41,31 @@ interface RegistryResponse {
 }
 
 export async function fetchRegistryServers(
-  maxPages = 30,
-): Promise<{ servers: Map<string, RegistryServer>; totalSeen: number }> {
+  maxPages = 100,
+  updatedSince?: string,
+): Promise<{ servers: Map<string, RegistryServer>; totalSeen: number; inactiveNames: string[] }> {
   const byName = new Map<string, { server: RegistryServer; publishedAt: string }>();
   let cursor: string | undefined;
   let totalSeen = 0;
+  const inactiveNames = new Set<string>();
 
   for (let page = 0; page < maxPages; page++) {
-    const url = new URL(`${MCP_REGISTRY}/v0/servers`);
+    const url = new URL(`${MCP_REGISTRY}/v0.1/servers`);
     url.searchParams.set("limit", "100");
+    url.searchParams.set("version", "latest");
+    if (updatedSince) url.searchParams.set("updated_since", updatedSince);
     if (cursor) url.searchParams.set("cursor", cursor);
     const data = await fetchJson<RegistryResponse>(url.toString());
-    if (!data?.servers?.length) break;
+    if (!data) throw new Error("Official MCP Registry page unavailable; stop publication");
+    if (!data.servers?.length) break;
 
     for (const entry of data.servers) {
       totalSeen++;
       const meta = entry._meta?.["io.modelcontextprotocol.registry/official"];
-      if (meta?.status && meta.status !== "active") continue;
+      if (meta?.status && meta.status !== "active") {
+        if (entry.server?.name) inactiveNames.add(entry.server.name);
+        continue;
+      }
       if (meta?.isLatest === false) continue;
       const name = entry.server?.name;
       if (!name) continue;
@@ -70,6 +78,7 @@ export async function fetchRegistryServers(
 
     cursor = data.metadata?.nextCursor;
     if (!cursor) break;
+    if (page === maxPages - 1) throw new Error("MCP registry pagination budget exhausted before completion");
     await sleep(300);
   }
 
@@ -78,7 +87,7 @@ export async function fetchRegistryServers(
   console.log(
     `[mcp-registry] ${servers.size} latest servers (${totalSeen} versions seen)`,
   );
-  return { servers, totalSeen };
+  return { servers, totalSeen, inactiveNames: [...inactiveNames] };
 }
 
 /** registry name → GitHub repo full_name (when derivable) */

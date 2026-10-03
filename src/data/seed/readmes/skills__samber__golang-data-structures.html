@@ -1,0 +1,251 @@
+<p><strong>Persona:</strong> You are a Go engineer who understands data structure internals. You choose the right structure for the job — not the most familiar one — by reasoning about memory layout, allocation cost, and access patterns.</p>
+<h1>Go Data Structures</h1>
+<p>Built-in and standard library data structures: internals, correct usage, and selection guidance.</p>
+<ul>
+<li>For safety pitfalls (nil maps, append aliasing, defensive copies) see <code>samber/cc-skills-golang@golang-safety</code> skill.</li>
+<li>For channels and sync primitives see <code>samber/cc-skills-golang@golang-concurrency</code> skill.</li>
+<li>For string/byte/rune choice see <code>samber/cc-skills-golang@golang-design-patterns</code> skill.</li>
+</ul>
+<h2>Best Practices Summary</h2>
+<ol>
+<li><strong>Preallocate slices and maps</strong> with <code>make(T, 0, n)</code> / <code>make(map[K]V, n)</code> when size is known or estimable — avoids repeated growth copies and rehashing</li>
+<li><strong>Arrays</strong> SHOULD be preferred over slices only for fixed, compile-time-known sizes (hash digests, IPv4 addresses, matrix dimensions)</li>
+<li><strong>NEVER rely on slice capacity growth timing</strong> — the growth algorithm changed between Go versions and may change again; your code should not depend on when a new backing array is allocated</li>
+<li><strong>Use <code>container/heap</code></strong> for priority queues, <strong><code>container/list</code></strong> only when frequent middle insertions are needed, <strong><code>container/ring</code></strong> for fixed-size circular buffers</li>
+<li><strong><code>strings.Builder</code></strong> MUST be preferred for building strings; <strong><code>bytes.Buffer</code></strong> MUST be preferred for bidirectional I/O (implements both <code>io.Reader</code> and <code>io.Writer</code>)</li>
+<li>Generic data structures SHOULD use the <strong>tightest constraint</strong> possible — <code>comparable</code> for keys, custom interfaces for ordering</li>
+<li><strong><code>unsafe.Pointer</code></strong> MUST only follow the 6 valid conversion patterns from the Go spec — NEVER store in a <code>uintptr</code> variable across statements</li>
+<li><strong><code>weak.Pointer[T]</code></strong> (Go 1.24+) SHOULD be used for caches and canonicalization maps to allow GC to reclaim entries</li>
+</ol>
+<h2>Slice Internals</h2>
+<p>A slice is a 3-word header: pointer, length, capacity. Multiple slices can share a backing array (→ see <code>samber/cc-skills-golang@golang-safety</code> for aliasing traps and the header diagram).</p>
+<h3>Capacity Growth</h3>
+<ul>
+<li>&lt; 256 elements: capacity doubles</li>
+<li><blockquote>
+<p>= 256 elements: grows by ~25% (<code>newcap += (newcap + 3*256) / 4</code>)</p>
+</blockquote>
+</li>
+<li>Each growth copies the entire backing array — O(n)</li>
+</ul>
+<h3>Preallocation</h3>
+<pre><code class="language-go">// Exact size known
+users := make([]User, 0, len(ids))
+
+// Approximate size known
+results := make([]Result, 0, estimatedCount)
+
+// Pre-grow before bulk append (Go 1.21+)
+s = slices.Grow(s, additionalNeeded)
+</code></pre>
+<h3><code>slices</code> Package (Go 1.21+)</h3>
+<p>Key functions: <code>Sort</code>/<code>SortFunc</code>, <code>BinarySearch</code>, <code>Contains</code>, <code>Compact</code>, <code>Grow</code>. For <code>Clone</code>, <code>Equal</code>, <code>DeleteFunc</code> → see <code>samber/cc-skills-golang@golang-safety</code> skill.</p>
+<p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-data-structures/references/slice-internals.md" target="_blank" rel="noopener noreferrer">Slice Internals Deep Dive</a></strong> — Full <code>slices</code> package reference, growth mechanics, <code>len</code> vs <code>cap</code>, header copying, backing array aliasing.</p>
+<h2>Map Internals</h2>
+<p>Maps are hash tables with 8-entry buckets and overflow chains. They are reference types — assigning a map copies the pointer, not the data.</p>
+<h3>Preallocation</h3>
+<pre><code class="language-go">m := make(map[string]*User, len(users)) // avoids rehashing during population
+</code></pre>
+<h3><code>maps</code> Package Quick Reference (Go 1.21+)</h3>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Collect</code> (1.23+)</td>
+<td>Build map from iterator</td>
+</tr>
+<tr>
+<td><code>Insert</code> (1.23+)</td>
+<td>Insert entries from iterator</td>
+</tr>
+<tr>
+<td><code>All</code> (1.23+)</td>
+<td>Iterator over all entries</td>
+</tr>
+<tr>
+<td><code>Keys</code>, <code>Values</code></td>
+<td>Iterators over keys/values</td>
+</tr>
+</tbody></table>
+<p>For <code>Clone</code>, <code>Equal</code>, sorted iteration → see <code>samber/cc-skills-golang@golang-safety</code> skill.</p>
+<p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-data-structures/references/map-internals.md" target="_blank" rel="noopener noreferrer">Map Internals Deep Dive</a></strong> — How Go maps store and hash data, bucket overflow chains, why maps never shrink (and what to do about it), comparing map performance to alternatives.</p>
+<h2>Arrays</h2>
+<p>Fixed-size, value types. Copied entirely on assignment. Use for compile-time-known sizes:</p>
+<pre><code class="language-go">type Digest [32]byte           // fixed-size, value type
+var grid [3][3]int             // multi-dimensional
+cache := map[[2]int]Result{}   // arrays are comparable — usable as map keys
+</code></pre>
+<p>Prefer slices for everything else — arrays cannot grow and pass by value (expensive for large sizes).</p>
+<h2>container/ Standard Library</h2>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Data Structure</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>container/list</code></td>
+<td>Doubly-linked list</td>
+<td>LRU caches, frequent middle insertion/removal</td>
+</tr>
+<tr>
+<td><code>container/heap</code></td>
+<td>Min-heap (priority queue)</td>
+<td>Top-K, scheduling, Dijkstra</td>
+</tr>
+<tr>
+<td><code>container/ring</code></td>
+<td>Circular buffer</td>
+<td>Rolling windows, round-robin</td>
+</tr>
+<tr>
+<td><code>bufio</code></td>
+<td>Buffered reader/writer/scanner</td>
+<td>Efficient I/O with small reads/writes</td>
+</tr>
+</tbody></table>
+<p>Container types use <code>any</code> (no type safety) — consider generic wrappers. <strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-data-structures/references/containers.md" target="_blank" rel="noopener noreferrer">Container Patterns, bufio, and Examples</a></strong> — When to use each container type, generic wrappers to add type safety, and <code>bufio</code> patterns for efficient I/O.</p>
+<h2>strings.Builder vs bytes.Buffer</h2>
+<p>Use <code>strings.Builder</code> for pure string concatenation (avoids copy on <code>String()</code>), <code>bytes.Buffer</code> when you need <code>io.Reader</code> or byte manipulation. Both support <code>Grow(n)</code>. <strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-data-structures/references/containers.md" target="_blank" rel="noopener noreferrer">Details and comparison</a></strong></p>
+<h2>Generic Collections (Go 1.18+)</h2>
+<p>Use the tightest constraint possible. <code>comparable</code> for map keys, <code>cmp.Ordered</code> for sorting, custom interfaces for domain-specific ordering.</p>
+<pre><code class="language-go">type Set[T comparable] map[T]struct{}
+
+func (s Set[T]) Add(v T)          { s[v] = struct{}{} }
+func (s Set[T]) Contains(v T) bool { _, ok := s[v]; return ok }
+</code></pre>
+<p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-data-structures/references/generics.md" target="_blank" rel="noopener noreferrer">Writing Generic Data Structures</a></strong> — Using Go 1.18+ generics for type-safe containers, understanding constraint satisfaction, and building domain-specific generic types.</p>
+<h2>Pointer Types</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Use Case</th>
+<th>Zero Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>*T</code></td>
+<td>Normal indirection, mutation, optional values</td>
+<td><code>nil</code></td>
+</tr>
+<tr>
+<td><code>unsafe.Pointer</code></td>
+<td>FFI, low-level memory layout (6 spec patterns only)</td>
+<td><code>nil</code></td>
+</tr>
+<tr>
+<td><code>weak.Pointer[T]</code> (1.24+)</td>
+<td>Caches, canonicalization, weak references</td>
+<td>N/A</td>
+</tr>
+</tbody></table>
+<p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-data-structures/references/pointers.md" target="_blank" rel="noopener noreferrer">Pointer Types Deep Dive</a></strong> — Normal pointers, <code>unsafe.Pointer</code> (the 6 valid spec patterns), and <code>weak.Pointer[T]</code> for GC-safe caches that don't prevent cleanup.</p>
+<h2>Copy Semantics Quick Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Copy Behavior</th>
+<th>Independence</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>int</code>, <code>float</code>, <code>bool</code>, <code>string</code></td>
+<td>Value (deep copy)</td>
+<td>Fully independent</td>
+</tr>
+<tr>
+<td><code>array</code>, <code>struct</code></td>
+<td>Value (deep copy)</td>
+<td>Fully independent</td>
+</tr>
+<tr>
+<td><code>slice</code></td>
+<td>Header copied, backing array shared</td>
+<td>Use <code>slices.Clone</code></td>
+</tr>
+<tr>
+<td><code>map</code></td>
+<td>Reference copied</td>
+<td>Use <code>maps.Clone</code></td>
+</tr>
+<tr>
+<td><code>channel</code></td>
+<td>Reference copied</td>
+<td>Same channel</td>
+</tr>
+<tr>
+<td><code>*T</code> (pointer)</td>
+<td>Address copied</td>
+<td>Same underlying value</td>
+</tr>
+<tr>
+<td><code>interface</code></td>
+<td>Value copied (type + value pair)</td>
+<td>Depends on held type</td>
+</tr>
+</tbody></table>
+<h2>Third-Party Libraries</h2>
+<p>For advanced data structures (trees, sets, queues, stacks) beyond the standard library:</p>
+<ul>
+<li><strong><code>emirpasic/gods</code></strong> — comprehensive collection library (trees, sets, lists, stacks, maps, queues)</li>
+<li><strong><code>deckarep/golang-set</code></strong> — thread-safe and non-thread-safe set implementations</li>
+<li><strong><code>gammazero/deque</code></strong> — fast double-ended queue</li>
+</ul>
+<p>When using third-party libraries, refer to their official documentation and code examples for current API signatures.</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>) — prefer it over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-performance</code> skill for struct field alignment, memory layout optimization, and cache locality</li>
+<li>→ See <code>samber/cc-skills-golang@golang-safety</code> skill for nil map/slice pitfalls, append aliasing, defensive copying, <code>slices.Clone</code>/<code>Equal</code></li>
+<li>→ See <code>samber/cc-skills-golang@golang-concurrency</code> skill for channels, <code>sync.Map</code>, <code>sync.Pool</code>, and all sync primitives</li>
+<li>→ See <code>samber/cc-skills-golang@golang-design-patterns</code> skill for <code>string</code> vs <code>[]byte</code> vs <code>[]rune</code>, iterators, streaming</li>
+<li>→ See <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill for struct composition, embedding, and generics vs <code>any</code></li>
+<li>→ See <code>samber/cc-skills-golang@golang-code-style</code> skill for slice/map initialization style</li>
+</ul>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Growing a slice in a loop without preallocation</td>
+<td>Each growth copies the entire backing array — O(n) per growth. Use <code>make([]T, 0, n)</code> or <code>slices.Grow</code></td>
+</tr>
+<tr>
+<td>Using <code>container/list</code> when a slice would suffice</td>
+<td>Linked lists have poor cache locality (each node is a separate heap allocation). Benchmark first</td>
+</tr>
+<tr>
+<td><code>bytes.Buffer</code> for pure string building</td>
+<td>Buffer's <code>String()</code> copies the underlying bytes. <code>strings.Builder</code> avoids this copy</td>
+</tr>
+<tr>
+<td><code>unsafe.Pointer</code> stored as <code>uintptr</code> across statements</td>
+<td>GC can move the object between statements — the <code>uintptr</code> becomes a dangling reference</td>
+</tr>
+<tr>
+<td>Large struct values in maps (copying overhead)</td>
+<td>Map access copies the entire value. Use <code>map[K]*V</code> for large value types to avoid the copy</td>
+</tr>
+</tbody></table>
+<h2>References</h2>
+<ul>
+<li><a href="https://research.swtch.com/godata" target="_blank" rel="noopener noreferrer">Go Data Structures (Russ Cox)</a></li>
+<li><a href="https://go.dev/ref/mem" target="_blank" rel="noopener noreferrer">The Go Memory Model</a></li>
+<li><a href="https://go.dev/doc/effective_go" target="_blank" rel="noopener noreferrer">Effective Go</a></li>
+</ul>

@@ -29,6 +29,9 @@ export async function GET(
     {
       slug: plugin.slug,
       ecosystem: plugin.ecosystem,
+      source_document_path: plugin.sourceDocumentPath,
+      skill_document_available: plugin.skillDocumentAvailable,
+      skills_sh_rank_at_review: plugin.skillsShRank,
       name: plugin.name,
       description: plugin.description,
       repo_url: plugin.repoUrl,

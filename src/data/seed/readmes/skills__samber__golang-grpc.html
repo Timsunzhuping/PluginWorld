@@ -1,0 +1,306 @@
+<p><strong>Persona:</strong> You are a Go distributed systems engineer. You design gRPC services for correctness and operability — proper status codes, deadlines, interceptors, and graceful shutdown matter as much as the happy path.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Build mode</strong> — implementing a new gRPC server or client from scratch.</li>
+<li><strong>Review mode</strong> — auditing existing gRPC code for correctness, security, and operability issues.</li>
+</ul>
+<p><strong>Dependencies:</strong></p>
+<ul>
+<li>protoc: <code>brew install protobuf</code></li>
+<li>protoc-gen-go: <code>go install google.golang.org/protobuf/cmd/protoc-gen-go@latest</code></li>
+<li>protoc-gen-go-grpc: <code>go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest</code></li>
+</ul>
+<h1>Go gRPC Best Practices</h1>
+<p>Treat gRPC as a pure transport layer — keep it separate from business logic. The official Go implementation is <code>google.golang.org/grpc</code>.</p>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<h2>Quick Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Package / Tool</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Service definition</td>
+<td><code>protoc</code> or <code>buf</code> with <code>.proto</code> files</td>
+</tr>
+<tr>
+<td>Code generation</td>
+<td><code>protoc-gen-go</code>, <code>protoc-gen-go-grpc</code></td>
+</tr>
+<tr>
+<td>Error handling</td>
+<td><code>google.golang.org/grpc/status</code> with <code>codes</code></td>
+</tr>
+<tr>
+<td>Rich error details</td>
+<td><code>google.golang.org/genproto/googleapis/rpc/errdetails</code></td>
+</tr>
+<tr>
+<td>Interceptors</td>
+<td><code>grpc.ChainUnaryInterceptor</code>, <code>grpc.ChainStreamInterceptor</code></td>
+</tr>
+<tr>
+<td>Middleware ecosystem</td>
+<td><code>github.com/grpc-ecosystem/go-grpc-middleware</code></td>
+</tr>
+<tr>
+<td>Testing</td>
+<td><code>google.golang.org/grpc/test/bufconn</code></td>
+</tr>
+<tr>
+<td>TLS / mTLS</td>
+<td><code>google.golang.org/grpc/credentials</code></td>
+</tr>
+<tr>
+<td>Health checks</td>
+<td><code>google.golang.org/grpc/health</code></td>
+</tr>
+</tbody></table>
+<h2>Proto File Organization</h2>
+<p>Organize by domain with versioned directories (<code>proto/user/v1/</code>). Always use <code>Request</code>/<code>Response</code> wrapper messages — bare types like <code>string</code> cannot have fields added later. Generate with <code>buf generate</code> or <code>protoc</code>.</p>
+<p><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-grpc/references/protoc-reference.md" target="_blank" rel="noopener noreferrer">Proto &amp; code generation reference</a></p>
+<h2>Server Implementation</h2>
+<ul>
+<li>Implement health check service (<code>grpc_health_v1</code>) — Kubernetes probes need it to determine readiness</li>
+<li>Use interceptors for cross-cutting concerns (logging, auth, recovery) — keeps business logic clean</li>
+<li>Use <code>GracefulStop()</code> with a timeout fallback to <code>Stop()</code> — drains in-flight RPCs while preventing hangs</li>
+<li>Disable reflection in production — it exposes your full API surface</li>
+</ul>
+<pre><code class="language-go">srv := grpc.NewServer(
+    grpc.ChainUnaryInterceptor(loggingInterceptor, recoveryInterceptor),
+)
+pb.RegisterUserServiceServer(srv, svc)
+healthpb.RegisterHealthServer(srv, health.NewServer())
+
+go srv.Serve(lis)
+
+// On shutdown signal:
+stopped := make(chan struct{})
+go func() { srv.GracefulStop(); close(stopped) }()
+select {
+case &lt;-stopped:
+case &lt;-time.After(15 * time.Second):
+    srv.Stop()
+}
+</code></pre>
+<h3>Interceptor Pattern</h3>
+<pre><code class="language-go">func loggingInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+    start := time.Now()
+    resp, err := handler(ctx, req)
+    log.Printf("method=%s duration=%s code=%s", info.FullMethod, time.Since(start), status.Code(err))
+    return resp, err
+}
+</code></pre>
+<h2>Client Implementation</h2>
+<ul>
+<li>Reuse connections — gRPC multiplexes RPCs on a single HTTP/2 connection; one-per-request wastes TCP/TLS handshakes</li>
+<li>Set deadlines on every call (<code>context.WithTimeout</code>) — without one, a slow upstream hangs goroutines indefinitely</li>
+<li>Use <code>round_robin</code> with headless Kubernetes services via <code>dns:///</code> scheme</li>
+<li>Pass metadata (auth tokens, trace IDs) via <code>metadata.NewOutgoingContext</code></li>
+</ul>
+<pre><code class="language-go">conn, err := grpc.NewClient("dns:///user-service:50051",
+    grpc.WithTransportCredentials(creds),
+    grpc.WithDefaultServiceConfig(`{
+        "loadBalancingPolicy": "round_robin",
+        "methodConfig": [{
+            "name": [{"service": ""}],
+            "timeout": "5s",
+            "retryPolicy": {
+                "maxAttempts": 3,
+                "initialBackoff": "0.1s",
+                "maxBackoff": "1s",
+                "backoffMultiplier": 2,
+                "retryableStatusCodes": ["UNAVAILABLE"]
+            }
+        }]
+    }`),
+)
+client := pb.NewUserServiceClient(conn)
+</code></pre>
+<h2>Error Handling</h2>
+<p>Always return gRPC errors using <code>status.Error</code> with a specific code — a raw <code>error</code> becomes <code>codes.Unknown</code>, telling the client nothing actionable. Clients use codes to decide retry vs fail-fast vs degrade.</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>When to Use</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>InvalidArgument</code></td>
+<td>Malformed input (missing field, bad format)</td>
+</tr>
+<tr>
+<td><code>NotFound</code></td>
+<td>Entity does not exist</td>
+</tr>
+<tr>
+<td><code>AlreadyExists</code></td>
+<td>Create failed, entity exists</td>
+</tr>
+<tr>
+<td><code>PermissionDenied</code></td>
+<td>Caller lacks permission</td>
+</tr>
+<tr>
+<td><code>Unauthenticated</code></td>
+<td>Missing or invalid token</td>
+</tr>
+<tr>
+<td><code>FailedPrecondition</code></td>
+<td>System not in required state</td>
+</tr>
+<tr>
+<td><code>ResourceExhausted</code></td>
+<td>Rate limit or quota exceeded</td>
+</tr>
+<tr>
+<td><code>Unavailable</code></td>
+<td>Transient issue, safe to retry</td>
+</tr>
+<tr>
+<td><code>Internal</code></td>
+<td>Unexpected bug</td>
+</tr>
+<tr>
+<td><code>DeadlineExceeded</code></td>
+<td>Timeout</td>
+</tr>
+</tbody></table>
+<pre><code class="language-go">// ✗ Bad — caller gets codes.Unknown, can't decide whether to retry
+return nil, fmt.Errorf("user not found")
+
+// ✓ Good — specific code lets clients act appropriately
+if errors.Is(err, ErrNotFound) {
+    return nil, status.Errorf(codes.NotFound, "user %q not found", req.UserId)
+}
+return nil, status.Errorf(codes.Internal, "lookup failed: %v", err)
+</code></pre>
+<p>For field-level validation errors, attach <code>errdetails.BadRequest</code> via <code>status.WithDetails</code>.</p>
+<h2>Streaming</h2>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Server streaming</td>
+<td>Server sends a sequence (log tailing, result sets)</td>
+</tr>
+<tr>
+<td>Client streaming</td>
+<td>Client sends a sequence, server responds once (file upload, batch)</td>
+</tr>
+<tr>
+<td>Bidirectional</td>
+<td>Both send independently (chat, real-time sync)</td>
+</tr>
+</tbody></table>
+<p>Prefer streaming over large single messages — avoids per-message size limits and lowers memory pressure.</p>
+<pre><code class="language-go">func (s *server) ListUsers(req *pb.ListUsersRequest, stream pb.UserService_ListUsersServer) error {
+    for _, u := range users {
+        if err := stream.Send(u); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+</code></pre>
+<h2>Testing</h2>
+<p>Use <code>bufconn</code> for in-memory connections that exercise the full gRPC stack (serialization, interceptors, metadata) without network overhead. Always test that error scenarios return the expected gRPC status codes.</p>
+<p><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-grpc/references/testing.md" target="_blank" rel="noopener noreferrer">Testing patterns and examples</a></p>
+<h2>Security</h2>
+<ul>
+<li>TLS MUST be enabled in production — credentials travel in metadata</li>
+<li>For service-to-service auth, use mTLS or delegate to a service mesh (Istio, Linkerd)</li>
+<li>For user auth, implement <code>credentials.PerRPCCredentials</code> and validate tokens in an auth interceptor</li>
+<li>Reflection SHOULD be disabled in production to prevent API discovery</li>
+</ul>
+<h2>Performance</h2>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Purpose</th>
+<th>Typical Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>keepalive.ServerParameters.Time</code></td>
+<td>Ping interval for idle connections</td>
+<td>30s</td>
+</tr>
+<tr>
+<td><code>keepalive.ServerParameters.Timeout</code></td>
+<td>Ping ack timeout</td>
+<td>10s</td>
+</tr>
+<tr>
+<td><code>grpc.MaxRecvMsgSize</code></td>
+<td>Override 4 MB default for large payloads</td>
+<td>16 MB</td>
+</tr>
+<tr>
+<td>Connection pooling</td>
+<td>Multiple conns for high-load streaming</td>
+<td>4 connections</td>
+</tr>
+</tbody></table>
+<p>Most services do not need connection pooling — profile before adding complexity.</p>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Returning raw <code>error</code></td>
+<td>Becomes <code>codes.Unknown</code> — client can't decide whether to retry. Use <code>status.Errorf</code> with a specific code</td>
+</tr>
+<tr>
+<td>No deadline on client calls</td>
+<td>Slow upstream hangs indefinitely. Always <code>context.WithTimeout</code></td>
+</tr>
+<tr>
+<td>New connection per request</td>
+<td>Wastes TCP/TLS handshakes. Create once, reuse — HTTP/2 multiplexes RPCs</td>
+</tr>
+<tr>
+<td>Reflection enabled in production</td>
+<td>Lets attackers enumerate every method. Enable only in dev/staging</td>
+</tr>
+<tr>
+<td><code>codes.Internal</code> for all errors</td>
+<td>Wrong codes break client retry logic. <code>Unavailable</code> triggers retry; <code>InvalidArgument</code> does not</td>
+</tr>
+<tr>
+<td>Bare types as RPC arguments</td>
+<td>Can't add fields to <code>string</code>. Wrapper messages allow backwards-compatible evolution</td>
+</tr>
+<tr>
+<td>Missing health check service</td>
+<td>Kubernetes can't determine readiness, kills pods during deployments</td>
+</tr>
+<tr>
+<td>Ignoring context cancellation</td>
+<td>Long operations continue after caller gave up. Check <code>ctx.Err()</code></td>
+</tr>
+</tbody></table>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-context</code> skill for deadline and cancellation patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-error-handling</code> skill for gRPC error to Go error mapping</li>
+<li>→ See <code>samber/cc-skills-golang@golang-observability</code> skill for gRPC interceptors (logging, tracing, metrics)</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for gRPC testing with bufconn</li>
+</ul>

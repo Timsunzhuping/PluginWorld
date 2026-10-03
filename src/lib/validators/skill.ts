@@ -13,7 +13,7 @@ const skillNameRe = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 const skillFrontmatterSchema = z.object({
   name: z.string().min(1).max(64).regex(skillNameRe, "name must be kebab-case"),
-  description: z.string().min(10, "description must be at least 10 characters"),
+  description: z.string().min(1).max(1024),
   license: z.string().optional(),
   version: z.string().optional(),
 });

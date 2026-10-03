@@ -1,13 +1,15 @@
 # Daily full-community scan (spec §6 + security gate):
 # crawls GitHub topics, the official MCP Registry, the npm registry and the
-# Glama directory; runs the pre-index security scan (grade D → quarantined);
-# scores and upserts everything, then triggers ISR revalidation.
+# optional Glama directory; reviews and publishes a snapshot, then CD runs.
 name: daily-community-scan
 
 on:
   schedule:
     - cron: "0 2 * * *" # daily 02:00 UTC
   workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 concurrency:
   group: sync
@@ -16,7 +18,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -31,8 +33,21 @@ jobs:
         env:
           # GITHUB_TOKEN raises API rate limits (spec §6)
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx tsx scripts/sync/run-all.ts --pages 5 --db
+          GLAMA_API_KEY: ${{ secrets.GLAMA_API_KEY }}
+        run: npx tsx scripts/sync/run-all.ts --pages 5 --skills-limit 1000
+
+      - name: Validate generated catalog and application
+        run: npm run typecheck && npm run lint && npm test
+
+      - name: Save review evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-review
+          path: |
+            src/data/seed/sync-report.json
+            src/data/seed/skills-audit.json
+            src/data/seed/quarantine.json
+          retention-days: 30
 
       - name: Commit snapshot (keeps demo-mode data fresh too)
         run: |
@@ -40,15 +55,9 @@ jobs:
           git config user.email "bot@pluginworld.ai"
           git add src/data/seed
           git diff --cached --quiet || git commit -m "chore(sync): daily community scan snapshot [skip ci]"
-          git push
+          # Never overwrite a concurrent human commit; a race fails safely.
+          git push origin HEAD:main
 
-      - name: Trigger ISR revalidation
-        if: ${{ vars.SITE_URL != '' }}
-        env:
-          REVALIDATE_SECRET: ${{ secrets.REVALIDATE_SECRET }}
-        run: |
-          curl -sf -X POST "${{ vars.SITE_URL }}/api/revalidate" \
-            -H "Authorization: Bearer $REVALIDATE_SECRET" || true
 
   test:
     runs-on: ubuntu-latest

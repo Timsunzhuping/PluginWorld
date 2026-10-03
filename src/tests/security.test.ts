@@ -30,6 +30,11 @@ function input(overrides: Partial<SecurityScanInput>): SecurityScanInput {
 }
 
 describe("security rating system", () => {
+  it("flags metadata-only Skills instead of claiming their unavailable content was safe", () => {
+    const r=runSecurityScan(input({ecosystem:"skills",skillDocumentAvailable:false,manifest:null,specValid:false}));
+    expect(r.findings.some(f=>f.id==="skill-document-unavailable" && f.severity==="warning")).toBe(true);
+    expect(r.grade).not.toBe("A");expect(r.grade).not.toBe("A+");
+  });
   it("A: clean plugin with license and valid spec", () => {
     const r = runSecurityScan(input({}));
     expect(r.findings).toEqual([]);

@@ -1,0 +1,163 @@
+<p><strong>Orchestration mode:</strong> Fan out the sub-agents described in the "Parallelizing Code Style Reviews" section, each covering an independent style concern, when reviewing code style across a large codebase, and merge their findings. On Claude Code, use <code>ultracode</code> to opt into multi-agent orchestration explicitly.</p>
+<blockquote>
+<p><strong>Community default.</strong> A company skill that explicitly supersedes <code>samber/cc-skills-golang@golang-code-style</code> skill takes precedence.</p>
+</blockquote>
+<h1>Go Code Style</h1>
+<p>Style rules that require human judgment — linters handle formatting, this skill handles clarity. For naming see <code>samber/cc-skills-golang@golang-naming</code> skill; for design patterns see <code>samber/cc-skills-golang@golang-design-patterns</code> skill; for struct/interface design see <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill.</p>
+<blockquote>
+<p>"Clear is better than clever." — Go Proverbs</p>
+</blockquote>
+<p>When ignoring a rule, add a comment to the code.</p>
+<h2>Line Length &amp; Breaking</h2>
+<p>No rigid line limit, but lines beyond ~120 characters MUST be broken. Break at <strong>semantic boundaries</strong>, not arbitrary column counts. Function calls with 4+ arguments MUST use one argument per line — even when the prompt asks for single-line code:</p>
+<pre><code class="language-go">// Good — each argument on its own line, closing paren separate
+mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+    handleUsers(
+        w,
+        r,
+        serviceName,
+        cfg,
+        logger,
+        authMiddleware,
+    )
+})
+</code></pre>
+<p>When a function signature is too long, the real fix is often <strong>fewer parameters</strong> (use an options struct) rather than better line wrapping. For multi-line signatures, put each parameter on its own line.</p>
+<h2>Variable Declarations</h2>
+<p>SHOULD use <code>:=</code> for non-zero values, <code>var</code> for zero-value initialization. The form signals intent: <code>var</code> means "this starts at zero."</p>
+<pre><code class="language-go">var count int              // zero value, set later
+name := "default"          // non-zero, := is appropriate
+var buf bytes.Buffer       // zero value is ready to use
+</code></pre>
+<h3>Slice &amp; Map Initialization</h3>
+<p>Slices and maps MUST be initialized explicitly, never nil. Nil maps panic on write; nil slices serialize to <code>null</code> in JSON (vs <code>[]</code> for empty slices), surprising API consumers.</p>
+<pre><code class="language-go">users := []User{}                       // always initialized
+m := map[string]int{}                   // always initialized
+users := make([]User, 0, len(ids))      // preallocate when capacity is known
+m := make(map[string]int, len(items))   // preallocate when size is known
+</code></pre>
+<p>Do not preallocate speculatively — <code>make([]T, 0, 1000)</code> wastes memory when the common case is 10 items.</p>
+<h3>Composite Literals</h3>
+<p>Composite literals MUST use field names — positional fields break when the type adds or reorders fields:</p>
+<pre><code class="language-go">srv := &amp;http.Server{
+    Addr:         ":8080",
+    ReadTimeout:  5 * time.Second,
+    WriteTimeout: 10 * time.Second,
+}
+</code></pre>
+<h2>Control Flow</h2>
+<h3>Reduce Nesting</h3>
+<p>Errors and edge cases MUST be handled first (early return). Keep the happy path at minimal indentation:</p>
+<pre><code class="language-go">func process(data []byte) (*Result, error) {
+    if len(data) == 0 {
+        return nil, errors.New("empty data")
+    }
+
+    parsed, err := parse(data)
+    if err != nil {
+        return nil, fmt.Errorf("parsing: %w", err)
+    }
+
+    return transform(parsed), nil
+}
+</code></pre>
+<h3>Eliminate Unnecessary <code>else</code></h3>
+<p>When the <code>if</code> body ends with <code>return</code>/<code>break</code>/<code>continue</code>, the <code>else</code> MUST be dropped. Use default-then-override for simple assignments — assign a default, then override with independent conditions or a <code>switch</code>:</p>
+<pre><code class="language-go">// Good — default-then-override with switch (cleanest for mutually exclusive overrides)
+level := slog.LevelInfo
+switch {
+case debug:
+    level = slog.LevelDebug
+case verbose:
+    level = slog.LevelWarn
+}
+
+// Bad — else-if chain hides that there's a default
+if debug {
+    level = slog.LevelDebug
+} else if verbose {
+    level = slog.LevelWarn
+} else {
+    level = slog.LevelInfo
+}
+</code></pre>
+<h3>Complex Conditions &amp; Init Scope</h3>
+<p>When an <code>if</code> condition has 3+ operands, MUST extract into named booleans — a wall of <code>||</code> is unreadable and hides business logic. Keep expensive checks inline for short-circuit benefit. <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-code-style/references/details.md" target="_blank" rel="noopener noreferrer">Details</a></p>
+<pre><code class="language-go">// Good — named booleans make intent clear
+isAdmin := user.Role == RoleAdmin
+isOwner := resource.OwnerID == user.ID
+isPublicVerified := resource.IsPublic &amp;&amp; user.IsVerified
+if isAdmin || isOwner || isPublicVerified || permissions.Contains(PermOverride) {
+    allow()
+}
+</code></pre>
+<p>Scope variables to <code>if</code> blocks when only needed for the check:</p>
+<pre><code class="language-go">if err := validate(input); err != nil {
+    return err
+}
+</code></pre>
+<h3>Switch Over If-Else Chains</h3>
+<p>When comparing the same variable multiple times, prefer <code>switch</code>:</p>
+<pre><code class="language-go">switch status {
+case StatusActive:
+    activate()
+case StatusInactive:
+    deactivate()
+default:
+    panic(fmt.Sprintf("unexpected status: %d", status))
+}
+</code></pre>
+<h2>Function Design</h2>
+<ul>
+<li>Functions SHOULD be <strong>short and focused</strong> — one function, one job.</li>
+<li>Functions SHOULD have <strong>≤4 parameters</strong>. Beyond that, use an options struct (see <code>samber/cc-skills-golang@golang-design-patterns</code> skill).</li>
+<li><strong>Parameter order</strong>: <code>context.Context</code> first, then inputs, then output destinations.</li>
+<li>Naked returns help in very short functions (1-3 lines) where return values are obvious, but become confusing when readers must scroll to find what's returned — name returns explicitly in longer functions.</li>
+</ul>
+<pre><code class="language-go">func FetchUser(ctx context.Context, id string) (*User, error)
+func SendEmail(ctx context.Context, msg EmailMessage) error  // grouped into struct
+</code></pre>
+<h3>Prefer <code>range</code> for Iteration</h3>
+<p>SHOULD use <code>range</code> over index-based loops. Use <code>range n</code> (Go 1.22+) for simple counting.</p>
+<pre><code class="language-go">for _, user := range users {
+    process(user)
+}
+</code></pre>
+<h2>Value vs Pointer Arguments</h2>
+<p>Pass small types (<code>string</code>, <code>int</code>, <code>bool</code>, <code>time.Time</code>) by value. Use pointers when mutating, for large structs (~128+ bytes), or when nil is meaningful. <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-code-style/references/details.md" target="_blank" rel="noopener noreferrer">Details</a></p>
+<h2>Code Organization Within Files</h2>
+<ul>
+<li><strong>Group related declarations</strong>: type, constructor, methods together</li>
+<li><strong>Order</strong>: package doc, imports, constants, types, constructors, methods, helpers</li>
+<li><strong>One primary type per file</strong> when it has significant methods</li>
+<li><strong>Blank imports</strong> (<code>_ "pkg"</code>) register side effects (init functions). Restricting them to <code>main</code> and test packages makes side effects visible at the application root, not hidden in library code</li>
+<li><strong>Dot imports</strong> pollute the namespace and make it impossible to tell where a name comes from — never use in library code</li>
+<li><strong>Unexport aggressively</strong> — you can always export later; unexporting is a breaking change. → See <code>samber/cc-skills-golang@golang-gopls</code> skill to unexport safely — its rename updates every call site atomically and refuses the change when lowercasing a method would break interface satisfaction, a breakage grep/sed silently ships.</li>
+</ul>
+<h2>String Handling</h2>
+<p>Use <code>strconv</code> for simple conversions (faster), <code>fmt.Sprintf</code> for complex formatting. Use <code>%q</code> in error messages to make string boundaries visible. Use <code>strings.Builder</code> for loops, <code>+</code> for simple concatenation.</p>
+<h2>Type Conversions</h2>
+<p>Prefer explicit, narrow conversions. Use generics over <code>any</code> when a concrete type will do:</p>
+<pre><code class="language-go">func Contains[T comparable](slice []T, target T) bool  // not []any
+</code></pre>
+<h2>Philosophy</h2>
+<ul>
+<li><strong>"A little copying is better than a little dependency"</strong></li>
+<li><strong>Use <code>slices</code> and <code>maps</code> standard packages</strong>; for filter/group-by/chunk, use <code>github.com/samber/lo</code></li>
+<li><strong>"Reflection is never clear"</strong> — avoid <code>reflect</code> unless necessary</li>
+<li><strong>Don't abstract prematurely</strong> — extract when the pattern is stable</li>
+<li><strong>Minimize public surface</strong> — every exported name is a commitment</li>
+</ul>
+<h2>Parallelizing Code Style Reviews</h2>
+<p>When reviewing code style across a large codebase, use up to 5 parallel sub-agents, each targeting an independent style concern (e.g. control flow, function design, variable declarations, string handling, code organization).</p>
+<h2>Enforce with Linters</h2>
+<p>Many rules are enforced automatically: <code>gofmt</code>, <code>gofumpt</code>, <code>goimports</code>, <code>gocritic</code>, <code>revive</code>, <code>wsl_v5</code>. → See the <code>samber/cc-skills-golang@golang-lint</code> skill.</p>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See the <code>samber/cc-skills-golang@golang-naming</code> skill for identifier naming conventions</li>
+<li>→ See the <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill for pointer vs value receivers, interface design</li>
+<li>→ See the <code>samber/cc-skills-golang@golang-design-patterns</code> skill for functional options, builders, constructors</li>
+<li>→ See the <code>samber/cc-skills-golang@golang-lint</code> skill for automated formatting enforcement</li>
+<li>→ See <code>samber/cc-skills-golang@golang-continuous-integration</code> skill for automated AI-driven code review in CI using these guidelines</li>
+<li>→ See <code>samber/cc-skills-golang@golang-refactoring</code> skill for mechanically applying guard-clause conversion, function extraction, and options-struct migration safely across many call sites once a review surfaces violations at scale</li>
+</ul>

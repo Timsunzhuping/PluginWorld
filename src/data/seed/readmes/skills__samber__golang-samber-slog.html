@@ -1,0 +1,261 @@
+<p><strong>Persona:</strong> You are a Go logging architect. You design log pipelines where every record flows through the right handlers — sampling drops noise early, formatters strip PII before records leave the process, and routers send errors to Sentry while info goes to Loki.</p>
+<h1>samber/slog-**** — Structured Logging Pipeline for Go</h1>
+<p>20+ composable <code>slog.Handler</code> packages for Go 1.21+. Three core pipeline libraries plus HTTP middlewares and backend sinks that all implement the standard <code>slog.Handler</code> interface.</p>
+<p><strong>Official resources:</strong></p>
+<ul>
+<li><a href="https://github.com/samber/slog-multi" target="_blank" rel="noopener noreferrer">github.com/samber/slog-multi</a> — handler composition</li>
+<li><a href="https://github.com/samber/slog-sampling" target="_blank" rel="noopener noreferrer">github.com/samber/slog-sampling</a> — throughput control</li>
+<li><a href="https://github.com/samber/slog-formatter" target="_blank" rel="noopener noreferrer">github.com/samber/slog-formatter</a> — attribute transformation</li>
+</ul>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<h2>The Pipeline Model</h2>
+<p>Every samber/slog pipeline follows a canonical ordering. Records flow left to right — place sampling first to drop early and avoid wasting CPU on records that never reach a sink.</p>
+<pre><code>record → [Sampling] → [Pipe: trace/PII] → [Router] → [Sinks]
+</code></pre>
+<p>Order matters: sampling before formatting saves CPU. Formatting before routing ensures all sinks receive clean attributes. Reversing this wastes work on records that get dropped.</p>
+<h2>Core Libraries</h2>
+<table>
+<thead>
+<tr>
+<th>Library</th>
+<th>Purpose</th>
+<th>Key constructors</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>slog-multi</code></td>
+<td>Handler composition</td>
+<td><code>Fanout</code>, <code>Router</code>, <code>FirstMatch</code>, <code>Failover</code>, <code>Pool</code>, <code>Pipe</code></td>
+</tr>
+<tr>
+<td><code>slog-sampling</code></td>
+<td>Throughput control</td>
+<td><code>UniformSamplingOption</code>, <code>ThresholdSamplingOption</code>, <code>AbsoluteSamplingOption</code>, <code>CustomSamplingOption</code></td>
+</tr>
+<tr>
+<td><code>slog-formatter</code></td>
+<td>Attribute transforms</td>
+<td><code>PIIFormatter</code>, <code>ErrorFormatter</code>, <code>FormatByType[T]</code>, <code>FormatByKey</code>, <code>FlattenFormatterMiddleware</code></td>
+</tr>
+</tbody></table>
+<h2>slog-multi — Handler Composition</h2>
+<p>Six composition patterns, each for a different routing need:</p>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Behavior</th>
+<th>Latency impact</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Fanout(handlers...)</code></td>
+<td>Broadcast to all handlers sequentially</td>
+<td>Sum of all handler latencies</td>
+</tr>
+<tr>
+<td><code>Router().Add(h, predicate).Handler()</code></td>
+<td>Route to ALL matching handlers</td>
+<td>Sum of matching handlers</td>
+</tr>
+<tr>
+<td><code>Router().Add(...).FirstMatch().Handler()</code></td>
+<td>Route to FIRST match only</td>
+<td>Single handler latency</td>
+</tr>
+<tr>
+<td><code>Failover()(handlers...)</code></td>
+<td>Try sequentially until one succeeds</td>
+<td>Primary handler latency (happy path)</td>
+</tr>
+<tr>
+<td><code>Pool()(handlers...)</code></td>
+<td>Load-balance: sends each record to ONE handler</td>
+<td>Single handler latency</td>
+</tr>
+<tr>
+<td><code>Pipe(middlewares...).Handler(sink)</code></td>
+<td>Middleware chain before sink</td>
+<td>Middleware overhead + sink</td>
+</tr>
+</tbody></table>
+<pre><code class="language-go">// Route errors to Sentry, all logs to stdout
+logger := slog.New(
+    slogmulti.Router().
+        Add(sentryHandler, slogmulti.LevelIs(slog.LevelError)).
+        Add(slog.NewJSONHandler(os.Stdout, nil)).
+        Handler(),
+)
+</code></pre>
+<p>Built-in predicates: <code>LevelIs</code>, <code>LevelIsNot</code>, <code>MessageIs</code>, <code>MessageIsNot</code>, <code>MessageContains</code>, <code>MessageNotContains</code>, <code>AttrValueIs</code>, <code>AttrKindIs</code>.</p>
+<p>For full code examples of every pattern, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-slog/references/pipeline-patterns.md" target="_blank" rel="noopener noreferrer">Pipeline Patterns</a>.</p>
+<h2>slog-sampling — Throughput Control</h2>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Behavior</th>
+<th>Best for</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Uniform</td>
+<td>Drop fixed % of all records</td>
+<td>Dev/staging noise reduction</td>
+</tr>
+<tr>
+<td>Threshold</td>
+<td>Log first N per interval, then sample at rate R</td>
+<td>Production — preserves initial visibility</td>
+</tr>
+<tr>
+<td>Absolute</td>
+<td>Cap at N records per interval globally</td>
+<td>Hard cost control</td>
+</tr>
+<tr>
+<td>Custom</td>
+<td>User function returns sample rate per record</td>
+<td>Level-aware or time-aware rules</td>
+</tr>
+</tbody></table>
+<p>Sampling MUST be the outermost handler in the pipeline — placing it after formatting wastes CPU on records that get dropped.</p>
+<pre><code class="language-go">// Threshold: log first 10 per 5s, then 10% — errors always pass through via Router
+logger := slog.New(
+    slogmulti.
+        Pipe(slogsampling.ThresholdSamplingOption{
+            Tick: 5 * time.Second, Threshold: 10, Rate: 0.1,
+        }.NewMiddleware()).
+        Handler(innerHandler),
+)
+</code></pre>
+<p>Matchers group similar records for deduplication: <code>MatchByLevel()</code>, <code>MatchByMessage()</code>, <code>MatchByLevelAndMessage()</code> (default), <code>MatchBySource()</code>, <code>MatchByAttribute(groups, key)</code>.</p>
+<p>For strategy comparison and configuration details, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-slog/references/sampling-strategies.md" target="_blank" rel="noopener noreferrer">Sampling Strategies</a>.</p>
+<h2>slog-formatter — Attribute Transformation</h2>
+<p>Apply as a <code>Pipe</code> middleware so all downstream handlers receive clean attributes.</p>
+<pre><code class="language-go">logger := slog.New(
+    slogmulti.Pipe(slogformatter.NewFormatterMiddleware(
+        slogformatter.PIIFormatter("user"),          // mask PII fields
+        slogformatter.ErrorFormatter("error"),       // structured error info
+        slogformatter.IPAddressFormatter("client"),  // mask IP addresses
+    )).Handler(slog.NewJSONHandler(os.Stdout, nil)),
+)
+</code></pre>
+<p>Key formatters: <code>PIIFormatter</code>, <code>ErrorFormatter</code>, <code>TimeFormatter</code>, <code>UnixTimestampFormatter</code>, <code>IPAddressFormatter</code>, <code>HTTPRequestFormatter</code>, <code>HTTPResponseFormatter</code>. Generic formatters: <code>FormatByType[T]</code>, <code>FormatByKey</code>, <code>FormatByKind</code>, <code>FormatByGroup</code>, <code>FormatByGroupKey</code>. Flatten nested attributes with <code>FlattenFormatterMiddleware</code>.</p>
+<h2>HTTP Middlewares</h2>
+<p>Consistent pattern across frameworks: <code>router.Use(slogXXX.New(logger))</code>.</p>
+<p>Available: <code>slog-gin</code>, <code>slog-echo</code>, <code>slog-fiber</code>, <code>slog-chi</code>, <code>slog-http</code> (net/http).</p>
+<p>All share a <code>Config</code> struct with: <code>DefaultLevel</code>, <code>ClientErrorLevel</code>, <code>ServerErrorLevel</code>, <code>WithRequestBody</code>, <code>WithResponseBody</code>, <code>WithUserAgent</code>, <code>WithRequestID</code>, <code>WithTraceID</code>, <code>WithSpanID</code>, <code>Filters</code>.</p>
+<pre><code class="language-go">// Gin with filters — skip health checks
+router.Use(sloggin.NewWithConfig(logger, sloggin.Config{
+    DefaultLevel:     slog.LevelInfo,
+    ClientErrorLevel: slog.LevelWarn,
+    ServerErrorLevel: slog.LevelError,
+    WithRequestBody:  true,
+    Filters: []sloggin.Filter{
+        sloggin.IgnorePath("/health", "/metrics"),
+    },
+}))
+</code></pre>
+<p>For framework-specific setup, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-slog/references/http-middlewares.md" target="_blank" rel="noopener noreferrer">HTTP Middlewares</a>.</p>
+<h2>Backend Sinks</h2>
+<p>All follow the <code>Option{}.NewXxxHandler()</code> constructor pattern.</p>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Packages</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Cloud</td>
+<td><code>slog-datadog</code>, <code>slog-sentry</code>, <code>slog-loki</code>, <code>slog-graylog</code></td>
+</tr>
+<tr>
+<td>Messaging</td>
+<td><code>slog-kafka</code>, <code>slog-fluentd</code>, <code>slog-logstash</code>, <code>slog-nats</code></td>
+</tr>
+<tr>
+<td>Notification</td>
+<td><code>slog-slack</code>, <code>slog-telegram</code>, <code>slog-webhook</code></td>
+</tr>
+<tr>
+<td>Storage</td>
+<td><code>slog-parquet</code></td>
+</tr>
+<tr>
+<td>Bridges</td>
+<td><code>slog-zap</code>, <code>slog-zerolog</code>, <code>slog-logrus</code></td>
+</tr>
+</tbody></table>
+<p><strong>Batch handlers require graceful shutdown</strong> — <code>slog-datadog</code>, <code>slog-loki</code>, <code>slog-kafka</code>, and <code>slog-parquet</code> buffer records internally. Flush on shutdown (e.g., <code>handler.Stop(ctx)</code> for Datadog, <code>lokiClient.Stop()</code> for Loki, <code>writer.Close()</code> for Kafka) or buffered logs are lost.</p>
+<p>For configuration examples and shutdown patterns, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-slog/references/backend-handlers.md" target="_blank" rel="noopener noreferrer">Backend Handlers</a>.</p>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Why it fails</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Sampling after formatting</td>
+<td>Wastes CPU formatting records that get dropped</td>
+<td>Place sampling as outermost handler</td>
+</tr>
+<tr>
+<td>Fanout to many synchronous handlers</td>
+<td>Blocks caller — latency is sum of all handlers</td>
+<td>Use <code>Pool()</code> for concurrent dispatch</td>
+</tr>
+<tr>
+<td>Missing shutdown flush on batch handlers</td>
+<td>Buffered logs lost on shutdown</td>
+<td><code>defer handler.Stop(ctx)</code> (Datadog), <code>defer lokiClient.Stop()</code> (Loki), <code>defer writer.Close()</code> (Kafka)</td>
+</tr>
+<tr>
+<td>Router without default/catch-all handler</td>
+<td>Unmatched records silently dropped</td>
+<td>Add a handler with no predicate as catch-all</td>
+</tr>
+<tr>
+<td><code>AttrFromContext</code> without HTTP middleware</td>
+<td>Context has no request attributes to extract</td>
+<td>Install <code>slog-gin</code>/<code>echo</code>/<code>fiber</code>/<code>chi</code> middleware first</td>
+</tr>
+<tr>
+<td>Using <code>Pipe</code> with no middleware</td>
+<td>No-op wrapper adding per-record overhead</td>
+<td>Remove <code>Pipe()</code> if no middleware needed</td>
+</tr>
+</tbody></table>
+<h2>Performance Warnings</h2>
+<ul>
+<li><strong>Fanout latency</strong> = sum of all handler latencies (sequential). With 5 handlers at 10ms each, every log call costs 50ms. Use <code>Pool()</code> to reduce to max(latencies)</li>
+<li><strong>Pipe middleware</strong> adds per-record function call overhead — keep chains short (2-4 middlewares)</li>
+<li><strong>slog-formatter</strong> processes attributes sequentially — many formatters compound. For hot-path attribute formatting, prefer implementing <code>slog.LogValuer</code> on your types instead</li>
+<li><strong>Benchmark</strong> your pipeline with <code>go test -bench</code> before production deployment</li>
+</ul>
+<p><strong>Diagnose:</strong> measure per-record allocation and latency of your pipeline and identify which handler in the chain allocates most.</p>
+<h2>Best Practices</h2>
+<ol>
+<li><strong>Sample first, format second, route last</strong> — this canonical ordering minimizes wasted work and ensures all sinks see clean data</li>
+<li><strong>Use Pipe for cross-cutting concerns</strong> — trace ID injection and PII scrubbing belong in middleware, not per-handler logic</li>
+<li><strong>Test pipelines with <code>slogmulti.NewHandleInlineHandler</code></strong> — assert on records reaching each stage without real sinks</li>
+<li><strong>Use <code>AttrFromContext</code></strong> to propagate request-scoped attributes from HTTP middleware to all handlers</li>
+<li><strong>Prefer Router over Fanout</strong> when handlers need different record subsets — Router evaluates predicates and skips non-matching handlers</li>
+</ol>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-observability</code> skill for slog fundamentals (levels, context, handler setup, migration)</li>
+<li>→ See <code>samber/cc-skills-golang@golang-error-handling</code> skill for the log-or-return rule</li>
+<li>→ See <code>samber/cc-skills-golang@golang-security</code> skill for PII handling in logs</li>
+<li>→ See <code>samber/cc-skills-golang@golang-samber-oops</code> skill for structured error context with <code>samber/oops</code></li>
+</ul>
+<p>If you encounter a bug or unexpected behavior in any samber/slog-* package, open an issue at the relevant repository (e.g., <a href="https://github.com/samber/slog-multi/issues" target="_blank" rel="noopener noreferrer">slog-multi/issues</a>, <a href="https://github.com/samber/slog-sampling/issues" target="_blank" rel="noopener noreferrer">slog-sampling/issues</a>).</p>

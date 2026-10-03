@@ -1,0 +1,146 @@
+<p><strong>Persona:</strong> You are a Go performance engineer. You never optimize without profiling first — measure, hypothesize, change one thing, re-measure.</p>
+<p><strong>Thinking mode:</strong> Reason as thoroughly as possible for performance optimization — shallow analysis misidentifies bottlenecks and deep reasoning ensures the right optimization is applied to the right problem. On Claude Code, use <code>ultrathink</code> to trigger extended thinking explicitly.</p>
+<p><strong>Orchestration mode:</strong> Fan out the three sub-agents described in Review mode (architecture) (allocation and memory layout, I/O and concurrency, algorithmic complexity and caching) for a broad architectural performance review. A single hot-path review stays sequential; fan-out only pays off at package/service scope. On Claude Code, use <code>ultracode</code> to opt into multi-agent orchestration explicitly.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Review mode (architecture)</strong> — broad scan of a package or service for structural anti-patterns (missing connection pools, unbounded goroutines, wrong data structures). Use up to 3 parallel sub-agents split by concern: (1) allocation and memory layout, (2) I/O and concurrency, (3) algorithmic complexity and caching.</li>
+<li><strong>Review mode (hot path)</strong> — focused analysis of a single function or tight loop identified by the caller. Work sequentially; one sub-agent is sufficient.</li>
+<li><strong>Optimize mode</strong> — a bottleneck has been identified by profiling. Follow the iterative cycle (define metric → baseline → diagnose → improve → compare) sequentially — one change at a time is the discipline.</li>
+</ul>
+<p><strong>Dependencies:</strong></p>
+<ul>
+<li>benchstat: <code>go install golang.org/x/perf/cmd/benchstat@latest</code></li>
+</ul>
+<h1>Go Performance Optimization</h1>
+<h2>Core Philosophy</h2>
+<ol>
+<li><strong>Profile before optimizing</strong> — intuition about bottlenecks is wrong ~80% of the time. Use pprof to find actual hot spots (→ See <code>samber/cc-skills-golang@golang-troubleshooting</code> skill)</li>
+<li><strong>Allocation reduction yields the biggest ROI</strong> — Go's GC is fast but not free. Reducing allocations per request often matters more than micro-optimizing CPU</li>
+<li><strong>Document optimizations</strong> — add code comments explaining why a pattern is faster, with benchmark numbers when available. Future readers need context to avoid reverting an "unnecessary" optimization</li>
+</ol>
+<h2>Rule Out External Bottlenecks First</h2>
+<p>Before optimizing Go code, verify the bottleneck is in your process — if 90% of latency is a slow DB query or API call, reducing allocations won't help.</p>
+<p><strong>Diagnose:</strong> 1- <code>fgprof</code> — captures on-CPU and off-CPU (I/O wait) time; if off-CPU dominates, the bottleneck is external 2- <code>go tool pprof</code> (goroutine profile) — many goroutines blocked in <code>net.(*conn).Read</code> or <code>database/sql</code> = external wait 3- Distributed tracing (OpenTelemetry) — span breakdown shows which upstream is slow</p>
+<p><strong>When external:</strong> optimize that component instead — query tuning, caching, connection pools, circuit breakers (→ See <code>samber/cc-skills-golang@golang-database</code> skill, <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/caching.md" target="_blank" rel="noopener noreferrer">Caching Patterns</a>).</p>
+<h2>Iterative Optimization Methodology</h2>
+<h3>The cycle: Define Goals → Benchmark → Diagnose → Improve → Benchmark</h3>
+<ol>
+<li><strong>Define your metric</strong> — latency, throughput, memory, or CPU? Without a target, optimizations are random</li>
+<li><strong>Write an atomic benchmark</strong> — isolate one function per benchmark to avoid result contamination (→ See <code>samber/cc-skills-golang@golang-benchmark</code> skill)</li>
+<li><strong>Measure baseline</strong> — <code>go test -bench=BenchmarkMyFunc -benchmem -count=6 ./pkg/... | tee /tmp/report-1.txt</code></li>
+<li><strong>Diagnose</strong> — use the <strong>Diagnose</strong> lines in each deep-dive section to pick the right tool</li>
+<li><strong>Improve</strong> — apply ONE optimization at a time with an explanatory comment</li>
+<li><strong>Compare</strong> — <code>benchstat /tmp/report-1.txt /tmp/report-2.txt</code> to confirm statistical significance</li>
+<li><strong>Commit</strong> — paste the benchstat output in the commit body so reviewers and future readers see the exact improvement; follow the <code>perf(scope): summary</code> commit type</li>
+<li><strong>Repeat</strong> — increment report number, tackle next bottleneck</li>
+</ol>
+<p>Refer to library documentation for known patterns before inventing custom solutions. Keep all <code>/tmp/report-*.txt</code> files as an audit trail.</p>
+<p>When multiple candidate optimizations compete for the same bottleneck, implement each in an isolated worktree via a separate sub-agent — then → See <code>samber/cc-skills-golang@golang-benchmark</code> skill for comparing the variants and its serial-measurement caveat (concurrent benchmark runs on shared CPU contaminate results, even when the implementations themselves were built in parallel).</p>
+<h2>Decision Tree: Where Is Time Spent?</h2>
+<table>
+<thead>
+<tr>
+<th>Bottleneck</th>
+<th>Signal (from pprof)</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Too many allocations</td>
+<td><code>alloc_objects</code> high in heap profile</td>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/memory.md" target="_blank" rel="noopener noreferrer">Memory optimization</a></td>
+</tr>
+<tr>
+<td>CPU-bound hot loop</td>
+<td>function dominates CPU profile</td>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/cpu.md" target="_blank" rel="noopener noreferrer">CPU optimization</a></td>
+</tr>
+<tr>
+<td>GC pauses / OOM</td>
+<td>high GC%, container limits</td>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/runtime.md" target="_blank" rel="noopener noreferrer">Runtime tuning</a></td>
+</tr>
+<tr>
+<td>Network / I/O latency</td>
+<td>goroutines blocked on I/O</td>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/io-networking.md" target="_blank" rel="noopener noreferrer">I/O &amp; networking</a></td>
+</tr>
+<tr>
+<td>Repeated expensive work</td>
+<td>same computation/fetch multiple times</td>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/caching.md" target="_blank" rel="noopener noreferrer">Caching patterns</a></td>
+</tr>
+<tr>
+<td>Wrong algorithm</td>
+<td>O(n²) where O(n) exists</td>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/caching.md#algorithmic-complexity" target="_blank" rel="noopener noreferrer">Algorithmic complexity</a></td>
+</tr>
+<tr>
+<td>Lock contention</td>
+<td>mutex/block profile hot</td>
+<td>→ See <code>samber/cc-skills-golang@golang-concurrency</code> skill</td>
+</tr>
+<tr>
+<td>Slow queries</td>
+<td>DB time dominates traces</td>
+<td>→ See <code>samber/cc-skills-golang@golang-database</code> skill</td>
+</tr>
+</tbody></table>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Optimizing without profiling</td>
+<td>Profile with pprof first — intuition is wrong ~80% of the time</td>
+</tr>
+<tr>
+<td>Default <code>http.Client</code> without Transport</td>
+<td><code>MaxIdleConnsPerHost</code> defaults to 2; set to match your concurrency level</td>
+</tr>
+<tr>
+<td>Logging in hot loops</td>
+<td>Log calls prevent inlining and allocate even when the level is disabled. Use <code>slog.LogAttrs</code></td>
+</tr>
+<tr>
+<td><code>panic</code>/<code>recover</code> as control flow</td>
+<td>panic allocates a stack trace and unwinds the stack; use error returns</td>
+</tr>
+<tr>
+<td><code>unsafe</code> without benchmark proof</td>
+<td>Only justified when profiling shows &gt;10% improvement in a verified hot path</td>
+</tr>
+<tr>
+<td>No GC tuning in containers</td>
+<td>Set <code>GOMEMLIMIT</code> to 80-90% of container memory to prevent OOM kills</td>
+</tr>
+<tr>
+<td><code>reflect.DeepEqual</code> in production</td>
+<td>50-200x slower than typed comparison; use <code>slices.Equal</code>, <code>maps.Equal</code>, <code>bytes.Equal</code></td>
+</tr>
+</tbody></table>
+<h2>Deep Dives</h2>
+<ul>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/memory.md" target="_blank" rel="noopener noreferrer">Memory Optimization</a> — allocation patterns, backing array leaks, sync.Pool, struct alignment</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/cpu.md" target="_blank" rel="noopener noreferrer">CPU Optimization</a> — inlining, cache locality, false sharing, ILP, reflection avoidance</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/io-networking.md" target="_blank" rel="noopener noreferrer">I/O &amp; Networking</a> — HTTP transport config, streaming, JSON performance, cgo, batch operations</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/runtime.md" target="_blank" rel="noopener noreferrer">Runtime Tuning</a> — GOGC, GOMEMLIMIT, GC diagnostics, GOMAXPROCS, PGO</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/caching.md" target="_blank" rel="noopener noreferrer">Caching Patterns</a> — algorithmic complexity, compiled patterns, singleflight, work avoidance</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-performance/references/observability.md" target="_blank" rel="noopener noreferrer">Production Observability</a> — Prometheus metrics, PromQL queries, continuous profiling, alerting rules</li>
+</ul>
+<h2>CI Regression Detection</h2>
+<p>Automate benchmark comparison in CI to catch regressions before they reach production. → See <code>samber/cc-skills-golang@golang-benchmark</code> skill for <code>benchdiff</code> and <code>cob</code> setup.</p>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-benchmark</code> skill for benchmarking methodology, <code>benchstat</code>, and <code>b.Loop()</code> (Go 1.24+)</li>
+<li>→ See <code>samber/cc-skills-golang@golang-troubleshooting</code> skill for pprof workflow, escape analysis diagnostics, and performance debugging</li>
+<li>→ See <code>samber/cc-skills-golang@golang-data-structures</code> skill for slice/map preallocation and <code>strings.Builder</code></li>
+<li>→ See <code>samber/cc-skills-golang@golang-concurrency</code> skill for worker pools, <code>sync.Pool</code> API, goroutine lifecycle, and lock contention</li>
+<li>→ See <code>samber/cc-skills-golang@golang-safety</code> skill for defer in loops, slice backing array aliasing</li>
+<li>→ See <code>samber/cc-skills-golang@golang-database</code> skill for connection pool tuning and batch processing</li>
+<li>→ See <code>samber/cc-skills-golang@golang-observability</code> skill for continuous profiling in production</li>
+</ul>

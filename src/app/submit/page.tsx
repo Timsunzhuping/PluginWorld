@@ -4,7 +4,7 @@ import { ECOSYSTEM_META } from "@/lib/types";
 export const metadata: Metadata = {
   title: "Submit — List Your Plugin",
   description:
-    "Add the ecosystem topic to your repo — PluginWorld indexes, validates and scores it automatically every 6 hours. No signup.",
+    "Add the ecosystem topic to your repo — PluginWorld indexes, validates and scores it automatically daily. No signup.",
   alternates: { canonical: "/submit" },
 };
 

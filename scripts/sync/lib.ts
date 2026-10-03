@@ -25,7 +25,7 @@ export async function fetchJson<T>(
 ): Promise<T | null> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url, init);
+      const res = await fetch(url, { ...init, signal: init?.signal ?? AbortSignal.timeout(30000) });
       if (res.status === 403 || res.status === 429) {
         // rate limited → retry with exponential backoff
         const wait = Math.min(60_000, 2_000 * 2 ** attempt);
@@ -56,15 +56,18 @@ export async function fetchJson<T>(
 }
 
 export async function fetchText(url: string): Promise<string | null> {
-  try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "pluginworld-sync (www.pluginworld.ai)" },
-    });
-    if (!res.ok) return null;
-    return await res.text();
-  } catch {
-    return null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": "pluginworld-sync (www.pluginworld.ai)" },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (res.ok) return await res.text();
+      if (res.status < 500 && res.status !== 429) return null;
+    } catch { /* Retry transient network failures; never execute fetched code. */ }
+    if (attempt < 2) await sleep(1000 * (attempt + 1));
   }
+  return null;
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -119,14 +122,19 @@ export function redactSecrets(text: string): string {
 export function renderReadme(
   markdown: string,
   repoFullName: string | null,
+  documentPath = "README.md",
+  sourceUrl?: string,
 ): { html: string; textLength: number; hasCodeExample: boolean; hasStructure: boolean } {
   const redacted = redactSecrets(markdown);
   const truncated =
     redacted.length > 120_000 ? redacted.slice(0, 120_000) + "\n\n…" : redacted;
   const rawHtml = marked.parse(truncated, { async: false }) as string;
 
-  const rawBase = repoFullName ? `${RAW_BASE}/${repoFullName}/HEAD/` : null;
-  const blobBase = repoFullName ? `https://github.com/${repoFullName}/blob/HEAD/` : null;
+  const directory = documentPath.includes("/") && !documentPath.startsWith("skills.sh-rendered:")
+    ? documentPath.slice(0, documentPath.lastIndexOf("/") + 1) : "";
+  const externalBase = sourceUrl && !repoFullName ? `${sourceUrl}/${directory}` : null;
+  const rawBase = repoFullName ? `${RAW_BASE}/${repoFullName}/HEAD/${directory}` : externalBase;
+  const blobBase = repoFullName ? `https://github.com/${repoFullName}/blob/HEAD/${directory}` : externalBase;
 
   const html = sanitizeHtml(rawHtml, {
     allowedTags: [
@@ -148,7 +156,7 @@ export function renderReadme(
       a: (tagName, attribs) => {
         let href = attribs.href ?? "";
         if (href && !/^(https?:|mailto:|#)/.test(href) && blobBase) {
-          href = blobBase + href.replace(/^\.?\//, "");
+          try { href = new URL(href, blobBase).href; } catch { href = ""; }
         }
         return {
           tagName,
@@ -158,7 +166,7 @@ export function renderReadme(
       img: (tagName, attribs) => {
         let src = attribs.src ?? "";
         if (src && !/^https?:/.test(src) && rawBase) {
-          src = rawBase + src.replace(/^\.?\//, "");
+          try { src = new URL(src, rawBase).href; } catch { src = ""; }
         }
         return { tagName, attribs: { ...attribs, src } };
       },

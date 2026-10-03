@@ -1,0 +1,1078 @@
+<h1>Houki NTA MCP Server</h1>
+<p><a href="https://github.com/shuji-bonji/houki-nta-mcp/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/shuji-bonji/houki-nta-mcp/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+<a href="https://nodejs.org/" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Node-%3E%3D22-brightgreen" alt="Node" /></a></p>
+<p>税務の下調べで、国税庁（NTA）の通達と事例を LLM から引くための MCP サーバーです。国税庁公式サイトの <strong>基本通達・改正通達・事務運営指針・文書回答事例・タックスアンサー・質疑応答事例</strong> をローカル SQLite に取り込み、FTS5 で全文検索します。「法律で決まっている」と「通達でそうなっている」を混ぜずに、<code>legal_status</code>（通達は国民を拘束しない旨）と根拠条文への案内と鮮度を添えて返します。</p>
+<p>法律本文（法・政令・省令）は別 MCP の <a href="https://github.com/shuji-bonji/houki-egov-mcp" target="_blank" rel="noopener noreferrer"><code>@shuji-bonji/houki-egov-mcp</code></a> が担当します。通達の応答からは <code>next_actions</code> で houki-egov-mcp の <code>get_law</code> へ戻れます。</p>
+<blockquote>
+<p><strong>🔗 4 つを併用したい方へ</strong> — <code>houki-egov-mcp</code> (法令本文) と <code>pdf-reader-mcp</code> (添付 PDF 抽出) と組み合わせた <strong>install → 設定 → 実例 4 ユースケース</strong> をまとめた統合ガイドを用意しています。</p>
+<p>👉 <strong><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/HOUKI-FAMILY-INTEGRATION.md" target="_blank" rel="noopener noreferrer">docs/HOUKI-FAMILY-INTEGRATION.md</a></strong></p>
+</blockquote>
+<h2>できること</h2>
+<p>経理・税務の担当者や、会計・税務のアプリを作る開発者が、国税庁の公式な解説と通達を根拠つきで確かめるための機能です。</p>
+<ul>
+<li>下の表の 6 種類の文書を、キーワードで検索できます。応答には出典の URL と取得日時が付きます</li>
+<li>応答ごとに <code>legal_status</code> を付け、「法律で決まっている」ことと「通達や解説でそうなっている」ことを区別できるようにします</li>
+<li>基本通達の応答には、その通達が解釈している法律・政令・省令と、<a href="https://github.com/shuji-bonji/houki-egov-mcp" target="_blank" rel="noopener noreferrer"><code>houki-egov-mcp</code></a> で条文を読むための <code>next_actions</code> が付きます</li>
+<li>改正通達の添付 PDF（新旧対照表など）は、どれを先に読むべきかと読み方を返します</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>種類</th>
+<th align="right">件数</th>
+<th>拘束力（<code>legal_status</code>）</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>基本通達 4 種（消基通・所基通・法基通・相基通）</td>
+<td align="right">3,456 項</td>
+<td>税務署員を拘束する。国民・裁判所は拘束しない</td>
+</tr>
+<tr>
+<td>改正通達</td>
+<td align="right">118 件</td>
+<td>同上</td>
+</tr>
+<tr>
+<td>事務運営指針</td>
+<td align="right">32 件</td>
+<td>同上</td>
+</tr>
+<tr>
+<td>文書回答事例</td>
+<td align="right">487 件</td>
+<td>個別の照会への国税庁の回答。一般的な法的拘束力はない</td>
+</tr>
+<tr>
+<td>タックスアンサー</td>
+<td align="right">746 件</td>
+<td>国税庁の参考解説。法的拘束力はない</td>
+</tr>
+<tr>
+<td>質疑応答事例（9 税目）</td>
+<td align="right">1,841 件</td>
+<td>同上</td>
+</tr>
+</tbody></table>
+<p>件数は、2026-09-07〜09-24 JST に全種別を取り込んだ手元の DB の実数です。国税庁サイトの更新で増減します。</p>
+<h3>相談の形の問いでの使い方</h3>
+<p>「会社員で、副業の所得が 20 万円以下なら確定申告はしなくてよいか」と尋ねると、LLM が <code>nta_search_tax_answer(keyword="給与所得者で確定申告が必要な人")</code> を呼び、タックスアンサーのコード 1900「給与所得者で確定申告が必要な人」と、1906「給与所得者がネットオークション等により副収入を得た場合」が返ります。応答の <code>legal_status</code> は、これらが国税庁の参考解説で法的拘束力を持たないことを示します。</p>
+<p>根拠の条文（所得税法第 121 条第 1 項「確定所得申告を要しない場合」）は、<a href="https://github.com/shuji-bonji/houki-egov-mcp" target="_blank" rel="noopener noreferrer"><code>houki-egov-mcp</code></a> の <code>get_law</code> で読めます。解説と条文を並べると、給与の支払者の数や年末調整の有無のように、答えを分ける条件が分かります。個別の事案に当てはめた結論（「あなたは申告が不要です」）は返しません。理由は<a href="#%E6%A5%AD%E6%B3%95%E3%81%A8%E3%81%AE%E9%96%A2%E4%BF%82" target="_blank" rel="noopener noreferrer">業法との関係</a>に書いています。</p>
+<h2>まず試す</h2>
+<p><code>claude_desktop_config.json</code> に次の設定を足して、Claude Desktop を再起動します。</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "houki-nta": {
+      "command": "npx",
+      "args": ["-y", "@shuji-bonji/houki-nta-mcp"]
+    }
+  }
+}
+</code></pre>
+<p>取り込みをしなくても、<code>nta_get_tsutatsu</code>・<code>nta_get_tax_answer</code>・<code>nta_get_qa</code> は国税庁サイトから直接取ります。検索ツール（<code>nta_search_*</code>）には取り込みが要ります。まず 1 本だけ入れるなら、次のコマンドで消費税法基本通達を約 3〜5 分で取り込めます。</p>
+<pre><code class="language-bash">npx -y @shuji-bonji/houki-nta-mcp --quickstart
+</code></pre>
+<p>全種別の取り込みと税目ごとの絞り込みは「<a href="#%E5%88%9D%E5%9B%9E%E3%82%BB%E3%83%83%E3%83%88%E3%82%A2%E3%83%83%E3%83%97bulk-dl" target="_blank" rel="noopener noreferrer">初回セットアップ（bulk DL）</a>」をご覧ください。</p>
+<h2>主な機能</h2>
+<ul>
+<li><strong>6 大コンテンツに対応</strong>: 基本通達 4 種 + 改正通達・事務運営指針・文書回答事例・タックスアンサー・質疑応答事例</li>
+<li><strong>14 ツール提供</strong>: 取得 + FTS5 全文検索 + PDF メタ取得 + 略称解決</li>
+<li><strong>高速応答</strong>: bulk DL 済なら DB から即時応答（~10ms）。未投入のときの動きは取得ツールごとに違います（<a href="#%E5%8F%96%E5%BE%97%E3%83%84%E3%83%BC%E3%83%AB%E3%81%8C-db-%E3%82%92%E3%81%A9%E3%81%86%E4%BD%BF%E3%81%86%E3%81%8B" target="_blank" rel="noopener noreferrer">取得ツールが DB をどう使うか</a>）</li>
+<li><strong>正規化済み検索</strong>: Normalize-everywhere 原則で全角・半角ゆらぎを吸収（数字・英字・ハイフン・チルダ・空白。実装は houki-hub family 共通の <code>@shuji-bonji/houki-abbreviations</code>）</li>
+<li><strong>改正検知</strong>: SHA-1 content_hash で個別文書の変化を検知、4 パターン集計（新規 / 更新 / 削除 / 移動）</li>
+<li><strong>HP 構造変更耐性 (v0.6.0 / v0.9.4)</strong>: 9 種別 baseline で履歴管理 + <code>--health-check</code> CLI で週次 canary 検証 + <code>--check-baseline-drift</code> で <code>menu.htm</code> を真の正典として世代移行 (<code>sozoku2</code> / <code>hyoka_new</code> 等) を<strong>事前検知</strong> + soft-404 (<code>/error/404.htm</code> 着地) を <code>fetchNtaPage</code> で自動 fail させる二重防御</li>
+<li><strong>添付 PDF kind 分類 (v0.7.0)</strong>: タイトルから 6 種別（新旧対照表 / 別紙・別表 / Q&amp;A / 参考資料 / 通知・連絡 / その他）に自動分類。Markdown 出力は kind 優先度ソートの表 + <code>pdf-reader-mcp</code> 呼び出し例つき</li>
+<li><strong><code>hasPdf</code> 検索フィルタ + <code>nta_inspect_pdf_meta</code> (v0.7.1)</strong>: PDF 付きの重要文書だけを抽出 / PDF メタだけを軽量に返す軽量 API を提供</li>
+<li><strong>添付 PDF の読み方を返し、読み手は固定しない (v0.19.0)</strong>: 添付 PDF の kind（<code>comparison</code>=新旧対照表 / <code>attachment</code>=別紙・別表 など。「新旧<strong>対応</strong>表」の表記ゆれにも対応）ごとに <code>read_strategy</code>（表として取る / 本文として読む / 先頭を見て決める）と <code>layout_note</code>（紙面の組み方）を付ける。<code>save: true</code> で PDF をサーバー側に保存して絶対パスを返す。<code>next_actions</code> に pdf-reader-mcp の呼び出し例（保存済みなら <code>extract_tables</code> / <code>read_text</code> に <code>file_path</code>、未保存なら <code>read_url</code> に <code>url</code>）と、他の PDF 読み取りツール向けの汎用の 1 件を置く。houki-nta-mcp 自身は PDF の本文を読まない。改正通達で「別紙 N」とだけ題した PDF は新旧対照表本体のことが多いので、<code>comparison</code> として返す (v0.20.0)</li>
+<li><strong>レスポンスに <code>freshness</code> 付き</strong>: 利用者（LLM）が staleness を判定できる</li>
+<li><strong>法的位置付けを明示</strong>: 各レスポンスに <code>legal_status</code> フィールド（通達 = 税務署員のみ拘束、QA = 参考情報、等）</li>
+</ul>
+<h3>データフロー全体俯瞰</h3>
+<p>国税庁 HP の 6 大コンテンツを bulk DL で SQLite cache に投入し、MCP tool はローカル DB を先に引いて応答します。DB に無かったときの動きは取得ツールごとに違うので、<a href="#%E5%8F%96%E5%BE%97%E3%83%84%E3%83%BC%E3%83%AB%E3%81%8C-db-%E3%82%92%E3%81%A9%E3%81%86%E4%BD%BF%E3%81%86%E3%81%8B" target="_blank" rel="noopener noreferrer">取得ツールが DB をどう使うか</a>を参照してください。</p>
+<pre><code class="language-mermaid">flowchart TB
+  subgraph NTA["国税庁 HP (www.nta.go.jp)"]
+    direction TB
+    N1["基本通達 4 種&lt;br/&gt;消基通 / 所基通&lt;br/&gt;法基通 / 相基通"]
+    N2["改正通達"]
+    N3["事務運営指針"]
+    N4["文書回答事例"]
+    N5["タックスアンサー"]
+    N6["質疑応答事例"]
+  end
+
+  subgraph DL["bulk DL 層 (CLI)"]
+    DLA["--bulk-download-everything&lt;br/&gt;または個別 --bulk-download-*"]
+  end
+
+  subgraph DBLayer["SQLite cache&lt;br/&gt;~/.cache/houki-nta-mcp/cache.db"]
+    direction TB
+    DB1["document&lt;br/&gt;(本文 + content_hash)"]
+    DB2["section / clause&lt;br/&gt;(章節構造)"]
+    DB3["FTS5 全文検索&lt;br/&gt;(Normalize-everywhere)"]
+  end
+
+  subgraph Tools["14 MCP tool"]
+    direction TB
+    T1["nta_get_* × 6&lt;br/&gt;nta_search_* × 6"]
+    T2["nta_inspect_pdf_meta&lt;br/&gt;resolve_abbreviation"]
+  end
+
+  NTA --&gt;|"scrape + parse&lt;br/&gt;(週次 health-check で監視)"| DLA
+  DLA --&gt;|"normalize + insert"| DBLayer
+  DBLayer --&gt;|"DB-first ~10ms"| Tools
+  NTA -.-&gt;|"live fallback ~700ms&lt;br/&gt;(DB 未投入時のみ)"| Tools
+  Tools --&gt;|"freshness / legal_status&lt;br/&gt;を埋め込んで応答"| LLM(["LLM / Claude"])
+
+  classDef nta fill:#fff3cd,stroke:#ffc107,color:#333
+  classDef db fill:#d4edda,stroke:#28a745,color:#333
+  classDef tool fill:#cce5ff,stroke:#0066cc,color:#333
+  classDef cli fill:#e2d6f3,stroke:#7952b3,color:#333
+  class NTA nta
+  class DBLayer db
+  class Tools tool
+  class DL cli
+</code></pre>
+<h2>提供ツール（14 ツール）</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>nta_get_tsutatsu</code></td>
+<td>通達本文を取得（DB → 無ければ国税庁サイト、4 通達対応）</td>
+</tr>
+<tr>
+<td><code>nta_search_tsutatsu</code></td>
+<td>通達を FTS5 全文検索（<code>freshness</code> 付き）</td>
+</tr>
+<tr>
+<td><code>nta_get_kaisei_tsutatsu</code></td>
+<td>改正通達を docId で取得（DB のみ。本文 + kind 分類付き PDF 表）</td>
+</tr>
+<tr>
+<td><code>nta_search_kaisei_tsutatsu</code></td>
+<td>改正通達を FTS5 検索（<code>hasPdf</code> フィルタ・<code>freshness</code>）</td>
+</tr>
+<tr>
+<td><code>nta_get_jimu_unei</code></td>
+<td>事務運営指針を取得（DB のみ）</td>
+</tr>
+<tr>
+<td><code>nta_search_jimu_unei</code></td>
+<td>事務運営指針を FTS5 検索（<code>hasPdf</code> フィルタ・<code>freshness</code>）</td>
+</tr>
+<tr>
+<td><code>nta_get_bunshokaitou</code></td>
+<td>文書回答事例を取得（DB のみ）</td>
+</tr>
+<tr>
+<td><code>nta_search_bunshokaitou</code></td>
+<td>文書回答事例を FTS5 検索（<code>hasPdf</code> フィルタ・<code>freshness</code>）</td>
+</tr>
+<tr>
+<td><code>nta_get_tax_answer</code></td>
+<td>タックスアンサー本文を取得（DB → 無ければ国税庁サイト）</td>
+</tr>
+<tr>
+<td><code>nta_search_tax_answer</code></td>
+<td>タックスアンサーを FTS5 全文検索（<code>hasPdf</code> フィルタ・<code>freshness</code>）</td>
+</tr>
+<tr>
+<td><code>nta_get_qa</code></td>
+<td>質疑応答事例の本文を取得（DB → 無ければ国税庁サイト）</td>
+</tr>
+<tr>
+<td><code>nta_search_qa</code></td>
+<td>質疑応答事例を FTS5 全文検索（<code>topic</code> で税目の絞り込み・<code>freshness</code> 付き）</td>
+</tr>
+<tr>
+<td><code>nta_inspect_pdf_meta</code></td>
+<td>指定文書の添付 PDF の一覧に kind と読み方（<code>read_strategy</code> / <code>layout_note</code>）を付けて返す。<code>save: true</code> で PDF を保存して絶対パスを返し、<code>next_actions</code> に pdf-reader-mcp の呼び出し例と汎用の 1 件を置く。本文は読まない (v0.7.1、v0.19.0 で読み手を固定しない形に)</td>
+</tr>
+<tr>
+<td><code>resolve_abbreviation</code></td>
+<td>略称→エントリ解決（houki-abbreviations 経由）</td>
+</tr>
+</tbody></table>
+<h3>取得ツールが DB をどう使うか</h3>
+<p>取得ツール 6 つは、ローカル DB を先に引く点は同じですが、<strong>DB に無かったときの動きが 2 通りに分かれます</strong>（v0.16.0 / Issue #29）。</p>
+<table>
+<thead>
+<tr>
+<th>ツール</th>
+<th>DB を先に引く</th>
+<th>DB に無いとき</th>
+<th>DB へ書き戻す</th>
+<th>応答の <code>source</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>nta_get_tsutatsu</code></td>
+<td>引く</td>
+<td>国税庁サイトから取得</td>
+<td>書き戻す</td>
+<td><code>"db"</code> / <code>"live"</code></td>
+</tr>
+<tr>
+<td><code>nta_get_qa</code></td>
+<td>引く</td>
+<td>国税庁サイトから取得</td>
+<td>書き戻す</td>
+<td><code>"db"</code> / <code>"live"</code></td>
+</tr>
+<tr>
+<td><code>nta_get_tax_answer</code></td>
+<td>引く</td>
+<td>国税庁サイトから取得</td>
+<td>書き戻す</td>
+<td><code>"db"</code> / <code>"live"</code></td>
+</tr>
+<tr>
+<td><code>nta_get_kaisei_tsutatsu</code></td>
+<td>引く</td>
+<td><code>DOC_NOT_FOUND</code> を返す</td>
+<td>—</td>
+<td>付かない</td>
+</tr>
+<tr>
+<td><code>nta_get_jimu_unei</code></td>
+<td>引く</td>
+<td><code>DOC_NOT_FOUND</code> を返す</td>
+<td>—</td>
+<td>付かない</td>
+</tr>
+<tr>
+<td><code>nta_get_bunshokaitou</code></td>
+<td>引く</td>
+<td><code>DOC_NOT_FOUND</code> を返す</td>
+<td>—</td>
+<td>付かない</td>
+</tr>
+</tbody></table>
+<p><code>nta_get_qa</code> と <code>nta_get_tax_answer</code> は、国税庁サイトにそのページが無い（HTTP 404・410、または <code>/error/404.htm</code> への転送）と、番号の誤りとして <code>DOC_NOT_FOUND</code>（<code>retryable: false</code>）を返し、<code>next_actions</code> で検索ツールを案内します。v0.21.x までは <code>SOURCE_API_ERROR</code>（<code>retryable: true</code>）でした。</p>
+<p>改正通達・事務運営指針・文書回答事例の 3 つは、docId から個別ページの URL を組み立てるのに税目フォルダの世代差（<code>sozoku</code> / <code>sozoku2</code> など）を解く必要があるため、国税庁サイトへは取りに行きません。エラーには <code>--bulk-download-*</code> の案内が付きます。</p>
+<p><code>nta_get_qa</code> と <code>nta_get_tax_answer</code> が DB から返せるのは、<strong><code>structured_json</code> を持つ行</strong>だけです。この列は v0.16.0 で増えたので、v0.15.x までに投入した行は持っていません。持っていない行は国税庁サイトから取得して書き戻すので、1 度引けば次からは DB から返ります。<code>--bulk-download-qa</code> / <code>--bulk-download-tax-answer</code> を実行しても埋まります（この 2 種別では、構造を持たない行は条件付き GET を使わずに取り直します）。</p>
+<h3>国税庁の索引から消えた文書（v0.17.0 / Issue #30）</h3>
+<p>bulk download を再実行したときに、国税庁の索引から消えていた文書は <strong>DB から消しません</strong>。索引から外れても、過去の課税期間の判断では依然として意味を持つ通達があるためです。</p>
+<p>代わりに <code>document.orphaned_at</code> に「索引から消えたことを最初に確認した日時」を入れ、応答で現行の文書と区別できるようにしています。</p>
+<table>
+<thead>
+<tr>
+<th>応答</th>
+<th>付くもの</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>nta_search_*</code>（5 種別）</td>
+<td>各件に <code>index_status: "removed_from_index"</code> と <code>orphaned_at</code>、<code>search_notes</code> に「N 件のうち M 件は索引から外れています」の 1 行</td>
+</tr>
+<tr>
+<td><code>nta_get_*</code>（5 種別）</td>
+<td><code>index_status</code> / <code>orphaned_at</code> / <code>notice</code>（Markdown 形式では「索引の状態」の行と注記）</td>
+</tr>
+</tbody></table>
+<p>検索結果から除外はしません。除外すると、過去の期間を調べたい利用者が引けなくなります。</p>
+<p>印の付け外しは <code>--bulk-download-*</code> のときに行います。</p>
+<ul>
+<li>索引に戻っていれば印を外します（国税庁サイトの一時的な不整合や、世代ディレクトリの移行中に消えたように見える場合があるため）</li>
+<li>索引にある文書と題名が一致する行には印を付けません（<code>sozoku</code> → <code>sozoku2</code> のような世代移行で doc_id が変わっただけの文書を、消えたと数えないため）</li>
+<li>索引の取得に失敗した税目がある実行では、判定そのものを行いません（その税目の文書が丸ごと「消えた」と判定されるため）</li>
+</ul>
+<h3>対応通達（4 種）</h3>
+<table>
+<thead>
+<tr>
+<th>通達</th>
+<th>略称</th>
+<th>TOC スタイル</th>
+<th>clause 番号体系</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>消費税法基本通達</td>
+<td>消基通</td>
+<td>shohi</td>
+<td>3 階層 <code>1-4-13の2</code></td>
+</tr>
+<tr>
+<td>所得税基本通達</td>
+<td>所基通</td>
+<td>shotoku</td>
+<td>2 階層 <code>2-4の2</code> / 共通通達 <code>183~193共-1</code></td>
+</tr>
+<tr>
+<td>法人税基本通達</td>
+<td>法基通</td>
+<td>hojin</td>
+<td>3 階層、節の2 を含む <code>1-3の2-N</code></td>
+</tr>
+<tr>
+<td>相続税法基本通達</td>
+<td>相基通</td>
+<td>sozoku</td>
+<td>flat 構造、ナカグロ複数条共通 <code>1の3・1の4共-1</code></td>
+</tr>
+</tbody></table>
+<p>clause 番号は <strong>Normalize-everywhere</strong> で全角→半角統一されているため、ユーザーが半角・全角どちらで入力してもヒットします。全角英字（<code>ＮＩＳＡ</code> → <code>NISA</code>、<code>ｅ－Ｔａｘ</code> → <code>e-Tax</code>）も v0.15.0 から半角に揃います。</p>
+<p>v0.14.2 以前に作った DB は、v0.15.0 で最初にサーバーを起動したときに一度だけ入れ直されます。国税庁サイトへの再アクセスは発生しません。</p>
+<h3>検索キーワードの文字数（v0.10.1、Issue #18）</h3>
+<p>全文検索は SQLite FTS5 の trigram tokenizer を使うため、<strong>3 文字未満の語は索引に乗りません</strong>。v0.10.0 までは「役員」「退職」のような 2 文字語がそのまま 0 件になり、通常の「該当なし」と区別できませんでした。v0.10.1 からは次のように扱います。</p>
+<table>
+<thead>
+<tr>
+<th>語の長さ</th>
+<th>扱い</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>3 文字以上</td>
+<td>FTS5 で全文検索します（これまでどおり）</td>
+</tr>
+<tr>
+<td>2 文字</td>
+<td>3 文字以上の語と一緒なら、FTS5 のヒットを「本文かタイトルにその 2 文字語を含むもの」に絞り込みます。2 文字語だけのときは、本文とタイトルの部分一致（<code>LIKE</code>）で検索します（FTS5 の rank は付かないため score は低めになります）</td>
+</tr>
+<tr>
+<td>1 文字</td>
+<td>検索条件から外します</td>
+</tr>
+</tbody></table>
+<p>2 文字語や 1 文字語を含むクエリでは、応答に <code>search_notes</code>（文字列の配列）が付き、どう扱ったかを文で示します。0 件のときも <code>search_notes</code> が付くので、LLM / Skill 層は「仕様上ヒットしなかった」のか「本当に該当がない」のかを判別できます。</p>
+<h3>検索が 0 件のとき（v0.13.0、Issue #23）</h3>
+<p>文書系の検索 5 ツール（<code>nta_search_qa</code> / <code>nta_search_tax_answer</code> / <code>nta_search_kaisei_tsutatsu</code> / <code>nta_search_jimu_unei</code> / <code>nta_search_bunshokaitou</code>）は、結果が 0 件になった理由を分けて返します。v0.12.0 までは、どの場合も「<code>--bulk-download-*</code> で DB 投入済みか確認してください」という同じ <code>hint</code> だったため、文書が入っている DB でも投入をやり直すよう案内していました。</p>
+<table>
+<thead>
+<tr>
+<th>DB の状態</th>
+<th>応答</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>その種別の文書が DB に 1 件も無い</td>
+<td>エラー <code>DOC_NOT_FOUND</code>。「該当なし」という検索結果ではないことを応答の形で示します。<code>hint</code> に MCP サーバーが開いている DB ファイルのパスと投入コマンドを、<code>next_actions</code> に投入コマンドを入れます</td>
+</tr>
+<tr>
+<td>税目の絞り込み（<code>topic</code> / <code>taxonomy</code>）の範囲に文書が無い</td>
+<td><code>results: []</code>。<code>hint</code> で絞り込みを外すよう案内し、<code>available_taxonomies</code> にその種別の文書が持つ税目の一覧を入れます</td>
+</tr>
+<tr>
+<td><code>hasPdf</code> の条件に合う文書が無い</td>
+<td><code>results: []</code>。<code>hint</code> で <code>hasPdf</code> を外すよう案内します（質疑応答事例は PDF を持たないため、<code>hasPdf: true</code> では常にこれになります）</td>
+</tr>
+<tr>
+<td>文書はあるが、キーワードに合わない</td>
+<td><code>results: []</code>。<code>hint</code> に「該当なし」と、検索した文書の件数を書きます。<code>freshness</code> で DB の取得時点を示します</td>
+</tr>
+</tbody></table>
+<p>その種別の文書が 1 件も無くなるのは、主に次の場合です。</p>
+<ul>
+<li>その種別をまだ投入していない（bulk download は種別ごとに分かれています）</li>
+<li><code>--bulk-download-everything</code> の途中で、その種別だけ失敗した（失敗しても次の種別へ進みます）</li>
+<li>bulk download を実行したシェルと MCP サーバー（Claude Desktop や plugin が起動するもの）とで、環境変数 <code>HOUKI_NTA_DB_PATH</code> / <code>XDG_CACHE_HOME</code> が違い、サーバーが別の DB ファイルを開いている。<code>hint</code> の DB のパスで確かめられます</li>
+</ul>
+<p>基本通達を検索する <code>nta_search_tsutatsu</code> は、以前から同じ分け方をしています（DB に通達が無ければ <code>TSUTATSU_NOT_FOUND</code>）。</p>
+<h4><code>nta_search_qa</code> の税目の絞り込み</h4>
+<p>v0.13.0 から、<code>nta_search_qa</code> は <code>topic</code>（<code>shotoku</code> / <code>gensen</code> / <code>joto</code> / <code>sozoku</code> / <code>hyoka</code> / <code>hojin</code> / <code>shohi</code> / <code>inshi</code> / <code>hotei</code>。<code>--qa-topic</code> と同じ値）で税目を絞り込めます。v0.12.0 までの <code>domain</code> は分野（<code>tax</code> / <code>labor</code> など）の値を税目と比べていたため、指定すると必ず 0 件でした。質疑応答事例はすべて税務なので、<code>domain: "tax"</code> は絞り込まずに検索し、それ以外の値は 0 件と、<code>topic</code> を使うよう案内する <code>hint</code> を返します。</p>
+<h3>質疑応答事例の関係法令通達（v0.12.0、Issue #22）</h3>
+<p>質疑応答事例は国税庁の参考資料で、法的拘束力はありません。根拠は、ページの【関係法令通達】欄にある法律の条文と通達で確かめます。v0.12.0 から、<code>nta_get_qa</code>（<code>format: "json"</code>）はこの欄を次のように分けて返します。</p>
+<table>
+<thead>
+<tr>
+<th>フィールド</th>
+<th>中身</th>
+<th>例（shohi/02/19）</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>related_laws</code></td>
+<td>法令の参照。<code>law_name</code> / <code>article</code> / <code>paragraph</code> / <code>item</code>（別表は <code>appendix</code>）と、元の要素 <code>raw</code></td>
+<td><code>{ "law_name": "消費税法", "article": "2", "paragraph": 1, "item": 8 }</code></td>
+</tr>
+<tr>
+<td><code>related_tsutatsu</code></td>
+<td>通達の参照。<code>name</code> / <code>clause</code> / <code>raw</code></td>
+<td><code>{ "name": "消費税法基本通達", "clause": "5-1-1" }</code></td>
+</tr>
+<tr>
+<td><code>next_actions</code></td>
+<td>法令は houki-egov-mcp の <code>get_law</code>、基本通達 4 種は <code>nta_get_tsutatsu</code> への案内。引数をそのまま渡せます</td>
+<td><code>{ "mcp": "houki-egov", "tool": "get_law", "law_name": "消費税法", "article": "2", "paragraph": 1, "item": 8 }</code></td>
+</tr>
+<tr>
+<td><code>qa.notice</code> / <code>qa.basisDate</code></td>
+<td>ページ下部の「注記」（作成時点と、一般的な回答である旨の断り書き）と、その作成基準日</td>
+<td><code>"2025-08-01"</code></td>
+</tr>
+</tbody></table>
+<ul>
+<li>「所得税法第27条、第34条」の「第34条」のように法令名を省いた要素は、直前の法令の続きとして読みます。「、第9項」は直前の条の項、「、3-3」は直前の通達の番号です</li>
+<li>告示・説明文・「［参考］」など、法令と通達として読めない要素は入れません。推測で法令名を補うこともしません。<code>qa.relatedLaws</code>（欄の文字列そのまま）で確かめてください</li>
+<li>条約（「日米租税条約」など。e-Gov の法令名と一致しない通称）と改正前の法令（「旧所得税法」など）は、<code>related_laws</code> には入れますが <code>next_actions</code> では案内しません</li>
+<li>枝番号の号（「法人税法第2条第12号の8」）は、v0.14.0 から <code>item: "12の8"</code>（文字列）にし、<code>next_actions</code> にも入れます。<code>get_law</code> が文字列の <code>item</code> を受け付けるのは houki-egov-mcp v0.6.0 以上です</li>
+<li>分解できた割合: 2026-09-11 に、ローカル DB の質疑応答事例 1,834 件（【関係法令通達】欄あり）で測りました。欄を「、」と改行で区切った 5,059 要素のうち 4,767 要素（94.2%）を法令か通達として読み取れ、1,834 件のうち 1,652 件（90.1%）は欄の全要素を読み取れました。146 件は一部だけ、36 件は読み取れる要素がありませんでした（告示や通達の日付・番号だけが書かれた欄など）</li>
+<li>v0.11.1 までは、ページ下部の「注記」が <code>relatedLaws</code>（【関係法令通達】欄の無いページでは <code>answer</code>）に混ざっていました。v0.12.0 から <code>qa.notice</code> に分けています</li>
+</ul>
+<h3>文書回答事例の税目の別表記（v0.14.0）</h3>
+<p>文書回答事例の <code>taxonomy</code> は URL の税目フォルダ名です。国税局のページは本庁と違うフォルダ名を使うことがあり、同じ税目が次のように分かれています。<code>taxonomy</code> にどちらを指定しても両方を検索し、応答の <code>search_notes</code> にその旨が入ります。DB の値は変えていないので、取り込み直しは要りません。</p>
+<table>
+<thead>
+<tr>
+<th>税目</th>
+<th>本庁の表記</th>
+<th>国税局の表記</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>相続税</td>
+<td><code>sozoku</code></td>
+<td><code>souzoku</code></td>
+</tr>
+<tr>
+<td>源泉所得税</td>
+<td><code>gensen</code></td>
+<td><code>gensenshotoku</code></td>
+</tr>
+<tr>
+<td>譲渡所得・山林所得</td>
+<td><code>joto-sanrin</code></td>
+<td><code>joto_sanrin</code></td>
+</tr>
+</tbody></table>
+<p><code>--bunsho-taxonomy</code> は v0.14.2 からどちらの表記でも渡せます（国税局の表記は本庁の表記に直してから索引を絞り込みます）。絞り込むのは本庁の索引（<code>/law/bunshokaito/01.htm</code>）の節なので、<code>--bunsho-taxonomy=sozoku</code> でも <code>souzoku</code> でも、投入されるのは同じ 1 つの節の文書です。その節には国税局のページへのリンクも並んでいるため、DB には両方の表記が入ります（2026-09-12 に <code>--bunsho-taxonomy=souzoku</code> を実行し、18 件のうち <code>sozoku</code> 11 件・<code>souzoku</code> 7 件を確認）。</p>
+<h3>略称と通称の展開（v0.11.1、Issue #21）</h3>
+<p>キーワードが略称辞書（houki-abbreviations）に載っている場合、検索は正式名でも行います。v0.11.1 から、略称と通称で扱いを分けました。</p>
+<table>
+<thead>
+<tr>
+<th>キーワードの種類</th>
+<th>例</th>
+<th>扱い</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>略称そのもの</td>
+<td>「消基通」→ 消費税法基本通達、「消法」→ 消費税法</td>
+<td>これまでどおり、元の語と正式名の両方で検索します</td>
+</tr>
+<tr>
+<td>通称</td>
+<td>「インボイス」「軽減税率」「適格請求書発行事業者」→ 消費税法</td>
+<td><strong>元の語で 0 件のときだけ</strong>正式名で検索します</td>
+</tr>
+</tbody></table>
+<p>通称の展開先（「消費税法」）は、通達・質疑応答事例の本文にほぼ必ず出てきます。v0.11.0 までは通称でも常に展開していたため、「消費税法」という語が出てくるだけの文書が結果に混ざり、キーワードを含む文書が <code>limit</code> から押し出されていました（「適格請求書発行事業者」を limit 30 で検索すると、含む条項 32 件のうち 9 件が外れ、含まない条項が 7 件入っていました）。</p>
+<p>通称を 0 件のため展開したときは、応答の <code>search_notes</code> にその旨が入ります。展開した検索の結果には、「消費税法」という語が出てくるだけの文書も含まれます。</p>
+<h3>本文中の画像（v0.10.1、Issue #17）</h3>
+<p>所基通などの一部の通達では、算式が GIF 画像で掲載されています。v0.10.0 までは画像の段落が丸ごと落ち、本文が途切れていることを応答から読み取れませんでした。v0.10.1 からは <code>&lt;img&gt;</code> を <code>[画像: alt テキスト]</code> のプレースホルダとして同じ位置の段落に残し（alt が無ければ <code>[画像: ファイル名]</code>）、<code>format: "json"</code> では該当段落の <code>images: [{ alt, src }]</code> と、応答直下の <code>content_notes</code> でも画像の存在を示します。Markdown では本文末尾に <code>&gt; 注意: 本文に画像が N 箇所含まれています…</code> の行が入ります。画像の内容そのものは取得しないので、算式の正確な内容は出典 URL で確認してください。</p>
+<p>v0.10.0 以前に構築した DB には画像のプレースホルダが入っていません。<code>houki-nta-mcp --bulk-download-all --refresh</code> で通達を再投入してください（<code>--refresh</code> なしでは、国税庁サイトが <code>304 Not Modified</code> を返す節は再解析されません）。</p>
+<h3>文書回答事例の本文と別紙（v0.10.3）</h3>
+<p>文書回答事例のページは、照会者・関係する法令条項等・回答年月日・回答者・回答内容が表（<code>&lt;table class="kaito"&gt;</code>）に入り、照会の趣旨・事実関係・理由は「別紙」（同じディレクトリの <code>another.htm</code>）にあります。v0.10.2 までは <code>&lt;p&gt;</code> しか読んでいなかったため、<code>fullText</code> が「〔照会〕」「〔回答〕」の見出しだけになり、<code>issuedAt</code> も <code>null</code> でした。v0.10.3 からは表の各行を「見出し: 値」の形で取り込み、回答年月日を <code>issuedAt</code> にし、<code>--bulk-download-bunshokaitou</code> で別紙も取得して <code>【別紙】</code> として本文の末尾に連結します（文書あたり 1 リクエスト増えます）。</p>
+<p>v0.10.2 以前に構築した DB の文書回答事例には本文が入っていません。<strong>v0.10.4 以降で</strong> <code>houki-nta-mcp --bulk-download-bunshokaitou --refresh</code> を実行して再投入してください（v0.10.3 までは <code>--refresh</code> が基本通達以外に効かず、文書回答事例は <code>304 Not Modified</code> で再解析されませんでした）。</p>
+<h2>使い方の例</h2>
+<pre><code class="language-jsonc">// nta_get_tsutatsu — DB-first lookup（bulk DL 済みなら即時応答 ~10ms）
+{ "name": "消基通", "clause": "1-4-13の2" }
+// → "## 1-4-13の2（分割があった場合の課税事業者選択届出書の効力等）..."
+//    + 出典 URL + 取得時刻 + 解釈の対象になる法律 + legal_status の note + source: 'db' | 'live'
+// format: "json" では base_laws と next_actions（houki-egov-mcp の get_law への案内）が付く
+//   "base_laws": ["消費税法", "消費税法施行令", "消費税法施行規則"],
+//   "next_actions": [{ "action": "delegate_to_mcp",
+//     "reason": "通達は国民・裁判所を拘束しない。根拠は法律本文で確認する",
+//     "example": { "mcp": "houki-egov", "tool": "get_law", "law_name": "消費税法" } }]
+
+// 所基通（2 階層 clause / の付き）
+{ "name": "所基通", "clause": "2-4の2" }
+
+// 所基通源泉（チルダ複数条共通）
+{ "name": "所基通", "clause": "183~193共-1" }
+
+// 相基通（ナカグロ複数条共通）
+{ "name": "相基通", "clause": "1の3・1の4共-5" }
+
+// nta_search_tsutatsu — FTS5 全文検索（4 通達横断、freshness 付き）
+{ "keyword": "電子帳簿", "limit": 10 }
+// → { hits: [...], freshness: { staleness, oldest_fetched_at, ... }, legal_status: ...,
+//      base_laws_by_tsutatsu: { "消費税法基本通達": ["消費税法", "消費税法施行令", "消費税法施行規則"] },
+//      next_actions: [通達ごとに get_law への案内 1 件] }
+
+// nta_get_kaisei_tsutatsu — 改正通達取得
+{ "docId": "0026003-067" }
+// → "# 消費税法基本通達の一部改正について（法令解釈通達）" + 発出日 + 宛先 + 本文
+//   + 「## 添付 PDF (N 件)」表（🔄 新旧対照表 / 📎 別紙・別表 等で kind 分類済）
+//   + pdf-reader-mcp の read_text 呼び出し例 JSON
+//    PDF 本文は pdf-reader-mcp に委譲
+
+// nta_get_tax_answer — 番号で取得（先頭桁から税目自動判定）
+{ "no": "6101" }
+// → "# No.6101 消費税の基本的なしくみ ..." sections + 法令時点 + 出典
+
+// nta_get_qa — 質疑応答事例を取得
+{ "topic": "shohi", "category": "02", "id": "19" }
+// → "# 個人事業者が所有するゴルフ会員権の譲渡 ## 【照会要旨】 ... ## 【回答要旨】 ..."
+
+// 管轄外（消法 = 消費税法本体）→ houki-egov-mcp に誘導
+{ "name": "消法", "clause": "9" }
+// → { error: "...houki-egov の管轄...", hint: "houki-egov-mcp で取得してください" }
+</code></pre>
+<h2>初回セットアップ（bulk DL）</h2>
+<p>通達本体・改正通達・事務運営指針・文書回答事例・タックスアンサー・質疑応答事例を事前に bulk DL してローカル SQLite (FTS5) に投入します。1 度実行すれば DB から即時応答（fetch なし）。</p>
+<h3>まず数分で試す（v0.18.0 / Issue #35）</h3>
+<p>全部入りは 6 種別で約 100 分かかります。初めて入れたときは、通達 1 本だけを入れて動くことを確かめてください。</p>
+<pre><code class="language-bash">npx -y @shuji-bonji/houki-nta-mcp --quickstart   # 消費税法基本通達 1 本だけ。約 3〜5 分
+</code></pre>
+<p>終わると、その通達に対して <code>nta_search_tsutatsu</code> と <code>nta_get_tsutatsu</code> が使えます。別の通達にしたいときは <code>--quickstart --tsutatsu=所得税基本通達</code> のように指定します。ほかの種別はあとから、必要なものだけ足せます（下の「個別実行」）。</p>
+<p>DB が無い状態でも、<code>nta_get_*</code>（取得ツール）は国税庁サイトから直接取ります（約 700ms。結果は DB に書き戻します）。DB が要るのは <code>nta_search_*</code>（検索ツール）だけです。</p>
+<h3>コマンドの呼び出し形式</h3>
+<p>bulk DL コマンドは利用形態に応じて以下の 3 形式があります。以降の例は <strong>A. グローバルインストール済み</strong> の形式で記載しています。<code>B</code> / <code>C</code> を使う場合は同様に置き換えてください。</p>
+<table>
+<thead>
+<tr>
+<th>利用形態</th>
+<th>コマンド形式</th>
+<th>前提</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>A. グローバル install 済み</strong></td>
+<td><code>houki-nta-mcp --bulk-download-everything</code></td>
+<td><code>npm install -g @shuji-bonji/houki-nta-mcp</code> 実行済み</td>
+</tr>
+<tr>
+<td><strong>B. npx 経由（都度実行）</strong></td>
+<td><code>npx -y @shuji-bonji/houki-nta-mcp --bulk-download-everything</code></td>
+<td>Node.js / npm がインストール済みなら追加準備不要</td>
+</tr>
+<tr>
+<td><strong>C. ローカルクローン</strong></td>
+<td><code>node /path/to/houki-nta-mcp/dist/index.js --bulk-download-everything</code></td>
+<td><code>git clone</code> + <code>npm install</code> + <code>npm run build</code> 実行済み</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>[!TIP]
+Claude Desktop / Claude Code で MCP サーバとして登録する場合は別問題で、<code>mcp_servers</code> 設定の <code>npx -y @shuji-bonji/houki-nta-mcp</code> (= 形式 B) を使います（後述「Claude Desktop / Claude Code への登録例」を参照）。bulk DL は <strong>MCP サーバ起動とは別プロセス</strong> で人間が実行するため、ここではどの形式でも構いません。</p>
+</blockquote>
+<pre><code class="language-bash"># 全部入り: 6 種別を一括投入（約 100 分。--bunsho-taxonomy / --tax-answer-taxonomy / --qa-topic で短縮可。開始前に種別ごとの目安を表示します）
+
+# A. グローバル install 済み
+houki-nta-mcp --bulk-download-everything --bunsho-taxonomy=shotoku
+
+# B. npx 経由
+npx -y @shuji-bonji/houki-nta-mcp --bulk-download-everything --bunsho-taxonomy=shotoku
+
+# C. ローカルクローン
+node /path/to/houki-nta-mcp/dist/index.js --bulk-download-everything --bunsho-taxonomy=shotoku
+</code></pre>
+<pre><code class="language-bash"># 個別実行 — 必要な種別だけ足す（以下は形式 A の例。B / C は上記対応表で置き換え）
+houki-nta-mcp --quickstart                 # 通達 1 本（既定: 消基通、--tsutatsu= で変更可）
+houki-nta-mcp --bulk-download-all          # 通達本体 4 種
+houki-nta-mcp --bulk-download-kaisei       # 改正通達
+houki-nta-mcp --bulk-download-jimu-unei    # 事務運営指針
+houki-nta-mcp --bulk-download-bunshokaitou # 文書回答事例
+houki-nta-mcp --bulk-download-tax-answer   # タックスアンサー
+houki-nta-mcp --bulk-download-qa           # 質疑応答事例
+
+# 30 日より古い節を再取得（差分更新）
+houki-nta-mcp --refresh-stale=30 --apply
+
+# 9 種別の代表 URL を canary 検証（HP 構造変更検知）
+houki-nta-mcp --health-check
+
+# menu.htm を真の正典として CANARY_TARGETS の世代移行を事前検知（canary より前段の予兆検知 / v0.9.4+）
+houki-nta-mcp --check-baseline-drift
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>コンテンツ</th>
+<th>件数の目安</th>
+<th>投入時間</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>通達本体 (4 通達)</td>
+<td>約 2,800 clauses</td>
+<td>10-15 分</td>
+</tr>
+<tr>
+<td>改正通達</td>
+<td>約 125 docs</td>
+<td>5-10 分</td>
+</tr>
+<tr>
+<td>事務運営指針</td>
+<td>約 32 docs</td>
+<td>約 1 分</td>
+</tr>
+<tr>
+<td>文書回答事例</td>
+<td>数百〜2,000+ docs</td>
+<td>約 30 分超（絞り込み推奨）</td>
+</tr>
+<tr>
+<td>タックスアンサー</td>
+<td>約 750 docs</td>
+<td>約 14 分</td>
+</tr>
+<tr>
+<td>質疑応答事例</td>
+<td>約 1,840 docs</td>
+<td>約 35 分</td>
+</tr>
+</tbody></table>
+<p>DB は <code>${XDG_CACHE_HOME:-~/.cache}/houki-nta-mcp/cache.db</code>。詳細は <a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/DATABASE.md" target="_blank" rel="noopener noreferrer"><code>docs/DATABASE.md</code></a>。</p>
+<h3>投入済みかどうかを素早く確認する</h3>
+<p><code>nta_search_*</code> がエラー <code>DOC_NOT_FOUND</code>（基本通達は <code>TSUTATSU_NOT_FOUND</code>）を返した場合、その種別は MCP サーバーが開いている DB に入っていません（v0.12.0 までは <code>results: []</code> と「DB 投入済みか確認してください」のヒントでした）。投入の有無は以下で確認できます。</p>
+<pre><code class="language-bash"># 各 docType の件数を一発で確認 (DB が無ければ投入前)
+sqlite3 "$HOME/.cache/houki-nta-mcp/cache.db" \
+  "SELECT doc_type, COUNT(*) FROM document GROUP BY doc_type ORDER BY doc_type;"
+</code></pre>
+<p>期待される doc_type 名 → 対応 bulk DL コマンド:</p>
+<table>
+<thead>
+<tr>
+<th>doc_type</th>
+<th>bulk DL コマンド</th>
+<th>備考</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>tsutatsu</code></td>
+<td><code>--bulk-download-all</code></td>
+<td>通達本体 4 種を一括（消基通・所基通・法基通・相基通）</td>
+</tr>
+<tr>
+<td><code>kaisei</code></td>
+<td><code>--bulk-download-kaisei</code></td>
+<td>改正通達</td>
+</tr>
+<tr>
+<td><code>jimu-unei</code></td>
+<td><code>--bulk-download-jimu-unei</code></td>
+<td>事務運営指針</td>
+</tr>
+<tr>
+<td><code>bunshokaitou</code></td>
+<td><code>--bulk-download-bunshokaitou [--bunsho-taxonomy=…]</code></td>
+<td>文書回答事例（taxonomy 指定で短縮）</td>
+</tr>
+<tr>
+<td><code>tax-answer</code></td>
+<td><code>--bulk-download-tax-answer</code></td>
+<td>タックスアンサー</td>
+</tr>
+<tr>
+<td><code>qa-jirei</code></td>
+<td><code>--bulk-download-qa [--qa-topic=…]</code></td>
+<td>質疑応答事例（topic 指定で短縮）</td>
+</tr>
+</tbody></table>
+<p><code>--bulk-download-everything</code> は上記すべてを順番に実行する短絡コマンドです。</p>
+<p>bunsho-taxonomy / tax-answer-taxonomy / qa-topic で範囲を絞らない場合、<code>bunshokaitou</code> と <code>qa-jirei</code> は数千件単位になるため、初回は taxonomy/topic を絞って投入することを推奨します。</p>
+<p>税目に渡せる値は次のとおりです。v0.14.2 から、ここに無い値を渡すと、何も投入せずに使える値を表示して終了します（終了コード 1）。<code>--help</code> にも同じ一覧を載せています。</p>
+<table>
+<thead>
+<tr>
+<th>フラグ</th>
+<th>使える値</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--bunsho-taxonomy</code></td>
+<td><code>shotoku</code> / <code>gensen</code> / <code>joto-sanrin</code> / <code>sozoku</code> / <code>zoyo</code> / <code>hyoka</code> / <code>hojin</code> / <code>shohi</code> / <code>shozei</code> / <code>sonota</code>（国税局の表記 <code>souzoku</code> / <code>gensenshotoku</code> / <code>joto_sanrin</code> も可）</td>
+</tr>
+<tr>
+<td><code>--tax-answer-taxonomy</code></td>
+<td><code>shotoku</code> / <code>gensen</code> / <code>joto</code> / <code>sozoku</code> / <code>hojin</code> / <code>shohi</code> / <code>inshi</code> / <code>osirase</code></td>
+</tr>
+<tr>
+<td><code>--qa-topic</code></td>
+<td><code>shotoku</code> / <code>gensen</code> / <code>joto</code> / <code>sozoku</code> / <code>hyoka</code> / <code>hojin</code> / <code>shohi</code> / <code>inshi</code> / <code>hotei</code></td>
+</tr>
+</tbody></table>
+<p>v0.14.1 までは値を見ずに受け取っていたため、税目を打ち間違えても投入が 0 件のまま正常終了していました。</p>
+<pre><code class="language-bash"># 例: 所得税関連だけを bulk DL（数十分 → 数分に短縮）
+
+# A. グローバル install 済み
+houki-nta-mcp --bulk-download-bunshokaitou --bunsho-taxonomy=shotoku
+houki-nta-mcp --bulk-download-qa --qa-topic=shotoku
+
+# B. npx 経由
+npx -y @shuji-bonji/houki-nta-mcp --bulk-download-bunshokaitou --bunsho-taxonomy=shotoku
+npx -y @shuji-bonji/houki-nta-mcp --bulk-download-qa --qa-topic=shotoku
+
+# C. ローカルクローン
+node /path/to/houki-nta-mcp/dist/index.js --bulk-download-bunshokaitou --bunsho-taxonomy=shotoku
+node /path/to/houki-nta-mcp/dist/index.js --bulk-download-qa --qa-topic=shotoku
+</code></pre>
+<h2>推奨運用フロー</h2>
+<p>スクレイピング主体のため、国税庁 HP の構造変更で bulk DL や parse が静かに壊れるリスクがあります。検知・可視化のため、以下を組み合わせて運用するのを推奨:</p>
+<pre><code class="language-mermaid">flowchart LR
+  subgraph Monthly["月次（重い処理 / ~51 分）"]
+    M1["--bulk-download-everything&lt;br/&gt;6 種別を順次投入&lt;br/&gt;+ baseline 履歴記録"]
+  end
+
+  subgraph Weekly["週次（軽い処理 / 数秒〜数十秒）"]
+    direction TB
+    W1["--check-baseline-drift&lt;br/&gt;menu.htm 突合&lt;br/&gt;(v0.9.4+, ~0.1 秒)"]
+    W2["--health-check --strict&lt;br/&gt;9 種別 canary fetch+parse&lt;br/&gt;(~10 秒)"]
+  end
+
+  DB[("SQLite cache.db")]
+  R(["MCP レスポンス&lt;br/&gt;+ freshness&lt;br/&gt;(fresh / stale / outdated)"])
+
+  M1 --&gt;|"normalize + insert"| DB
+  DB --&gt;|"DB-first 応答"| R
+  W1 -.-&gt;|"drift 検出時&lt;br/&gt;baseline URL 更新を上申"| M1
+  W2 -.-&gt;|"parser 失敗時&lt;br/&gt;HP 構造変更を検知"| M1
+  R -.-&gt;|"stale なら&lt;br/&gt;再 bulk DL を促す"| M1
+
+  classDef monthly fill:#cce5ff,stroke:#0066cc
+  classDef weekly fill:#d4edda,stroke:#28a745
+  classDef response fill:#fff3cd,stroke:#ffc107
+  class Monthly monthly
+  class Weekly weekly
+  class R response
+</code></pre>
+<p><strong>設計の要点</strong>: 重い <code>bulk-download-everything</code> は <strong>月次</strong>、軽い <code>health-check</code> / <code>check-baseline-drift</code> は <strong>週次</strong>で階層化。週次の 2 つは Lv-3a (soft-404) と Lv-3b (menu.htm drift) の<strong>二重防御</strong>で、canary が落ちる前に baseline 更新を促せます (詳細は <a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/RESILIENCE.md" target="_blank" rel="noopener noreferrer"><code>docs/RESILIENCE.md</code></a> §5.9-5.11)。</p>
+<blockquote>
+<p>[!NOTE]
+以下の表およびコマンド例は、前述「コマンドの呼び出し形式」の <strong>形式 A (グローバル install 済み)</strong> を前提に記載しています。<code>B</code> (npx) / <code>C</code> (ローカルクローン) を使う場合は同様に置き換えてください。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>頻度</th>
+<th>コマンド</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>月 1 回</td>
+<td><code>houki-nta-mcp --bulk-download-everything</code></td>
+<td>4 パターン集計 + baseline 永続化</td>
+</tr>
+<tr>
+<td>週 1 回</td>
+<td><code>houki-nta-mcp --health-check</code></td>
+<td>9 種別の代表 URL を canary fetch + parse</td>
+</tr>
+<tr>
+<td>週 1 回</td>
+<td><code>houki-nta-mcp --check-baseline-drift</code></td>
+<td>menu.htm を正典として世代移行 (<code>sozoku2</code> 等) を事前検知 (v0.9.4+、canary より早期)</td>
+</tr>
+<tr>
+<td>週 1 回 (CI)</td>
+<td>GitHub Actions cron</td>
+<td><code>--health-check --strict</code> で自動検知 + <code>--check-baseline-drift</code> で drift 警告 (別 job)</td>
+</tr>
+</tbody></table>
+<p>cron 設定例:</p>
+<pre><code class="language-cron"># A. グローバル install 済み（npm install -g 済 / `which houki-nta-mcp` で絶対パス確認）
+# 月初に bulk DL（毎月 1 日 03:00 JST）
+0 3 1 * *  /usr/local/bin/houki-nta-mcp --bulk-download-everything &gt; ~/.cache/houki-nta-mcp/last-bulk.log 2&gt;&amp;1
+# 月曜に health-check（毎週月曜 09:00 JST）
+0 9 * * 1  /usr/local/bin/houki-nta-mcp --health-check &gt;&gt; ~/.cache/houki-nta-mcp/health.log 2&gt;&amp;1
+
+# B. npx 経由（PATH に node が通っている前提。/opt/homebrew/bin など環境ごとに調整）
+0 3 1 * *  /opt/homebrew/bin/npx -y @shuji-bonji/houki-nta-mcp --bulk-download-everything &gt; ~/.cache/houki-nta-mcp/last-bulk.log 2&gt;&amp;1
+0 9 * * 1  /opt/homebrew/bin/npx -y @shuji-bonji/houki-nta-mcp --health-check &gt;&gt; ~/.cache/houki-nta-mcp/health.log 2&gt;&amp;1
+
+# C. ローカルクローン
+0 3 1 * *  /opt/homebrew/bin/node /path/to/houki-nta-mcp/dist/index.js --bulk-download-everything &gt; ~/.cache/houki-nta-mcp/last-bulk.log 2&gt;&amp;1
+0 9 * * 1  /opt/homebrew/bin/node /path/to/houki-nta-mcp/dist/index.js --health-check &gt;&gt; ~/.cache/houki-nta-mcp/health.log 2&gt;&amp;1
+</code></pre>
+<blockquote>
+<p>[!TIP]
+cron は環境変数を継承しないので、<code>houki-nta-mcp</code> / <code>npx</code> / <code>node</code> は <strong>絶対パスで指定</strong>してください。<code>which houki-nta-mcp</code> / <code>which npx</code> / <code>which node</code> で確認できます。</p>
+</blockquote>
+<p>レスポンスに <code>freshness</code> フィールドが付き、<code>staleness</code> (<code>fresh</code>/<code>stale</code>/<code>outdated</code>) で再 bulk DL の必要性を判断できます。設計詳細は <a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/RESILIENCE.md" target="_blank" rel="noopener noreferrer"><code>docs/RESILIENCE.md</code></a>。</p>
+<h2>通達の法的位置付け（重要）</h2>
+<p>通達は <strong>行政内部文書</strong> であり、国民・裁判所には直接的な法的拘束力を持ちません（最高裁 昭和43.12.24 墓地埋葬法事件）。ただし税務署員は職務命令として守る義務があり、<strong>実務上は事実上の規範</strong> として機能します。</p>
+<pre><code>┌──────────────────────────────────────────────────┐
+│ 法律 (国会制定)              → 全員に拘束力     │
+│ 政令・省令・告示             → 同上             │
+│ ─── ここまでが houki-egov-mcp ─── │
+│ 通達 (行政内部)              → 税務署員のみ拘束 │
+│ 質疑応答事例                 → 参考情報         │
+│ タックスアンサー             → 一般向け解説     │
+│ ─── ここが houki-nta-mcp ─── │
+└──────────────────────────────────────────────────┘
+</code></pre>
+<p>各レスポンスには <code>legal_status</code> フィールドが付与され、種別ごとの拘束力（<code>binds_citizens</code> / <code>binds_courts</code> / <code>binds_tax_office</code>）が明示されます。LLM はこの情報を尊重して回答を組み立てる前提です。</p>
+<p>通達は国民・裁判所を拘束しないので、根拠は法律の条文で確かめる必要があります。v0.11.0 から、基本通達が解釈している法律・政令・省令と、その法律を houki-egov-mcp の <code>get_law</code> で読むための <code>next_actions</code> が応答に付きます。</p>
+<ul>
+<li><code>nta_get_tsutatsu</code>: <code>base_laws</code>（配列）</li>
+<li><code>nta_search_tsutatsu</code>: <code>base_laws_by_tsutatsu</code>（検索結果に現れた通達 → 配列の対応表）。対応は通達単位の事実なので、hit ごとではなく応答に 1 回だけ置きます</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>基本通達</th>
+<th><code>base_laws</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>消費税法基本通達</td>
+<td>消費税法、消費税法施行令、消費税法施行規則</td>
+</tr>
+<tr>
+<td>所得税基本通達</td>
+<td>所得税法、所得税法施行令、所得税法施行規則</td>
+</tr>
+<tr>
+<td>法人税基本通達</td>
+<td>法人税法、法人税法施行令、法人税法施行規則</td>
+</tr>
+<tr>
+<td>相続税法基本通達</td>
+<td>相続税法、相続税法施行令、相続税法施行規則</td>
+</tr>
+</tbody></table>
+<p>条番号は付けません。通達の項と法律の条の対応は一律ではなく、推測で付けると誤った引用につながるためです。</p>
+<h2>なぜ通達まで取得するのか</h2>
+<p>法律本文だけでは判断できないケースが多数あります。例えば消費税の軽減税率:</p>
+<ul>
+<li><strong>法律</strong>（消費税法 4 条）「飲食料品の譲渡には軽減税率を適用」</li>
+<li><strong>政令</strong>: 飲食料品の定義</li>
+<li><strong>基本通達 5-1-9</strong>: 「社内会議で出した飲食料品」「会議室への提供」「テイクアウト」の区分</li>
+<li><strong>質疑応答事例</strong>: 個別事例（「テレワーク手当に含まれる飲料水」等）</li>
+</ul>
+<p>会計・経理・税務系プロダクトを開発する場合、<strong>通達レベルまで参照しないと正しい判定ができない</strong> ことが多く、houki-nta-mcp はその領域をカバーします。</p>
+<h2>インストール</h2>
+<pre><code class="language-json">// claude_desktop_config.json
+{
+  "mcpServers": {
+    "houki-egov": {
+      "command": "npx",
+      "args": ["-y", "@shuji-bonji/houki-egov-mcp"]
+    },
+    "houki-nta": {
+      "command": "npx",
+      "args": ["-y", "@shuji-bonji/houki-nta-mcp"]
+    }
+  }
+}
+</code></pre>
+<p>法律本文と通達の両方を引けるよう、両方を併用することを推奨します。</p>
+<h3>初回 bulk DL の注意</h3>
+<ul>
+<li><strong>MCP サーバ起動とは別プロセス</strong> で bulk DL を事前実行します。まず試すなら <code>npx -y @shuji-bonji/houki-nta-mcp --quickstart</code>（通達 1 本、約 3〜5 分）、全部入りは <code>--bulk-download-everything</code>（6 種別、約 100 分）。</li>
+<li><a href="https://www.npmjs.com/package/@shuji-bonji/pdf-reader-mcp" target="_blank" rel="noopener noreferrer"><code>pdf-reader-mcp</code></a> を併用すると、改正通達の添付 PDF（新旧対照表など）も内容取得できます。v0.7.0 以降は kind 分類で「どの PDF を最優先で読むべきか」が Markdown 出力に明示され、<strong>v0.7.2 + pdf-reader-mcp v0.3.0 以降では <code>comparison</code> / <code>attachment</code> 系の PDF に対して <code>extract_tables</code> 呼び出し例を自動で出力</strong>します（表構造を保持したまま改正後/改正前を分離）。</li>
+</ul>
+<h3>prerelease (alpha) チャンネル</h3>
+<pre><code class="language-json">"args": ["-y", "@shuji-bonji/houki-nta-mcp@next"]   // alpha 系を追従
+"args": ["-y", "@shuji-bonji/houki-nta-mcp@latest"] // 安定版（既定）
+</code></pre>
+<h2>ローカル開発</h2>
+<pre><code class="language-bash">git clone git@github.com:shuji-bonji/houki-nta-mcp.git
+cd houki-nta-mcp
+npm install
+npm run build
+npm test
+</code></pre>
+<pre><code class="language-json">// 開発中の動作確認 (.mcp.json)
+{
+  "mcpServers": {
+    "houki-nta-local": {
+      "command": "node",
+      "args": ["/absolute/path/to/houki-nta-mcp/dist/index.js"]
+    }
+  }
+}
+</code></pre>
+<h2>エラー応答 (houki-hub family contract)</h2>
+<p>本 MCP のエラー応答は <strong>houki-hub family 共通契約</strong>に従います。<code>code</code> 文字列は family 全体で統一された語彙を使用するため、houki-egov-mcp / pdf-reader-mcp と併用しても LLM・Skill 層は一貫したロジックで解釈できます。</p>
+<ul>
+<li><a href="https://github.com/shuji-bonji/houki-research-skill/blob/main/docs/ERROR-CODES.md" target="_blank" rel="noopener noreferrer"><code>docs/ERROR-CODES.md</code></a> — 共通エラーコード語彙の正典 (houki-research-skill)</li>
+<li><a href="https://github.com/shuji-bonji/houki-research-skill/blob/main/docs/ERROR-HANDLING.md" target="_blank" rel="noopener noreferrer"><code>docs/ERROR-HANDLING.md</code></a> — 解釈ポリシー / next_actions テンプレ</li>
+</ul>
+<p>実装は <strong><a href="https://github.com/shuji-bonji/houki-egov-mcp/blob/main/src/errors.ts" target="_blank" rel="noopener noreferrer">houki-egov-mcp の <code>src/errors.ts</code></a> をリファレンス</strong>としつつ、本 MCP では共通パッケージ (<code>houki-abbreviations</code> 等) への依存を持たず独立して実装します。</p>
+<p>v0.10.0 以降、<code>tools/call</code> の応答は次の 3 経路でも同じ形式になり、いずれも <code>isError: true</code> が付きます（houki-egov-mcp v0.5.3 と同じ）。</p>
+<table>
+<thead>
+<tr>
+<th>経路</th>
+<th><code>code</code></th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ツール名が <code>tools/list</code> にない</td>
+<td><code>UNKNOWN_TOOL</code></td>
+<td><code>retryable: false</code>。<code>error</code> は <code>存在しないツールです: &lt;ツール名&gt;</code>、<code>hint</code> に利用可能なツール名一覧</td>
+</tr>
+<tr>
+<td>引数が <code>tools/list</code> の <code>inputSchema</code> に合わない（型・必須・enum・範囲・空文字・inputSchema に無い引数。v0.14.0 から未知の引数、v0.22.0 から範囲と空文字もエラー）</td>
+<td><code>INVALID_ARGUMENT</code></td>
+<td><code>detail.issues[]</code> に違反 1 件ごとの <code>path</code>（引数名）と <code>message</code>（日本語の 1 文）。handler は呼ばれません</td>
+</tr>
+<tr>
+<td>handler が例外を投げた</td>
+<td><code>INTERNAL_ERROR</code></td>
+<td><code>retryable: false</code>（不具合の報告を求めます。<code>next_actions</code> は付きません）、<code>detail.cause</code> に例外メッセージ</td>
+</tr>
+</tbody></table>
+<p>handler が <code>LawServiceError</code>（上の JSON 形式）を返した場合も <code>isError: true</code> が付きます。</p>
+<pre><code class="language-json">{
+  "error": "改正通達 docId=\"0025004-999\" は見つかりません",
+  "code": "DOC_NOT_FOUND",
+  "hint": "DB の改正通達 118 件に、この docId はありません。available_doc_ids（新しい順に 30 件）から選ぶか、nta_search_kaisei_tsutatsu で検索して docId を確かめてください。DB を投入した後に国税庁が公開した文書は、`houki-nta-mcp --bulk-download-kaisei` をもう一度実行すると取り込めます",
+  "available_doc_ids": [
+    { "docId": "0026003-067", "title": "消費税法基本通達の一部改正について（法令解釈通達）", "issuedAt": "2026-04-01" }
+  ],
+  "next_actions": [
+    {
+      "action": "nta_search_kaisei_tsutatsu",
+      "reason": "キーワード検索で正しい docId を探せます"
+    }
+  ],
+  "tool": "nta_get_kaisei_tsutatsu"
+}
+</code></pre>
+<h3>引数の検査（v0.22.0）</h3>
+<p>v0.22.0 から、引数の誤りは DB や国税庁サイトを引く前に <code>INVALID_ARGUMENT</code> で返します。v0.21.x までは、範囲の外の値を丸めたり、空のキーワードを「該当なし」として返したりしていました。</p>
+<table>
+<thead>
+<tr>
+<th>引数</th>
+<th>検査</th>
+<th>例</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>検索ツールの <code>limit</code></td>
+<td>1 以上 50 以下の整数。丸めません</td>
+<td><code>limit: 100</code> は「50 以下で指定してください」</td>
+</tr>
+<tr>
+<td>必須の文字列（<code>keyword</code>・<code>abbr</code>・<code>name</code>・<code>docId</code>・<code>category</code>・<code>id</code>・<code>no</code>）</td>
+<td>空文字と、空白（全角スペース・タブ・改行を含む）だけの値は受け付けません</td>
+<td><code>keyword: "　"</code> は「keyword が空です」</td>
+</tr>
+<tr>
+<td>文書の識別子（文書系 3 ツールの <code>docId</code>、<code>nta_get_qa</code> の <code>category</code> / <code>id</code>、<code>nta_get_tax_answer</code> の <code>no</code>）</td>
+<td>受け付ける形かを確かめます。全角の数字・ダッシュ類は半角に揃えてから確かめます</td>
+<td><code>no: "６１０１"</code> は <code>"6101"</code> と同じ。<code>no: "61"</code> は「半角の数字 4 桁で指定してください」</td>
+</tr>
+</tbody></table>
+<p>文書の識別子の形は次のとおりです。形は合っていても DB に無い値は、<code>DOC_NOT_FOUND</code> と <code>available_doc_ids</code> で案内します。</p>
+<table>
+<thead>
+<tr>
+<th>ツール</th>
+<th><code>docId</code> の形</th>
+<th>例</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>nta_get_kaisei_tsutatsu</code></td>
+<td>英小文字・数字・<code>-</code> だけの 1 つの要素</td>
+<td><code>0026003-067</code>、<code>240401</code>、<code>tougou</code></td>
+</tr>
+<tr>
+<td><code>nta_get_jimu_unei</code></td>
+<td><code>税目/…/フォルダー名</code>（2 つ以上の要素。2 つ目以降は <code>_</code> も使えます）</td>
+<td><code>shotoku/shinkoku/170331</code>、<code>sozoku/170111_1</code></td>
+</tr>
+<tr>
+<td><code>nta_get_bunshokaitou</code></td>
+<td><code>税目/フォルダー名</code> か <code>局/税目/フォルダー名</code></td>
+<td><code>shotoku/250416</code>、<code>tokyo/shotoku/260218</code></td>
+</tr>
+</tbody></table>
+<p><code>nta_get_qa</code> の <code>category</code> と <code>id</code> は 1 桁か 2 桁の数字、<code>nta_get_tax_answer</code> の <code>no</code> は 4 桁の数字です。略称（<code>abbr</code>・<code>name</code>、検索キーワードの略称の展開）も、全角の英数字・ダッシュ類・全角スペースを半角に揃えてから辞書を引くので、<code>ＰＬ法</code> は <code>PL法</code> と同じ結果になります。</p>
+<h3>docId が見つからないとき（v0.14.1）</h3>
+<p>取得系の <code>nta_get_kaisei_tsutatsu</code> / <code>nta_get_jimu_unei</code> / <code>nta_get_bunshokaitou</code> は、指定された docId が DB に無いとき、理由を 2 つに分けて返します。どちらも <code>code</code> は <code>DOC_NOT_FOUND</code> です（v0.21.x までは、改正通達と事務運営指針が <code>TSUTATSU_NOT_FOUND</code> でした）。</p>
+<table>
+<thead>
+<tr>
+<th>DB の状態</th>
+<th>応答</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>その種別の文書が 1 件もない</td>
+<td>「ローカル DB に◯◯が 1 件も無いため、docId=… を取得できません」。<code>hint</code> に DB のパスと環境変数、<code>next_actions</code> に投入コマンド（<code>cli_bulk_download</code>）</td>
+</tr>
+<tr>
+<td>文書はあるが、その docId が無い</td>
+<td>「◯◯ docId=… は見つかりません」。<code>available_doc_ids</code>（新しい順に 30 件）と、検索ツールへの <code>next_actions</code></td>
+</tr>
+</tbody></table>
+<p>v0.14.0 までは、どちらの場合も「DB に未投入です」と返して bulk download を案内していたため、docId を打ち間違えただけでも投入を勧めていました。</p>
+<h2>ドキュメント</h2>
+<ul>
+<li>🌐 <strong><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/HOUKI-FAMILY-INTEGRATION.md" target="_blank" rel="noopener noreferrer"><code>docs/HOUKI-FAMILY-INTEGRATION.md</code></a> — houki-hub family 4 つを連携した統合利用ガイド (Claude Desktop / Claude Code 向け install→設定→実例 4 ユースケース)</strong></li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/DESIGN.md" target="_blank" rel="noopener noreferrer"><code>docs/DESIGN.md</code></a> — 設計原則・houki-hub family 内の位置付け・ツール設計</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/DATABASE.md" target="_blank" rel="noopener noreferrer"><code>docs/DATABASE.md</code></a> — SQLite + FTS5 スキーマ・テーブル仕様・マイグレーション履歴</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/DATA-SOURCES.md" target="_blank" rel="noopener noreferrer"><code>docs/DATA-SOURCES.md</code></a> — 国税庁公開コンテンツの URL 構造・スクレイピング方針・ライセンス</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/RESILIENCE.md" target="_blank" rel="noopener noreferrer"><code>docs/RESILIENCE.md</code></a> — HP 構造変更検知の 5 層フレームワーク・運用フロー</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/PHASE4-PDF.md" target="_blank" rel="noopener noreferrer"><code>docs/PHASE4-PDF.md</code></a> — Phase 4: PDF メタデータ強化と pdf-reader-mcp 連携の責務分離</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/PHASE4-PDF-FIXTURES.md" target="_blank" rel="noopener noreferrer"><code>docs/PHASE4-PDF-FIXTURES.md</code></a> — kind 別代表 PDF カタログ + Phase 4-3 実機テスト結果</li>
+<li>🚧 <a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/PHASE6.md" target="_blank" rel="noopener noreferrer"><code>docs/PHASE6.md</code></a> — <strong>Phase 6 計画書</strong>: 運用品質と発信の底上げ (v1.0.0 への道) — search relevance ranking / bulk DL 差分更新 / houki-hub-doc + llms.txt 公開</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/llms.txt" target="_blank" rel="noopener noreferrer"><code>llms.txt</code></a> — LLM 向け summary（family routing / setup / legal positioning）</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/DISCLAIMER.md" target="_blank" rel="noopener noreferrer"><code>DISCLAIMER.md</code></a> — 通達の法的位置付け・利用範囲</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer"><code>CONTRIBUTING.md</code></a> — 貢献方法</li>
+<li><a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer"><code>CHANGELOG.md</code></a> — リリースノート</li>
+</ul>
+<h2>業法との関係</h2>
+<p>本 MCP は <strong>一次情報の取得・提示のみ</strong> を担います。分析は LLM、判断は利用者（または有資格者）の責任です。</p>
+<p><strong>業としての税務代理・税務書類作成・税務相談（税理士法 52 条）への利用は想定外</strong> です。詳細は <a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/DISCLAIMER.md" target="_blank" rel="noopener noreferrer"><code>DISCLAIMER.md</code></a> 参照。</p>
+<h2>ライセンス</h2>
+<p>MIT — 個人利用・学習用途のフォーク・改変・再配布を自由に許可します。</p>
+<p>国税庁コンテンツの著作権は <strong>国（国税庁）</strong> にあり、再配布・改変は<a href="https://cio.go.jp/policy-opendata" target="_blank" rel="noopener noreferrer">政府標準利用規約（第 2.0 版）</a>の範囲内で可能です。本 MCP は出典 URL を必ず付与する設計とし、利用者は元情報を確認できます。</p>
+<h2>houki-hub MCP family</h2>
+<table>
+<thead>
+<tr>
+<th>パッケージ</th>
+<th>役割</th>
+<th>状態</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/shuji-bonji/houki-abbreviations" target="_blank" rel="noopener noreferrer"><code>@shuji-bonji/houki-abbreviations</code></a></td>
+<td>略称辞書（共有ライブラリ）</td>
+<td>✅ 公開済</td>
+</tr>
+<tr>
+<td><a href="https://github.com/shuji-bonji/houki-egov-mcp" target="_blank" rel="noopener noreferrer"><code>@shuji-bonji/houki-egov-mcp</code></a></td>
+<td>e-Gov 法令 API クライアント。法律・政令・省令・規則・告示の本文取得</td>
+<td>✅ 公開済</td>
+</tr>
+<tr>
+<td><strong><code>@shuji-bonji/houki-nta-mcp</code></strong></td>
+<td><strong>国税庁の通達・改正通達・事務運営指針・文書回答事例・Q&amp;A・タックスアンサー（このリポジトリ）</strong></td>
+<td>✅ 公開済</td>
+</tr>
+<tr>
+<td><code>@shuji-bonji/houki-mhlw-mcp</code></td>
+<td>厚労省の通達・通知・指針</td>
+<td>📅 計画中</td>
+</tr>
+<tr>
+<td><code>@shuji-bonji/houki-saiketsu-mcp</code></td>
+<td>裁決全般。初版は国税不服審判所 (kfs.go.jp、約 1,950 件)。将来的に公正取引委員会・特許庁審判部・各省庁不服審査会 等へ拡張</td>
+<td>💭 構想中</td>
+</tr>
+<tr>
+<td><code>@shuji-bonji/houki-court-mcp</code></td>
+<td>判例全般。初版は民事判決オープンデータ API。将来的に courts.go.jp の全公開判例（最高裁・高裁・地裁）へ拡張</td>
+<td>💭 構想中</td>
+</tr>
+<tr>
+<td><code>@shuji-bonji/houki-hub</code></td>
+<td>meta-package（一括 install）</td>
+<td>📅 計画中</td>
+</tr>
+</tbody></table>
+<p>family 全体のドキュメントサイト（<a href="https://houki-hub.mikuro.net" target="_blank" rel="noopener noreferrer">houki-hub.mikuro.net</a> / 構築中）で各 MCP の詳細を順次公開予定です。</p>
+<blockquote>
+<p>💡 houki-nta-mcp 単体ではなく <strong><code>houki-egov-mcp</code> + <code>pdf-reader-mcp</code> と連携させて使う方法</strong> は <a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/docs/HOUKI-FAMILY-INTEGRATION.md" target="_blank" rel="noopener noreferrer"><code>docs/HOUKI-FAMILY-INTEGRATION.md</code></a> にまとめてあります。Claude Desktop / Claude Code の設定例から、新旧対照表 PDF を <code>extract_tables</code> で表構造のまま抽出する実例まで、一から順に追えるガイドです。</p>
+</blockquote>
+<p>ただし、<strong>業としての使用（税理士法 52 条が定める独占業務）</strong> については想定外であり、作者は一切の責任を負いません。<a href="https://github.com/shuji-bonji/houki-nta-mcp/blob/HEAD/DISCLAIMER.md" target="_blank" rel="noopener noreferrer"><code>DISCLAIMER.md</code></a> を必ずご確認ください。</p>

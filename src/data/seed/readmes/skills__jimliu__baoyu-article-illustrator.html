@@ -1,0 +1,378 @@
+<h1>Article Illustrator</h1>
+<p>Analyze articles, identify illustration positions, generate images with Type × Style × Palette consistency.</p>
+<h2>User Input Tools</h2>
+<p>When this skill prompts the user, follow this tool-selection rule (priority order):</p>
+<ol>
+<li><strong>Prefer built-in user-input tools</strong> exposed by the current agent runtime — e.g., <code>AskUserQuestion</code>, <code>request_user_input</code>, <code>clarify</code>, <code>ask_user</code>, or any equivalent.</li>
+<li><strong>Fallback</strong>: if no such tool exists, emit a numbered plain-text message and ask the user to reply with the chosen number/answer for each question.</li>
+<li><strong>Batching</strong>: if the tool supports multiple questions per call, combine all applicable questions into a single call; if only single-question, ask them one at a time in priority order.</li>
+</ol>
+<p>Concrete <code>AskUserQuestion</code> references below are examples — substitute the local equivalent in other runtimes.</p>
+<h2>Image Generation Tools</h2>
+<p>When this skill needs to render an image, resolve the backend in this order:</p>
+<ol>
+<li><strong>Current-request override</strong> — if the user names a specific backend in the current message, use it.</li>
+<li><strong>Saved preference</strong> — if <code>EXTEND.md</code> sets <code>preferred_image_backend</code> to a backend available right now, use it.</li>
+<li><strong>Auto-select</strong> (when the preference is <code>auto</code>, unset, or the pinned backend isn't available):<ul>
+<li><strong>Codex (<code>imagegen</code>)</strong> — first, inspect your available-skills / tool inventory. If a skill named <code>imagegen</code> is listed, you are running inside Codex and MUST use it: invoke via the <code>Skill</code> tool with <code>skill: "imagegen"</code>, passing the saved prompt file's content (plus output path and aspect ratio per Codex <code>imagegen</code>'s own args). Codex <code>imagegen</code> is the official raster backend in that runtime and outranks any non-native skill (e.g., <code>baoyu-image-gen</code>) unless the user has explicitly pinned a different <code>preferred_image_backend</code>.</li>
+<li><strong>Codex via <code>codex exec</code> (<code>codex-imagegen</code>)</strong> — if the current runtime exposes no native <code>imagegen</code> skill but the <code>codex</code> CLI is on <code>PATH</code> with an active <code>codex login</code>, route through <code>baoyu-image-gen --provider codex-cli</code> (preferred), or — if baoyu-image-gen is unavailable — invoke the bundled wrapper directly. Details, parameters, and the runtime-discovery procedure live in <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/codex-imagegen.md" target="_blank" rel="noopener noreferrer">references/codex-imagegen.md</a> — load that file only when this branch is selected.</li>
+<li><strong>Cursor (<code>GenerateImage</code>)</strong> — if the runtime exposes a native <code>GenerateImage</code> tool, you are running inside Cursor and it outranks any non-native skill the same way Codex <code>imagegen</code> does. Two hard caveats: (a) it has no aspect-ratio parameter — state the target aspect ratio / dimensions explicitly in the prompt text passed as <code>description</code>; (b) it does not accept an output directory — it saves to a tool-managed location, so after generation copy/move the file to the skill's expected output path (e.g., <code>outputs/.../NN-xxx.png</code>). Reference images go in <code>reference_image_paths</code>.</li>
+<li><strong>Other runtime-native tools</strong> — if the runtime exposes a different native image tool (e.g., Hermes <code>image_generate</code>), use it the same way.</li>
+<li>Otherwise, if exactly one non-native backend is installed (e.g., <code>baoyu-image-gen</code>), use it.</li>
+<li>Otherwise (multiple non-native backends with no runtime-native tool), ask the user once — batch with any other initial questions.</li>
+</ul>
+</li>
+<li><strong>If none are available</strong>, tell the user and ask how to proceed.</li>
+</ol>
+<p><strong>⛔ Never substitute SVG, HTML, canvas, or other code-based rendering for raster image generation.</strong> Codex <code>imagegen</code>'s own description says it should be used "when the output should be a bitmap asset rather than repo-native code or vector." If you cannot resolve a raster backend via step 3, fall through to step 4 and ask the user — do <strong>not</strong> silently emit SVG, write inline <code>&lt;svg&gt;</code> markup, or produce HTML/CSS art as a substitute. This applies even if the article/section seems "diagram-like": the consumer skill calling this rule has already decided that a raster image is what it needs.</p>
+<p><strong>⛔ Never repair rendered text by painting over a generated bitmap.</strong> Do not use ImageMagick, Pillow, Canvas, SVG, HTML/CSS, OCR scripts, or any other programmatic overlay to cover, rewrite, erase, stroke, or replace labels, captions, or any other text inside an already generated illustration. If text is wrong or unclear, regenerate from a corrected prompt, redraw with less or no on-image text, or ask the user which imperfect candidate to keep.</p>
+<p>Setting <code>preferred_image_backend: ask</code> forces the step-3 prompt every run regardless of available backends. Users change the pinned backend via the <code>## Changing Preferences</code> section below.</p>
+<p><strong>Prompt file requirement (hard)</strong>: write each image's full, final prompt to a standalone file under <code>prompts/</code> (naming: <code>NN-{type}-[slug].md</code>) BEFORE invoking any backend. The backend receives the prompt file (or its content); the file is the reproducibility record and lets you switch backends without regenerating prompts.</p>
+<p>Concrete tool names (<code>imagegen</code>, <code>GenerateImage</code>, <code>image_generate</code>, <code>baoyu-image-gen</code>) above are examples — substitute the local equivalents under the same rule.</p>
+<h2>Batch Generation Policy</h2>
+<p>After every prompt file for the run has been saved and verified, generate images in batches by default.</p>
+<p>Priority order:</p>
+<ol>
+<li>Use the chosen backend's native batch / multi-task interface if it exists. Each task must keep its own prompt file, output path, aspect ratio, and direct reference images.</li>
+<li>If no native batch interface exists but the runtime can issue parallel tool calls, dispatch up to <code>generation_batch_size</code> images at a time. Default: <code>4</code>. An explicit user request in the current message, such as <code>--batch-size 4</code> or "并行4张一起生成", overrides EXTEND.md.</li>
+<li>If neither native batch nor parallel tool calls are available, generate sequentially.</li>
+</ol>
+<p>Rules:</p>
+<ul>
+<li>Never start the first batch until all prompt files for that batch exist on disk.</li>
+<li>Retry failed items once without regenerating successful items.</li>
+<li>Do not use subagents merely to parallelize image rendering. Use subagents only for separate prompt iteration or creative exploration.</li>
+</ul>
+<h2>Confirmation Policy</h2>
+<p>Default behavior: <strong>confirm before generation</strong>.</p>
+<ul>
+<li>Treat explicit skill invocation, a file path, matched signals/presets, and <code>EXTEND.md</code> defaults as <strong>recommendation inputs only</strong>. None of them authorizes skipping confirmation.</li>
+<li>Do <strong>not</strong> start Step 4 or later until the user completes Step 3.</li>
+<li>Skip confirmation only when the current request explicitly says to do so, for example: "直接生成", "不用确认", "跳过确认", "按默认出图", or equivalent wording.</li>
+<li>If confirmation is skipped explicitly, state the assumed type / density / style / palette / language / backend in the next user-facing update before generating.</li>
+</ul>
+<h2>Reference Images</h2>
+<p>Users may supply reference images via <code>--ref &lt;files...&gt;</code> or by providing file paths / pasting images in conversation. Refs guide style, palette, composition, or subject for specific illustrations.</p>
+<p>Full detection, storage, and processing rules are in <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/workflow.md" target="_blank" rel="noopener noreferrer">references/workflow.md</a> (Step 1.0 saves to <code>references/NN-ref-{slug}.{ext}</code>; Step 5.3 processes per-illustration usage <code>direct | style | palette</code>). When the chosen backend supports batch input, <code>direct</code>-usage entries in each prompt file's <code>references:</code> frontmatter should be propagated into its batch payload so backends can pass them through (e.g. <code>baoyu-image-gen</code> accepts <code>ref</code> per task).</p>
+<h2>Three Dimensions</h2>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Controls</th>
+<th>Examples</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Type</strong></td>
+<td>Information structure</td>
+<td>infographic, scene, flowchart, comparison, framework, timeline</td>
+</tr>
+<tr>
+<td><strong>Style</strong></td>
+<td>Rendering approach</td>
+<td>notion, warm, minimal, blueprint, watercolor, elegant</td>
+</tr>
+<tr>
+<td><strong>Palette</strong></td>
+<td>Color scheme (optional)</td>
+<td>macaron, warm, neon — overrides style's default colors</td>
+</tr>
+</tbody></table>
+<p>Combine freely: <code>--type infographic --style vector-illustration --palette macaron</code></p>
+<p>Or use presets: <code>--preset edu-visual</code> → type + style + palette in one flag. See <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/style-presets.md" target="_blank" rel="noopener noreferrer">Style Presets</a>.</p>
+<h2>Types</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>infographic</code></td>
+<td>Data, metrics, technical</td>
+</tr>
+<tr>
+<td><code>scene</code></td>
+<td>Narratives, emotional</td>
+</tr>
+<tr>
+<td><code>flowchart</code></td>
+<td>Processes, workflows</td>
+</tr>
+<tr>
+<td><code>comparison</code></td>
+<td>Side-by-side, options</td>
+</tr>
+<tr>
+<td><code>framework</code></td>
+<td>Models, architecture</td>
+</tr>
+<tr>
+<td><code>timeline</code></td>
+<td>History, evolution</td>
+</tr>
+</tbody></table>
+<h2>Styles</h2>
+<p>See <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/styles.md" target="_blank" rel="noopener noreferrer">references/styles.md</a> for Core Styles, full gallery, and Type × Style compatibility.</p>
+<h2>Workflow</h2>
+<pre><code>- [ ] Step 1: Pre-check (EXTEND.md, references, config)
+- [ ] Step 2: Analyze content
+- [ ] Step 3: Confirm settings (AskUserQuestion)
+- [ ] Step 4: Generate outline
+- [ ] Step 5: Generate images
+- [ ] Step 6: Finalize
+</code></pre>
+<h3>Step 1: Pre-check</h3>
+<p><strong>1.5 Load Preferences (EXTEND.md) ⛔ BLOCKING</strong></p>
+<p>Check EXTEND.md in priority order — the first one found wins:</p>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Path</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>.baoyu-skills/baoyu-article-illustrator/EXTEND.md</code></td>
+<td>Project</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>${XDG_CONFIG_HOME:-$HOME/.config}/baoyu-skills/baoyu-article-illustrator/EXTEND.md</code></td>
+<td>XDG</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>$HOME/.baoyu-skills/baoyu-article-illustrator/EXTEND.md</code></td>
+<td>User home</td>
+</tr>
+</tbody></table>
+<table>
+<thead>
+<tr>
+<th>Result</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Found</td>
+<td>Read, parse, display summary</td>
+</tr>
+<tr>
+<td>Not found</td>
+<td>⛔ Run <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/config/first-time-setup.md" target="_blank" rel="noopener noreferrer">first-time-setup</a></td>
+</tr>
+</tbody></table>
+<p>Full procedures: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/workflow.md#step-1-pre-check" target="_blank" rel="noopener noreferrer">references/workflow.md</a></p>
+<h3>Step 2: Analyze</h3>
+<table>
+<thead>
+<tr>
+<th>Analysis</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Content type</td>
+<td>Technical / Tutorial / Methodology / Narrative</td>
+</tr>
+<tr>
+<td>Purpose</td>
+<td>information / visualization / imagination</td>
+</tr>
+<tr>
+<td>Core arguments</td>
+<td>2-5 main points</td>
+</tr>
+<tr>
+<td>Positions</td>
+<td>Where illustrations add value</td>
+</tr>
+</tbody></table>
+<p><strong>CRITICAL</strong>: Metaphors → visualize underlying concept, NOT literal image.</p>
+<p>Full procedures: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/workflow.md#step-2-setup--analyze" target="_blank" rel="noopener noreferrer">references/workflow.md</a></p>
+<h3>Step 3: Confirm Settings ⚠️</h3>
+<p><strong>Hard gate</strong>: this step is mandatory per the <a href="#confirmation-policy" target="_blank" rel="noopener noreferrer">Confirmation Policy</a> — Steps 4+ cannot start until the user confirms here (or explicitly opts out with "直接生成" / equivalent wording in the current request).</p>
+<p><strong>ONE AskUserQuestion, max 4 Qs. Q1-Q2 REQUIRED. Q3 required unless preset chosen.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Q</th>
+<th>Options</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Q1: Preset or Type</strong></td>
+<td>[Recommended preset], [alt preset], or manual: infographic, scene, flowchart, comparison, framework, timeline, mixed</td>
+</tr>
+<tr>
+<td><strong>Q2: Density</strong></td>
+<td>minimal (1-2), balanced (3-5), per-section (Recommended), rich (6+)</td>
+</tr>
+<tr>
+<td><strong>Q3: Style</strong></td>
+<td>[Recommended], minimal-flat, sci-fi, hand-drawn, editorial, scene, poster, Other — <strong>skip if preset chosen</strong></td>
+</tr>
+<tr>
+<td>Q4: Palette</td>
+<td>Default (style colors), macaron, warm, neon — <strong>skip if preset includes palette or preferred_palette set</strong></td>
+</tr>
+<tr>
+<td>Q5: Language</td>
+<td>When article language ≠ EXTEND.md setting</td>
+</tr>
+</tbody></table>
+<p>Full procedures: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/workflow.md#step-3-confirm-settings-" target="_blank" rel="noopener noreferrer">references/workflow.md</a></p>
+<h3>Step 4: Generate Outline</h3>
+<p>Save <code>outline.md</code> with frontmatter (type, density, style, palette, image_count) and entries:</p>
+<pre><code class="language-yaml">## Illustration 1
+**Position**: [section/paragraph]
+**Purpose**: [why]
+**Visual Content**: [what]
+**Filename**: 01-infographic-concept-name.png
+</code></pre>
+<p>Full template: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/workflow.md#step-4-generate-outline" target="_blank" rel="noopener noreferrer">references/workflow.md</a></p>
+<h3>Step 5: Generate Images</h3>
+<p>⛔ <strong>BLOCKING: Prompt files MUST be saved before ANY image generation.</strong> This is a hard requirement regardless of which backend is chosen — the prompt file is the reproducibility record.</p>
+<ol>
+<li>For each illustration, create a prompt file per <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/prompt-construction.md" target="_blank" rel="noopener noreferrer">references/prompt-construction.md</a></li>
+<li>Save to <code>prompts/NN-{type}-{slug}.md</code> with YAML frontmatter</li>
+<li>Prompts <strong>MUST</strong> use type-specific templates with structured sections (ZONES / LABELS / COLORS / STYLE / ASPECT)</li>
+<li>LABELS <strong>MUST</strong> include article-specific data: actual numbers, terms, metrics, quotes</li>
+<li><strong>DO NOT</strong> pass ad-hoc inline prompts to <code>--prompt</code> without saving prompt files first</li>
+<li>Select the backend via the <code>## Image Generation Tools</code> rule at the top: use whatever is available; if multiple, ask the user once. Do this once per session before any generation.<ul>
+<li><strong><code>codex-imagegen</code> invocation</strong>: when the rule resolves to <code>codex-imagegen</code>, see <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/codex-imagegen.md" target="_blank" rel="noopener noreferrer">references/codex-imagegen.md</a> for the invocation contract (preferred <code>baoyu-image-gen --provider codex-cli</code> path, runtime wrapper discovery, parameter notes, stdout schema, batch semantics).</li>
+</ul>
+</li>
+<li><strong>Execution strategy</strong>: Generate in batches per the <code>## Batch Generation Policy</code>: backend native batch first, runtime parallel tool calls second, sequential only as fallback. Default batch size is 4 unless EXTEND.md or the current request overrides it.</li>
+<li>Process references (<code>direct</code>/<code>style</code>/<code>palette</code>) per prompt frontmatter</li>
+<li>Apply watermark if EXTEND.md enabled</li>
+<li>Generate from saved prompt files; retry once on failure</li>
+</ol>
+<p>Full procedures: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/workflow.md#step-5-generate-images" target="_blank" rel="noopener noreferrer">references/workflow.md</a></p>
+<h3>Step 6: Finalize</h3>
+<p>Insert <code>![description]({relative-path}/NN-{type}-{slug}.png)</code> after paragraphs. Path computed relative to article file based on output directory setting.</p>
+<pre><code>Article Illustration Complete!
+Article: [path] | Type: [type] | Density: [level] | Style: [style] | Palette: [palette or default]
+Images: X/N generated
+</code></pre>
+<h2>Output Directory</h2>
+<p>Output directory is determined by <code>default_output_dir</code> in EXTEND.md (set during first-time setup):</p>
+<table>
+<thead>
+<tr>
+<th><code>default_output_dir</code></th>
+<th>Output Path</th>
+<th>Markdown Insert Path</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>imgs-subdir</code> (default)</td>
+<td><code>{article-dir}/imgs/</code></td>
+<td><code>imgs/NN-{type}-{slug}.png</code></td>
+</tr>
+<tr>
+<td><code>same-dir</code></td>
+<td><code>{article-dir}/</code></td>
+<td><code>NN-{type}-{slug}.png</code></td>
+</tr>
+<tr>
+<td><code>illustrations-subdir</code></td>
+<td><code>{article-dir}/illustrations/</code></td>
+<td><code>illustrations/NN-{type}-{slug}.png</code></td>
+</tr>
+<tr>
+<td><code>independent</code></td>
+<td><code>illustrations/{topic-slug}/</code></td>
+<td><code>illustrations/{topic-slug}/NN-{type}-{slug}.png</code> (relative to cwd)</td>
+</tr>
+</tbody></table>
+<p>All auxiliary files (outline, prompts) are saved inside the output directory:</p>
+<pre><code>{output-dir}/
+├── outline.md
+├── prompts/
+│   └── NN-{type}-{slug}.md
+└── NN-{type}-{slug}.png
+</code></pre>
+<p>When input is <strong>pasted content</strong> (no file path), always uses <code>illustrations/{topic-slug}/</code> with <code>source-{slug}.{ext}</code> saved alongside.</p>
+<p><strong>Slug</strong>: 2-4 words, kebab-case. <strong>Conflict</strong>: append <code>-YYYYMMDD-HHMMSS</code>.</p>
+<h2>Modification</h2>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Steps</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Edit</td>
+<td>Update prompt → Regenerate → Update reference</td>
+</tr>
+<tr>
+<td>Add</td>
+<td>Position → Prompt → Generate → Update outline → Insert</td>
+</tr>
+<tr>
+<td>Delete</td>
+<td>Delete files → Remove reference → Update outline</td>
+</tr>
+</tbody></table>
+<p>Text correction policy:</p>
+<ul>
+<li>If any rendered text (labels, captions, etc.) is misspelled, garbled, hard to read, or visually weak, do not patch the bitmap with code.</li>
+<li>For text-correction regenerations, write a new prompt file and a new output path so the flawed candidate is preserved for comparison.</li>
+<li>Post-processing is limited to crop, resize, compression, or format conversion that does not alter text or the main composition.</li>
+</ul>
+<h2>References</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/workflow.md" target="_blank" rel="noopener noreferrer">references/workflow.md</a></td>
+<td>Detailed procedures</td>
+</tr>
+<tr>
+<td><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/usage.md" target="_blank" rel="noopener noreferrer">references/usage.md</a></td>
+<td>Command syntax</td>
+</tr>
+<tr>
+<td><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/styles.md" target="_blank" rel="noopener noreferrer">references/styles.md</a></td>
+<td>Style gallery + Palette gallery</td>
+</tr>
+<tr>
+<td><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/style-presets.md" target="_blank" rel="noopener noreferrer">references/style-presets.md</a></td>
+<td>Preset shortcuts (type + style + palette)</td>
+</tr>
+<tr>
+<td><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/prompt-construction.md" target="_blank" rel="noopener noreferrer">references/prompt-construction.md</a></td>
+<td>Prompt templates</td>
+</tr>
+<tr>
+<td><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-article-illustrator/references/config/first-time-setup.md" target="_blank" rel="noopener noreferrer">references/config/first-time-setup.md</a></td>
+<td>First-time setup</td>
+</tr>
+</tbody></table>
+<h2>Changing Preferences</h2>
+<p>EXTEND.md lives at the first matching path listed in Step 1.5. Three ways to change it:</p>
+<ul>
+<li><strong>Edit directly</strong> — open EXTEND.md and change fields. Full schema: <code>references/config/preferences-schema.md</code>.</li>
+<li><strong>Reconfigure interactively</strong> — delete EXTEND.md (or ask "reconfigure baoyu-article-illustrator preferences" / "重新配置"). The next run re-triggers first-time setup.</li>
+<li><strong>Common one-line edits</strong>:<ul>
+<li><code>preferred_image_backend: auto</code> — default; runtime-native tool wins, falls back to the only installed backend, asks only if multiple non-native are present.</li>
+<li><code>preferred_image_backend: codex-imagegen</code> — pin to Codex's built-in.</li>
+<li><code>preferred_image_backend: baoyu-image-gen</code> — pin to the baoyu-image-gen skill.</li>
+<li><code>preferred_image_backend: ask</code> — confirm backend every run.</li>
+<li><code>generation_batch_size: 4</code> — default number of images to render concurrently when the runtime supports parallel generation calls.</li>
+<li><code>preferred_type: infographic</code>, <code>preferred_style: notion</code>, <code>preferred_palette: macaron</code>, <code>language: zh</code>.</li>
+<li><code>default_output_dir: imgs-subdir</code> — where to write generated images relative to the article.</li>
+</ul>
+</li>
+</ul>

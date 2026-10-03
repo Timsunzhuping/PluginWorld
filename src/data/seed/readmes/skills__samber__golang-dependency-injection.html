@@ -1,0 +1,377 @@
+<p><strong>Persona:</strong> You are a Go software architect. You guide teams toward testable, loosely coupled designs — you choose the simplest DI approach that solves the problem, and you never over-engineer.</p>
+<p><strong>Orchestration mode:</strong> Fan out the three sub-agents described in Refactor mode (global/init discovery, concrete-dependency mapping, service-locator detection) when refactoring a large coupled codebase toward dependency injection, and consolidate into one migration plan. On Claude Code, use <code>ultracode</code> to opt into multi-agent orchestration explicitly.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Design mode</strong> (new project, new service, or adding a service to an existing DI setup): assess the existing dependency graph and lifecycle needs; recommend manual injection or a library from the decision table; then generate the wiring code.</li>
+<li><strong>Refactor mode</strong> (existing coupled code): use up to 3 parallel sub-agents — Agent 1 identifies global variables and <code>init()</code> service setup, Agent 2 maps concrete type dependencies that should become interfaces, Agent 3 locates service-locator anti-patterns (container passed as argument) — then consolidate findings and propose a migration plan.</li>
+</ul>
+<blockquote>
+<p><strong>Community default.</strong> A company skill that explicitly supersedes <code>samber/cc-skills-golang@golang-dependency-injection</code> skill takes precedence.</p>
+</blockquote>
+<h1>Dependency Injection in Go</h1>
+<p>Dependency injection (DI) means passing dependencies to a component rather than having it create or find them. In Go, this is how you build testable, loosely coupled applications — your services declare what they need, and the caller (or container) provides it.</p>
+<p>This skill is not exhaustive. When using a DI library (google/wire, uber-go/dig, uber-go/fx, samber/do), refer to the library's official documentation and code examples for current API signatures.</p>
+<p>For interface-based design foundations (accept interfaces, return structs), see the <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill.</p>
+<h2>Best Practices Summary</h2>
+<ol>
+<li>Dependencies MUST be injected via constructors — NEVER use global variables or <code>init()</code> for service setup</li>
+<li>Small projects (&lt; 10 services) SHOULD use manual constructor injection — no library needed</li>
+<li>Interfaces MUST be defined where consumed, not where implemented — accept interfaces, return structs</li>
+<li>NEVER use global registries or package-level service locators</li>
+<li>The DI container MUST only exist at the composition root (<code>main()</code> or app startup) — NEVER pass the container as a dependency</li>
+<li><strong>Prefer lazy initialization</strong> — only create services when first requested</li>
+<li><strong>Use singletons for stateful services</strong> (DB connections, caches) and transients for stateless ones</li>
+<li><strong>Mock at the interface boundary</strong> — DI makes this trivial</li>
+<li><strong>Keep the dependency graph shallow</strong> — deep chains signal design problems</li>
+<li><strong>Choose the right DI library</strong> for your project size and team — see the decision table below</li>
+</ol>
+<h2>Why Dependency Injection?</h2>
+<table>
+<thead>
+<tr>
+<th>Problem without DI</th>
+<th>How DI solves it</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Functions create their own dependencies</td>
+<td>Dependencies are injected — swap implementations freely</td>
+</tr>
+<tr>
+<td>Testing requires real databases, APIs</td>
+<td>Pass mock implementations in tests</td>
+</tr>
+<tr>
+<td>Changing one component breaks others</td>
+<td>Loose coupling via interfaces — components don't know each other's internals</td>
+</tr>
+<tr>
+<td>Services initialized everywhere</td>
+<td>Centralized container manages lifecycle (singleton, factory, lazy)</td>
+</tr>
+<tr>
+<td>All services loaded at startup</td>
+<td>Lazy loading — services created only when first requested</td>
+</tr>
+<tr>
+<td>Global state and <code>init()</code> functions</td>
+<td>Explicit wiring at startup — predictable, debuggable</td>
+</tr>
+</tbody></table>
+<p>DI shines in applications with many interconnected services — HTTP servers, microservices, CLI tools with plugins. For a small script with 2-3 functions, manual wiring is fine. Don't over-engineer.</p>
+<h2>Manual Constructor Injection (No Library)</h2>
+<p>For small projects, pass dependencies through constructors. See <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-dependency-injection/references/manual-di.md" target="_blank" rel="noopener noreferrer">Manual DI examples</a> for a complete application example.</p>
+<pre><code class="language-go">// ✓ Good — explicit dependencies, testable
+type UserService struct {
+    db     UserStore
+    mailer Mailer
+    logger *slog.Logger
+}
+
+func NewUserService(db UserStore, mailer Mailer, logger *slog.Logger) *UserService {
+    return &amp;UserService{db: db, mailer: mailer, logger: logger}
+}
+
+// main.go — manual wiring
+func main() {
+    logger := slog.Default()
+    db := postgres.NewUserStore(connStr)
+    mailer := smtp.NewMailer(smtpAddr)
+    userSvc := NewUserService(db, mailer, logger)
+    orderSvc := NewOrderService(db, logger)
+    api := NewAPI(userSvc, orderSvc, logger)
+    api.ListenAndServe(":8080")
+}
+</code></pre>
+<pre><code class="language-go">// ✗ Bad — hardcoded dependencies, untestable
+type UserService struct {
+    db *sql.DB
+}
+
+func NewUserService() *UserService {
+    db, _ := sql.Open("postgres", os.Getenv("DATABASE_URL")) // hidden dependency
+    return &amp;UserService{db: db}
+}
+</code></pre>
+<p>Manual DI breaks down when:</p>
+<ul>
+<li>You have 15+ services with cross-dependencies</li>
+<li>You need lifecycle management (health checks, graceful shutdown)</li>
+<li>You want lazy initialization or scoped containers</li>
+<li>Wiring order becomes fragile and hard to maintain</li>
+</ul>
+<h2>DI Library Comparison</h2>
+<p>Go has three main approaches to DI libraries:</p>
+<ul>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-dependency-injection/references/google-wire.md" target="_blank" rel="noopener noreferrer">google/wire examples</a> — Compile-time code generation</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-dependency-injection/references/uber-dig-fx.md" target="_blank" rel="noopener noreferrer">uber-go/dig + fx examples</a> — Reflection-based framework</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-dependency-injection/references/samber-do.md" target="_blank" rel="noopener noreferrer">samber/do examples</a> — Generics-based, no code generation</li>
+</ul>
+<h3>Decision Table</h3>
+<table>
+<thead>
+<tr>
+<th>Criteria</th>
+<th>Manual</th>
+<th>google/wire</th>
+<th>uber-go/dig + fx</th>
+<th>samber/do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Project size</strong></td>
+<td>Small (&lt; 10 services)</td>
+<td>Medium-Large</td>
+<td>Large</td>
+<td>Any size</td>
+</tr>
+<tr>
+<td><strong>Type safety</strong></td>
+<td>Compile-time</td>
+<td>Compile-time (codegen)</td>
+<td>Runtime (reflection)</td>
+<td>Compile-time (generics)</td>
+</tr>
+<tr>
+<td><strong>Code generation</strong></td>
+<td>None</td>
+<td>Required (<code>wire_gen.go</code>)</td>
+<td>None</td>
+<td>None</td>
+</tr>
+<tr>
+<td><strong>Reflection</strong></td>
+<td>None</td>
+<td>None</td>
+<td>Yes</td>
+<td>None</td>
+</tr>
+<tr>
+<td><strong>API style</strong></td>
+<td>N/A</td>
+<td>Provider sets + build tags</td>
+<td>Struct tags + decorators</td>
+<td>Simple, generic functions</td>
+</tr>
+<tr>
+<td><strong>Lazy loading</strong></td>
+<td>Manual</td>
+<td>N/A (all eager)</td>
+<td>Built-in (fx)</td>
+<td>Built-in</td>
+</tr>
+<tr>
+<td><strong>Singletons</strong></td>
+<td>Manual</td>
+<td>Built-in</td>
+<td>Built-in</td>
+<td>Built-in</td>
+</tr>
+<tr>
+<td><strong>Transient/factory</strong></td>
+<td>Manual</td>
+<td>Manual</td>
+<td>Built-in</td>
+<td>Built-in</td>
+</tr>
+<tr>
+<td><strong>Scopes/modules</strong></td>
+<td>Manual</td>
+<td>Provider sets</td>
+<td>Module system (fx)</td>
+<td>Built-in (hierarchical)</td>
+</tr>
+<tr>
+<td><strong>Health checks</strong></td>
+<td>Manual</td>
+<td>Manual</td>
+<td>Manual</td>
+<td>Built-in interface</td>
+</tr>
+<tr>
+<td><strong>Graceful shutdown</strong></td>
+<td>Manual</td>
+<td>Manual</td>
+<td>Built-in (fx)</td>
+<td>Built-in interface</td>
+</tr>
+<tr>
+<td><strong>Container cloning</strong></td>
+<td>N/A</td>
+<td>N/A</td>
+<td>N/A</td>
+<td>Built-in</td>
+</tr>
+<tr>
+<td><strong>Debugging</strong></td>
+<td>Print statements</td>
+<td>Compile errors</td>
+<td><code>fx.Visualize()</code></td>
+<td><code>ExplainInjector()</code>, web interface</td>
+</tr>
+<tr>
+<td><strong>Go version</strong></td>
+<td>Any</td>
+<td>Any</td>
+<td>Any</td>
+<td>1.18+ (generics)</td>
+</tr>
+<tr>
+<td><strong>Learning curve</strong></td>
+<td>None</td>
+<td>Medium</td>
+<td>High</td>
+<td>Low</td>
+</tr>
+</tbody></table>
+<h3>Quick Comparison: Wiring Style</h3>
+<p>The same graph — <code>Config -&gt; Database -&gt; UserStore -&gt; UserService -&gt; API</code> — wired by hand and by a container. The contrast is what the wiring code encodes: an ordered call sequence you maintain, versus a set of providers the container orders for you.</p>
+<pre><code class="language-go">// Manual — you own the order; adding a dependency means editing every call site downstream
+cfg := NewConfig()
+db := NewDatabase(cfg)
+store := NewUserStore(db)
+svc := NewUserService(store)
+api := NewAPI(svc)
+api.Run()
+// No shutdown hooks, health checks, or lazy loading — add them yourself
+
+// Container (samber/do) — order is derived from the constructor signatures
+i := do.New()
+do.Provide(i, NewConfig)
+do.Provide(i, NewDatabase)
+do.Provide(i, NewUserStore)
+do.Provide(i, NewUserService)
+api := do.MustInvoke[*API](i)
+api.Run()
+defer i.Shutdown() // shutdown and health checks come from the container
+</code></pre>
+<p>google/wire and uber-go/fx express the same graph differently: wire generates the manual sequence above at build time from a <code>wire.Build</code> provider list (cleanup via <code>func()</code> returned by providers, no lifecycle hooks), while fx registers providers with <code>fx.Provide</code> and resolves them by reflection at runtime with <code>OnStart</code>/<code>OnStop</code> hooks. Full wiring examples for each: <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-dependency-injection/references/google-wire.md" target="_blank" rel="noopener noreferrer">google/wire</a>, <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-dependency-injection/references/uber-dig-fx.md" target="_blank" rel="noopener noreferrer">uber-go/dig + fx</a>, <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-dependency-injection/references/samber-do.md" target="_blank" rel="noopener noreferrer">samber/do</a>.</p>
+<h2>Testing with DI</h2>
+<p>DI makes testing straightforward — inject mocks instead of real implementations:</p>
+<pre><code class="language-go">// Define a mock
+type MockUserStore struct {
+    users map[string]*User
+}
+
+func (m *MockUserStore) FindByID(ctx context.Context, id string) (*User, error) {
+    u, ok := m.users[id]
+    if !ok {
+        return nil, ErrNotFound
+    }
+    return u, nil
+}
+
+// Test with manual injection
+func TestUserService_GetUser(t *testing.T) {
+    mock := &amp;MockUserStore{
+        users: map[string]*User{"1": {ID: "1", Name: "Alice"}},
+    }
+    svc := NewUserService(mock, nil, slog.Default())
+
+    user, err := svc.GetUser(context.Background(), "1")
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if user.Name != "Alice" {
+        t.Errorf("got %q, want %q", user.Name, "Alice")
+    }
+}
+</code></pre>
+<h3>Testing with samber/do — Clone and Override</h3>
+<p>Container cloning creates an isolated copy where you override only the services you need to mock:</p>
+<pre><code class="language-go">func TestUserService_WithDo(t *testing.T) {
+    // Create a test injector with mock implementation
+    testInjector := do.New()
+
+    // Provide the mock UserStore interface
+    do.OverrideValue[UserStore](testInjector, &amp;MockUserStore{
+        users: map[string]*User{"1": {ID: "1", Name: "Alice"}},
+    })
+
+    // Provide other real services as needed
+    do.Provide[*slog.Logger](testInjector, func(i *do.Injector) (*slog.Logger, error) {
+        return slog.Default(), nil
+    })
+
+    svc := do.MustInvoke[*UserService](testInjector)
+    user, err := svc.GetUser(context.Background(), "1")
+    // ... assertions
+}
+</code></pre>
+<p>This is particularly useful for integration tests where you want most services to be real but need to mock a specific boundary (database, external API, mailer).</p>
+<h2>When to Adopt a DI Library</h2>
+<table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>&lt; 10 services, simple dependencies</td>
+<td>Stay with manual constructor injection</td>
+</tr>
+<tr>
+<td>10-20 services, some cross-cutting concerns</td>
+<td>Consider a DI library</td>
+</tr>
+<tr>
+<td>20+ services, lifecycle management needed</td>
+<td>Strongly recommended</td>
+</tr>
+<tr>
+<td>Need health checks, graceful shutdown</td>
+<td>Use a library with built-in lifecycle support</td>
+</tr>
+<tr>
+<td>Team unfamiliar with DI concepts</td>
+<td>Start manual, migrate incrementally</td>
+</tr>
+</tbody></table>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Global variables as dependencies</td>
+<td>Pass through constructors or DI container</td>
+</tr>
+<tr>
+<td><code>init()</code> for service setup</td>
+<td>Explicit initialization in <code>main()</code> or container</td>
+</tr>
+<tr>
+<td>Depending on concrete types</td>
+<td>Accept interfaces at consumption boundaries</td>
+</tr>
+<tr>
+<td>Passing the container everywhere (service locator)</td>
+<td>Inject specific dependencies, not the container</td>
+</tr>
+<tr>
+<td>Deep dependency chains (A-&gt;B-&gt;C-&gt;D-&gt;E)</td>
+<td>Flatten — most services should depend on repositories and config directly</td>
+</tr>
+<tr>
+<td>Creating a new container per request</td>
+<td>One container per application; use scopes for request-level isolation</td>
+</tr>
+</tbody></table>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-samber-do</code> skill for detailed samber/do usage patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill for interface design and composition</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for testing with dependency injection</li>
+<li>→ See <code>samber/cc-skills-golang@golang-project-layout</code> skill for DI initialization placement</li>
+</ul>
+<h2>References</h2>
+<ul>
+<li><a href="https://do.samber.dev" target="_blank" rel="noopener noreferrer">samber/do/v2 documentation</a> | <a href="https://github.com/samber/do" target="_blank" rel="noopener noreferrer">github.com/samber/do/v2</a></li>
+<li><a href="https://github.com/google/wire/blob/main/docs/guide.md" target="_blank" rel="noopener noreferrer">google/wire user guide</a></li>
+<li><a href="https://uber-go.github.io/fx/" target="_blank" rel="noopener noreferrer">uber-go/fx documentation</a></li>
+<li><a href="https://github.com/uber-go/dig" target="_blank" rel="noopener noreferrer">uber-go/dig</a></li>
+</ul>

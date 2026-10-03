@@ -1,0 +1,145 @@
+<p><strong>Persona:</strong> You are a Go engineer who treats configuration as a layered system. Flag beats env beats file beats default — and you bind every key so all four layers stay reachable through one API.</p>
+<h1>Using spf13/viper for layered configuration in Go</h1>
+<p>Viper resolves configuration values from multiple sources in a fixed precedence order. It has no user-facing surface — it doesn't define commands or flags. Its job is to answer "what is the value of key X right now?" by walking its source layers from highest to lowest priority.</p>
+<p><strong>Official Resources:</strong></p>
+<ul>
+<li><a href="https://pkg.go.dev/github.com/spf13/viper" target="_blank" rel="noopener noreferrer">pkg.go.dev/github.com/spf13/viper</a></li>
+<li><a href="https://github.com/spf13/viper" target="_blank" rel="noopener noreferrer">github.com/spf13/viper</a></li>
+</ul>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<pre><code class="language-bash">go get github.com/spf13/viper@latest
+</code></pre>
+<h2>Viper vs. cobra</h2>
+<p>Cobra owns the command tree — subcommands, flags, arg validation, completions. Viper owns configuration resolution — it answers "what is the value of key X?" by walking its source layers, with no user-facing surface of its own: it is purely a key-value resolver.</p>
+<ul>
+<li><strong>Cobra alone</strong> — flag-only CLIs.</li>
+<li><strong>Viper alone</strong> — config-file daemons.</li>
+<li><strong>Both</strong> — bind flags at <code>PersistentPreRunE</code> via <code>BindPFlag</code>.</li>
+</ul>
+<p>→ See <code>samber/cc-skills-golang@golang-spf13-cobra</code> for the cobra side of this integration.</p>
+<h2>The precedence pipeline</h2>
+<p>Viper resolves a key by walking sources in this order (first set value wins):</p>
+<pre><code>1. explicit Set()      — viper.Set("key", val)    highest priority
+2. flag                — bound pflag.Flag
+3. env var             — BindEnv / AutomaticEnv
+4. config file         — ReadInConfig / MergeInConfig
+5. KV remote           — etcd / Consul
+6. default             — viper.SetDefault("key", val)   lowest priority
+</code></pre>
+<p>This pipeline is fixed and cannot be reordered. Understanding it prevents most viper bugs: a key that "should" come from a config file may be shadowed by an env var or a flag with a default value.</p>
+<h2>Sources and config files</h2>
+<pre><code class="language-go">viper.SetConfigName("config")
+viper.AddConfigPath("$HOME/.myapp")
+if err := viper.ReadInConfig(); err != nil {
+    var notFound *viper.ConfigFileNotFoundError
+    if !errors.As(err, &amp;notFound) {
+        return fmt.Errorf("reading config: %w", err) // propagate real errors only
+    }
+}
+</code></pre>
+<p><code>ConfigFileNotFoundError</code> must be handled gracefully — config files are usually optional. An unhandled error from a missing file crashes programs that are perfectly valid when run with only flags or env vars.</p>
+<p>For supported formats (JSON, TOML, YAML, HCL, INI, properties), <code>MergeInConfig</code>, and remote KV, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/sources-and-formats.md" target="_blank" rel="noopener noreferrer">sources-and-formats.md</a>.</p>
+<h2>Env binding and key replacers</h2>
+<p>This is the highest-bug-density area in viper. All three settings must be wired together — missing any one breaks nested key resolution:</p>
+<pre><code class="language-go">// ✓ Good — all three wired together at startup
+viper.SetEnvPrefix("MYAPP")                             // prevent collisions: PORT → MYAPP_PORT
+viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))  // database.host → MYAPP_DATABASE_HOST
+viper.AutomaticEnv()
+
+// ✗ Bad — without SetEnvKeyReplacer, viper looks for MYAPP_DATABASE.HOST (dot preserved)
+</code></pre>
+<p>For <code>BindEnv</code>, <code>AllowEmptyEnv</code>, and env-vs-default interaction, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/binding-and-env.md" target="_blank" rel="noopener noreferrer">binding-and-env.md</a>.</p>
+<h2>Flag binding (the cobra seam)</h2>
+<p>Bind cobra flags to viper in <code>init()</code> or <code>PersistentPreRunE</code> — never in <code>RunE</code> (config loading in <code>PersistentPreRunE</code> already ran before <code>RunE</code>, so bindings set in <code>RunE</code> are missed):</p>
+<pre><code class="language-go">func init() {
+    rootCmd.PersistentFlags().Int("port", 8080, "listen port")
+    viper.BindPFlag("port", rootCmd.PersistentFlags().Lookup("port"))
+    // viper.BindPFlags(cmd.Flags()) — bind an entire FlagSet at once
+}
+</code></pre>
+<p>For <code>AllowEmptyEnv</code> and flag/env interaction details, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/binding-and-env.md" target="_blank" rel="noopener noreferrer">binding-and-env.md</a>.</p>
+<h2>Unmarshaling into structs</h2>
+<p><code>viper.Unmarshal</code> maps the resolved configuration into a struct using <code>mapstructure</code>:</p>
+<pre><code class="language-go">type Config struct {
+    Port     int `mapstructure:"port"`
+    Database struct {
+        MaxConn int `mapstructure:"max_conn"` // explicit tag: mapstructure won't convert underscore→camelCase
+    } `mapstructure:"database"`
+}
+var cfg Config
+viper.Unmarshal(&amp;cfg)
+</code></pre>
+<p><strong>Always use <code>mapstructure</code> tags</strong> — implicit mapping is fragile for nested structs and underscore-named fields. Prefer <code>UnmarshalKey("database", &amp;dbCfg)</code> over <code>Sub("database").Unmarshal</code> — it avoids the nil-check <code>Sub</code> requires when the key is missing.</p>
+<p>For <code>time.Duration</code> / <code>net.IP</code> / slice decoders and custom <code>DecodeHook</code> registration, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/unmarshal.md" target="_blank" rel="noopener noreferrer">unmarshal.md</a>.</p>
+<h2>Sub-trees</h2>
+<p><code>viper.Sub("database")</code> returns a new <code>*viper.Viper</code> scoped to the prefix, or <strong>nil</strong> if the key does not exist — always nil-check before calling methods on the result. Prefer <code>UnmarshalKey("database", &amp;dbCfg)</code> which avoids the nil risk entirely.</p>
+<h2>Hot reload</h2>
+<pre><code class="language-go">viper.WatchConfig()
+viper.OnConfigChange(func(e fsnotify.Event) { /* re-apply changed values */ })
+</code></pre>
+<p><code>WatchConfig</code> uses fsnotify and watches inodes, so editors that write atomically via rename (vim, neovim) replace the inode and the callback may not fire. Test hot-reload with <code>echo &gt;&gt; config.yaml</code>, not editor saves. For race-safe reload patterns, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/watch-and-reload.md" target="_blank" rel="noopener noreferrer">watch-and-reload.md</a>.</p>
+<h2>Test isolation</h2>
+<p><strong>Never use the global viper in tests</strong> — state leaks across test cases. Use <code>viper.New()</code> per test so each instance is isolated:</p>
+<pre><code class="language-go">v := viper.New()
+v.SetConfigFile("testdata/config.yaml")
+require.NoError(t, v.ReadInConfig())
+</code></pre>
+<p>For <code>t.Setenv</code> interactions and <code>Reset()</code> limitations, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/testing-and-isolation.md" target="_blank" rel="noopener noreferrer">testing-and-isolation.md</a>.</p>
+<h2>Best Practices</h2>
+<ol>
+<li><strong>Set prefix + key replacer + AutomaticEnv together</strong> — missing any one causes nested env keys to silently not resolve (<code>database.host</code> → <code>DATABASE.HOST</code> instead of <code>DATABASE_HOST</code>).</li>
+<li><strong>Handle <code>ConfigFileNotFoundError</code> gracefully</strong> — a missing config file should not crash a service that runs with only flags and env vars.</li>
+<li><strong>Always use <code>mapstructure</code> tags on config structs</strong> — implicit mapping silently misses nested and underscore-named fields.</li>
+<li><strong>Use <code>viper.New()</code> in tests, never the global</strong> — the global accumulates state across test runs; per-test instances are isolated.</li>
+<li><strong>Bind flags before <code>Execute()</code></strong> — binding in <code>RunE</code> is too late; cobra parses flags before <code>RunE</code> runs.</li>
+</ol>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Why it fails</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>AutomaticEnv</code> without <code>SetEnvKeyReplacer</code></td>
+<td><code>database.host</code> looks for <code>MYAPP_DATABASE.HOST</code> (dot preserved) — never matches</td>
+<td>Add <code>SetEnvKeyReplacer(strings.NewReplacer(".", "_"))</code> before <code>AutomaticEnv</code></td>
+</tr>
+<tr>
+<td>No <code>mapstructure</code> tags on struct fields</td>
+<td>Silently misses nested and underscore-named fields</td>
+<td>Add <code>mapstructure:"key_name"</code> to every field</td>
+</tr>
+<tr>
+<td>Using global viper in tests</td>
+<td>State from one test contaminates the next, causing flaky ordering</td>
+<td>Create <code>viper.New()</code> per test</td>
+</tr>
+<tr>
+<td>Missing <code>ConfigFileNotFoundError</code> check</td>
+<td>Missing config file crashes a service that should run on flags/env alone</td>
+<td><code>errors.As(err, &amp;notFound)</code> — only propagate non-not-found errors</td>
+</tr>
+</tbody></table>
+<h2>Further Reading</h2>
+<ul>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/sources-and-formats.md" target="_blank" rel="noopener noreferrer">sources-and-formats.md</a> — supported file formats, multi-path search, MergeInConfig, remote KV (etcd/Consul)</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/binding-and-env.md" target="_blank" rel="noopener noreferrer">binding-and-env.md</a> — BindEnv, AutomaticEnv, SetEnvPrefix, SetEnvKeyReplacer, AllowEmptyEnv, timing rules</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/unmarshal.md" target="_blank" rel="noopener noreferrer">unmarshal.md</a> — Unmarshal, UnmarshalKey, mapstructure tags, custom DecodeHooks (Duration, IP, slice)</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/watch-and-reload.md" target="_blank" rel="noopener noreferrer">watch-and-reload.md</a> — WatchConfig, OnConfigChange, fsnotify caveats, atomic-rename trap, race-safe patterns</li>
+<li><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-spf13-viper/references/testing-and-isolation.md" target="_blank" rel="noopener noreferrer">testing-and-isolation.md</a> — viper.New() per test, t.Setenv interactions, Reset() limitations, snapshot/restore</li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-cli</code> skill for general CLI architecture — project layout, exit codes, signal handling, cobra+viper integration</li>
+<li>→ See <code>samber/cc-skills-golang@golang-spf13-cobra</code> skill for the cobra side of this integration (flag definition and binding)</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for general Go testing patterns</li>
+</ul>
+<p>If you encounter a bug or unexpected behavior in spf13/viper, open an issue at <a href="https://github.com/spf13/viper/issues" target="_blank" rel="noopener noreferrer">https://github.com/spf13/viper/issues</a>.</p>

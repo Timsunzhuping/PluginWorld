@@ -1,0 +1,247 @@
+<p><strong>Persona:</strong> You are a Go architect who values simplicity and explicitness. You apply patterns only when they solve a real problem — not to demonstrate sophistication — and you push back on premature abstraction.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Design mode</strong> — creating new APIs, packages, or application structure: ask the developer about their architecture preference before proposing patterns; favor the smallest pattern that satisfies the requirement.</li>
+<li><strong>Review mode</strong> — auditing existing code for design issues: scan for <code>init()</code> abuse, unbounded resources, missing timeouts, and implicit global state; report findings before suggesting refactors.</li>
+</ul>
+<blockquote>
+<p><strong>Community default.</strong> A company skill that explicitly supersedes <code>samber/cc-skills-golang@golang-design-patterns</code> skill takes precedence.</p>
+</blockquote>
+<h1>Go Design Patterns &amp; Idioms</h1>
+<p>Idiomatic Go patterns for production-ready code. For error handling details see the <code>samber/cc-skills-golang@golang-error-handling</code> skill; for context propagation see <code>samber/cc-skills-golang@golang-context</code> skill; for struct/interface design see <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill.</p>
+<h2>Best Practices Summary</h2>
+<ol>
+<li>Constructors SHOULD use <strong>functional options</strong> — they scale better as APIs evolve (one function per option, no breaking changes)</li>
+<li>Functional options MUST <strong>return an error</strong> if validation can fail — catch bad config at construction, not at runtime</li>
+<li><strong>Avoid <code>init()</code></strong> — runs implicitly, cannot return errors, makes testing unpredictable. Use explicit constructors</li>
+<li>Enums SHOULD <strong>start at 1</strong> (or Unknown sentinel at 0) — Go's zero value silently passes as the first enum member</li>
+<li>Error cases MUST be <strong>handled first</strong> with early return — keep happy path flat</li>
+<li><strong>Panic is for bugs, not expected errors</strong> — callers can handle returned errors; panics crash the process</li>
+<li><strong><code>defer Close()</code> immediately after opening</strong> — later code changes can accidentally skip cleanup</li>
+<li><strong><code>runtime.AddCleanup</code></strong> over <code>runtime.SetFinalizer</code> — finalizers are unpredictable and can resurrect objects</li>
+<li>Every external call SHOULD <strong>have a timeout</strong> — a slow upstream hangs your goroutine indefinitely</li>
+<li><strong>Limit everything</strong> (pool sizes, queue depths, buffers) — unbounded resources grow until they crash</li>
+<li>Retry logic MUST <strong>check context cancellation</strong> between attempts</li>
+<li><strong>Use <code>strings.Builder</code></strong> for concatenation in loops → see <code>samber/cc-skills-golang@golang-code-style</code></li>
+<li>string vs []byte: <strong>use <code>[]byte</code> for mutation and I/O</strong>, <code>string</code> for display and keys — conversions allocate</li>
+<li>Iterators (Go 1.23+): <strong>use for lazy evaluation</strong> — avoid loading everything into memory</li>
+<li><strong>Stream large transfers</strong> — loading millions of rows causes OOM; stream keeps memory constant</li>
+<li><code>//go:embed</code> for <strong>static assets</strong> — embeds at compile time, eliminates runtime file I/O errors</li>
+<li><strong>Use <code>crypto/rand</code></strong> for keys/tokens — <code>math/rand</code> is predictable → see <code>samber/cc-skills-golang@golang-security</code></li>
+<li>Regexp MUST be <strong>compiled once at package level</strong> — compilation is O(n) and allocates</li>
+<li>Compile-time interface checks: <strong><code>var _ Interface = (*Type)(nil)</code></strong></li>
+<li><strong>A little recode &gt; a big dependency</strong> — each dep adds attack surface and maintenance burden</li>
+<li><strong>Design for testability</strong> — accept interfaces, inject dependencies</li>
+</ol>
+<h2>Constructor Patterns: Functional Options vs Builder</h2>
+<h3>Functional Options (Preferred)</h3>
+<pre><code class="language-go">type Server struct {
+    addr         string
+    readTimeout  time.Duration
+    writeTimeout time.Duration
+    maxConns     int
+}
+
+type Option func(*Server)
+
+func WithReadTimeout(d time.Duration) Option {
+    return func(s *Server) { s.readTimeout = d }
+}
+
+func WithWriteTimeout(d time.Duration) Option {
+    return func(s *Server) { s.writeTimeout = d }
+}
+
+func WithMaxConns(n int) Option {
+    return func(s *Server) { s.maxConns = n }
+}
+
+func NewServer(addr string, opts ...Option) *Server {
+    // Default options
+    s := &amp;Server{
+        addr:         addr,
+        readTimeout:  5 * time.Second,
+        writeTimeout: 10 * time.Second,
+        maxConns:     100,
+    }
+    for _, opt := range opts {
+        opt(s)
+    }
+    return s
+}
+
+// Usage
+srv := NewServer(":8080",
+    WithReadTimeout(30*time.Second),
+    WithMaxConns(500),
+)
+</code></pre>
+<p>Constructors SHOULD use <strong>functional options</strong> — they scale better with API evolution and require less code. Use builder pattern only if you need complex validation between configuration steps.</p>
+<h2>Constructors &amp; Initialization</h2>
+<h3>Avoid <code>init()</code> and Mutable Globals</h3>
+<p><code>init()</code> runs implicitly, makes testing harder, and creates hidden dependencies:</p>
+<ul>
+<li>Multiple <code>init()</code> functions run in declaration order, across files in <strong>filename alphabetical order</strong> — fragile</li>
+<li>Cannot return errors — failures must panic or <code>log.Fatal</code></li>
+<li>Runs before <code>main()</code> and tests — side effects make tests unpredictable</li>
+</ul>
+<pre><code class="language-go">// Bad — hidden global state
+var db *sql.DB
+
+func init() {
+    var err error
+    db, err = sql.Open("postgres", os.Getenv("DATABASE_URL"))
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+
+// Good — explicit initialization, injectable
+func NewUserRepository(db *sql.DB) *UserRepository {
+    return &amp;UserRepository{db: db}
+}
+</code></pre>
+<h3>Enums: Start at 1</h3>
+<p>Zero values should represent invalid/unset state:</p>
+<pre><code class="language-go">type Status int
+
+const (
+    StatusUnknown Status = iota // 0 = invalid/unset
+    StatusActive                // 1
+    StatusInactive              // 2
+    StatusSuspended             // 3
+)
+</code></pre>
+<h3>Compile Regexp Once</h3>
+<pre><code class="language-go">// Good — compiled once at package level
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+
+func ValidateEmail(email string) bool {
+    return emailRegex.MatchString(email)
+}
+</code></pre>
+<h3>Use <code>//go:embed</code> for Static Assets</h3>
+<pre><code class="language-go">import "embed"
+
+//go:embed templates/*
+var templateFS embed.FS
+
+//go:embed version.txt
+var version string
+</code></pre>
+<h3>Compile-Time Interface Checks</h3>
+<p>→ See <code>samber/cc-skills-golang@golang-structs-interfaces</code> for the <code>var _ Interface = (*Type)(nil)</code> pattern.</p>
+<h2>Error Flow Patterns</h2>
+<p>Error cases MUST be handled first with early return — keep the happy path at minimal indentation. → See <code>samber/cc-skills-golang@golang-code-style</code> for the full pattern and examples.</p>
+<h3>When to Panic vs Return Error</h3>
+<ul>
+<li><strong>Return error</strong>: network failures, file not found, invalid input — anything a caller can handle</li>
+<li><strong>Panic</strong>: nil pointer in a place that should be impossible, violated invariant, <code>Must*</code> constructors used at init time</li>
+<li><strong><code>.Close()</code> / <code>Flush()</code> errors</strong>: read-only cleanup can often use <code>defer f.Close()</code>, but write/flush resources must report close or flush errors when durability matters</li>
+</ul>
+<h2>Data Handling</h2>
+<h3>string vs []byte vs []rune</h3>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Default for</th>
+<th>Use when</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>string</code></td>
+<td>Everything</td>
+<td>Immutable, safe, UTF-8</td>
+</tr>
+<tr>
+<td><code>[]byte</code></td>
+<td>I/O</td>
+<td>Writing to <code>io.Writer</code>, building strings, mutations</td>
+</tr>
+<tr>
+<td><code>[]rune</code></td>
+<td>Unicode ops</td>
+<td><code>len()</code> must mean characters, not bytes</td>
+</tr>
+</tbody></table>
+<p>Avoid repeated conversions — each one allocates. Stay in one type until you need the other.</p>
+<h3>Iterators &amp; Streaming for Large Data</h3>
+<p>Use iterators (Go 1.23+) and streaming patterns to process large datasets without loading everything into memory. For large transfers between services (e.g., 1M rows DB to HTTP), stream to prevent OOM.</p>
+<p>For code examples, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-design-patterns/references/data-handling.md" target="_blank" rel="noopener noreferrer">Data Handling Patterns</a>.</p>
+<h2>Resource Management</h2>
+<p><code>defer Close()</code> immediately after opening — don't wait, don't forget:</p>
+<pre><code class="language-go">f, err := os.Open(path)
+if err != nil {
+    return err
+}
+defer f.Close() // right here, not 50 lines later
+
+rows, err := db.QueryContext(ctx, query)
+if err != nil {
+    return err
+}
+defer rows.Close()
+</code></pre>
+<p>For graceful shutdown, resource pools, and <code>runtime.AddCleanup</code>, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-design-patterns/references/resource-management.md" target="_blank" rel="noopener noreferrer">Resource Management</a>.</p>
+<h2>Resilience &amp; Limits</h2>
+<h3>Timeout Every External Call</h3>
+<pre><code class="language-go">ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+defer cancel()
+
+resp, err := httpClient.Do(req.WithContext(ctx))
+</code></pre>
+<h3>Retry &amp; Context Checks</h3>
+<p>Retry logic MUST check <code>ctx.Err()</code> between attempts and use exponential/linear backoff via <code>select</code> on <code>ctx.Done()</code>. Long loops MUST check <code>ctx.Err()</code> periodically. → See <code>samber/cc-skills-golang@golang-context</code> skill.</p>
+<h2>Database Patterns</h2>
+<p>→ See <code>samber/cc-skills-golang@golang-database</code> skill for sqlx/pgx, transactions, nullable columns, connection pools, repository interfaces, testing.</p>
+<h2>Architecture</h2>
+<p>Ask the developer which architecture they prefer: clean architecture, hexagonal, DDD, or flat layout. Don't impose complex architecture on a small project.</p>
+<p>Core principles regardless of architecture:</p>
+<ul>
+<li><strong>Keep domain pure</strong> — no framework dependencies in the domain layer</li>
+<li><strong>Fail fast</strong> — validate at boundaries, trust internal code</li>
+<li><strong>Make illegal states unrepresentable</strong> — use types to enforce invariants</li>
+<li><strong>Respect 12-factor app</strong> principles — → see <code>samber/cc-skills-golang@golang-project-layout</code></li>
+</ul>
+<h2>Detailed Guides</h2>
+<table>
+<thead>
+<tr>
+<th>Guide</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-design-patterns/references/architecture.md" target="_blank" rel="noopener noreferrer">Architecture Patterns</a></td>
+<td>High-level principles, when each architecture fits</td>
+</tr>
+<tr>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-design-patterns/references/clean-architecture.md" target="_blank" rel="noopener noreferrer">Clean Architecture</a></td>
+<td>Use cases, dependency rule, layered adapters</td>
+</tr>
+<tr>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-design-patterns/references/hexagonal-architecture.md" target="_blank" rel="noopener noreferrer">Hexagonal Architecture</a></td>
+<td>Ports and adapters, domain core isolation</td>
+</tr>
+<tr>
+<td><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-design-patterns/references/ddd.md" target="_blank" rel="noopener noreferrer">Domain-Driven Design</a></td>
+<td>Aggregates, value objects, bounded contexts</td>
+</tr>
+</tbody></table>
+<h2>Code Philosophy</h2>
+<ul>
+<li><strong>Avoid repetitive code</strong> — but don't abstract prematurely</li>
+<li><strong>Minimize dependencies</strong> — a little recode &gt; a big dependency</li>
+<li><strong>Design for testability</strong> — accept interfaces, inject dependencies, keep functions pure</li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-data-structures</code> skill for data structure selection, internals, and container/ packages</li>
+<li>→ See <code>samber/cc-skills-golang@golang-error-handling</code> skill for error wrapping, sentinel errors, and the single handling rule</li>
+<li>→ See <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill for interface design and composition</li>
+<li>→ See <code>samber/cc-skills-golang@golang-concurrency</code> skill for goroutine lifecycle and graceful shutdown</li>
+<li>→ See <code>samber/cc-skills-golang@golang-context</code> skill for timeout and cancellation patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-project-layout</code> skill for architecture and directory structure</li>
+<li>→ See <code>samber/cc-skills-golang@golang-refactoring</code> skill for safely staging a migration toward one of these patterns (options struct, DI, consumer-side interfaces) across an existing codebase</li>
+</ul>

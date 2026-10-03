@@ -38,12 +38,18 @@ export async function fetchGlamaServers(
   const servers: GlamaServer[] = [];
   let cursor: string | undefined;
   let totalSeen = 0;
+  if (!process.env.GLAMA_API_KEY) {
+    console.log("[glama] not configured: directory API requires GLAMA_API_KEY");
+    return { servers, totalSeen };
+  }
 
   for (let page = 0; page < maxPages; page++) {
     const url = new URL("https://glama.ai/api/mcp/v1/servers");
     url.searchParams.set("first", "100");
     if (cursor) url.searchParams.set("after", cursor);
-    const data = await fetchJson<GlamaResponse>(url.toString());
+    const data = await fetchJson<GlamaResponse>(url.toString(), {
+      headers: { Authorization: `Bearer ${process.env.GLAMA_API_KEY}` },
+    });
     if (!data?.servers?.length) break;
     for (const s of data.servers) {
       totalSeen++;

@@ -1,0 +1,146 @@
+<p><strong>Persona:</strong> You are a Go engineer who treats tests as executable specifications. You write tests to constrain behavior and make failures self-explanatory — not to hit coverage targets.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Write mode</strong> — adding new tests or mocks to a codebase.</li>
+<li><strong>Review mode</strong> — auditing existing test code for testify misuse.</li>
+</ul>
+<h1>stretchr/testify</h1>
+<p>testify complements Go's <code>testing</code> package with readable assertions, mocks, and suites. It does not replace <code>testing</code> — always use <code>*testing.T</code> as the entry point.</p>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<h2>assert vs require</h2>
+<p>Both offer identical assertions. The difference is failure behavior:</p>
+<ul>
+<li><strong>assert</strong>: records failure, continues — see all failures at once</li>
+<li><strong>require</strong>: calls <code>t.FailNow()</code> — use for preconditions where continuing would panic or mislead</li>
+</ul>
+<p>Use <code>assert.New(t)</code> / <code>require.New(t)</code> for readability. Name them <code>is</code> and <code>must</code>:</p>
+<pre><code class="language-go">func TestParseConfig(t *testing.T) {
+    is := assert.New(t)
+    must := require.New(t)
+
+    cfg, err := ParseConfig("testdata/valid.yaml")
+    must.NoError(err)    // stop if parsing fails — cfg would be nil
+    must.NotNil(cfg)
+
+    is.Equal("production", cfg.Environment)
+    is.Equal(8080, cfg.Port)
+    is.True(cfg.TLS.Enabled)
+}
+</code></pre>
+<p><strong>Rule</strong>: <code>require</code> for preconditions (setup, error checks), <code>assert</code> for verifications. Never mix randomly.</p>
+<h2>Core Assertions</h2>
+<pre><code class="language-go">is := assert.New(t)
+
+// Equality
+is.Equal(expected, actual)              // DeepEqual + exact type
+is.NotEqual(unexpected, actual)
+is.EqualValues(expected, actual)        // converts to common type first
+is.EqualExportedValues(expected, actual)
+
+// Nil / Bool / Emptiness
+is.Nil(obj)                  is.NotNil(obj)
+is.True(cond)                is.False(cond)
+is.Empty(collection)         is.NotEmpty(collection)
+is.Len(collection, n)
+
+// Contains (strings, slices, map keys)
+is.Contains("hello world", "world")
+is.Contains([]int{1, 2, 3}, 2)
+is.Contains(map[string]int{"a": 1}, "a")
+
+// Comparison
+is.Greater(actual, threshold)     is.Less(actual, ceiling)
+is.Positive(val)                  is.Negative(val)
+is.Zero(val)
+
+// Errors
+is.Error(err)                     is.NoError(err)
+is.ErrorIs(err, ErrNotFound)      // walks error chain
+is.ErrorAs(err, &amp;target)
+is.ErrorContains(err, "not found")
+
+// Type
+is.IsType(&amp;User{}, obj)
+is.Implements((*io.Reader)(nil), obj)
+</code></pre>
+<p><strong>Argument order</strong>: always <code>(expected, actual)</code> — swapping produces confusing diff output.</p>
+<h2>Advanced Assertions</h2>
+<pre><code class="language-go">is.ElementsMatch([]string{"b", "a", "c"}, result)             // unordered comparison
+is.InDelta(3.14, computedPi, 0.01)                            // float tolerance
+is.JSONEq(`{"name":"alice"}`, `{"name": "alice"}`)             // ignores whitespace/key order
+is.WithinDuration(expected, actual, 5*time.Second)
+is.Regexp(`^user-[a-f0-9]+$`, userID)
+
+// Async polling
+is.Eventually(func() bool {
+    status, _ := client.GetJobStatus(jobID)
+    return status == "completed"
+}, 5*time.Second, 100*time.Millisecond)
+
+// Async polling with rich assertions
+is.EventuallyWithT(func(c *assert.CollectT) {
+    resp, err := client.GetOrder(orderID)
+    assert.NoError(c, err)
+    assert.Equal(c, "shipped", resp.Status)
+}, 10*time.Second, 500*time.Millisecond)
+</code></pre>
+<h2>testify/mock</h2>
+<p>Mock interfaces to isolate the unit under test. Embed <code>mock.Mock</code>, implement methods with <code>m.Called()</code>, always verify with <code>AssertExpectations(t)</code>.</p>
+<p>Key matchers: <code>mock.Anything</code>, <code>mock.AnythingOfType("T")</code>, <code>mock.MatchedBy(func)</code>. Call modifiers: <code>.Once()</code>, <code>.Times(n)</code>, <code>.Maybe()</code>, <code>.Run(func)</code>.</p>
+<p>For defining mocks, argument matchers, call modifiers, return sequences, and verification, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-stretchr-testify/references/mock.md" target="_blank" rel="noopener noreferrer">Mock reference</a>.</p>
+<h2>testify/suite</h2>
+<p>Suites group related tests with shared setup/teardown.</p>
+<h3>Lifecycle</h3>
+<pre><code>SetupSuite()    → once before all tests
+  SetupTest()   → before each test
+    TestXxx()
+  TearDownTest() → after each test
+TearDownSuite() → once after all tests
+</code></pre>
+<h3>Example</h3>
+<pre><code class="language-go">type TokenServiceSuite struct {
+    suite.Suite
+    store   *MockTokenStore
+    service *TokenService
+}
+
+func (s *TokenServiceSuite) SetupTest() {
+    s.store = new(MockTokenStore)
+    s.service = NewTokenService(s.store)
+}
+
+func (s *TokenServiceSuite) TestGenerate_ReturnsValidToken() {
+    s.store.On("Save", mock.Anything, mock.Anything).Return(nil)
+    token, err := s.service.Generate("user-42")
+    s.NoError(err)
+    s.NotEmpty(token)
+    s.store.AssertExpectations(s.T())
+}
+
+// Required launcher
+func TestTokenServiceSuite(t *testing.T) {
+    suite.Run(t, new(TokenServiceSuite))
+}
+</code></pre>
+<p>Suite methods like <code>s.Equal()</code> behave like <code>assert</code>. For require: <code>s.Require().NotNil(obj)</code>.</p>
+<h2>Common Mistakes</h2>
+<ul>
+<li><strong>Forgetting <code>AssertExpectations(t)</code></strong> — mock expectations silently pass without verification</li>
+<li><strong><code>is.Equal(ErrNotFound, err)</code></strong> — fails on wrapped errors. Use <code>is.ErrorIs</code> to walk the chain</li>
+<li><strong>Swapped argument order</strong> — testify assumes <code>(expected, actual)</code>. Swapping produces backwards diffs</li>
+<li><strong><code>assert</code> for guards</strong> — test continues after failure and panics on nil dereference. Use <code>require</code></li>
+<li><strong>Missing <code>suite.Run()</code></strong> — without the launcher function, zero tests execute silently</li>
+<li><strong>Comparing pointers</strong> — <code>is.Equal(ptr1, ptr2)</code> compares addresses. Dereference or use <code>EqualExportedValues</code></li>
+</ul>
+<h2>Linters</h2>
+<p>Use <code>testifylint</code> to catch wrong argument order, assert/require misuse, and more. See <code>samber/cc-skills-golang@golang-lint</code> skill.</p>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for general test patterns, table-driven tests, and CI</li>
+<li>→ See <code>samber/cc-skills-golang@golang-lint</code> skill for testifylint configuration</li>
+</ul>

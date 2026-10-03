@@ -1,0 +1,506 @@
+<h1>indexagentica-mcp</h1>
+<p>Read-only <strong>remote MCP server</strong> (Streamable HTTP) and <strong>REST search API</strong> for
+<a href="https://indexagentica.com" target="_blank" rel="noopener noreferrer">Index Agentica</a>, the agent-first directory of skills,
+harnesses, MCP servers, tools, protocols and APIs, plus its long-form guides,
+comparisons, stacks and downloadable Agent Skills. Runs on <strong>Cloudflare Workers
+(free plan)</strong>, stateless, no Durable Objects, no auth, CORS open.</p>
+<h2>Install</h2>
+<p>Remote server: no install, no API key. Streamable HTTP at <code>https://mcp.indexagentica.com/mcp</code> (live).</p>
+<pre><code class="language-bash">claude mcp add --transport http indexagentica https://mcp.indexagentica.com/mcp
+</code></pre>
+<p>Other clients: add the URL as a Streamable HTTP server with no auth (see <a href="https://github.com/Drudley/indexagentica-mcp/blob/HEAD/llms-install.md" target="_blank" rel="noopener noreferrer">llms-install.md</a>).
+The same Worker also answers at <code>https://indexagentica-mcp.indexagentica.workers.dev/mcp</code>
+(see <a href="https://github.com/Drudley/indexagentica-mcp/blob/HEAD/DEPLOY.md" target="_blank" rel="noopener noreferrer">DEPLOY.md</a>).</p>
+<h2>Endpoints</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>What</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>POST</td>
+<td><code>/mcp</code></td>
+<td>MCP Streamable HTTP endpoint (JSON-RPC 2.0, JSON responses)</td>
+</tr>
+<tr>
+<td>GET/DELETE</td>
+<td><code>/mcp</code></td>
+<td><code>405</code> (no standalone SSE stream, no sessions)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/</code></td>
+<td>JSON self-description with links to the MCP endpoint, REST, llms.txt, docs</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/search?q=&amp;type=&amp;category=&amp;tags=a,b&amp;limit=</code></td>
+<td>Ranked search over entries and long-form (<code>type</code>: <code>entry</code>, <code>guide</code>, <code>comparison</code>, <code>stack</code>, <code>skill</code> or <code>all</code> (default); <code>category</code> applies to entries; limit 1-50, default 10; tags are AND-ed)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/entries/&lt;id&gt;</code> (or <code>&lt;id&gt;.json</code>)</td>
+<td>One full entry; <code>404</code> includes <code>suggestions</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/entries</code></td>
+<td>All ids</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/content/&lt;type&gt;/&lt;id&gt;</code> (or <code>&lt;id&gt;.json</code>)</td>
+<td>One guide, comparison, stack or skill: metadata + markdown (<code>?include_html=1</code> adds HTML); <code>404</code> includes <code>suggestions</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/content?type=</code></td>
+<td>Published long-form items (metadata)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/categories</code></td>
+<td>Categories with counts</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/openapi.json</code></td>
+<td>OpenAPI 3.1 for the REST API</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/.well-known/mcp/server-card.json</code></td>
+<td>Static server card (Smithery scan fallback): <code>serverInfo</code>, <code>authentication: {required: false}</code>, the same <code>tools</code> as <code>tools/list</code>, empty <code>resources</code>/<code>prompts</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/stats</code></td>
+<td>Public usage stats (JSON): site page views, outbound clicks, skill downloads, MCP tool calls per tool, REST requests, agent/human split; last 24h, last 7 days, all time since the <code>since</code> timestamps. Cached 10 min. See <a href="#usage-stats-get-stats" target="_blank" rel="noopener noreferrer">Usage stats</a></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/v1/usage</code></td>
+<td>Alias of <code>/stats</code> (used by the site; less likely to be caught by content-blocker filters)</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/v1/e</code></td>
+<td>Alias of <code>/hit</code> (used by the site)</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/hit</code></td>
+<td>Site usage beacon from indexagentica.com's inline script (origin-checked, strictly validated, 204). See <a href="#site-beacons-post-hit" target="_blank" rel="noopener noreferrer">Site beacons</a></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/health</code></td>
+<td>Liveness (not rate limited)</td>
+</tr>
+</tbody></table>
+<p>Errors are always JSON: <code>{"error":{"status":400,"code":"bad_request","message":"..."}}</code>
+(codes: <code>bad_request</code>, <code>not_found</code>, <code>method_not_allowed</code>, <code>rate_limited</code>, <code>upstream_error</code>).</p>
+<h2>MCP tools</h2>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Input</th>
+<th>Output (<code>structuredContent</code>)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search</code></td>
+<td><code>query</code> (string), <code>type?</code> (<code>entry</code>|<code>guide</code>|<code>comparison</code>|<code>stack</code>|<code>skill</code>|<code>all</code>, default all), <code>category?</code> (slug; entries only), <code>tags?</code> (string[], all must match), <code>limit?</code> (1-50)</td>
+<td><code>{query, type, category?, tags, limit, total, results[]}</code>; each result has <code>type, id, name, summary, url, tags, score, links</code>, plus <code>category</code> (entries) or <code>author, last_verified, entries</code> (long-form)</td>
+</tr>
+<tr>
+<td><code>get_entry</code></td>
+<td><code>id</code> (kebab-case)</td>
+<td><code>{entry}</code> (the full entry per the <a href="https://indexagentica.com/schema/entry.schema.json" target="_blank" rel="noopener noreferrer">entry schema</a> + <code>links</code> + <code>longform</code> back-references)</td>
+</tr>
+<tr>
+<td><code>get_content</code></td>
+<td><code>type</code> (<code>guide</code>|<code>comparison</code>|<code>stack</code>|<code>skill</code>), <code>id</code>, <code>include_html?</code></td>
+<td><code>{content}</code>: front matter, metadata, <code>markdown</code> (scheme links resolved to absolute URLs), <code>links</code>; comparisons add <code>comparison</code> (criteria, table, verdict), stacks add <code>stack</code> (use case, components), skills add <code>skill_md</code> (full SKILL.md) and <code>links.zip</code> / <code>links.skill_md</code></td>
+</tr>
+<tr>
+<td><code>list_categories</code></td>
+<td>none</td>
+<td><code>{total, generated, categories[{slug,name,description,count,html,json}]}</code></td>
+</tr>
+</tbody></table>
+<p>Every tool has a JSON-Schema <code>inputSchema</code>, an <code>outputSchema</code>, <code>readOnlyHint</code>
+annotations, and returns both <code>structuredContent</code> and the same JSON as a <code>text</code>
+content block. Bad arguments and unknown ids come back as <code>isError: true</code> tool
+results (so the model can correct itself); an unknown tool name is JSON-RPC <code>-32602</code>.</p>
+<p>Scoring: per query word, exact id/name match 12, id segment 6, name substring 5,
+exact tag 4 (partial tag 2), summary 2, category 1.5, description 1; +8 if the
+whole phrase is in the name; multiplied by the fraction of words matched.</p>
+<h2>Protocol support (dual-era, stateless)</h2>
+<ul>
+<li><strong>2026-07-28 (current spec, "modern")</strong>: no handshake. Each POST carries
+<code>_meta["io.modelcontextprotocol/protocolVersion"]</code> and the <code>MCP-Protocol-Version</code>,
+<code>Mcp-Method</code> (and for <code>tools/call</code>, <code>Mcp-Name</code>, base64 sentinel supported) headers.
+The server validates headers against the body (<code>-32020 HeaderMismatch</code>), rejects
+unknown versions with <code>-32022</code> + <code>supported</code> list, implements <code>server/discover</code>,
+returns <code>resultType: "complete"</code>, <code>serverInfo</code> in result <code>_meta</code>, and
+<code>ttlMs</code>/<code>cacheScope</code> caching hints on <code>tools/list</code> and <code>server/discover</code>. Unknown
+methods -&gt; HTTP 404 + <code>-32601</code>.</li>
+<li><strong>2025-11-25 / 2025-06-18 / 2025-03-26 ("legacy")</strong>: <code>initialize</code> is answered
+(version negotiated, falling back to 2025-11-25), <code>notifications/initialized</code> -&gt; 202,
+<code>ping</code>, <code>tools/list</code>, <code>tools/call</code>; 2025-03-26 batches are accepted. <strong>No
+<code>Mcp-Session-Id</code> is ever issued</strong>, so every request is independent and any
+Worker isolate can serve it.</li>
+<li>Responses are always <code>application/json</code> (never SSE). <code>Origin</code> is checked against
+<code>ALLOWED_ORIGINS</code> (default <code>*</code> because the data is public and read-only).</li>
+</ul>
+<p>Spec refs: <a href="https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http" target="_blank" rel="noopener noreferrer">Streamable HTTP 2026-07-28</a>,
+<a href="https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning" target="_blank" rel="noopener noreferrer">Versioning / dual-era</a>,
+<a href="https://modelcontextprotocol.io/specification/2026-07-28/server/discover" target="_blank" rel="noopener noreferrer">server/discover</a>.</p>
+<h2>Data &amp; caching</h2>
+<p>Source of truth is the published static site: <code>GET https://indexagentica.com/api/index.json</code>
+(all entries + categories) and <code>GET /api/longform.json</code> (long-form metadata), fetched
+together; if the long-form index can't be loaded, entries keep working. <code>get_content</code>
+fetches <code>/api/longform/&lt;route&gt;/&lt;id&gt;.json</code> on demand (same cache), always from
+<code>DATA_BASE_URL</code>. The Worker keeps the indexes in isolate memory for
+<code>CACHE_TTL_SECONDS</code> (600 s), also stores it in the Cloudflare Cache API (effective
+on a custom domain; a no-op on workers.dev), coalesces concurrent refreshes, and
+serves the stale copy if the upstream fetch fails. New categories added by the site
+build appear automatically. Nothing is written anywhere.</p>
+<h2>Usage logging (Workers Analytics Engine)</h2>
+<p>Each request (except <code>OPTIONS</code>, <code>/health</code>, <code>/robots.txt</code>, <code>/favicon.ico</code>, <code>/hit</code>, <code>/stats</code>) writes one data point to the
+Analytics Engine dataset <strong><code>indexagentica_mcp</code></strong> (binding <code>ANALYTICS</code> in <code>wrangler.toml</code>), so we can count
+agent usage per tool and client. If the binding is missing (local tests, the <code>ratelimit-test</code> env),
+logging is a no-op, and a failing write never affects the response. Workers Free includes
+100,000 data points written per day (<a href="https://developers.cloudflare.com/analytics/analytics-engine/pricing/" target="_blank" rel="noopener noreferrer">pricing</a>);
+data is kept for 3 months (<a href="https://developers.cloudflare.com/analytics/analytics-engine/limits/" target="_blank" rel="noopener noreferrer">limits</a>).</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Field</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>index1</code></td>
+<td><code>&lt;route&gt;:&lt;tool or method or endpoint&gt;</code></td>
+<td>e.g. <code>mcp:search</code>, <code>rest:get_entry</code></td>
+</tr>
+<tr>
+<td><code>blob1</code></td>
+<td>route</td>
+<td><code>mcp</code> or <code>rest</code></td>
+</tr>
+<tr>
+<td><code>blob2</code></td>
+<td>endpoint</td>
+<td>normalized: <code>/mcp</code>, <code>/search</code>, <code>/entries/{id}</code>, <code>/content/{type}/{id}</code>, ..., <code>other</code></td>
+</tr>
+<tr>
+<td><code>blob3</code></td>
+<td>JSON-RPC method</td>
+<td><code>initialize</code>, <code>tools/call</code>, <code>batch</code>, ... (MCP only)</td>
+</tr>
+<tr>
+<td><code>blob4</code></td>
+<td>tool</td>
+<td>MCP tool name, or the REST equivalent (<code>search</code>, <code>get_entry</code>, <code>get_content</code>, <code>list_content</code>, <code>list_categories</code>)</td>
+</tr>
+<tr>
+<td><code>blob5</code>, <code>blob6</code></td>
+<td>client name, version</td>
+<td>from <code>initialize</code> <code>clientInfo</code> or 2026-07-28 <code>_meta["io.modelcontextprotocol/clientInfo"]</code>; truncated to 64/32 chars</td>
+</tr>
+<tr>
+<td><code>blob7</code></td>
+<td>User-Agent</td>
+<td>truncated to 128 chars</td>
+</tr>
+<tr>
+<td><code>blob8</code>, <code>blob9</code></td>
+<td>protocol version, era</td>
+<td><code>modern</code> / <code>legacy</code></td>
+</tr>
+<tr>
+<td><code>blob10</code></td>
+<td>outcome</td>
+<td><code>ok</code>, <code>error</code> (HTTP ≥ 400, JSON-RPC error or <code>isError</code> tool result), <code>rate_limited</code></td>
+</tr>
+<tr>
+<td><code>blob11</code></td>
+<td>detail</td>
+<td>JSON-RPC error code, <code>tool_error</code>, or HTTP status</td>
+</tr>
+<tr>
+<td><code>blob12</code>, <code>blob13</code></td>
+<td>country, colo</td>
+<td>from <code>request.cf</code></td>
+</tr>
+<tr>
+<td><code>blob14</code>, <code>blob15</code>, <code>blob16</code></td>
+<td>type filter, category filter, target id</td>
+<td>only kebab-case values (public catalog slugs/ids); anything else is stored as <code>invalid</code></td>
+</tr>
+<tr>
+<td><code>blob17</code></td>
+<td>UA class</td>
+<td><code>human</code> (mainstream browser User-Agent) or <code>agent</code> (everything else: MCP clients, SDKs, curl, crawlers, headless browsers); see <code>src/ua.js</code>. Added 2026-10-03; earlier rows are classified from <code>blob7</code> at query time</td>
+</tr>
+<tr>
+<td><code>double1</code></td>
+<td>HTTP status</td>
+<td></td>
+</tr>
+<tr>
+<td><code>double2</code></td>
+<td>latency (ms)</td>
+<td>wall time inside the Worker (Workers clocks advance on I/O)</td>
+</tr>
+<tr>
+<td><code>double3</code></td>
+<td>ASN</td>
+<td>from <code>request.cf.asn</code> (network, not person)</td>
+</tr>
+<tr>
+<td><code>double4</code></td>
+<td>result count</td>
+<td>search <code>total</code></td>
+</tr>
+<tr>
+<td><code>double5</code>, <code>double6</code></td>
+<td>query length in characters, words</td>
+<td></td>
+</tr>
+</tbody></table>
+<p><strong>Privacy:</strong> no IP addresses, no search query text, no free-text tool arguments, no cookies or
+tokens (the server has none), and for site beacons no referrers, query strings or client identifiers. Clients are identified only by their self-reported name/version and a
+truncated User-Agent. Example query (SQL API):
+<code>SELECT blob4 AS tool, blob5 AS client, SUM(_sample_interval) AS requests FROM indexagentica_mcp WHERE timestamp &gt; NOW() - INTERVAL '1' DAY GROUP BY tool, client ORDER BY requests DESC</code>.</p>
+<h3>Site beacons (<code>POST /hit</code>)</h3>
+<p>Every page of indexagentica.com carries a small inline script (no cookies, no localStorage, no
+identifiers, no third-party code). It is skipped when <code>navigator.webdriver</code> is set or the browser sends
+Do Not Track or Global Privacy Control. It sends, with <code>navigator.sendBeacon</code> (as <code>text/plain</code>, so no
+CORS preflight):</p>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Body</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>page view</td>
+<td><code>{"t":"pageview","p":"/entries/x402/"}</code></td>
+<td>page load; <code>p</code> is the page's canonical path (no query string, no referrer)</td>
+</tr>
+<tr>
+<td>outbound click</td>
+<td><code>{"t":"click","p":"/entries/x402/","id":"x402","h":"www.x402.org"}</code></td>
+<td>click on a listing's website/repo/docs/source link on its entry page</td>
+</tr>
+<tr>
+<td>download</td>
+<td><code>{"t":"download","p":"/skills/&lt;id&gt;/","id":"&lt;id&gt;","k":"zip"|"skill_md"}</code></td>
+<td>click on a skill zip or raw <code>SKILL.md</code> link</td>
+</tr>
+</tbody></table>
+<p>The site posts to the alias <code>/v1/e</code> on <code>mcp.indexagentica.com</code> and falls back to the same path on
+<code>indexagentica-mcp.indexagentica.workers.dev</code> if that fails (same Worker, same checks). The Worker accepts
+only <code>Origin: https://indexagentica.com</code> (<code>HIT_ORIGINS</code>), bodies up to 512 bytes,
+the three event types with exactly their fields, <code>p</code> from the set of pages the site publishes, ids
+that exist in the published index, and hosts that the entry actually links to. Anything else gets
+<code>400</code> and is not stored. <code>/hit</code> has its own rate-limit counter (same 120/min per IP). Accepted hits go
+to the separate dataset <strong><code>indexagentica_hits</code></strong> (binding <code>HITS</code>), index <code>hit:&lt;event&gt;</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Field</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>blob1</code></td>
+<td>event: <code>pageview</code>, <code>click</code>, <code>download</code></td>
+</tr>
+<tr>
+<td><code>blob2</code></td>
+<td>page path</td>
+</tr>
+<tr>
+<td><code>blob3</code></td>
+<td>entry or skill id (click, download)</td>
+</tr>
+<tr>
+<td><code>blob4</code></td>
+<td>destination host (click)</td>
+</tr>
+<tr>
+<td><code>blob5</code></td>
+<td>download kind: <code>zip</code>, <code>skill_md</code></td>
+</tr>
+<tr>
+<td><code>blob6</code></td>
+<td>UA class (<code>human</code> / <code>agent</code>)</td>
+</tr>
+<tr>
+<td><code>blob7</code></td>
+<td>country (from <code>request.cf</code>)</td>
+</tr>
+<tr>
+<td><code>double1</code></td>
+<td>1</td>
+</tr>
+</tbody></table>
+<h3>Usage stats (<code>GET /stats</code>)</h3>
+<p>Aggregates both datasets through the <a href="https://developers.cloudflare.com/analytics/analytics-engine/sql-api/" target="_blank" rel="noopener noreferrer">Analytics Engine SQL API</a>
+using the secret <code>CF_ANALYTICS_TOKEN</code> (Account Analytics Read) and <code>CF_ACCOUNT_ID</code>. Counts are
+<code>SUM(_sample_interval)</code>. Windows: <code>last_24h</code>, <code>last_7d</code> (rolling) and <code>all_time</code>. Because Analytics
+Engine keeps 3 months, a daily cron (<code>30 0 * * *</code>) stores each completed UTC day's totals in Workers KV
+(<code>STATS_KV</code>, key <code>day:YYYY-MM-DD</code>); <code>all_time</code> = stored days + a live query from the first day not yet
+stored (<code>/stats</code> also catches up missing days lazily). <code>since.mcp_api</code> (<code>STATS_API_SINCE</code>, first deploy
+with request logging) and <code>since.site_beacon</code> (<code>STATS_BEACON_SINCE</code>, deploy of the beacon) label where
+counting starts; nothing earlier is estimated or backfilled. Only the server's own tool names are
+published (anything else is <code>unknown_tool</code>). Responses are cached 10 minutes (Cache API + in-memory,
+<code>Cache-Control: public, max-age=600</code>). Without the token the endpoint answers
+<code>{"status":"collecting", ...}</code> with no numbers; if the SQL API fails, <code>503 {"status":"unavailable"}</code>.</p>
+<h2>Rate limiting</h2>
+<ul>
+<li>Default: <strong>120 requests / 60 s per client IP, per Cloudflare location</strong>, via the
+<a href="https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/" target="_blank" rel="noopener noreferrer">Workers Rate Limiting binding</a>
+(<code>[[ratelimits]]</code> in <code>wrangler.toml</code>, GA since Sept 2025; period must be 10 or 60 s).
+It is intentionally approximate (eventually consistent, per location).</li>
+<li>If the binding is absent or errors, a per-isolate token bucket with the same
+numbers (<code>RATE_LIMIT_REQUESTS</code> / <code>RATE_LIMIT_PERIOD_SECONDS</code>) is used instead.</li>
+<li>Exceeding it returns <strong>HTTP 429</strong> with <code>Retry-After</code>; on <code>/mcp</code> the body is a
+JSON-RPC error (<code>-32000</code>), elsewhere the JSON error envelope. <code>/health</code> and
+<code>OPTIONS</code> are not metered. Responses carry <code>x-ratelimit-limit</code> / <code>x-ratelimit-period</code>.</li>
+<li>Free-plan ceiling to keep in mind: Workers Free allows <strong>100,000 requests/day per
+account</strong> and 10 ms CPU per request (<a href="https://developers.cloudflare.com/workers/platform/limits/" target="_blank" rel="noopener noreferrer">limits</a>).
+A cold search costs ~1-3 ms CPU (parsing the ~135 KB index); warm requests well under 1 ms.</li>
+</ul>
+<h2>Local development &amp; tests</h2>
+<pre><code class="language-bash">npm install
+npm run dev                  # wrangler dev on http://127.0.0.1:8787 (no Cloudflare login needed)
+npm test                     # unit tests + 2x wrangler dev + E2E (REST, MCP both eras, rate limit) + MCP Inspector CLI
+npm run test:unit            # pure unit tests (no network)
+BASE=https://&lt;deployed-host&gt; npm run test:e2e   # E2E against any deployment
+DATA_BASE_URL=http://127.0.0.1:8089 npm test   # point the local Workers at another copy of the site
+</code></pre>
+<p>The long-form E2E checks adapt to the data: with published items they fetch one of
+each type over REST and MCP; with none (all drafts) they check the empty listings and
+not-found paths. To exercise the full path before anything is published, build the
+site with drafts published (e.g. <code>INCLUDE_DRAFTS=1 SITE_URL=http://127.0.0.1:8089 node scripts/build.mjs</code>
+in the site repo), serve <code>dist/</code> on that port, and run <code>npm test</code> with <code>DATA_BASE_URL</code> set.</p>
+<p><code>scripts/test-local.sh</code> starts the normal Worker on :8797 and a low-limit copy
+(<code>--env ratelimit-test</code>, 5 req / 10 s) on :8798, runs <code>test/e2e.mjs</code>, then checks
+the server with <code>@modelcontextprotocol/inspector --cli</code> in the default legacy era and
+pinned to the modern era (<code>protocolEra: "modern"</code> config).</p>
+<p>Manual checks:</p>
+<pre><code class="language-bash">npx mcp-inspector --cli http://127.0.0.1:8787/mcp --transport http --method tools/list
+npx mcp-inspector --cli http://127.0.0.1:8787/mcp --transport http --method tools/call \
+  --tool-name search --tool-args-json '{"query":"browser automation","limit":3}'
+curl -s http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_entry","arguments":{"id":"x402"}}}'
+</code></pre>
+<h2>Connecting a client</h2>
+<pre><code class="language-bash">claude mcp add --transport http indexagentica https://mcp.indexagentica.com/mcp
+</code></pre>
+<p>JSON config (e.g. Claude Code's <code>.mcp.json</code>; Claude Code requires <code>"type": "http"</code> for remote servers):</p>
+<pre><code class="language-json">{ "mcpServers": { "indexagentica": { "type": "http", "url": "https://mcp.indexagentica.com/mcp" } } }
+</code></pre>
+<p>Other clients use their own name for Streamable HTTP (Cline: <code>"type": "streamableHttp"</code>; some accept just <code>"url"</code>).</p>
+<h2>Configuration (<code>wrangler.toml</code> <code>[vars]</code>)</h2>
+<table>
+<thead>
+<tr>
+<th>Var</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DATA_BASE_URL</code></td>
+<td><code>https://indexagentica.com</code></td>
+<td>Where <code>/api/index.json</code> is fetched from</td>
+</tr>
+<tr>
+<td><code>CACHE_TTL_SECONDS</code></td>
+<td><code>600</code></td>
+<td>In-memory / Cache API TTL</td>
+</tr>
+<tr>
+<td><code>RATE_LIMIT_REQUESTS</code>, <code>RATE_LIMIT_PERIOD_SECONDS</code></td>
+<td><code>120</code>, <code>60</code></td>
+<td>Documented limit + fallback bucket (keep in sync with <code>[ratelimits.simple]</code>)</td>
+</tr>
+<tr>
+<td><code>ALLOWED_ORIGINS</code></td>
+<td><code>*</code></td>
+<td>Comma-separated Origin allow-list for browser callers</td>
+</tr>
+<tr>
+<td><code>PUBLIC_BASE_URL</code></td>
+<td>request origin</td>
+<td>Canonical base for links in <code>GET /</code></td>
+</tr>
+<tr>
+<td><code>CF_ACCOUNT_ID</code></td>
+<td>(none)</td>
+<td>Account for the Analytics Engine SQL API (<code>/stats</code>)</td>
+</tr>
+<tr>
+<td><code>STATS_API_SINCE</code>, <code>STATS_BEACON_SINCE</code></td>
+<td><code>2026-10-02T20:21:47Z</code>, (deploy time)</td>
+<td>Where MCP/REST and site-beacon counting start (shown as <code>since</code> in <code>/stats</code>)</td>
+</tr>
+<tr>
+<td><code>HIT_ORIGINS</code></td>
+<td><code>https://indexagentica.com,https://www.indexagentica.com</code></td>
+<td>Origins allowed to <code>POST /hit</code></td>
+</tr>
+</tbody></table>
+<p>Secret: <code>CF_ANALYTICS_TOKEN</code> (Account Analytics Read), set with <code>wrangler secret put CF_ANALYTICS_TOKEN</code>.
+Bindings: <code>ANALYTICS</code> and <code>HITS</code> (Analytics Engine), <code>STATS_KV</code> (KV), <code>RATE_LIMITER</code>; cron <code>30 0 * * *</code>.</p>
+<h2>Deploy</h2>
+<p>See <strong><a href="https://github.com/Drudley/indexagentica-mcp/blob/HEAD/DEPLOY.md" target="_blank" rel="noopener noreferrer">DEPLOY.md</a></strong> for the options for <code>mcp.indexagentica.com</code> and the
+exact Cloudflare/GoDaddy access needed. Short version:</p>
+<pre><code class="language-bash">export CLOUDFLARE_ACCOUNT_ID=...   # from the Cloudflare dashboard
+export CLOUDFLARE_API_TOKEN=...    # custom token, permissions in DEPLOY.md
+npm run deploy:dry                 # build only
+npm run deploy                     # -&gt; https://mcp.indexagentica.com (custom domain)
+                                   #    + https://indexagentica-mcp.indexagentica.workers.dev
+BASE=https://mcp.indexagentica.com npm run test:e2e
+</code></pre>
+<h2>Layout</h2>
+<pre><code>src/index.js      router, CORS, JSON errors, REST endpoints, rate-limit gate
+src/mcp.js        stateless dual-era MCP JSON-RPC handler
+src/tools.js      tool definitions (schemas) + implementations shared with REST
+src/search.js     scoring / filtering
+src/data.js       fetch + cache of /api/index.json
+src/ratelimit.js  Workers rate limiting binding + in-isolate fallback
+src/openapi.js    OpenAPI document for the REST API
+src/analytics.js  per-request usage logging to Workers Analytics Engine (no-op without the binding)
+src/ua.js         human (browser) vs agent User-Agent classification
+src/hits.js       POST /hit: site beacon validation + logging (dataset indexagentica_hits)
+src/stats.js      GET /stats: Analytics Engine SQL aggregation, KV daily rollup (cron), caching
+test/             unit tests, E2E script, Inspector config
+docs/             proposed copy for llms.txt, /agents and the directory listing
+</code></pre>
+<p>License: code MIT; directory content CC BY 4.0.</p>
+<h2>Registry metadata</h2>
+<ul>
+<li><a href="https://github.com/Drudley/indexagentica-mcp/blob/HEAD/server.json" target="_blank" rel="noopener noreferrer"><code>server.json</code></a>: official MCP Registry entry (<code>com.indexagentica/mcp</code>, schema 2025-12-11), validated with
+<code>mcp-publisher validate</code>. Publishing uses HTTP domain auth against
+<code>https://indexagentica.com/.well-known/mcp-registry-auth</code>; it's a separate, manual step once the endpoint is live.</li>
+<li><a href="https://github.com/Drudley/indexagentica-mcp/blob/HEAD/glama.json" target="_blank" rel="noopener noreferrer"><code>glama.json</code></a>: Glama ownership claim (maintainer <code>Drudley</code>).</li>
+<li><a href="https://github.com/Drudley/indexagentica-mcp/blob/HEAD/llms-install.md" target="_blank" rel="noopener noreferrer"><code>llms-install.md</code></a>: install notes for agent-driven installers such as Cline.</li>
+</ul>
+<h2>License</h2>
+<p><a href="https://github.com/Drudley/indexagentica-mcp/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a> for the code. Directory content served by the tools is CC BY 4.0.</p>

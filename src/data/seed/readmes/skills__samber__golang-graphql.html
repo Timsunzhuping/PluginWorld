@@ -1,0 +1,284 @@
+<p><strong>Persona:</strong> You are a Go GraphQL engineer. You design schemas deliberately, batch database access to prevent N+1, and treat query complexity limits as non-optional in production.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Build mode</strong> — generating new schemas, resolvers, or server setup: follow the skill's sequential instructions; launch a background agent to grep for existing resolver patterns and naming conventions before generating new code.</li>
+<li><strong>Review mode</strong> — auditing a GraphQL codebase or PR: use a sub-agent to scan for N+1 resolver patterns, missing complexity caps, global DataLoaders, and introspection enabled in production, in parallel with reading the business logic.</li>
+</ul>
+<blockquote>
+<p><strong>Community default.</strong> A company skill that explicitly supersedes <code>samber/cc-skills-golang@golang-graphql</code> skill takes precedence.</p>
+</blockquote>
+<h1>Go GraphQL Best Practices</h1>
+<p>Both major libraries are schema-first: write SDL (<code>.graphql</code> files), bind Go resolvers. Choose based on project size and team preferences.</p>
+<p>This skill is not exhaustive — refer to each library's official documentation and code examples for current API signatures:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<h2>Library Choice</h2>
+<table>
+<thead>
+<tr>
+<th>Library</th>
+<th>Approach</th>
+<th>Type safety</th>
+<th>Build step</th>
+<th>Best for</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>github.com/99designs/gqlgen</code></td>
+<td>Codegen</td>
+<td>Compile-time</td>
+<td><code>go generate</code></td>
+<td>Large schemas, federation, strict types</td>
+</tr>
+<tr>
+<td><code>github.com/graph-gophers/graphql-go</code></td>
+<td>Reflection</td>
+<td>Parse-time</td>
+<td>None</td>
+<td>Simple schemas, fast iteration</td>
+</tr>
+<tr>
+<td><code>github.com/graphql-go/graphql</code></td>
+<td>Code-first</td>
+<td>Runtime</td>
+<td>None</td>
+<td><strong>Avoid</strong> — verbose, no SDL</td>
+</tr>
+</tbody></table>
+<p>Pick <strong>gqlgen</strong> when: Apollo Federation is required, schema is large (100+ types), or the team wants generated stubs and zero reflection overhead.</p>
+<p>Pick <strong>graph-gophers</strong> when: schema is small/medium, the build pipeline should stay simple, or a dynamic schema is needed.</p>
+<p>For deep-dive on each library, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-graphql/references/gqlgen.md" target="_blank" rel="noopener noreferrer">gqlgen reference</a> and <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-graphql/references/graphql-go.md" target="_blank" rel="noopener noreferrer">graphql-go reference</a>.</p>
+<h2>Schema Design</h2>
+<pre><code class="language-graphql"># ✓ Good — explicit nullability; ID scalar for opaque identifiers
+type User {
+  id: ID!
+  email: String! # non-null: the server can always return this
+  bio: String # nullable: may be unset
+  posts(first: Int = 10, after: String): PostConnection!
+}
+
+# ✗ Bad — Int ID leaks implementation details, breaks client caching
+type Post {
+  id: Int!
+}
+</code></pre>
+<p><strong>Nullability rule:</strong> mark a field <code>!</code> only when the server can <em>always</em> return a value. A resolver error on a non-null field nulls the parent object, causing cascade failures; nullable fields only null the field itself.</p>
+<p><strong>Pagination:</strong> use Relay cursor connections (<code>Connection</code>/<code>Edge</code>/<code>PageInfo</code>) for list fields. Avoid offset pagination on large datasets — cursors are stable under concurrent writes.</p>
+<p><strong>Mutations:</strong> wrap results in an envelope type so clients receive business errors alongside partial results without polluting the GraphQL <code>errors</code> array:</p>
+<pre><code class="language-graphql">type CreateUserPayload {
+  user: User
+  errors: [UserError!]!
+}
+</code></pre>
+<h2>Resolver Patterns</h2>
+<p>Keep resolvers thin — they translate GraphQL inputs to domain calls and domain responses to GraphQL outputs.</p>
+<pre><code class="language-go">// ✓ Good — resolver delegates to service layer
+func (r *mutationResolver) CreateUser(ctx context.Context, input model.CreateUserInput) (*model.CreateUserPayload, error) {
+    user, err := r.userService.Create(ctx, input.Email, input.Name)
+    if err != nil {
+        return nil, formatError(err)
+    }
+    return &amp;model.CreateUserPayload{User: toGQLUser(user)}, nil
+}
+
+// ✗ Bad — SQL in resolver, no separation of concerns
+func (r *queryResolver) User(ctx context.Context, id string) (*model.User, error) {
+    row := r.db.QueryRowContext(ctx, "SELECT * FROM users WHERE id = $1", id)
+    // ...
+}
+</code></pre>
+<p>Use per-type resolver structs (<code>userResolver</code>, <code>postResolver</code>) rather than one monolithic resolver for all fields.</p>
+<h2>N+1 Prevention (DataLoaders)</h2>
+<p>Each <code>User.posts</code> resolver fires a SQL query per user without batching — O(n) DB calls for n users. DataLoaders solve this by coalescing per-field loads into a single batch query.</p>
+<p><strong>Critical rule: DataLoaders MUST be created per-request in HTTP middleware, never globally.</strong> A global DataLoader caches across requests — stale data, potential cross-user data leakage.</p>
+<pre><code class="language-go">// ✓ Good — per-request DataLoader in middleware
+func DataLoaderMiddleware(db *sql.DB, next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        loaders := &amp;Loaders{
+            PostsByUserID: newPostsByUserIDLoader(r.Context(), db),
+        }
+        ctx := context.WithValue(r.Context(), loadersKey, loaders)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+
+// ✗ Bad — global DataLoader shared across all requests
+var globalLoader = newPostsByUserIDLoader(context.Background(), db)
+</code></pre>
+<p>In gqlgen, mark batched fields with <code>resolver: true</code> in <code>gqlgen.yml</code> to force a dedicated resolver method. See <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-graphql/references/gqlgen.md" target="_blank" rel="noopener noreferrer">gqlgen reference</a> for full DataLoader wiring.</p>
+<h2>Authentication and Authorization</h2>
+<p>Two-layer model:</p>
+<ol>
+<li><strong>HTTP middleware</strong> — extract and validate tokens, stash identity in <code>context.Context</code>.</li>
+<li><strong>Schema directives</strong> (gqlgen) or <strong>resolver checks</strong> (graphql-go) — enforce per-field authorization.</li>
+</ol>
+<pre><code class="language-go">// HTTP middleware layer (both libraries)
+func AuthMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        token := r.Header.Get("Authorization")
+        user, err := validateToken(token)
+        if err != nil {
+            http.Error(w, "Unauthorized", http.StatusUnauthorized)
+            return
+        }
+        ctx := context.WithValue(r.Context(), userKey, user)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+</code></pre>
+<p>In gqlgen, use <code>@hasRole</code> schema directives for field-level authorization — authorization policy lives in the schema, not scattered across resolvers. See <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-graphql/references/gqlgen.md" target="_blank" rel="noopener noreferrer">gqlgen reference</a>.</p>
+<h2>Error Handling</h2>
+<p>Never return raw internal errors — they leak SQL messages, stack traces, or service internals to clients.</p>
+<pre><code class="language-go">// gqlgen — custom ErrorPresenter strips internal details
+srv.SetErrorPresenter(func(ctx context.Context, err error) *gqlerror.Error {
+    var gqlErr *gqlerror.Error
+    if errors.As(err, &amp;gqlErr) {
+        return gqlErr // already formatted
+    }
+    // log internal err here
+    return gqlerror.Errorf("internal error") // safe client message
+})
+
+// Add extension codes for client-side error handling
+return nil, &amp;gqlerror.Error{
+    Message: "user not found",
+    Extensions: map[string]any{"code": "NOT_FOUND"},
+}
+</code></pre>
+<p>For graph-gophers, implement the <code>ResolverError</code> interface to attach <code>Extensions()</code>. See <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-graphql/references/graphql-go.md" target="_blank" rel="noopener noreferrer">graphql-go reference</a>.</p>
+<p>Use <code>graphql.AddError(ctx, err)</code> in gqlgen for non-fatal field errors where the resolver can still return partial data.</p>
+<p>For error wrapping patterns, see the <code>samber/cc-skills-golang@golang-error-handling</code> skill.</p>
+<h2>Subscriptions</h2>
+<p>Subscriptions use long-lived WebSocket connections. The critical discipline: <strong>always respect context cancellation</strong> — a leaked goroutine per disconnected client exhausts resources silently.</p>
+<pre><code class="language-go">// ✓ Good — closes channel when client disconnects
+func (r *subscriptionResolver) MessageAdded(ctx context.Context, room string) (&lt;-chan *model.Message, error) {
+    ch := make(chan *model.Message, 1)
+    sub := r.pubsub.Subscribe(room) // subscribe once before the goroutine
+    go func() {
+        defer close(ch) // always close; signals iteration to stop
+        for {
+            select {
+            case &lt;-ctx.Done():
+                return // client disconnected
+            case msg := &lt;-sub:
+                select {
+                case ch &lt;- msg:
+                case &lt;-ctx.Done():
+                    return
+                }
+            }
+        }
+    }()
+    return ch, nil
+}
+
+// ✗ Bad — goroutine leaks forever when client disconnects
+func (r *subscriptionResolver) MessageAdded(ctx context.Context, room string) (&lt;-chan *model.Message, error) {
+    ch := make(chan *model.Message, 1)
+    go func() {
+        for msg := range r.pubsub.Subscribe(room) {
+            ch &lt;- msg // blocks forever after client gone
+        }
+    }()
+    return ch, nil
+}
+</code></pre>
+<h2>Performance and Safety</h2>
+<p>Production GraphQL servers require explicit limits. Without them, a single deeply nested query exhausts CPU and memory.</p>
+<pre><code class="language-go">// gqlgen — wire these into every production handler
+srv := handler.NewDefaultServer(es)
+srv.Use(extension.FixedComplexityLimit(200)) // max cost per query
+
+// Gate introspection — only in non-production environments
+if os.Getenv("ENV") != "production" {
+    srv.Use(extension.Introspection{})
+}
+</code></pre>
+<p>For graph-gophers: <code>graphql.MaxDepth(10)</code> and <code>graphql.MaxParallelism(10)</code> options at <code>ParseSchema</code> time.</p>
+<p><strong>Query allow-listing:</strong> in production, consider persisted queries (gqlgen APQ extension) to reject arbitrary query strings.</p>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Mistake</th>
+<th>Why it matters</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>N+1 queries in child resolvers</td>
+<td>One SQL per parent row → O(n) DB calls</td>
+<td>Use per-request DataLoader</td>
+</tr>
+<tr>
+<td>Global DataLoader</td>
+<td>Cross-request cache — stale data, data leaks</td>
+<td>Create DataLoader in request middleware</td>
+</tr>
+<tr>
+<td>Editing <code>models_gen.go</code> directly</td>
+<td>Next <code>go generate</code> wipes hand edits</td>
+<td>Use <code>autobind</code> or <code>models.&lt;T&gt;.model</code> in <code>gqlgen.yml</code></td>
+</tr>
+<tr>
+<td>Forgetting <code>go generate</code> after schema change</td>
+<td>Resolver interface mismatch at compile time</td>
+<td>Re-run <code>go tool gqlgen generate</code></td>
+</tr>
+<tr>
+<td><code>int</code> field in graph-gophers resolver</td>
+<td>Library requires <code>int32</code> for <code>Int</code> scalar</td>
+<td>Use <code>int32</code> (or <code>float64</code> for <code>Float</code>)</td>
+</tr>
+<tr>
+<td>Introspection enabled in production</td>
+<td>Exposes full schema to attackers</td>
+<td>Gate with <code>ENV</code> check</td>
+</tr>
+<tr>
+<td>No complexity cap</td>
+<td>Deeply nested query → CPU/memory DoS</td>
+<td><code>extension.FixedComplexityLimit(N)</code></td>
+</tr>
+<tr>
+<td>Leaking DB errors from resolvers</td>
+<td>Exposes SQL internals to clients</td>
+<td>Wrap in <code>ErrorPresenter</code> / <code>ResolverError</code></td>
+</tr>
+<tr>
+<td>Subscription goroutine leak</td>
+<td>Client disconnect → goroutine runs forever</td>
+<td><code>defer close(ch)</code> + <code>select ctx.Done()</code></td>
+</tr>
+<tr>
+<td>Nullable field for always-required data</td>
+<td>Clients must null-check everywhere</td>
+<td>Mark <code>!</code> in schema; return error from resolver</td>
+</tr>
+</tbody></table>
+<h2>Deep Dives</h2>
+<ul>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-graphql/references/gqlgen.md" target="_blank" rel="noopener noreferrer">gqlgen reference</a></strong> — codegen workflow, <code>gqlgen.yml</code>, DataLoaders, Federation v2, directives</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-graphql/references/graphql-go.md" target="_blank" rel="noopener noreferrer">graphql-go reference</a></strong> — reflection resolver model, type mapping, tracing</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-graphql/references/testing.md" target="_blank" rel="noopener noreferrer">Testing</a></strong> — gqlgen client harness, gqltesting, httptest patterns</li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-context</code> skill for context propagation in resolvers and subscriptions</li>
+<li>→ See <code>samber/cc-skills-golang@golang-error-handling</code> skill for error wrapping and sentinel patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for table-driven and integration test patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-observability</code> skill for tracing and metrics in resolvers</li>
+<li>→ See <code>samber/cc-skills-golang@golang-security</code> skill for input validation and injection prevention</li>
+<li>→ See <code>samber/cc-skills-golang@golang-database</code> skill for N+1 query patterns and DataLoader database batching</li>
+</ul>
+<h2>References</h2>
+<ul>
+<li><a href="https://github.com/99designs/gqlgen" target="_blank" rel="noopener noreferrer">gqlgen</a></li>
+<li><a href="https://github.com/graph-gophers/graphql-go" target="_blank" rel="noopener noreferrer">graph-gophers/graphql-go</a></li>
+<li><a href="https://relay.dev/graphql/connections.htm" target="_blank" rel="noopener noreferrer">Relay cursor connections spec</a></li>
+</ul>
+<p>If you encounter a bug or unexpected behavior in gqlgen, open an issue at <a href="https://github.com/99designs/gqlgen/issues" target="_blank" rel="noopener noreferrer">https://github.com/99designs/gqlgen/issues</a>.</p>
+<p>If you encounter a bug or unexpected behavior in graph-gophers/graphql-go, open an issue at <a href="https://github.com/graph-gophers/graphql-go/issues" target="_blank" rel="noopener noreferrer">https://github.com/graph-gophers/graphql-go/issues</a>.</p>

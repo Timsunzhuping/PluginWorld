@@ -1,0 +1,224 @@
+<p><strong>Persona:</strong> You are a Go architect setting up dependency injection. You keep the container at the composition root, depend on interfaces not concrete types, and treat provider errors as first-class failures.</p>
+<h1>Using samber/do for Dependency Injection in Go</h1>
+<p>Type-safe dependency injection toolkit for Go based on Go 1.18+ generics.</p>
+<p><strong>Official Resources:</strong></p>
+<ul>
+<li><a href="https://pkg.go.dev/github.com/samber/do/v2" target="_blank" rel="noopener noreferrer">pkg.go.dev/github.com/samber/do/v2</a></li>
+<li><a href="https://do.samber.dev" target="_blank" rel="noopener noreferrer">do.samber.dev</a></li>
+<li><a href="https://github.com/samber/do" target="_blank" rel="noopener noreferrer">github.com/samber/do/v2</a></li>
+</ul>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<p>Install v2 — v1 is superseded and lacks the generics-based container, scopes, and lifecycle hooks documented below, so v1-era guidance misleads on every API in this skill:</p>
+<pre><code class="language-bash">go get -u github.com/samber/do/v2
+</code></pre>
+<h2>Core Concepts</h2>
+<h3>The Injector (Container)</h3>
+<pre><code class="language-go">import "github.com/samber/do/v2"
+
+injector := do.New()
+</code></pre>
+<h3>Service Types</h3>
+<ul>
+<li><strong>Lazy</strong> (default): Created when first requested</li>
+<li><strong>Eager</strong>: Created immediately when the container starts</li>
+<li><strong>Transient</strong>: New instance created on every request</li>
+<li><strong>Value</strong>: Pre-created value, no instantiation</li>
+</ul>
+<h3>Provider Functions</h3>
+<p>Services MUST be registered via provider functions:</p>
+<pre><code class="language-go">type Provider[T any] func(i Injector) (T, error)
+</code></pre>
+<h2>Basic Usage</h2>
+<h3>1. Define and Register Services</h3>
+<p>Follow "Accept Interfaces, Return Structs":</p>
+<pre><code class="language-go">// Register a service (lazy by default)
+do.Provide(injector, func(i do.Injector) (Database, error) {
+    return &amp;PostgreSQLDatabase{connString: "postgres://..."}, nil
+})
+
+// Register a pre-created value
+do.ProvideValue(injector, &amp;Config{Port: 8080})
+
+// Register a transient service (new instance each time)
+do.ProvideTransient(injector, func(i do.Injector) (*Logger, error) {
+    return &amp;Logger{}, nil
+})
+
+// Register an eager service (created immediately at startup)
+do.ProvideValue(injector, &amp;Config{Port: 8080})
+</code></pre>
+<h3>2. Invoke Services</h3>
+<p>The container MUST only be accessed at the composition root:</p>
+<pre><code class="language-go">// Invoke with error handling — reserve for call sites outside the DI graph
+// (e.g. an HTTP handler that must degrade gracefully instead of crashing)
+db, err := do.Invoke[Database](injector)
+
+// MustInvoke panics on error — preferred in providers, recovered by do.Invoke on the parent call
+db := do.MustInvoke[Database](injector)
+</code></pre>
+<p>Inside a provider function, always use <code>do.MustInvoke</code> (or <code>MustInvokeAs</code>/<code>MustInvokeNamed</code>/<code>MustInvokeStruct</code>) rather than the error-returning variant:</p>
+<ul>
+<li>A provider already returns <code>(T, error)</code>, so propagating a dependency failure with <code>do.Invoke</code> costs an extra <code>if err != nil { return nil, err }</code> on every call.</li>
+<li><code>do.MustInvoke</code> panics instead, but samber/do correctly catches and recovers that panic at the enclosing <code>Invoke</code> call and converts it back into a regular error — this recover happens inside the library itself, not in caller code, so <code>MustInvoke</code> is safe to use inside providers.</li>
+<li>The failure still surfaces as an error at the composition root, just without the manual boilerplate in every provider.</li>
+</ul>
+<h3>3. Service Dependencies</h3>
+<pre><code class="language-go">func NewUserService(i do.Injector) (UserService, error) {
+    db := do.MustInvoke[Database](i)
+    cache := do.MustInvoke[Cache](i)
+    return &amp;userService{db: db, cache: cache}, nil
+}
+
+do.Provide(injector, NewUserService)
+</code></pre>
+<h3>4. Implicit Aliasing (Preferred)</h3>
+<p>Register a concrete type and invoke as an interface without explicit aliasing:</p>
+<pre><code class="language-go">// Register concrete type
+do.Provide(injector, func(i do.Injector) (*PostgreSQLDatabase, error) {
+    return &amp;PostgreSQLDatabase{}, nil
+})
+
+// Invoke directly as interface (implicit aliasing)
+db := do.MustInvokeAs[Database](injector)
+</code></pre>
+<h3>5. Named Services</h3>
+<p>Register multiple services of the same type:</p>
+<pre><code class="language-go">do.ProvideNamed(injector, "primary-db", func(i do.Injector) (*Database, error) {
+    return &amp;Database{URL: "postgres://primary..."}, nil
+})
+
+mainDB := do.MustInvokeNamed[*Database](injector, "primary-db")
+</code></pre>
+<h2>Package Organization</h2>
+<p>Use <code>do.Package()</code> to organize service registration by module:</p>
+<pre><code class="language-go">// infrastructure/package.go
+var Package = do.Package(
+    do.Lazy(func(i do.Injector) (*postgres.DB, error) {
+        cfg := do.MustInvoke[*Config](i)
+        return postgres.Connect(cfg.DatabaseURL)
+    }),
+    do.Lazy(func(i do.Injector) (*redis.Client, error) {
+        cfg := do.MustInvoke[*Config](i)
+        return redis.NewClient(cfg.RedisURL), nil
+    }),
+)
+
+// main.go
+injector := do.New(infrastructure.Package, service.Package)
+</code></pre>
+<h2>Full Application Setup</h2>
+<pre><code class="language-go">func main() {
+    injector := do.New(
+        infrastructure.Package,
+        repository.Package,
+        service.Package,
+        transport.Package,
+    )
+
+    server := do.MustInvoke[*http.Server](injector)
+    go server.ListenAndServe()
+
+    _ = injector.ShutdownOnSignalsWithContext(context.Background(), os.Interrupt)
+}
+</code></pre>
+<h2>Best Practices</h2>
+<ol>
+<li>Depend on interfaces, not concrete types — lets you swap implementations in tests without touching production code</li>
+<li>Each service should have one job — services with multiple responsibilities are harder to test and harder to replace</li>
+<li>Keep dependency trees shallow — chains beyond 3-4 levels make initialization order fragile and errors harder to trace</li>
+<li>Handle errors in provider functions — a silently failing provider creates a broken service that crashes later in unexpected places</li>
+<li>Use scopes to organize services by lifecycle — request-scoped services prevent leaks, global services prevent redundant initialization</li>
+<li>Use <code>do.MustInvoke*</code> inside provider functions instead of <code>do.Invoke*</code> — samber/do correctly catches and recovers the panic at the outer <code>Invoke</code> call, turning it back into a returned error, so it's safe to use inside providers and you get the same error propagation without the boilerplate</li>
+</ol>
+<p>For scopes, lifecycle management, struct injection, and debugging, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-do/references/advanced.md" target="_blank" rel="noopener noreferrer">Advanced Usage</a>.</p>
+<p>For testing patterns (cloning, overrides, mocks), see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-do/references/testing.md" target="_blank" rel="noopener noreferrer">Testing</a>.</p>
+<h2>Quick Reference</h2>
+<h3>Registration</h3>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>do.Provide[T]()</code></td>
+<td>Register lazy service (default)</td>
+</tr>
+<tr>
+<td><code>do.ProvideNamed[T]()</code></td>
+<td>Register named lazy service</td>
+</tr>
+<tr>
+<td><code>do.ProvideValue[T]()</code></td>
+<td>Register pre-created value</td>
+</tr>
+<tr>
+<td><code>do.ProvideNamedValue[T]()</code></td>
+<td>Register named value</td>
+</tr>
+<tr>
+<td><code>do.ProvideTransient[T]()</code></td>
+<td>Register new instance each time</td>
+</tr>
+<tr>
+<td><code>do.ProvideNamedTransient[T]()</code></td>
+<td>Register named transient service</td>
+</tr>
+<tr>
+<td><code>do.Package()</code></td>
+<td>Group service registrations</td>
+</tr>
+</tbody></table>
+<h3>Invocation</h3>
+<table>
+<thead>
+<tr>
+<th>Function</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>do.Invoke[T]()</code></td>
+<td>Get service (with error)</td>
+</tr>
+<tr>
+<td><code>do.InvokeNamed[T]()</code></td>
+<td>Get named service</td>
+</tr>
+<tr>
+<td><code>do.InvokeAs[T]()</code></td>
+<td>Get first service matching interface</td>
+</tr>
+<tr>
+<td><code>do.InvokeStruct[T]()</code></td>
+<td>Inject into struct fields using tags</td>
+</tr>
+<tr>
+<td><code>do.MustInvoke[T]()</code></td>
+<td>Get service (panic on error)</td>
+</tr>
+<tr>
+<td><code>do.MustInvokeNamed[T]()</code></td>
+<td>Get named service (panic on error)</td>
+</tr>
+<tr>
+<td><code>do.MustInvokeAs[T]()</code></td>
+<td>Get service by interface (panic on error)</td>
+</tr>
+<tr>
+<td><code>do.MustInvokeStruct[T]()</code></td>
+<td>Inject into struct (panic on error)</td>
+</tr>
+</tbody></table>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-dependency-injection</code> skill for DI concepts, comparison, and when to adopt a DI library</li>
+<li>→ See <code>samber/cc-skills-golang@golang-structs-interfaces</code> skill for interface design patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for general testing patterns</li>
+</ul>

@@ -1,0 +1,273 @@
+<p><strong>Persona:</strong> You are a Go engineer who treats errors as structured data. Every error carries enough context — domain, attributes, trace — for an on-call engineer to diagnose the problem without asking the developer.</p>
+<h1>samber/oops Structured Error Handling</h1>
+<p><strong>samber/oops</strong> is a drop-in replacement for Go's standard error handling that adds structured context, stack traces, error codes, public messages, and panic recovery. Variable data goes in <code>.With()</code> attributes (not the message string), so APM tools (Datadog, Loki, Sentry) can group errors properly. Unlike the stdlib approach (adding <code>slog</code> attributes at the log site), oops attributes travel with the error through the call stack.</p>
+<h2>Why use samber/oops</h2>
+<p>Standard Go errors lack context — you see <code>connection failed</code> but not which user triggered it, what query was running, or the full call stack. <code>samber/oops</code> provides:</p>
+<ul>
+<li><strong>Structured context</strong> — key-value attributes on any error</li>
+<li><strong>Stack traces</strong> — automatic call stack capture</li>
+<li><strong>Error codes</strong> — machine-readable identifiers</li>
+<li><strong>Public messages</strong> — user-safe messages separate from technical details</li>
+<li><strong>Low-cardinality messages</strong> — variable data in <code>.With()</code> attributes, not the message string, so APM tools group errors properly</li>
+</ul>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<h2>Core pattern: Error builder chain</h2>
+<p>All <code>oops</code> errors use a fluent builder pattern:</p>
+<pre><code class="language-go">err := oops.
+    In("user-service").           // domain/feature
+    Tags("database", "postgres").  // categorization
+    Code("network_failure").       // machine-readable identifier
+    User("user-123", "email", "foo@bar.com").  // user context
+    With("query", query).          // custom attributes
+    Errorf("failed to fetch user: %s", "timeout")
+</code></pre>
+<p>Terminal methods:</p>
+<ul>
+<li><code>.Errorf(format, args...)</code> — create a new error</li>
+<li><code>.Wrap(err)</code> — wrap an existing error</li>
+<li><code>.Wrapf(err, format, args...)</code> — wrap with a message</li>
+<li><code>.Join(err1, err2, ...)</code> — combine multiple errors</li>
+<li><code>.Recover(fn)</code> / <code>.Recoverf(fn, format, args...)</code> — convert panic to error</li>
+</ul>
+<h3>Error builder methods</h3>
+<table>
+<thead>
+<tr>
+<th>Methods</th>
+<th>Use case</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>.With("key", value)</code></td>
+<td>Add custom key-value attribute (lazy <code>func() any</code> values supported)</td>
+</tr>
+<tr>
+<td><code>.WithContext(ctx, "key1", "key2")</code></td>
+<td>Extract values from Go context into attributes (lazy values supported)</td>
+</tr>
+<tr>
+<td><code>.In("domain")</code></td>
+<td>Set the feature/service/domain</td>
+</tr>
+<tr>
+<td><code>.Tags("auth", "sql")</code></td>
+<td>Add categorization tags (query with <code>err.HasTag("tag")</code>)</td>
+</tr>
+<tr>
+<td><code>.Code("iam_authz_missing_permission")</code></td>
+<td>Set machine-readable error identifier/slug</td>
+</tr>
+<tr>
+<td><code>.Public("Could not fetch user.")</code></td>
+<td>Set user-safe message (separate from technical details)</td>
+</tr>
+<tr>
+<td><code>.Hint("Runbook: https://doc.acme.org/doc/abcd.md")</code></td>
+<td>Add debugging hint for developers</td>
+</tr>
+<tr>
+<td><code>.Owner("team/slack")</code></td>
+<td>Identify responsible team/owner</td>
+</tr>
+<tr>
+<td><code>.User(id, "k", "v")</code></td>
+<td>Add user identifier and attributes</td>
+</tr>
+<tr>
+<td><code>.Tenant(id, "k", "v")</code></td>
+<td>Add tenant/organization context and attributes</td>
+</tr>
+<tr>
+<td><code>.Trace(id)</code></td>
+<td>Add trace / correlation ID (default: ULID)</td>
+</tr>
+<tr>
+<td><code>.Span(id)</code></td>
+<td>Add span ID representing a unit of work/operation (default: ULID)</td>
+</tr>
+<tr>
+<td><code>.Time(t)</code></td>
+<td>Override error timestamp (default: <code>time.Now()</code>)</td>
+</tr>
+<tr>
+<td><code>.Since(t)</code></td>
+<td>Set duration based on time since <code>t</code> (exposed via <code>err.Duration()</code>)</td>
+</tr>
+<tr>
+<td><code>.Duration(d)</code></td>
+<td>Set explicit error duration</td>
+</tr>
+<tr>
+<td><code>.Request(req, includeBody)</code></td>
+<td>Attach <code>*http.Request</code> (optionally including body)</td>
+</tr>
+<tr>
+<td><code>.Response(res, includeBody)</code></td>
+<td>Attach <code>*http.Response</code> (optionally including body)</td>
+</tr>
+<tr>
+<td><code>oops.FromContext(ctx)</code></td>
+<td>Start from an <code>OopsErrorBuilder</code> stored in a Go context</td>
+</tr>
+</tbody></table>
+<h2>Common scenarios</h2>
+<h3>Database/repository layer</h3>
+<pre><code class="language-go">func (r *UserRepository) FetchUser(id string) (*User, error) {
+    query := "SELECT * FROM users WHERE id = $1"
+    row, err := r.db.Query(query, id)
+    if err != nil {
+        return nil, oops.
+            In("user-repository").
+            Tags("database", "postgres").
+            With("query", query).
+            With("user_id", id).
+            Wrapf(err, "failed to fetch user from database")
+    }
+    // ...
+}
+</code></pre>
+<h3>HTTP handler layer</h3>
+<pre><code class="language-go">func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
+    userID := getUserID(r)
+
+    err := h.service.CreateUser(r.Context(), userID)
+    if err != nil {
+        err = oops.
+            In("http-handler").
+            Tags("endpoint", "/users").
+            Request(r, false).
+            User(userID).
+            Wrapf(err, "create user failed")
+        http.Error(w, oops.GetPublic(err, "Internal server error"), http.StatusInternalServerError)
+        return
+    }
+
+    w.WriteHeader(http.StatusCreated)
+}
+</code></pre>
+<h3>Service layer with reusable builder</h3>
+<pre><code class="language-go">func (s *UserService) CreateOrder(ctx context.Context, req CreateOrderRequest) error {
+    builder := oops.
+        In("order-service").
+        Tags("orders", "checkout").
+        Tenant(req.TenantID, "plan", req.Plan).
+        User(req.UserID, "email", req.UserEmail)
+
+    product, err := s.catalog.GetProduct(ctx, req.ProductID)
+    if err != nil {
+        return builder.
+            With("product_id", req.ProductID).
+            Wrapf(err, "product lookup failed")
+    }
+
+    if product.Stock &lt; req.Quantity {
+        return builder.
+            Code("insufficient_stock").
+            Public("Not enough items in stock.").
+            With("requested", req.Quantity).
+            With("available", product.Stock).
+            Errorf("insufficient stock for product %s", req.ProductID)
+    }
+
+    return nil
+}
+</code></pre>
+<h2>Error wrapping best practices</h2>
+<h3>DO: Wrap directly, no nil check needed</h3>
+<pre><code class="language-go">// ✓ Good — Wrap returns nil if err is nil
+return oops.Wrapf(err, "operation failed")
+
+// ✗ Bad — unnecessary nil check
+if err != nil {
+    return oops.Wrapf(err, "operation failed")
+}
+return nil
+</code></pre>
+<h3>DO: Add context at each layer</h3>
+<p>Each architectural layer SHOULD add context via Wrap/Wrapf — at least once per package boundary (not necessarily at every function call).</p>
+<pre><code class="language-go">// ✓ Good — each layer adds relevant context
+func Controller() error {
+    return oops.In("controller").Trace(traceID).Wrapf(Service(), "user request failed")
+}
+
+func Service() error {
+    return oops.In("service").With("op", "create_user").Wrapf(Repository(), "db operation failed")
+}
+
+func Repository() error {
+    return oops.In("repository").Tags("database", "postgres").Errorf("connection timeout")
+}
+</code></pre>
+<h3>DO: Keep error messages low-cardinality</h3>
+<p>Error messages MUST be low-cardinality for APM aggregation. Interpolating variable data into the message breaks grouping in Datadog, Loki, Sentry.</p>
+<pre><code class="language-go">// ✗ Bad — high-cardinality, breaks APM grouping
+oops.Errorf("failed to process user %s in tenant %s", userID, tenantID)
+
+// ✓ Good — static message + structured attributes
+oops.With("user_id", userID).With("tenant_id", tenantID).Errorf("failed to process user")
+</code></pre>
+<h2>Panic recovery</h2>
+<p><code>oops.Recover()</code> MUST be used in goroutine boundaries. Convert panics to structured errors:</p>
+<pre><code class="language-go">func ProcessData(data string) (err error) {
+    return oops.
+        In("data-processor").
+        Code("panic_recovered").
+        Hint("Check input data format and dependencies").
+        With("input_data", data).
+        Recover(func() {
+            riskyOperation(data)
+        })
+}
+</code></pre>
+<h2>Accessing error information</h2>
+<p><code>samber/oops</code> errors implement the standard <code>error</code> interface. Access additional info:</p>
+<pre><code class="language-go">if oopsErr, ok := err.(oops.OopsError); ok {
+    fmt.Println("Code:", oopsErr.Code())
+    fmt.Println("Domain:", oopsErr.Domain())
+    fmt.Println("Tags:", oopsErr.Tags())
+    fmt.Println("Context:", oopsErr.Context())
+    fmt.Println("Stacktrace:", oopsErr.Stacktrace())
+}
+
+// Get public-facing message with fallback
+publicMsg := oops.GetPublic(err, "Something went wrong")
+</code></pre>
+<h3>Output formats</h3>
+<pre><code class="language-go">fmt.Printf("%+v\n", err)       // verbose with stack trace
+bytes, _ := json.Marshal(err)  // JSON for logging
+slog.Error(err.Error(), slog.Any("error", err))  // slog integration
+</code></pre>
+<h2>Context propagation</h2>
+<p>Carry error context through Go contexts:</p>
+<pre><code class="language-go">func middleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        builder := oops.
+            In("http").
+            Request(r, false).
+            Trace(r.Header.Get("X-Trace-ID"))
+
+        ctx := oops.WithBuilder(r.Context(), builder)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+
+func handler(ctx context.Context) error {
+    return oops.FromContext(ctx).Tags("handler", "users").Errorf("something failed")
+}
+</code></pre>
+<p>For assertions, configuration, and additional logger examples, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-oops/references/advanced.md" target="_blank" rel="noopener noreferrer">Advanced patterns</a>.</p>
+<h2>References</h2>
+<ul>
+<li><a href="https://github.com/samber/oops" target="_blank" rel="noopener noreferrer">github.com/samber/oops</a></li>
+<li><a href="https://pkg.go.dev/github.com/samber/oops" target="_blank" rel="noopener noreferrer">pkg.go.dev/github.com/samber/oops</a></li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-error-handling</code> skill for general error handling patterns</li>
+<li>→ See <code>samber/cc-skills-golang@golang-observability</code> skill for logger integration and structured logging</li>
+</ul>

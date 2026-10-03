@@ -1,0 +1,544 @@
+<h1>Knowledge Comic Creator</h1>
+<p>Create original knowledge comics with flexible art style × tone combinations.</p>
+<h2>User Input Tools</h2>
+<p>When this skill prompts the user, follow this tool-selection rule (priority order):</p>
+<ol>
+<li><strong>Prefer built-in user-input tools</strong> exposed by the current agent runtime — e.g., <code>AskUserQuestion</code>, <code>request_user_input</code>, <code>clarify</code>, <code>ask_user</code>, or any equivalent.</li>
+<li><strong>Fallback</strong>: if no such tool exists, emit a numbered plain-text message and ask the user to reply with the chosen number/answer for each question.</li>
+<li><strong>Batching</strong>: if the tool supports multiple questions per call, combine all applicable questions into a single call; if only single-question, ask them one at a time in priority order.</li>
+</ol>
+<p>Concrete <code>AskUserQuestion</code> references below are examples — substitute the local equivalent in other runtimes.</p>
+<h2>Image Generation Tools</h2>
+<p>When this skill needs to render an image, resolve the backend in this order:</p>
+<ol>
+<li><strong>Current-request override</strong> — if the user names a specific backend in the current message, use it.</li>
+<li><strong>Saved preference</strong> — if <code>EXTEND.md</code> sets <code>preferred_image_backend</code> to a backend available right now, use it.</li>
+<li><strong>Auto-select</strong> (when the preference is <code>auto</code>, unset, or the pinned backend isn't available):<ul>
+<li><strong>Codex (<code>imagegen</code>)</strong> — first, inspect your available-skills / tool inventory. If a skill named <code>imagegen</code> is listed, you are running inside Codex and MUST use it: invoke via the <code>Skill</code> tool with <code>skill: "imagegen"</code>, passing the saved prompt file's content (plus output path and aspect ratio per Codex <code>imagegen</code>'s own args). Codex <code>imagegen</code> is the official raster backend in that runtime and outranks any non-native skill (e.g., <code>baoyu-image-gen</code>) unless the user has explicitly pinned a different <code>preferred_image_backend</code>.</li>
+<li><strong>Codex via <code>codex exec</code> (<code>codex-imagegen</code>)</strong> — if the current runtime exposes no native <code>imagegen</code> skill but the <code>codex</code> CLI is on <code>PATH</code> with an active <code>codex login</code>, route through <code>baoyu-image-gen --provider codex-cli</code> (preferred), or — if baoyu-image-gen is unavailable — invoke the bundled wrapper directly. Details, parameters, and the runtime-discovery procedure live in <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/codex-imagegen.md" target="_blank" rel="noopener noreferrer">references/codex-imagegen.md</a> — load that file only when this branch is selected.</li>
+<li><strong>Cursor (<code>GenerateImage</code>)</strong> — if the runtime exposes a native <code>GenerateImage</code> tool, you are running inside Cursor and it outranks any non-native skill the same way Codex <code>imagegen</code> does. Two hard caveats: (a) it has no aspect-ratio parameter — state the target aspect ratio / dimensions explicitly in the prompt text passed as <code>description</code>; (b) it does not accept an output directory — it saves to a tool-managed location, so after generation copy/move the file to the skill's expected output path (e.g., <code>outputs/.../NN-xxx.png</code>). Reference images go in <code>reference_image_paths</code>.</li>
+<li><strong>Other runtime-native tools</strong> — if the runtime exposes a different native image tool (e.g., Hermes <code>image_generate</code>), use it the same way.</li>
+<li>Otherwise, if exactly one non-native backend is installed (e.g., <code>baoyu-image-gen</code>), use it.</li>
+<li>Otherwise (multiple non-native backends with no runtime-native tool), ask the user once — batch with any other initial questions.</li>
+</ul>
+</li>
+<li><strong>If none are available</strong>, tell the user and ask how to proceed.</li>
+</ol>
+<p><strong>⛔ Never substitute SVG, HTML, canvas, or other code-based rendering for raster image generation.</strong> Codex <code>imagegen</code>'s own description says it should be used "when the output should be a bitmap asset rather than repo-native code or vector." If you cannot resolve a raster backend via step 3, fall through to step 4 and ask the user — do <strong>not</strong> silently emit SVG, write inline <code>&lt;svg&gt;</code> markup, or produce HTML/CSS art as a substitute. This applies even if the article/section seems "diagram-like": the consumer skill calling this rule has already decided that a raster image is what it needs.</p>
+<p><strong>⛔ Never repair rendered text by painting over a generated bitmap.</strong> Do not use ImageMagick, Pillow, Canvas, SVG, HTML/CSS, OCR scripts, or any other programmatic overlay to cover, rewrite, erase, stroke, or replace dialogue, sound effects, panel labels, or any other text inside an already generated comic page. If text is wrong or unclear, regenerate from a corrected prompt, redraw the page with less or no on-image text, or ask the user which imperfect candidate to keep.</p>
+<p>Setting <code>preferred_image_backend: ask</code> forces the step-3 prompt every run regardless of available backends. Users change the pinned backend via the <code>## Changing Preferences</code> section below.</p>
+<p><strong>Prompt file requirement (hard)</strong>: write each image's full, final prompt to a standalone file under <code>prompts/</code> (naming: <code>NN-{type}-[slug].md</code>) BEFORE invoking any backend. The backend receives the prompt file (or its content); the file is the reproducibility record and lets you switch backends without regenerating prompts.</p>
+<p>Concrete tool names (<code>imagegen</code>, <code>GenerateImage</code>, <code>image_generate</code>, <code>baoyu-image-gen</code>) above are examples — substitute the local equivalents under the same rule.</p>
+<h2>Batch Generation Policy</h2>
+<p>After every prompt file for the current generation group has been saved and verified, generate images in batches by default.</p>
+<p>Priority order:</p>
+<ol>
+<li>Use the chosen backend's native batch / multi-task interface if it exists. Each task must keep its own prompt file, output path, aspect ratio, session ID, and direct reference images.</li>
+<li>If no native batch interface exists but the runtime can issue parallel tool calls, dispatch up to <code>generation_batch_size</code> images at a time. Default: <code>4</code>. An explicit user request in the current message, such as <code>--batch-size 4</code> or "并行4张一起生成", overrides EXTEND.md.</li>
+<li>If neither native batch nor parallel tool calls are available, generate sequentially.</li>
+</ol>
+<p>Rules:</p>
+<ul>
+<li>Honor workflow dependencies first: generate <code>characters/characters.png</code> before pages that use it as a reference.</li>
+<li>Never start the first page batch until all selected page prompt files exist on disk.</li>
+<li>Retry failed items once without regenerating successful items.</li>
+<li>Do not use subagents merely to parallelize image rendering. Use subagents only for separate prompt iteration or creative exploration.</li>
+</ul>
+<h2>Reference Images</h2>
+<p>Users may supply reference images to guide art style, palette, scene composition, or subject. This is <strong>separate from</strong> the auto-generated character sheet (Step 7.1) — both can coexist: user refs guide the look, the character sheet anchors recurring character identity.</p>
+<p><strong>Intake</strong>: Accept via <code>--ref &lt;files...&gt;</code> or when the user provides file paths / pastes images in conversation.</p>
+<ul>
+<li>File path(s) → copy to <code>refs/NN-ref-{slug}.{ext}</code> alongside the comic output</li>
+<li>Pasted image with no path → ask the user for the path (per the User Input Tools rule above), or extract style traits verbally as a text fallback</li>
+<li>No reference → skip this section</li>
+</ul>
+<p><strong>Usage modes</strong> (per reference):</p>
+<table>
+<thead>
+<tr>
+<th>Usage</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>direct</code></td>
+<td>Pass the file to the backend as a reference image on every page (or selected pages)</td>
+</tr>
+<tr>
+<td><code>style</code></td>
+<td>Extract style traits (line treatment, texture, mood) and append to every page's prompt body</td>
+</tr>
+<tr>
+<td><code>palette</code></td>
+<td>Extract hex colors and append to every page's prompt body</td>
+</tr>
+</tbody></table>
+<p><strong>Record in each page's prompt frontmatter</strong> when refs exist:</p>
+<pre><code class="language-yaml">references:
+  - ref_id: 01
+    filename: 01-ref-scene.png
+    usage: direct
+</code></pre>
+<p><strong>At generation time</strong>:</p>
+<ul>
+<li>Verify each referenced file exists on disk</li>
+<li>If <code>usage: direct</code> AND the chosen backend accepts multiple reference images → pass both the character sheet (Step 7.2) and the user refs via the backend's ref parameter; compress images first per Step 7.1's guidance to avoid payload failures</li>
+<li>If the backend accepts only one ref → prefer the character sheet for pages with recurring characters; embed user-ref traits in the prompt body instead</li>
+<li>For <code>style</code>/<code>palette</code> usage → embed extracted traits in every page's prompt text (applies regardless of backend capability)</li>
+</ul>
+<h2>Options</h2>
+<h3>Visual Dimensions</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Values</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--art</code></td>
+<td>ligne-claire (default), manga, realistic, ink-brush, chalk, minimalist</td>
+<td>Art style / rendering technique</td>
+</tr>
+<tr>
+<td><code>--tone</code></td>
+<td>neutral (default), warm, dramatic, romantic, energetic, vintage, action</td>
+<td>Mood / atmosphere</td>
+</tr>
+<tr>
+<td><code>--layout</code></td>
+<td>standard (default), cinematic, dense, splash, mixed, webtoon, four-panel</td>
+<td>Panel arrangement</td>
+</tr>
+<tr>
+<td><code>--aspect</code></td>
+<td>3:4 (default, portrait), 4:3 (landscape), 16:9 (widescreen)</td>
+<td>Page aspect ratio</td>
+</tr>
+<tr>
+<td><code>--lang</code></td>
+<td>auto (default), zh, en, ja, etc.</td>
+<td>Output language</td>
+</tr>
+<tr>
+<td><code>--ref &lt;files...&gt;</code></td>
+<td>File paths</td>
+<td>Reference images applied to every page for style / palette / scene guidance. See <a href="#reference-images" target="_blank" rel="noopener noreferrer">Reference Images</a> above.</td>
+</tr>
+<tr>
+<td><code>--batch-size &lt;n&gt;</code></td>
+<td>1-8</td>
+<td>Temporary page generation batch size for this run. Default: <code>generation_batch_size</code> from EXTEND.md, otherwise 4.</td>
+</tr>
+</tbody></table>
+<h3>Partial Workflow Options</h3>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--storyboard-only</code></td>
+<td>Generate storyboard only, skip prompts and images</td>
+</tr>
+<tr>
+<td><code>--prompts-only</code></td>
+<td>Generate storyboard + prompts, skip images</td>
+</tr>
+<tr>
+<td><code>--images-only</code></td>
+<td>Generate images from existing prompts directory</td>
+</tr>
+<tr>
+<td><code>--regenerate N</code></td>
+<td>Regenerate specific page(s) only (e.g., <code>3</code> or <code>2,5,8</code>)</td>
+</tr>
+</tbody></table>
+<p>Details: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/partial-workflows.md" target="_blank" rel="noopener noreferrer">references/partial-workflows.md</a></p>
+<h3>Art, Tone &amp; Preset Catalogue</h3>
+<ul>
+<li><p><strong>Art styles</strong> (6): <code>ligne-claire</code>, <code>manga</code>, <code>realistic</code>, <code>ink-brush</code>, <code>chalk</code>, <code>minimalist</code>. Full definitions at <code>references/art-styles/&lt;style&gt;.md</code>.</p>
+</li>
+<li><p><strong>Tones</strong> (7): <code>neutral</code>, <code>warm</code>, <code>dramatic</code>, <code>romantic</code>, <code>energetic</code>, <code>vintage</code>, <code>action</code>. Full definitions at <code>references/tones/&lt;tone&gt;.md</code>.</p>
+</li>
+<li><p><strong>Presets</strong> (5) with special rules beyond plain art+tone:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Equivalent</th>
+<th>Hook</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ohmsha</code></td>
+<td>manga + neutral</td>
+<td>Visual metaphors, no talking heads, gadget reveals</td>
+</tr>
+<tr>
+<td><code>wuxia</code></td>
+<td>ink-brush + action</td>
+<td>Qi effects, combat visuals, atmospheric</td>
+</tr>
+<tr>
+<td><code>shoujo</code></td>
+<td>manga + romantic</td>
+<td>Decorative elements, eye details, romantic beats</td>
+</tr>
+<tr>
+<td><code>concept-story</code></td>
+<td>manga + warm</td>
+<td>Visual symbol system, growth arc, dialogue+action balance</td>
+</tr>
+<tr>
+<td><code>four-panel</code></td>
+<td>minimalist + neutral + four-panel layout</td>
+<td>起承转合 structure, B&amp;W + spot color, stick-figure characters</td>
+</tr>
+</tbody></table>
+<p>Full rules at <code>references/presets/&lt;preset&gt;.md</code> — load the file when a preset is picked.</p>
+</li>
+<li><p><strong>Compatibility matrix</strong> and <strong>content-signal → preset</strong> table live in <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/auto-selection.md" target="_blank" rel="noopener noreferrer">references/auto-selection.md</a>. Read it before recommending combinations in Step 2.</p>
+</li>
+</ul>
+<h2>Script Directory</h2>
+<p><strong>Important</strong>: All scripts are located in the <code>scripts/</code> subdirectory of this skill.</p>
+<p><strong>Agent Execution Instructions</strong>:</p>
+<ol>
+<li>Determine this SKILL.md file's directory path as <code>{baseDir}</code></li>
+<li>Script path = <code>{baseDir}/scripts/&lt;script-name&gt;.ts</code></li>
+<li>Replace all <code>{baseDir}</code> in this document with the actual path</li>
+<li>Resolve <code>${BUN_X}</code> runtime: if <code>bun</code> installed → <code>bun</code>; if <code>npx</code> available → <code>npx -y bun</code>; else suggest installing bun</li>
+</ol>
+<p><strong>Script Reference</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Script</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>scripts/merge-to-pdf.ts</code></td>
+<td>Merge comic pages into PDF</td>
+</tr>
+</tbody></table>
+<h2>File Structure</h2>
+<p>Output directory: <code>comic/{topic-slug}/</code></p>
+<ul>
+<li>Slug: 2-4 words kebab-case from topic (e.g., <code>alan-turing-bio</code>)</li>
+<li>Conflict: append timestamp (e.g., <code>turing-story-20260118-143052</code>)</li>
+</ul>
+<p><strong>Contents</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>source-{slug}.{ext}</code></td>
+<td>Source files</td>
+</tr>
+<tr>
+<td><code>analysis.md</code></td>
+<td>Content analysis</td>
+</tr>
+<tr>
+<td><code>storyboard.md</code></td>
+<td>Storyboard with panel breakdown</td>
+</tr>
+<tr>
+<td><code>characters/characters.md</code></td>
+<td>Character definitions</td>
+</tr>
+<tr>
+<td><code>characters/characters.png</code></td>
+<td>Character reference sheet</td>
+</tr>
+<tr>
+<td><code>prompts/NN-{cover|page}-[slug].md</code></td>
+<td>Generation prompts</td>
+</tr>
+<tr>
+<td><code>NN-{cover|page}-[slug].png</code></td>
+<td>Generated images</td>
+</tr>
+<tr>
+<td><code>{topic-slug}.pdf</code></td>
+<td>Final merged PDF</td>
+</tr>
+</tbody></table>
+<h2>Language Handling</h2>
+<p><strong>Detection Priority</strong>:</p>
+<ol>
+<li><code>--lang</code> flag (explicit)</li>
+<li>EXTEND.md <code>language</code> setting</li>
+<li>User's conversation language</li>
+<li>Source content language</li>
+</ol>
+<p><strong>Rule</strong>: Use user's input language or saved language preference for ALL interactions:</p>
+<ul>
+<li>Storyboard outlines and scene descriptions</li>
+<li>Image generation prompts</li>
+<li>User selection options and confirmations</li>
+<li>Progress updates, questions, errors, summaries</li>
+</ul>
+<p>Technical terms remain in English.</p>
+<h2>Workflow</h2>
+<h3>Progress Checklist</h3>
+<pre><code>Comic Progress:
+- [ ] Step 1: Setup &amp; Analyze
+  - [ ] 1.1 Preferences (EXTEND.md) ⛔ BLOCKING
+    - [ ] Found → load preferences → continue
+    - [ ] Not found → run first-time setup → MUST complete before other steps
+  - [ ] 1.2 Analyze, 1.3 Check existing
+- [ ] Step 2: Confirmation - Style &amp; options ⚠️ REQUIRED
+- [ ] Step 3: Generate storyboard + characters
+- [ ] Step 4: Review outline (conditional)
+- [ ] Step 5: Generate prompts
+- [ ] Step 6: Review prompts (conditional)
+- [ ] Step 7: Generate images
+  - [ ] 7.1 Generate character sheet (if needed) → characters/characters.png
+  - [ ] 7.2 Generate pages (with --ref if character sheet exists)
+- [ ] Step 8: Merge to PDF
+- [ ] Step 9: Completion report
+</code></pre>
+<h3>Flow</h3>
+<pre><code>Input → [Preferences] ─┬─ Found → Continue
+                       │
+                       └─ Not found → First-Time Setup ⛔ BLOCKING
+                                      │
+                                      └─ Complete setup → Save EXTEND.md → Continue
+                                                                              │
+        ┌─────────────────────────────────────────────────────────────────────┘
+        ↓
+Analyze → [Check Existing?] → [Confirm: Style + Reviews] → Storyboard → [Review?] → Prompts → [Review?] → Images → PDF → Complete
+</code></pre>
+<h3>Step Summary</h3>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Action</th>
+<th>Key Output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1.1</td>
+<td>Load EXTEND.md preferences ⛔ BLOCKING if not found</td>
+<td>Config loaded</td>
+</tr>
+<tr>
+<td>1.2</td>
+<td>Analyze content</td>
+<td><code>analysis.md</code></td>
+</tr>
+<tr>
+<td>1.3</td>
+<td>Check existing directory</td>
+<td>Handle conflicts</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Confirm style, focus, audience, reviews</td>
+<td>User preferences</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Generate storyboard + characters</td>
+<td><code>storyboard.md</code>, <code>characters/</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Review outline (if requested)</td>
+<td>User approval</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Generate prompts</td>
+<td><code>prompts/*.md</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>Review prompts (if requested)</td>
+<td>User approval</td>
+</tr>
+<tr>
+<td>7.1</td>
+<td>Generate character sheet (if needed)</td>
+<td><code>characters/characters.png</code></td>
+</tr>
+<tr>
+<td>7.2</td>
+<td>Generate pages (with character ref if available)</td>
+<td><code>*.png</code> files</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Merge to PDF</td>
+<td><code>{slug}.pdf</code></td>
+</tr>
+<tr>
+<td>9</td>
+<td>Completion report</td>
+<td>Summary</td>
+</tr>
+</tbody></table>
+<h3>Step 7: Image Generation</h3>
+<p><strong>Pick a backend once per session</strong> using the <code>## Image Generation Tools</code> rule at the top. If the backend is a repo skill (e.g., <code>baoyu-image-gen</code>), read its <code>SKILL.md</code> and use its documented interface rather than its scripts.</p>
+<p><strong><code>codex-imagegen</code> invocation</strong>: when the rule resolves to <code>codex-imagegen</code>, see <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/codex-imagegen.md" target="_blank" rel="noopener noreferrer">references/codex-imagegen.md</a> for the invocation contract (preferred <code>baoyu-image-gen --provider codex-cli</code> path, runtime wrapper discovery, parameter notes, stdout schema, batch semantics — n=1 per call so page batches must dispatch one wrapper call per page).</p>
+<p><strong>7.1 Character sheet</strong> — generate it (to <code>characters/characters.png</code>, aspect <code>4:3</code>) when the comic is multi-page with recurring characters. Skip for simple presets (e.g., four-panel minimalist) or single-page comics. Compress to JPEG before use-as-<code>--ref</code> (<code>sips -s format jpeg -s formatOptions 80 …</code> on macOS, <code>pngquant --quality=65-80 …</code> elsewhere) to avoid payload failures. The prompt file at <code>characters/characters.md</code> must exist before invoking the backend.</p>
+<p><strong>7.2 Pages</strong> — each page's prompt MUST already be at <code>prompts/NN-{cover|page}-[slug].md</code> before invoking the backend; the file is the reproducibility record. Strategy depends on the character sheet:</p>
+<table>
+<thead>
+<tr>
+<th>Character sheet</th>
+<th>Backend <code>--ref</code></th>
+<th>Strategy</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Exists</td>
+<td>Supported</td>
+<td>Pass sheet as <code>--ref</code> on every page</td>
+</tr>
+<tr>
+<td>Exists</td>
+<td>Not supported</td>
+<td>Prepend character descriptions to every prompt file</td>
+</tr>
+<tr>
+<td>Skipped</td>
+<td>—</td>
+<td>All descriptions inline in prompt</td>
+</tr>
+</tbody></table>
+<p><strong>Execution strategy</strong>: Generate the character sheet first when needed. Then build the selected page task list from saved prompt files and dispatch pages in batches per the <code>## Batch Generation Policy</code>: backend native batch first, runtime parallel tool calls second, sequential only as fallback. <code>--regenerate N</code> and <code>--images-only</code> apply the same batching rules to the selected existing prompts.</p>
+<p><strong>Backup rule</strong>: existing <code>prompts/…md</code> and <code>…png</code> files → rename with <code>-backup-YYYYMMDD-HHMMSS</code> suffix before regenerating. Aspect ratio from storyboard (default <code>3:4</code>; preset may override).</p>
+<p><strong><code>--ref</code> failure recovery</strong>: compress sheet → retry → still fails → drop <code>--ref</code> and embed character descriptions in the prompt text.</p>
+<p>Full step-by-step workflow (analysis, storyboard, review gates, regeneration variants): <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/workflow.md" target="_blank" rel="noopener noreferrer">references/workflow.md</a>.</p>
+<h3>EXTEND.md Paths ⛔ BLOCKING</h3>
+<p>If EXTEND.md is not found, first-time setup is <strong>blocking</strong> — complete it before any content analysis or style/tone questions.</p>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Path</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>.baoyu-skills/baoyu-comic/EXTEND.md</code></td>
+<td>Project</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>$HOME/.baoyu-skills/baoyu-comic/EXTEND.md</code></td>
+<td>User home</td>
+</tr>
+</tbody></table>
+<table>
+<thead>
+<tr>
+<th>Result</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Found</td>
+<td>Read, parse, display summary → continue</td>
+</tr>
+<tr>
+<td>Not found</td>
+<td>⛔ Run first-time setup (<a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/config/first-time-setup.md" target="_blank" rel="noopener noreferrer">references/config/first-time-setup.md</a>) → save EXTEND.md → continue</td>
+</tr>
+</tbody></table>
+<p><strong>EXTEND.md supports</strong>: watermark, preferred art/tone/layout, custom style definitions, character presets, language preference, preferred image backend, generation batch size. Schema: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/config/preferences-schema.md" target="_blank" rel="noopener noreferrer">references/config/preferences-schema.md</a>.</p>
+<h2>References</h2>
+<p><strong>Core Templates</strong>:</p>
+<ul>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/analysis-framework.md" target="_blank" rel="noopener noreferrer">analysis-framework.md</a> - Deep content analysis</li>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/character-template.md" target="_blank" rel="noopener noreferrer">character-template.md</a> - Character definition format</li>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/storyboard-template.md" target="_blank" rel="noopener noreferrer">storyboard-template.md</a> - Storyboard structure</li>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/ohmsha-guide.md" target="_blank" rel="noopener noreferrer">ohmsha-guide.md</a> - Ohmsha manga specifics</li>
+</ul>
+<p><strong>Style Definitions</strong>:</p>
+<ul>
+<li><code>references/art-styles/</code> - Art styles (ligne-claire, manga, realistic, ink-brush, chalk, minimalist)</li>
+<li><code>references/tones/</code> - Tones (neutral, warm, dramatic, romantic, energetic, vintage, action)</li>
+<li><code>references/presets/</code> - Presets with special rules (ohmsha, wuxia, shoujo, concept-story, four-panel)</li>
+<li><code>references/layouts/</code> - Layouts (standard, cinematic, dense, splash, mixed, webtoon, four-panel)</li>
+</ul>
+<p><strong>Workflow</strong>:</p>
+<ul>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/workflow.md" target="_blank" rel="noopener noreferrer">workflow.md</a> - Full workflow details</li>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/auto-selection.md" target="_blank" rel="noopener noreferrer">auto-selection.md</a> - Content signal analysis</li>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/partial-workflows.md" target="_blank" rel="noopener noreferrer">partial-workflows.md</a> - Partial workflow options</li>
+</ul>
+<p><strong>Config</strong>:</p>
+<ul>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/config/preferences-schema.md" target="_blank" rel="noopener noreferrer">config/preferences-schema.md</a> - EXTEND.md schema</li>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/config/first-time-setup.md" target="_blank" rel="noopener noreferrer">config/first-time-setup.md</a> - First-time setup</li>
+<li><a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-comic/references/config/watermark-guide.md" target="_blank" rel="noopener noreferrer">config/watermark-guide.md</a> - Watermark configuration</li>
+</ul>
+<h2>Page Modification</h2>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Steps</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Edit</strong></td>
+<td><strong>Update prompt file FIRST</strong> → <code>--regenerate N</code> → Regenerate PDF</td>
+</tr>
+<tr>
+<td><strong>Add</strong></td>
+<td>Create prompt at position → Generate with character ref → Renumber subsequent → Update storyboard → Regenerate PDF</td>
+</tr>
+<tr>
+<td><strong>Delete</strong></td>
+<td>Remove files → Renumber subsequent → Update storyboard → Regenerate PDF</td>
+</tr>
+</tbody></table>
+<p><strong>IMPORTANT</strong>: When updating pages, ALWAYS update the prompt file (<code>prompts/NN-{cover|page}-[slug].md</code>) FIRST before regenerating. This ensures changes are documented and reproducible.</p>
+<p>Text correction policy:</p>
+<ul>
+<li>If dialogue, sound effects, panel labels, or any other rendered text is misspelled, garbled, hard to read, or visually weak, do not patch the bitmap with code.</li>
+<li>For text-correction regenerations, write a new prompt file and a new output path so the flawed candidate is preserved for comparison.</li>
+<li>Post-processing is limited to crop, resize, compression, or format conversion that does not alter text or the main composition.</li>
+</ul>
+<h2>Notes</h2>
+<ul>
+<li>Image generation: 10-30 seconds per page</li>
+<li>Auto-retry once on generation failure</li>
+<li>Use stylized alternatives for sensitive public figures</li>
+<li>Maintain style consistency via session ID</li>
+<li><strong>Step 2 confirmation required</strong> - do not skip</li>
+<li><strong>Steps 4/6 conditional</strong> - only if user requested in Step 2</li>
+<li><strong>Step 7.1 character sheet</strong> - recommended for multi-page comics, optional for simple presets</li>
+<li><strong>Step 7.2 character reference</strong> - use <code>--ref</code> if sheet exists; compress/convert on failure; fall back to prompt-only</li>
+<li>Watermark/language configured once in EXTEND.md</li>
+</ul>
+<h2>Changing Preferences</h2>
+<p>EXTEND.md lives at <code>.baoyu-skills/baoyu-comic/EXTEND.md</code> (project) or <code>~/.baoyu-skills/baoyu-comic/EXTEND.md</code> (user). Three ways to change it:</p>
+<ul>
+<li><strong>Edit directly</strong> — open EXTEND.md and change fields. Full schema: <code>references/config/preferences-schema.md</code>.</li>
+<li><strong>Reconfigure interactively</strong> — delete EXTEND.md (or ask "reconfigure baoyu-comic preferences" / "重新配置"). The next run re-triggers first-time setup.</li>
+<li><strong>Common one-line edits</strong>:<ul>
+<li><code>preferred_image_backend: auto</code> — default; runtime-native tool wins, falls back to the only installed backend, asks only if multiple non-native are present.</li>
+<li><code>preferred_image_backend: codex-imagegen</code> — pin to Codex's built-in.</li>
+<li><code>preferred_image_backend: baoyu-image-gen</code> — pin to the baoyu-image-gen skill.</li>
+<li><code>preferred_image_backend: ask</code> — confirm backend every run.</li>
+<li><code>generation_batch_size: 4</code> — default number of page images to render concurrently when the backend/runtime supports batch or parallel generation.</li>
+<li><code>watermark.enabled: true</code>, <code>preferred_art</code>, <code>preferred_tone</code>, <code>preferred_layout</code>, <code>language</code> — shift the auto-selection defaults and cosmetic choices.</li>
+</ul>
+</li>
+</ul>

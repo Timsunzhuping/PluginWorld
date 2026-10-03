@@ -49,6 +49,7 @@ export interface SecurityScanInput {
   secretsRedacted: boolean;
   /** Popular plugins in the same ecosystem: for typosquat detection */
   popularNames: { name: string; owner: string | null; stars: number }[];
+  skillDocumentAvailable?: boolean;
   /** Injectable clock for tests */
   now?: Date;
 }
@@ -116,6 +117,10 @@ export function runSecurityScan(input: SecurityScanInput): SecurityReport {
   }
 
   // ---- warning ----
+  if (input.ecosystem === "skills" && input.skillDocumentAvailable === false) {
+    findings.push({ id: "skill-document-unavailable", severity: "warning",
+      message: "Skill content is unavailable. This is a metadata-only listing; installation commands are withheld until the document can be reviewed." });
+  }
   const hooks = lifecycleHooks(input.manifest);
   if (hooks.length > 0) {
     findings.push({

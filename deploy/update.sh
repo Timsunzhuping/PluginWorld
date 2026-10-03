@@ -11,7 +11,7 @@ BEFORE=$(git rev-parse HEAD)
 git pull --ff-only
 AFTER=$(git rev-parse HEAD)
 
-if [ "$BEFORE" = "$AFTER" ] && [ "${FORCE:-0}" != "1" ]; then
+if [ "$BEFORE" = "$AFTER" ] && [ "${FORCE:-0}" != "1" ] && [ -f .deployed-commit ] && [ "$(cat .deployed-commit)" = "$AFTER" ]; then
   echo "[deploy] already up to date ($AFTER) — nothing to do"
   exit 0
 fi
@@ -26,7 +26,10 @@ if command -v pm2 >/dev/null 2>&1 && pm2 describe pluginworld >/dev/null 2>&1; t
 elif systemctl list-units --type=service 2>/dev/null | grep -q pluginworld; then
   sudo systemctl restart pluginworld
 else
-  echo "[deploy] WARNING: no pm2 process or systemd unit named 'pluginworld' found — restart the app manually"
+  echo "[deploy] ERROR: no pm2 process or systemd unit named pluginworld found" >&2
+  exit 1
 fi
+
+printf '%s\n' "$AFTER" > .deployed-commit
 
 echo "[deploy] done: $(git log -1 --oneline)"

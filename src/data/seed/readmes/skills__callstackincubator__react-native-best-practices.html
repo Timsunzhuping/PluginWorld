@@ -1,0 +1,388 @@
+<h1>React Native Best Practices</h1>
+<h2>Overview</h2>
+<p>Performance optimization guide for React Native applications, covering JavaScript/React, Native (iOS/Android), and bundling optimizations. Based on Callstack's "Ultimate Guide to React Native Optimization".</p>
+<h2>When to Apply</h2>
+<p>Reference these guidelines when:</p>
+<ul>
+<li>Debugging slow/janky UI or animations</li>
+<li>Investigating memory leaks (JS or native)</li>
+<li>Optimizing app startup time (TTI)</li>
+<li>Reducing bundle or app size</li>
+<li>Writing native modules (Turbo Modules)</li>
+<li>Profiling React Native performance</li>
+<li>Reviewing React Native code for performance</li>
+</ul>
+<h2>Security Notes</h2>
+<ul>
+<li>Treat shell commands in these references as local developer operations. Review them before running, prefer version-pinned tooling, and avoid piping remote scripts directly to a shell.</li>
+<li>Treat third-party libraries and plugins as dependencies that still require normal supply-chain controls: pin versions, verify provenance, and update through your standard review process.</li>
+<li>Treat remote chunk loading as first-party artifact delivery only. Prefer app-bundled chunks or signed CI release manifests; hosted chunks must come from trusted HTTPS origins you control and be pinned to the current app release.</li>
+</ul>
+<h2>Priority-Ordered Guidelines</h2>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Category</th>
+<th>Impact</th>
+<th>Prefix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>FPS &amp; Re-renders</td>
+<td>CRITICAL</td>
+<td><code>js-*</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Bundle Size</td>
+<td>CRITICAL</td>
+<td><code>bundle-*</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>TTI Optimization</td>
+<td>HIGH</td>
+<td><code>native-*</code>, <code>bundle-*</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Native Performance</td>
+<td>HIGH</td>
+<td><code>native-*</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Memory Management</td>
+<td>MEDIUM-HIGH</td>
+<td><code>js-*</code>, <code>native-*</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>Animations</td>
+<td>MEDIUM</td>
+<td><code>js-*</code></td>
+</tr>
+</tbody></table>
+<p>Impact labels are triage hints: CRITICAL first, HIGH next, MEDIUM when evidence points there.</p>
+<h2>Quick Reference</h2>
+<h3>Optimization Workflow</h3>
+<p>Follow this cycle for any performance issue: <strong>Measure → Optimize → Re-measure → Validate</strong></p>
+<ol>
+<li><strong>Measure</strong>: Capture baseline metrics before changes. For runtime issues, prefer commit timeline, re-render counts, slow components, heaviest-commit breakdown, and startup/TTI when available. Component tree depth or count are optional context, not substitutes. Do not recommend memoization, atomic state, or compiler changes without a measured render or FPS problem.</li>
+<li><strong>Optimize</strong>: Apply the targeted fix from the relevant reference</li>
+<li><strong>Re-measure</strong>: Run the same measurement to get updated metrics</li>
+<li><strong>Validate</strong>: Confirm improvement (e.g., FPS 45→60, TTI 3.2s→1.8s, bundle 2.1MB→1.6MB)</li>
+</ol>
+<p>If metrics did not improve, revert and try the next suggested fix.</p>
+<h3>Review Guardrails</h3>
+<ul>
+<li>Check library versions before suggesting API-specific fixes. Example: FlashList v2 deprecates <code>estimatedItemSize</code>, so do not flag it as missing there.</li>
+<li>Do not suggest <code>useMemo</code> or <code>useCallback</code> dependency changes unless behavior is demonstrably incorrect or profiling shows wasted work tied to that value.</li>
+<li>Do not report stale closures speculatively. Show the stale read path, a repro, or profiler evidence before calling it out.</li>
+<li>When profiling a flow, measure the target interaction itself. Do not treat component tree depth or component count as the main performance evidence.</li>
+</ul>
+<h3>Critical: FPS &amp; Re-renders</h3>
+<p><strong>Profile first:</strong></p>
+<pre><code class="language-bash">agent-device react-devtools status
+agent-device react-devtools wait --connected
+agent-device react-devtools profile start
+agent-device react-devtools profile stop
+agent-device react-devtools profile slow --limit 5
+agent-device react-devtools profile rerenders --limit 5
+agent-device react-devtools profile timeline --limit 20
+</code></pre>
+<p>Drive the target interaction with normal <code>agent-device</code> commands between <code>profile start</code> and <code>profile stop</code>.</p>
+<p>Manual fallback when <code>agent-device</code> is unavailable: open React Native DevTools from Metro (<code>j</code>) or the Dev Menu, use the Profiler tab, and record the same interaction.</p>
+<p>For release-build React component profiling, connect <a href="https://github.com/callstackincubator/inspector#inspector" target="_blank" rel="noopener noreferrer"><code>@callstack/inspector</code></a> first so React DevTools can attach to the release app, then run the <code>agent-device react-devtools</code> flow above.</p>
+<p><strong>Common fixes:</strong></p>
+<ul>
+<li>Replace ScrollView with FlatList/FlashList/Legend List for long lists</li>
+<li>After profiling shows cascading re-renders, use React Compiler for automatic memoization</li>
+<li>After profiling shows broad store/context updates, use atomic state (Jotai/Zustand) to reduce re-renders</li>
+<li>Use <code>useDeferredValue</code> for expensive computations</li>
+</ul>
+<h3>Critical: Bundle Size</h3>
+<p><strong>Analyze bundle:</strong></p>
+<pre><code class="language-bash">npx react-native bundle \
+  --entry-file index.js \
+  --bundle-output output.js \
+  --platform ios \
+  --sourcemap-output output.js.map \
+  --dev false --minify true
+
+npx source-map-explorer output.js --no-border-checks
+</code></pre>
+<p><strong>Verify improvement after optimization:</strong></p>
+<pre><code class="language-bash"># Record baseline size before changes
+ls -lh output.js  # e.g., Before: 2.1 MB
+
+# After applying fixes, re-bundle and compare
+npx react-native bundle --entry-file index.js --bundle-output output.js \
+  --platform ios --dev false --minify true
+ls -lh output.js  # e.g., After: 1.6 MB  (24% reduction)
+</code></pre>
+<p><strong>Common fixes:</strong></p>
+<ul>
+<li>Avoid barrel imports (import directly from source)</li>
+<li>Remove unnecessary Intl polyfills only after checking Hermes API and method coverage</li>
+<li>Evaluate tree shaking (Expo SDK 52+ experimental unused import/export removal, or Re.Pack only if already configured)</li>
+<li>Enable R8 for Android native code shrinking</li>
+</ul>
+<h3>High: TTI Optimization</h3>
+<p><strong>Measure TTI:</strong></p>
+<ul>
+<li>Use <code>react-native-performance</code> for markers</li>
+<li>Only measure cold starts (exclude warm/hot/prewarm)</li>
+</ul>
+<p><strong>Common fixes:</strong></p>
+<ul>
+<li>For React Native 0.78 and earlier, disable Android JS bundle compression to enable Hermes mmap</li>
+<li>Use native navigation (react-native-screens)</li>
+<li>Preload commonly-used expensive screens before navigating to them</li>
+</ul>
+<h3>High: Native Performance</h3>
+<p><strong>Profile native:</strong></p>
+<ul>
+<li>iOS: Xcode Instruments → Time Profiler</li>
+<li>Android: Android Studio → CPU Profiler</li>
+</ul>
+<p><strong>Common fixes:</strong></p>
+<ul>
+<li>Use background threads for heavy native work</li>
+<li>Prefer async over sync Turbo Module methods</li>
+<li>Use C++ for cross-platform performance-critical code</li>
+</ul>
+<h2>References</h2>
+<p>Full documentation with code examples in <a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/" target="_blank" rel="noopener noreferrer">references/</a>:</p>
+<h3>JavaScript/React (<code>js-*</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Impact</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-lists-flatlist-flashlist.md" target="_blank" rel="noopener noreferrer">js-lists-flatlist-flashlist.md</a></td>
+<td>CRITICAL</td>
+<td>Replace ScrollView with virtualized lists</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-profile-react.md" target="_blank" rel="noopener noreferrer">js-profile-react.md</a></td>
+<td>MEDIUM</td>
+<td><code>agent-device react-devtools</code> profiling</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-measure-fps.md" target="_blank" rel="noopener noreferrer">js-measure-fps.md</a></td>
+<td>HIGH</td>
+<td>FPS monitoring and measurement</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-memory-leaks.md" target="_blank" rel="noopener noreferrer">js-memory-leaks.md</a></td>
+<td>MEDIUM</td>
+<td>JS memory leak hunting</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-atomic-state.md" target="_blank" rel="noopener noreferrer">js-atomic-state.md</a></td>
+<td>HIGH</td>
+<td>Jotai/Zustand patterns</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-concurrent-react.md" target="_blank" rel="noopener noreferrer">js-concurrent-react.md</a></td>
+<td>HIGH</td>
+<td>useDeferredValue, useTransition</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-react-compiler.md" target="_blank" rel="noopener noreferrer">js-react-compiler.md</a></td>
+<td>HIGH</td>
+<td>Automatic memoization</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-animations-reanimated.md" target="_blank" rel="noopener noreferrer">js-animations-reanimated.md</a></td>
+<td>MEDIUM</td>
+<td>Reanimated worklets</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-bottomsheet.md" target="_blank" rel="noopener noreferrer">js-bottomsheet.md</a></td>
+<td>HIGH</td>
+<td>Bottom sheet optimization</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-uncontrolled-components.md" target="_blank" rel="noopener noreferrer">js-uncontrolled-components.md</a></td>
+<td>HIGH</td>
+<td>TextInput optimization</td>
+</tr>
+</tbody></table>
+<h3>Native (<code>native-*</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Impact</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-turbo-modules.md" target="_blank" rel="noopener noreferrer">native-turbo-modules.md</a></td>
+<td>HIGH</td>
+<td>Building fast native modules</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-sdks-over-polyfills.md" target="_blank" rel="noopener noreferrer">native-sdks-over-polyfills.md</a></td>
+<td>HIGH</td>
+<td>Native vs JS libraries</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-measure-tti.md" target="_blank" rel="noopener noreferrer">native-measure-tti.md</a></td>
+<td>HIGH</td>
+<td>TTI measurement setup</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-threading-model.md" target="_blank" rel="noopener noreferrer">native-threading-model.md</a></td>
+<td>HIGH</td>
+<td>Turbo Module threads</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-profiling.md" target="_blank" rel="noopener noreferrer">native-profiling.md</a></td>
+<td>MEDIUM</td>
+<td>Xcode/Android Studio profiling</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-platform-setup.md" target="_blank" rel="noopener noreferrer">native-platform-setup.md</a></td>
+<td>MEDIUM</td>
+<td>iOS/Android tooling guide</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-view-flattening.md" target="_blank" rel="noopener noreferrer">native-view-flattening.md</a></td>
+<td>MEDIUM</td>
+<td>View hierarchy debugging</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-memory-patterns.md" target="_blank" rel="noopener noreferrer">native-memory-patterns.md</a></td>
+<td>MEDIUM</td>
+<td>C++/Swift/Kotlin memory</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-memory-leaks.md" target="_blank" rel="noopener noreferrer">native-memory-leaks.md</a></td>
+<td>MEDIUM</td>
+<td>Native memory leak hunting</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-android-16kb-alignment.md" target="_blank" rel="noopener noreferrer">native-android-16kb-alignment.md</a></td>
+<td>CRITICAL</td>
+<td>Third-party library alignment for Google Play</td>
+</tr>
+</tbody></table>
+<h3>Bundling (<code>bundle-*</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Impact</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-barrel-exports.md" target="_blank" rel="noopener noreferrer">bundle-barrel-exports.md</a></td>
+<td>CRITICAL</td>
+<td>Avoid barrel imports</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-analyze-js.md" target="_blank" rel="noopener noreferrer">bundle-analyze-js.md</a></td>
+<td>CRITICAL</td>
+<td>JS bundle visualization</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-tree-shaking.md" target="_blank" rel="noopener noreferrer">bundle-tree-shaking.md</a></td>
+<td>HIGH</td>
+<td>Dead code elimination</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-analyze-app.md" target="_blank" rel="noopener noreferrer">bundle-analyze-app.md</a></td>
+<td>HIGH</td>
+<td>App size analysis</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-r8-android.md" target="_blank" rel="noopener noreferrer">bundle-r8-android.md</a></td>
+<td>HIGH</td>
+<td>Android code shrinking</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-hermes-mmap.md" target="_blank" rel="noopener noreferrer">bundle-hermes-mmap.md</a></td>
+<td>HIGH</td>
+<td>Disable bundle compression</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-native-assets.md" target="_blank" rel="noopener noreferrer">bundle-native-assets.md</a></td>
+<td>HIGH</td>
+<td>Asset catalog setup</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-library-size.md" target="_blank" rel="noopener noreferrer">bundle-library-size.md</a></td>
+<td>MEDIUM</td>
+<td>Evaluate dependencies</td>
+</tr>
+<tr>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-code-splitting.md" target="_blank" rel="noopener noreferrer">bundle-code-splitting.md</a></td>
+<td>MEDIUM</td>
+<td>Remote chunk loading safeguards</td>
+</tr>
+</tbody></table>
+<h2>Problem → Skill Mapping</h2>
+<table>
+<thead>
+<tr>
+<th>Problem</th>
+<th>Start With</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>App feels slow/janky</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-measure-fps.md" target="_blank" rel="noopener noreferrer">js-measure-fps.md</a> → <a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-profile-react.md" target="_blank" rel="noopener noreferrer">js-profile-react.md</a></td>
+</tr>
+<tr>
+<td>Too many re-renders</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-profile-react.md" target="_blank" rel="noopener noreferrer">js-profile-react.md</a> → <a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-react-compiler.md" target="_blank" rel="noopener noreferrer">js-react-compiler.md</a></td>
+</tr>
+<tr>
+<td>Slow startup (TTI)</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-measure-tti.md" target="_blank" rel="noopener noreferrer">native-measure-tti.md</a> → <a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-analyze-js.md" target="_blank" rel="noopener noreferrer">bundle-analyze-js.md</a></td>
+</tr>
+<tr>
+<td>Large app size</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-analyze-app.md" target="_blank" rel="noopener noreferrer">bundle-analyze-app.md</a> → <a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/bundle-r8-android.md" target="_blank" rel="noopener noreferrer">bundle-r8-android.md</a></td>
+</tr>
+<tr>
+<td>Memory growing</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-memory-leaks.md" target="_blank" rel="noopener noreferrer">js-memory-leaks.md</a> or <a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-memory-leaks.md" target="_blank" rel="noopener noreferrer">native-memory-leaks.md</a></td>
+</tr>
+<tr>
+<td>Animation drops frames</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-animations-reanimated.md" target="_blank" rel="noopener noreferrer">js-animations-reanimated.md</a></td>
+</tr>
+<tr>
+<td>Bottom sheet jank/re-renders</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-bottomsheet.md" target="_blank" rel="noopener noreferrer">js-bottomsheet.md</a> → <a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-animations-reanimated.md" target="_blank" rel="noopener noreferrer">js-animations-reanimated.md</a></td>
+</tr>
+<tr>
+<td>List scroll jank</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-lists-flatlist-flashlist.md" target="_blank" rel="noopener noreferrer">js-lists-flatlist-flashlist.md</a></td>
+</tr>
+<tr>
+<td>TextInput lag</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/js-uncontrolled-components.md" target="_blank" rel="noopener noreferrer">js-uncontrolled-components.md</a></td>
+</tr>
+<tr>
+<td>Native module slow</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-turbo-modules.md" target="_blank" rel="noopener noreferrer">native-turbo-modules.md</a> → <a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-threading-model.md" target="_blank" rel="noopener noreferrer">native-threading-model.md</a></td>
+</tr>
+<tr>
+<td>Native library alignment issue</td>
+<td><a href="https://github.com/callstackincubator/agent-skills/blob/HEAD/skills/react-native-best-practices/references/native-android-16kb-alignment.md" target="_blank" rel="noopener noreferrer">native-android-16kb-alignment.md</a></td>
+</tr>
+</tbody></table>
+<h2>Attribution</h2>
+<p>Based on "The Ultimate Guide to React Native Optimization" by Callstack.</p>

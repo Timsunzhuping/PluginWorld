@@ -28,7 +28,7 @@ import {
 import { fetchRegistryServers, registryRepoFullName, type RegistryServer } from "./mcp-registry";
 import { fetchNpmPackages, type NpmPackage } from "./npm-registry";
 import { fetchGlamaServers } from "./glama";
-import { fetchSkillsShTop, type ResolvedSkill } from "./skills-sh";
+import { fetchSkillsShTop, isGithubSource, type ResolvedSkill } from "./skills-sh";
 import {
   RAW_BASE,
   OFFICIAL_OWNERS,
@@ -77,10 +77,12 @@ interface RawEntry {
   skillsShOfficial: boolean;
   skillFrontmatter: Record<string, unknown> | null;
   skillBody: string | null;
+  skill?: ResolvedSkill;
+  slugName?: string;
 }
 
 function slugFor(e: RawEntry): string {
-  return `${e.ecosystem}/${e.owner.toLowerCase()}/${e.name.toLowerCase()}`;
+  return `${e.ecosystem}/${e.owner.toLowerCase()}/${(e.slugName ?? e.name).toLowerCase()}`;
 }
 
 /** slug → deterministic UUID (stable across repeated syncs) */
@@ -185,9 +187,9 @@ function skillToRaw(s: ResolvedSkill): RawEntry {
     ecosystem: "skills",
     owner: s.owner,
     name: s.skillId,
-    repoFullName: s.source,
+    repoFullName: isGithubSource(s.source) ? s.source : null,
     description,
-    repoUrl: `https://github.com/${s.source}`,
+    repoUrl: s.sourceUrl,
     homepage: `https://www.skills.sh/${s.source}/${s.skillId}`,
     license: typeof s.frontmatter?.license === "string" ? (s.frontmatter.license as string) : null,
     topics: [],
@@ -201,6 +203,7 @@ function skillToRaw(s: ResolvedSkill): RawEntry {
     skillsShOfficial: Boolean(s.isOfficial),
     skillFrontmatter: s.frontmatter,
     skillBody: s.body,
+    skill: s,
   };
 }
 
@@ -249,7 +252,7 @@ async function fetchNpmDownloads(pkg: string): Promise<number> {
   const data = await fetchJson<{ downloads?: number }>(
     `https://api.npmjs.org/downloads/point/last-month/${encoded}`,
     undefined,
-    1,
+    0,
   );
   return data?.downloads ?? 0;
 }
@@ -262,6 +265,27 @@ async function main() {
   };
   const pages = parseInt(getFlag("pages") ?? "5", 10);
   const limit = parseInt(getFlag("limit") ?? "0", 10);
+  const skillsLimit = parseInt(getFlag("skills-limit") ?? "1000", 10);
+  if (!Number.isInteger(skillsLimit) || skillsLimit < 1 || skillsLimit > 5000) throw new Error("Invalid --skills-limit");
+  const previous: Plugin[] = fs.existsSync(path.join(SEED_DIR, "plugins.json")) ? JSON.parse(fs.readFileSync(path.join(SEED_DIR, "plugins.json"), "utf8")) : [];
+  const previousStatsPath = path.join(SEED_DIR,"stats.json");
+  const previousSyncedAt = fs.existsSync(previousStatsPath) ? JSON.parse(fs.readFileSync(previousStatsPath,"utf8")).lastSyncedAt : null;
+  const registrySince = !args.includes("--registry-full") && previousSyncedAt && Number.isFinite(Date.parse(previousSyncedAt))
+    ? new Date(Date.parse(previousSyncedAt) - 48*60*60*1000).toISOString() : undefined;
+  // An explicit --resume reuses this run's recent source results after a transient failure.
+  // Scheduled scans always fetch fresh. The cache is ignored by Git and never deployed.
+  async function discovered<T>(key:string, load:()=>Promise<T>):Promise<T> {
+    const dir=path.join(process.cwd(),".cache");
+    const file=path.join(dir,`discovery-${key}.json`);
+    if (args.includes("--resume") && fs.existsSync(file)) {
+      const cached=JSON.parse(fs.readFileSync(file,"utf8"),(_k,v)=>v && Object.keys(v).length===1 && Array.isArray(v.mapEntries) ? new Map(v.mapEntries) : v);
+      if (Date.now()-cached.at < 15*60*1000) { console.log(`[sync] resume source ${key}`); return cached.value; }
+    }
+    const value=await load();
+    fs.mkdirSync(dir,{recursive:true,mode:0o700});
+    fs.writeFileSync(file,JSON.stringify({at:Date.now(),value},(_k,v)=>v instanceof Map ? {mapEntries:[...v]} : v),{mode:0o600});
+    return value;
+  }
   const writeDb = args.includes("--db") && Boolean(process.env.DATABASE_URL);
 
   console.log(`[sync] start pages=${pages} limit=${limit || "∞"} db=${writeDb}`);
@@ -270,16 +294,23 @@ async function main() {
   // 1. Fetch all community sources in parallel
   const [dsh, claudeCode, mcpTopic, registry, npmDsh, npmClaude, npmMcp, glama, skillsSh] =
     await Promise.all([
-      fetchTopicRepos("dsh", pages),
-      fetchTopicRepos("claude-code", pages),
-      fetchTopicRepos("mcp", pages),
-      fetchRegistryServers(),
-      fetchNpmPackages("dsh"),
-      fetchNpmPackages("claude-code"),
-      fetchNpmPackages("mcp"),
-      fetchGlamaServers(),
-      fetchSkillsShTop(500),
+      discovered(`dsh-${pages}`,()=>fetchTopicRepos("dsh", pages)),
+      discovered(`claude-${pages}`,()=>fetchTopicRepos("claude-code", pages)),
+      discovered(`mcp-${pages}`,()=>fetchTopicRepos("mcp", pages)),
+      discovered(`registry-${registrySince?.slice(0,10) ?? "full"}`,()=>fetchRegistryServers(args.includes("--registry-full") ? 1000 : 100, registrySince)),
+      discovered("npm-dsh",()=>fetchNpmPackages("dsh")),
+      discovered("npm-claude",()=>fetchNpmPackages("claude-code")),
+      discovered("npm-mcp",()=>fetchNpmPackages("mcp")),
+      discovered("glama",()=>fetchGlamaServers()),
+      discovered(`skills-${skillsLimit}`,()=>fetchSkillsShTop(skillsLimit)),
     ]);
+  const sourceCounts = { githubDsh:dsh.repos.length, githubClaude:claudeCode.repos.length,
+    githubMcp:mcpTopic.repos.length, mcpRegistry:registry.servers.size,
+    npmDsh:npmDsh.packages.length, npmClaude:npmClaude.packages.length,
+    npmMcp:npmMcp.packages.length, glama:glama.servers.length, skillsSh:skillsSh.skills.length };
+  if (!dsh.repos.length || !claudeCode.repos.length || !mcpTopic.repos.length || (!registry.servers.size && !registrySince)) {
+    throw new Error("Required source unavailable: keep last good snapshot; do not publish partial crawl");
+  }
   const npmByEco: Record<TopicEcosystem, NpmPackage[]> = {
     dsh: npmDsh.packages,
     "claude-code": npmClaude.packages,
@@ -387,11 +418,12 @@ async function main() {
 
   const skillEntries: RawEntry[] = [];
   const seenSkillKeys = new Set<string>();
-  for (const s of skillsSh.skills) {
-    const key = `${s.owner.toLowerCase()}/${s.skillId.toLowerCase()}`;
-    if (seenSkillKeys.has(key)) continue; // leaderboard is installs-desc: first wins
-    seenSkillKeys.add(key);
-    skillEntries.push(skillToRaw(s));
+  for (const skill of skillsSh.skills) {
+    const entry = skillToRaw(skill);
+    const slug = slugFor(entry);
+    if (seenSkillKeys.has(slug)) entry.slugName = `${skill.skillId}--${skill.repo || "source"}`;
+    seenSkillKeys.add(slugFor(entry));
+    skillEntries.push(entry);
   }
 
   const entries: RawEntry[] = [
@@ -418,10 +450,11 @@ async function main() {
     if (i > 0 && i % 200 === 0) console.log(`  …${i}/${entries.length}`);
     const [manifest, readmeMd] =
       entry.ecosystem === "skills"
-        ? [entry.skillFrontmatter, entry.skillBody ?? (await fetchReadme(entry))]
+        ? [entry.skillFrontmatter, entry.skillBody]
         : await Promise.all([fetchManifest(entry), fetchReadme(entry)]);
     const validation = validateManifest(entry.ecosystem, manifest);
-    const readme = readmeMd ? renderReadme(readmeMd, entry.repoFullName) : null;
+    const readme = readmeMd ? renderReadme(readmeMd, entry.repoFullName,
+      entry.skill?.skillMdPath ?? "README.md", entry.skill?.sourceUrl) : null;
     const secretsRedacted = readmeMd != null && redactSecrets(readmeMd) !== readmeMd;
     const suspicious = scanInstallScripts(manifest);
     // package.json with private: true (monorepo root) cannot be npm-installed
@@ -475,11 +508,14 @@ async function main() {
   }
 
   // 4. npm download counts for packages the search results didn't already cover
+  // npm search supplies authoritative monthly counts. Backfill only new packages,
+  // with a bounded budget so optional npm rate limits cannot stall daily review.
+  const previousDownloads = new Map(previous.filter(p=>p.npmPackage && p.downloads>0).map(p=>[p.npmPackage!,p.downloads]));
   const needDownloads = enriched.filter(
-    (e) => e.npmPackage && e.entry.npmDownloads === 0,
-  );
+    e => e.npmPackage && e.entry.npmDownloads === 0 && !previousDownloads.has(e.npmPackage),
+  ).slice(0, 20);
   console.log(`[sync] fetching npm downloads for ${needDownloads.length} packages`);
-  const downloadsMap = new Map<string, number>();
+  const downloadsMap = new Map<string, number>(previousDownloads);
   // npm API rate limits are tight: low concurrency + gentle throttling
   await pooled(needDownloads, 3, async (e) => {
     downloadsMap.set(e.npmPackage!, await fetchNpmDownloads(e.npmPackage!));
@@ -522,6 +558,9 @@ async function main() {
     grade: string;
     findings: { id: string; severity: string; message: string }[];
   }[] = [];
+  const audit: { source:string; rank:number; slug:string; installs:number; document:string|null;
+    specValid:boolean; specErrors:string[]; securityGrade:string; findings:unknown[];
+    decision:string }[] = [];
   const seenSlugs = new Set<string>();
 
   for (const e of enriched) {
@@ -557,7 +596,15 @@ async function main() {
       secretsRedacted: e.secretsRedacted,
       popularNames: popularByEco.get(entry.ecosystem) ?? [],
       now,
+      skillDocumentAvailable: entry.skill ? Boolean(entry.skill.body) : undefined,
     });
+    if (entry.skill) {
+      audit.push({ source:entry.skill.source, rank:entry.skill.rank, slug, installs:downloads,
+        document:entry.skill.skillMdPath, specValid:validation.valid, specErrors:validation.errors,
+        securityGrade:security.grade, findings:security.findings,
+        decision:isBlocked(security) ? "quarantined" : !entry.skill.body ? "metadata-only" :
+          security.findings.length || !validation.valid ? "published-with-notes" : "approved" });
+    }
     if (isBlocked(security)) {
       quarantine.push({
         slug,
@@ -604,6 +651,8 @@ async function main() {
 
     plugins.push({
       id: stableId(slug),
+      ...(entry.skill ? { sourceUrl:entry.skill.sourceUrl, sourceDocumentPath:entry.skill.skillMdPath ?? undefined,
+        skillsShRank:entry.skill.rank, skillDocumentAvailable:Boolean(entry.skill.body) } : {}),
       ecosystem: entry.ecosystem,
       slug,
       name: isPrivatePkg
@@ -644,6 +693,19 @@ async function main() {
     });
   }
 
+  // Preserve previously reviewed entries that fall outside today's discovery window.
+  // Never retain an entry explicitly quarantined in this scan.
+  const inactiveRegistryNames = new Set(registry.inactiveNames);
+  const blockedSlugs = new Set(quarantine.map(q=>q.slug));
+  const currentSlugs = new Set(plugins.map(p=>p.slug));
+  let retained = 0;
+  for (const old of previous) {
+    if (!currentSlugs.has(old.slug) && !blockedSlugs.has(old.slug) && old.securityGrade !== "D" &&
+        !(old.ecosystem==="mcp" && typeof old.manifest?.name === "string" && inactiveRegistryNames.has(old.manifest.name))) {
+      plugins.push(old); retained++;
+    }
+  }
+  if (plugins.length < previous.length * 0.8) throw new Error("Catalog shrink guard: preserve last good snapshot");
   plugins.sort((a, b) => b.qualityScore - a.qualityScore);
 
   // 7. Write snapshot + quarantine report
@@ -692,6 +754,17 @@ async function main() {
     console.log(`[security] blocked:`, quarantine.map((q) => q.slug).join(", "));
   }
 
+  const previousSlugs = new Set(previous.map(p=>p.slug));
+  const report = {
+    generatedAt:now.toISOString(), status:"success", schedule:"Daily 02:00 UTC (10:00 Asia/Singapore)",
+    sourceCounts, registryUpdatedSince:registrySince ?? null, inactiveRegistryEntries:registry.inactiveNames.length, requestedSkills:skillsLimit, reviewedSkills:audit.length,
+    skillsDecisions:Object.fromEntries([...new Set(audit.map(a=>a.decision))].map(d=>[d,audit.filter(a=>a.decision===d).length])),
+    indexed:plugins.length, newlyIndexed:plugins.filter(p=>!previousSlugs.has(p.slug)).length,
+    retained, quarantined:quarantine.length, durationSeconds:Math.round((Date.now()-startedAt.getTime())/1000),
+    auditScope:"Automated SKILL.md/manifest validation, document URL and secret scan, install-script signals; no third-party code is executed. Warnings remain visible. Not a guarantee of runtime safety.",
+  };
+  fs.writeFileSync(path.join(SEED_DIR,"sync-report.json"),JSON.stringify(report,null,2));
+  fs.writeFileSync(path.join(SEED_DIR,"skills-audit.json"),JSON.stringify({generatedAt:now.toISOString(),skills:audit},null,2));
   // 8. DB upsert (optional)
   if (writeDb) {
     const { upsertPlugins } = await import("../db/upsert");

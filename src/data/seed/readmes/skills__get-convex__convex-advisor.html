@@ -1,0 +1,26 @@
+<h1>Live-deployment advisor</h1>
+<p>Static review guesses; the deployment KNOWS. The official Convex MCP ships an <code>insights</code> tool with typed 72h health events per function — documentsReadLimit / bytesReadLimit (hard limit hits), documentsReadThreshold / bytesReadThreshold (approaching), occFailedPermanently / occRetried (write contention) — each carrying evidence (table_name, bytes_read, documents_read, occ document id + retry count). The advisor turns each event into a root-caused finding by reading the flagged function's actual code, and emits findings on the findings bus (specs/finding.schema.json) so fixers can be dispatched and launch-readiness can score.</p>
+<h2>Workflow</h2>
+<ol>
+<li>GUARD: run deploy-guard step 0-1 — identify + announce the deployment being read. Reading insights/logs on prod is allowed read-only; never enable mutating prod access for an advisory pass.</li>
+<li>GATHER (deterministic, via the official Convex MCP): <code>status</code> → deployment selector; <code>insights</code> → the typed 72h events; <code>tables</code> → schema + row counts; <code>functionSpec</code> → the public/internal surface. The <code>insights</code> tool is only available on cloud dev/prod deployments when logged in as a user (not on previews or deploy-key-scoped contexts) and needs ~72h of traffic; if it returns nothing or is unavailable, say so and fall back to offering convex-reviewer — do NOT invent findings.</li>
+<li>ROOT-CAUSE each insight event by reading the flagged function's code:<ul>
+<li>bytesReadThreshold/Limit or documentsReadThreshold/Limit → look for <code>.collect()</code> / unindexed <code>.filter()</code> / missing pagination on the named table; the fix is an index + <code>.withIndex</code>, <code>.take(n)</code>, or <code>.paginate</code> (convex-expert patterns), or an aggregate component for counting shapes.</li>
+<li>occRetried / occFailedPermanently → look for read-modify-write hotspots on the named document (shared counters, status toggles); the fix is @convex-dev/sharded-counter, narrowing the read set, or moving contention to a workpool.</li>
+<li>repeated failures in <code>logs</code> (status: failure) → classify: crash loop in a cron, validator rejections, unhandled error shapes.</li>
+</ul>
+</li>
+<li>EMIT findings per specs/finding.schema.json: class perf/correctness/cost, severity from the insight kind (limit hits = high, thresholds = med, retried = med, permanent OCC failure = high), locus {kind: deployment, functionId, tableName}, evidence {kind: insight-event, detail: the raw event}, confidence: confirmed (the event happened — it is not a hypothesis), fixCapability + autofixable where the repair is mechanical.</li>
+<li>REPORT: findings ranked by severity, each with (a) the runtime evidence in one line ('messages:list read 4.2MB from messages 31× yesterday'), (b) the code-level root cause with file:line, (c) the concrete fix and which capability applies it. Offer to apply fixes; apply only on confirmation, then re-run <code>insights</code> after traffic to verify the trend, or re-run the static check immediately.</li>
+<li>Scope discipline: this is a health/perf/cost pass. Route authz findings to convex-authz, code-idiom findings to convex-reviewer, error triage to sentinel — emit a pointer finding rather than duplicating their work.</li>
+</ol>
+<h2>Rules</h2>
+<ul>
+<li>Evidence-not-vibes: every finding cites a real insight event, log line, or table stat — if the deployment has no evidence, the advisor has no findings (offer convex-reviewer instead).</li>
+<li>Read-only by construction: an advisory pass never mutates any deployment and never enables prod mutation flags (deploy-guard discipline applies).</li>
+<li>Root-cause in the code before reporting: an insight event names the symptom; the finding must name the line and the mechanism.</li>
+<li>Emit on the findings bus (specs/finding.schema.json), confidence: confirmed — runtime events are facts, not hypotheses.</li>
+<li>Severity from the event kind: limit-hit / permanent-OCC-failure = high; threshold / retried = med.</li>
+<li>Stay in lane: perf/cost/health only — hand authz to convex-authz, style to convex-reviewer, error triage to sentinel.</li>
+<li>Prefer component fixes over hand-rolls when they match (sharded-counter for OCC on counters, aggregate for count scans) — same bias as suggest.</li>
+</ul>

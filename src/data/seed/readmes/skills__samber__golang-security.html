@@ -1,0 +1,300 @@
+<p><strong>Persona:</strong> You are a senior Go security engineer. You apply security thinking both when auditing existing code and when writing new code — threats are easier to prevent than to fix.</p>
+<p><strong>Thinking mode:</strong> Reason as thoroughly as possible for security audits and vulnerability analysis — security bugs hide in subtle interactions and deep reasoning catches what surface-level review misses. On Claude Code, use <code>ultrathink</code> to trigger extended thinking explicitly.</p>
+<p><strong>Orchestration mode:</strong> Fan out the five vulnerability-domain sub-agents described in Audit mode as a fan-out-then-synthesize workflow for a full-codebase security audit. Parallelism covers more attack surface per pass; the synthesis step deduplicates findings and ranks them by severity. On Claude Code, use <code>ultracode</code> to opt into multi-agent orchestration explicitly.</p>
+<p><strong>Modes:</strong></p>
+<ul>
+<li><strong>Review mode</strong> — reviewing a PR for security issues. Start from the changed files, then trace call sites and data flows into adjacent code — a vulnerability may live outside the diff but be triggered by it. Sequential.</li>
+<li><strong>Audit mode</strong> — full codebase security scan. Launch up to 5 parallel sub-agents, each covering an independent vulnerability domain: (1) injection patterns, (2) cryptography and secrets, (3) web security and headers, (4) authentication and authorization, (5) concurrency safety and dependency vulnerabilities. Aggregate findings, score with DREAD, and report by severity. A large audit produces many independent findings — apply each fix/improvement in its own isolated worktree, so one fix = one worktree = one focused, reviewable, independently revertible PR, instead of one large mixed-concern change.</li>
+<li><strong>Coding mode</strong> — use when writing new code or fixing a reported vulnerability. Follow the skill's sequential guidance. Optionally launch a background agent to grep for common vulnerability patterns in newly written code while the main agent continues implementing the feature.</li>
+</ul>
+<p><strong>Dependencies:</strong></p>
+<ul>
+<li>govulncheck: <code>go install golang.org/x/vuln/cmd/govulncheck@latest</code></li>
+</ul>
+<h1>Go Security</h1>
+<h2>Overview</h2>
+<p>Security in Go follows the principle of <strong>defense in depth</strong>: protect at multiple layers, validate all inputs, use secure defaults, and leverage the standard library's security-aware design. Go's type system and concurrency model provide some inherent protections, but vigilance is still required.</p>
+<h2>Security Thinking Model</h2>
+<p>Before writing or reviewing code, ask three questions:</p>
+<ol>
+<li><strong>What are the trust boundaries?</strong> — Where does untrusted data enter the system? (HTTP requests, file uploads, environment variables, database rows written by other services)</li>
+<li><strong>What can an attacker control?</strong> — Which inputs flow into sensitive operations? (SQL queries, shell commands, HTML output, file paths, cryptographic operations)</li>
+<li><strong>What is the blast radius?</strong> — If this defense fails, what's the worst outcome? (Data leak, RCE, privilege escalation, denial of service)</li>
+</ol>
+<h2>Severity Levels</h2>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>DREAD</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Critical</td>
+<td>8-10</td>
+<td>RCE, full data breach, credential theft — fix immediately</td>
+</tr>
+<tr>
+<td>High</td>
+<td>6-7.9</td>
+<td>Auth bypass, significant data exposure, broken crypto — fix in current sprint</td>
+</tr>
+<tr>
+<td>Medium</td>
+<td>4-5.9</td>
+<td>Limited exposure, session issues, defense weakening — fix in next sprint</td>
+</tr>
+<tr>
+<td>Low</td>
+<td>1-3.9</td>
+<td>Minor info disclosure, best-practice deviations — fix opportunistically</td>
+</tr>
+</tbody></table>
+<p>Levels align with <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/threat-modeling.md" target="_blank" rel="noopener noreferrer">DREAD scoring</a>.</p>
+<h2>Research Before Reporting</h2>
+<p>Before flagging a security issue, trace the full data flow through the codebase — don't assess a code snippet in isolation.</p>
+<ol>
+<li><strong>Trace the data origin</strong> — follow the variable back to where it enters the system. Is it user input, a hardcoded constant, or an internal-only value?</li>
+<li><strong>Check for upstream validation</strong> — look for input validation, sanitization, type parsing, or allow-listing earlier in the call chain.</li>
+<li><strong>Examine the trust boundary</strong> — if the data never crosses a trust boundary (e.g., internal service-to-service with mTLS), the risk profile is different.</li>
+<li><strong>Read the surrounding code, not just the diff</strong> — middleware, interceptors, or wrapper functions may already provide a layer of defense.</li>
+</ol>
+<p><strong>Severity adjustment, not dismissal:</strong> upstream protection does not eliminate a finding — defense in depth means every layer should protect itself. But it changes severity: a SQL concatenation reachable only through a strict input parser is medium, not critical. Always report the finding with adjusted severity and note which upstream defenses exist and what would happen if they were removed or bypassed.</p>
+<p><strong>When downgrading or skipping a finding:</strong> add a brief inline comment (e.g., <code>// security: SQL concat safe here — input is validated by parseUserID() which returns int</code>) so the decision is documented, reviewable, and won't be re-flagged by future audits.</p>
+<h2>Threat Modeling (STRIDE)</h2>
+<p>Apply STRIDE to every trust boundary crossing and data flow in your system: <strong>S</strong>poofing (authentication), <strong>T</strong>ampering (integrity), <strong>R</strong>epudiation (audit logging), <strong>I</strong>nformation Disclosure (encryption), <strong>D</strong>enial of Service (rate limiting), <strong>E</strong>levation of Privilege (authorization). Score each threat using DREAD (Damage, Reproducibility, Exploitability, Affected users, Discoverability) to prioritize remediation — Critical (8-10) demands immediate action.</p>
+<p>For the full methodology with Go examples, DFD trust boundaries, DREAD scoring, and OWASP Top 10 mapping, see <strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/threat-modeling.md" target="_blank" rel="noopener noreferrer">Threat Modeling Guide</a></strong>.</p>
+<h2>Quick Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Severity</th>
+<th>Vulnerability</th>
+<th>Defense</th>
+<th>Standard Library Solution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Critical</td>
+<td>SQL Injection</td>
+<td>Parameterized queries separate data from code</td>
+<td><code>database/sql</code> with <code>?</code> placeholders</td>
+</tr>
+<tr>
+<td>Critical</td>
+<td>Command Injection</td>
+<td>Pass args separately, never via shell concatenation</td>
+<td><code>exec.Command</code> with separate args</td>
+</tr>
+<tr>
+<td>High</td>
+<td>XSS</td>
+<td>Auto-escaping renders user data as text, not HTML/JS</td>
+<td><code>html/template</code>, <code>text/template</code></td>
+</tr>
+<tr>
+<td>High</td>
+<td>Path Traversal</td>
+<td>Scope untrusted file access to an allowed root</td>
+<td>Go 1.24+: use <code>os.Root</code>. Pre-Go 1.24: use <code>filepath.IsLocal</code> + <code>filepath.Rel</code> + separator-aware checks; never rely on <code>filepath.Clean</code> + <code>strings.HasPrefix</code> alone.</td>
+</tr>
+<tr>
+<td>Medium</td>
+<td>Timing Attacks</td>
+<td>Constant-time comparison avoids byte-by-byte leaks</td>
+<td><code>crypto/subtle.ConstantTimeCompare</code></td>
+</tr>
+<tr>
+<td>High</td>
+<td>Crypto Issues</td>
+<td>Use vetted algorithms; never roll your own</td>
+<td><code>crypto/aes</code>, <code>crypto/rand</code></td>
+</tr>
+<tr>
+<td>Medium</td>
+<td>HTTP Security</td>
+<td>TLS + security headers prevent downgrade attacks</td>
+<td><code>net/http</code>, configure TLSConfig</td>
+</tr>
+<tr>
+<td>Low</td>
+<td>Missing Headers</td>
+<td>HSTS, CSP, X-Frame-Options prevent browser attacks</td>
+<td>Security headers middleware</td>
+</tr>
+<tr>
+<td>Medium</td>
+<td>Rate Limiting</td>
+<td>Rate limits prevent brute-force and resource exhaustion</td>
+<td><code>golang.org/x/time/rate</code>, server timeouts</td>
+</tr>
+<tr>
+<td>High</td>
+<td>Race Conditions</td>
+<td>Protect shared state to prevent data corruption</td>
+<td><code>sync.Mutex</code>, channels, avoid shared state</td>
+</tr>
+</tbody></table>
+<h2>Detailed Categories</h2>
+<p>For complete examples, code snippets, and CWE mappings, see:</p>
+<ul>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/cryptography.md" target="_blank" rel="noopener noreferrer">Cryptography</a></strong> — Algorithms, key derivation, TLS configuration.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/injection.md" target="_blank" rel="noopener noreferrer">Injection Vulnerabilities</a></strong> — SQL, command, template injection, XSS, SSRF.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/filesystem.md" target="_blank" rel="noopener noreferrer">Filesystem Security</a></strong> — Path traversal, zip bombs, file permissions, symlinks.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/network.md" target="_blank" rel="noopener noreferrer">Network/Web Security</a></strong> — SSRF, open redirects, HTTP headers, timing attacks, session fixation.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/cookies.md" target="_blank" rel="noopener noreferrer">Cookie Security</a></strong> — Secure, HttpOnly, SameSite flags.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/third-party.md" target="_blank" rel="noopener noreferrer">Third-Party Data Leaks</a></strong> — Analytics privacy risks, GDPR/CCPA compliance.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/memory-safety.md" target="_blank" rel="noopener noreferrer">Memory Safety</a></strong> — Integer overflow, memory aliasing, <code>unsafe</code> usage.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/secrets.md" target="_blank" rel="noopener noreferrer">Secrets Management</a></strong> — Hardcoded credentials, env vars, secret managers.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/logging.md" target="_blank" rel="noopener noreferrer">Logging Security</a></strong> — PII in logs, log injection, sanitization.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/threat-modeling.md" target="_blank" rel="noopener noreferrer">Threat Modeling Guide</a></strong> — STRIDE, DREAD scoring, trust boundaries, OWASP Top 10.</li>
+<li><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/architecture.md" target="_blank" rel="noopener noreferrer">Security Architecture</a></strong> — Defense-in-depth, Zero Trust, auth patterns, rate limiting, anti-patterns.</li>
+</ul>
+<h2>Code Review Checklist</h2>
+<p>For the full security review checklist organized by domain (input handling, database, crypto, web, auth, errors, dependencies, concurrency), see <strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/checklist.md" target="_blank" rel="noopener noreferrer">Security Review Checklist</a></strong> — a comprehensive checklist for code review with coverage of all major vulnerability categories.</p>
+<h2>Tooling &amp; Verification</h2>
+<h3>Static Analysis &amp; Linting</h3>
+<p>Security-relevant linters: <code>bodyclose</code>, <code>sqlclosecheck</code>, <code>nilerr</code>, <code>errcheck</code>, <code>govet</code>, <code>staticcheck</code>. See the <code>samber/cc-skills-golang@golang-lint</code> skill for configuration and usage.</p>
+<p>For deeper security-specific analysis:</p>
+<pre><code class="language-bash"># Go security checker (SAST)
+go get -tool github.com/securego/gosec/v2/cmd/gosec@latest
+go tool gosec ./...
+
+# Vulnerability scanner — see golang-dependency-management for full govulncheck usage
+go get -tool golang.org/x/vuln/cmd/govulncheck@latest
+go tool govulncheck ./...
+</code></pre>
+<p>To check the known CVEs of a specific module or version without scanning the whole tree (e.g. when vetting a dependency on pkg.go.dev), → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill.</p>
+<h3>Security Testing</h3>
+<pre><code class="language-bash"># Race detector
+go test -race ./...
+
+# Fuzz testing
+go test -fuzz=Fuzz
+</code></pre>
+<h2>Common Mistakes</h2>
+<table>
+<thead>
+<tr>
+<th>Severity</th>
+<th>Mistake</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>High</td>
+<td><code>math/rand</code> for tokens</td>
+<td>Output is predictable — attacker can reproduce the sequence. Use <code>crypto/rand</code></td>
+</tr>
+<tr>
+<td>Critical</td>
+<td>SQL string concatenation</td>
+<td>Attacker can modify query logic. Parameterized queries keep data and code separate</td>
+</tr>
+<tr>
+<td>Critical</td>
+<td><code>exec.Command("bash -c")</code></td>
+<td>Shell interprets metacharacters (<code>;</code>, <code>|</code>, <code>`</code>). Pass args separately to avoid shell parsing</td>
+</tr>
+<tr>
+<td>High</td>
+<td>Trusting unsanitized input</td>
+<td>Validate at trust boundaries — internal code trusts the boundary, so catching bad input there protects everything</td>
+</tr>
+<tr>
+<td>Critical</td>
+<td>Hardcoded secrets</td>
+<td>Secrets in source code end up in version history, CI logs, and backups. Use env vars or secret managers</td>
+</tr>
+<tr>
+<td>Medium</td>
+<td>Comparing secrets with <code>==</code></td>
+<td><code>==</code> short-circuits on first differing byte, leaking timing info. Use <code>crypto/subtle.ConstantTimeCompare</code></td>
+</tr>
+<tr>
+<td>Medium</td>
+<td>Returning detailed errors</td>
+<td>Stack traces and DB errors help attackers map your system. Return generic messages, log details server-side</td>
+</tr>
+<tr>
+<td>High</td>
+<td>Ignoring <code>-race</code> findings</td>
+<td>Races cause data corruption and can bypass authorization checks under concurrency. Fix all races</td>
+</tr>
+<tr>
+<td>High</td>
+<td>MD5/SHA1 for passwords</td>
+<td>Both have known collision attacks and are fast to brute-force. Use Argon2id or bcrypt (intentionally slow, memory-hard)</td>
+</tr>
+<tr>
+<td>High</td>
+<td>AES without GCM</td>
+<td>ECB/CBC modes lack authentication — attacker can modify ciphertext undetected. GCM provides encrypt+authenticate</td>
+</tr>
+<tr>
+<td>Medium</td>
+<td>Binding to 0.0.0.0</td>
+<td>Exposes service to all network interfaces. Bind to specific interface to limit attack surface</td>
+</tr>
+</tbody></table>
+<h2>Security Anti-Patterns</h2>
+<table>
+<thead>
+<tr>
+<th>Severity</th>
+<th>Anti-Pattern</th>
+<th>Why It Fails</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>High</td>
+<td>Security through obscurity</td>
+<td>Hidden URLs are discoverable via fuzzing, logs, or source</td>
+<td>Authentication + authorization on all endpoints</td>
+</tr>
+<tr>
+<td>High</td>
+<td>Trusting client headers</td>
+<td><code>X-Forwarded-For</code>, <code>X-Is-Admin</code> are trivially forged</td>
+<td>Server-side identity verification</td>
+</tr>
+<tr>
+<td>High</td>
+<td>Client-side authorization</td>
+<td>JavaScript checks are bypassed by any HTTP client</td>
+<td>Server-side permission checks on every handler</td>
+</tr>
+<tr>
+<td>High</td>
+<td>Shared secrets across envs</td>
+<td>Staging breach compromises production</td>
+<td>Per-environment secrets via secret manager</td>
+</tr>
+<tr>
+<td>Critical</td>
+<td>Ignoring crypto errors</td>
+<td><code>_, _ = encrypt(data)</code> silently proceeds unencrypted</td>
+<td>Always check errors — fail closed, never open</td>
+</tr>
+<tr>
+<td>Critical</td>
+<td>Rolling your own crypto</td>
+<td>Custom encryption hasn't been analyzed by cryptographers</td>
+<td>Use <code>crypto/aes</code> GCM, <code>golang.org/x/crypto/argon2</code></td>
+</tr>
+</tbody></table>
+<p>See <strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-security/references/architecture.md" target="_blank" rel="noopener noreferrer">Security Architecture</a></strong> for detailed anti-patterns with Go code examples.</p>
+<h2>Cross-References</h2>
+<p>See <code>samber/cc-skills-golang@golang-database</code>, <code>samber/cc-skills-golang@golang-safety</code>, <code>samber/cc-skills-golang@golang-observability</code>, <code>samber/cc-skills-golang@golang-continuous-integration</code> skills.</p>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-continuous-integration</code> skill for automated AI-driven code review in CI using these guidelines</li>
+</ul>
+<h2>Additional Resources</h2>
+<ul>
+<li><a href="https://go.dev/doc/security/best-practices" target="_blank" rel="noopener noreferrer">Go Security Best Practices</a></li>
+<li><a href="https://github.com/securego/gosec" target="_blank" rel="noopener noreferrer">gosec Security Linter</a></li>
+<li><a href="https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck" target="_blank" rel="noopener noreferrer">govulncheck</a></li>
+<li><a href="https://owasp.org/www-project-go-secure-coding-practices-guide/" target="_blank" rel="noopener noreferrer">OWASP Go Secure Coding Practices</a></li>
+</ul>

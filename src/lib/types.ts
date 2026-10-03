@@ -66,6 +66,12 @@ export interface SecurityFinding {
 }
 
 export interface Plugin {
+  /** Original source URL and document location for Skills (including well-known hosts). */
+  sourceUrl?: string;
+  sourceDocumentPath?: string;
+  skillsShRank?: number;
+  /** Metadata-only listings cannot offer an installation command. */
+  skillDocumentAvailable?: boolean;
   id: string;
   ecosystem: Ecosystem;
   /** {ecosystem}/{owner}/{name} */

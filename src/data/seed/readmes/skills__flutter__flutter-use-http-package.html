@@ -1,0 +1,158 @@
+<h1>Implementing Flutter Networking</h1>
+<h2>Contents</h2>
+<ul>
+<li><a href="#configuration--permissions" target="_blank" rel="noopener noreferrer">Configuration &amp; Permissions</a></li>
+<li><a href="#request-execution--response-handling" target="_blank" rel="noopener noreferrer">Request Execution &amp; Response Handling</a></li>
+<li><a href="#background-parsing" target="_blank" rel="noopener noreferrer">Background Parsing</a></li>
+<li><a href="#workflow-executing-network-operations" target="_blank" rel="noopener noreferrer">Workflow: Executing Network Operations</a></li>
+<li><a href="#examples" target="_blank" rel="noopener noreferrer">Examples</a></li>
+</ul>
+<h2>Configuration &amp; Permissions</h2>
+<p>Configure the environment and platform-specific permissions required for network access.</p>
+<ol>
+<li>Add the <code>http</code> package dependency via the terminal:<pre><code class="language-bash">flutter pub add http
+</code></pre>
+</li>
+<li>Import the package in your Dart files:<pre><code class="language-dart">import 'package:http/http.dart' as http;
+</code></pre>
+</li>
+<li>Configure Android permissions by adding the Internet permission to <code>android/app/src/main/AndroidManifest.xml</code>:<pre><code class="language-xml">&lt;uses-permission android:name="android.permission.INTERNET" /&gt;
+</code></pre>
+</li>
+<li>Configure macOS entitlements by adding the network client key to both <code>macos/Runner/DebugProfile.entitlements</code> and <code>macos/Runner/Release.entitlements</code>:<pre><code class="language-xml">&lt;key&gt;com.apple.security.network.client&lt;/key&gt;
+&lt;true/&gt;
+</code></pre>
+</li>
+</ol>
+<h2>Request Execution &amp; Response Handling</h2>
+<p>Execute HTTP operations and map responses to strongly typed Dart objects.</p>
+<ul>
+<li><strong>URIs:</strong> Always parse URL strings using <code>Uri.parse('your_url')</code>.</li>
+<li><strong>Headers:</strong> Inject authorization and content-type headers via the <code>headers</code> parameter map. Use <code>HttpHeaders.authorizationHeader</code> for auth tokens.</li>
+<li><strong>Payloads:</strong> For POST and PUT requests, encode the body using <code>jsonEncode()</code> from <code>dart:convert</code>.</li>
+<li><strong>Status Validation:</strong> Evaluate <code>response.statusCode</code>. Treat <code>200 OK</code> (GET/PUT/DELETE) and <code>201 CREATED</code> (POST) as success. </li>
+<li><strong>Error Handling:</strong> Throw explicit exceptions for non-success status codes. Never return <code>null</code> on failure, as this prevents <code>FutureBuilder</code> from triggering its error state and causes infinite loading indicators.</li>
+<li><strong>Deserialization:</strong> Parse the raw string using <code>jsonDecode(response.body)</code> and map it to a custom Dart object using a factory constructor (e.g., <code>fromJson</code>).</li>
+</ul>
+<h2>Background Parsing</h2>
+<p>Offload expensive JSON parsing to a separate Isolate to prevent UI jank (frame drops).</p>
+<ul>
+<li>Import <code>package:flutter/foundation.dart</code>.</li>
+<li>Use the <code>compute()</code> function to run the parsing logic in a background isolate.</li>
+<li>Ensure the parsing function passed to <code>compute()</code> is a top-level function or a static method, as closures or instance methods cannot be passed across isolates.</li>
+</ul>
+<h2>Workflow: Executing Network Operations</h2>
+<p>Use the following checklist to implement and validate network operations.</p>
+<p><strong>Task Progress:</strong></p>
+<ul>
+<li> 1. Define the strongly typed Dart model with a <code>fromJson</code> factory constructor.</li>
+<li> 2. Implement the network request method returning a <code>Future&lt;Model&gt;</code>.</li>
+<li> 3. Apply conditional logic based on the operation type:<ul>
+<li><strong>If fetching data (GET):</strong> Append query parameters to the URI.</li>
+<li><strong>If mutating data (POST/PUT):</strong> Set <code>'Content-Type': 'application/json; charset=UTF-8'</code> and attach the <code>jsonEncode</code> body.</li>
+<li><strong>If deleting data (DELETE):</strong> Return an empty model instance on success (<code>200 OK</code>).</li>
+</ul>
+</li>
+<li> 4. Validate the <code>statusCode</code> and throw an <code>Exception</code> on failure.</li>
+<li> 5. Integrate the <code>Future</code> into the UI using <code>FutureBuilder</code>.</li>
+<li> 6. Handle <code>snapshot.hasData</code>, <code>snapshot.hasError</code>, and default to a <code>CircularProgressIndicator</code>.</li>
+<li> 7. <strong>Feedback Loop:</strong> Run the app -&gt; trigger the network request -&gt; review console for unhandled exceptions -&gt; fix parsing or permission errors.</li>
+</ul>
+<h2>Examples</h2>
+<h3>High-Fidelity Implementation: Fetching and Parsing in the Background</h3>
+<pre><code class="language-dart">import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+
+// 1. Top-level parsing function for Isolate
+List&lt;Photo&gt; parsePhotos(String responseBody) {
+  final parsed = (jsonDecode(responseBody) as List&lt;Object?&gt;)
+      .cast&lt;Map&lt;String, Object?&gt;&gt;();
+  return parsed.map&lt;Photo&gt;(Photo.fromJson).toList();
+}
+
+// 2. Network execution with background parsing
+Future&lt;List&lt;Photo&gt;&gt; fetchPhotos() async {
+  final response = await http.get(
+    Uri.parse('https://jsonplaceholder.typicode.com/photos'),
+    headers: {
+      HttpHeaders.authorizationHeader: 'Bearer your_token_here',
+      HttpHeaders.acceptHeader: 'application/json',
+    },
+  );
+
+  if (response.statusCode == 200) {
+    // Offload heavy parsing to a background isolate
+    return compute(parsePhotos, response.body);
+  } else {
+    throw Exception('Failed to load photos. Status: ${response.statusCode}');
+  }
+}
+
+// 3. Strongly typed model
+class Photo {
+  final int id;
+  final String title;
+  final String thumbnailUrl;
+
+  const Photo({
+    required this.id,
+    required this.title,
+    required this.thumbnailUrl,
+  });
+
+  factory Photo.fromJson(Map&lt;String, dynamic&gt; json) {
+    return Photo(
+      id: json['id'] as int,
+      title: json['title'] as String,
+      thumbnailUrl: json['thumbnailUrl'] as String,
+    );
+  }
+}
+
+// 4. UI Integration
+class PhotoGallery extends StatefulWidget {
+  const PhotoGallery({super.key});
+
+  @override
+  State&lt;PhotoGallery&gt; createState() =&gt; _PhotoGalleryState();
+}
+
+class _PhotoGalleryState extends State&lt;PhotoGallery&gt; {
+  late Future&lt;List&lt;Photo&gt;&gt; _futurePhotos;
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize Future once to prevent re-fetching on rebuilds
+    _futurePhotos = fetchPhotos();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder&lt;List&lt;Photo&gt;&gt;(
+      future: _futurePhotos,
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          final photos = snapshot.data!;
+          return ListView.builder(
+            itemCount: photos.length,
+            itemBuilder: (context, index) =&gt; ListTile(
+              leading: Image.network(photos[index].thumbnailUrl),
+              title: Text(photos[index].title),
+            ),
+          );
+        } else if (snapshot.hasError) {
+          return Center(child: Text('Error: ${snapshot.error}'));
+        }
+        
+        // Default loading state
+        return const Center(child: CircularProgressIndicator());
+      },
+    );
+  }
+}
+</code></pre>

@@ -1,0 +1,363 @@
+<h1>Cover Image Generator</h1>
+<p>Generate elegant cover images for articles with 5-dimensional customization.</p>
+<h2>User Input Tools</h2>
+<p>When this skill prompts the user, follow this tool-selection rule (priority order):</p>
+<ol>
+<li><strong>Prefer built-in user-input tools</strong> exposed by the current agent runtime — e.g., <code>AskUserQuestion</code>, <code>request_user_input</code>, <code>clarify</code>, <code>ask_user</code>, or any equivalent.</li>
+<li><strong>Fallback</strong>: if no such tool exists, emit a numbered plain-text message and ask the user to reply with the chosen number/answer for each question.</li>
+<li><strong>Batching</strong>: if the tool supports multiple questions per call, combine all applicable questions into a single call; if only single-question, ask them one at a time in priority order.</li>
+</ol>
+<p>Concrete <code>AskUserQuestion</code> references below are examples — substitute the local equivalent in other runtimes.</p>
+<h2>Image Generation Tools</h2>
+<p>When this skill needs to render an image, resolve the backend in this order:</p>
+<ol>
+<li><strong>Current-request override</strong> — if the user names a specific backend in the current message, use it.</li>
+<li><strong>Saved preference</strong> — if <code>EXTEND.md</code> sets <code>preferred_image_backend</code> to a backend available right now, use it.</li>
+<li><strong>Auto-select</strong> (when the preference is <code>auto</code>, unset, or the pinned backend isn't available):<ul>
+<li><strong>Codex (<code>imagegen</code>)</strong> — first, inspect your available-skills / tool inventory. If a skill named <code>imagegen</code> is listed, you are running inside Codex and MUST use it: invoke via the <code>Skill</code> tool with <code>skill: "imagegen"</code>, passing the saved prompt file's content (plus output path and aspect ratio per Codex <code>imagegen</code>'s own args). Codex <code>imagegen</code> is the official raster backend in that runtime and outranks any non-native skill (e.g., <code>baoyu-image-gen</code>) unless the user has explicitly pinned a different <code>preferred_image_backend</code>.</li>
+<li><strong>Codex via <code>codex exec</code> (<code>codex-imagegen</code>)</strong> — if the current runtime exposes no native <code>imagegen</code> skill but the <code>codex</code> CLI is on <code>PATH</code> with an active <code>codex login</code>, route through <code>baoyu-image-gen --provider codex-cli</code> (preferred), or — if baoyu-image-gen is unavailable — invoke the bundled wrapper directly. Details, parameters, and the runtime-discovery procedure live in <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/codex-imagegen.md" target="_blank" rel="noopener noreferrer">references/codex-imagegen.md</a> — load that file only when this branch is selected.</li>
+<li><strong>Cursor (<code>GenerateImage</code>)</strong> — if the runtime exposes a native <code>GenerateImage</code> tool, you are running inside Cursor and it outranks any non-native skill the same way Codex <code>imagegen</code> does. Two hard caveats: (a) it has no aspect-ratio parameter — state the target aspect ratio / dimensions explicitly in the prompt text passed as <code>description</code>; (b) it does not accept an output directory — it saves to a tool-managed location, so after generation copy/move the file to the skill's expected output path (e.g., <code>outputs/.../NN-xxx.png</code>). Reference images go in <code>reference_image_paths</code>.</li>
+<li><strong>Other runtime-native tools</strong> — if the runtime exposes a different native image tool (e.g., Hermes <code>image_generate</code>), use it the same way.</li>
+<li>Otherwise, if exactly one non-native backend is installed (e.g., <code>baoyu-image-gen</code>), use it.</li>
+<li>Otherwise (multiple non-native backends with no runtime-native tool), ask the user once — batch with any other initial questions.</li>
+</ul>
+</li>
+<li><strong>If none are available</strong>, tell the user and ask how to proceed.</li>
+</ol>
+<p><strong>⛔ Never substitute SVG, HTML, canvas, or other code-based rendering for raster image generation.</strong> Codex <code>imagegen</code>'s own description says it should be used "when the output should be a bitmap asset rather than repo-native code or vector." If you cannot resolve a raster backend via step 3, fall through to step 4 and ask the user — do <strong>not</strong> silently emit SVG, write inline <code>&lt;svg&gt;</code> markup, or produce HTML/CSS art as a substitute. This applies even if the article/section seems "diagram-like": the consumer skill calling this rule has already decided that a raster image is what it needs.</p>
+<p><strong>⛔ Never repair rendered text by painting over a generated bitmap.</strong> Do not use ImageMagick, Pillow, Canvas, SVG, HTML/CSS, OCR scripts, or any other programmatic overlay to cover, rewrite, erase, stroke, or replace title/subtitle text inside an already generated cover image. If text is wrong or unclear, regenerate from a corrected prompt, switch to a lower-text or no-title variant, or ask the user which imperfect candidate to keep.</p>
+<p>Setting <code>preferred_image_backend: ask</code> forces the step-3 prompt every run regardless of available backends. Users change the pinned backend via the <code>## Changing Preferences</code> section below.</p>
+<p><strong>Prompt file requirement (hard)</strong>: write each image's full, final prompt to a standalone file under <code>prompts/</code> (naming: <code>NN-{type}-[slug].md</code>) BEFORE invoking any backend. The backend receives the prompt file (or its content); the file is the reproducibility record and lets you switch backends without regenerating prompts.</p>
+<p>Concrete tool names (<code>imagegen</code>, <code>GenerateImage</code>, <code>image_generate</code>, <code>baoyu-image-gen</code>) above are examples — substitute the local equivalents under the same rule.</p>
+<h2>Confirmation Policy</h2>
+<p>Default behavior: <strong>confirm before generation</strong>.</p>
+<ul>
+<li>Treat explicit skill invocation, a file path, matched keywords/presets, <code>EXTEND.md</code> defaults, and any documented auto-selection as <strong>recommendation inputs only</strong>. None of them authorizes skipping confirmation.</li>
+<li>Do <strong>not</strong> start Step 3 or Step 4 until the user confirms the dimensions / aspect / language / backend choices.</li>
+<li>Skip confirmation only when the current request explicitly says to do so, for example: <code>--quick</code>, "直接生成", "不用确认", "跳过确认", "按默认出图", or equivalent wording. <code>quick_mode: true</code> in <code>EXTEND.md</code> counts as a standing explicit opt-out — set it only when you want every run to skip Step 2.</li>
+<li>If confirmation is skipped explicitly, state the assumed dimensions / aspect / language / backend in the next user-facing update before generating.</li>
+</ul>
+<h2>Options</h2>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--type &lt;name&gt;</code></td>
+<td>hero, conceptual, typography, metaphor, scene, minimal</td>
+</tr>
+<tr>
+<td><code>--palette &lt;name&gt;</code></td>
+<td>warm, elegant, cool, dark, earth, vivid, pastel, mono, retro, duotone, macaron</td>
+</tr>
+<tr>
+<td><code>--rendering &lt;name&gt;</code></td>
+<td>flat-vector, hand-drawn, painterly, digital, pixel, chalk, screen-print</td>
+</tr>
+<tr>
+<td><code>--style &lt;name&gt;</code></td>
+<td>Preset shorthand (see <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/style-presets.md" target="_blank" rel="noopener noreferrer">Style Presets</a>)</td>
+</tr>
+<tr>
+<td><code>--text &lt;level&gt;</code></td>
+<td>none, title-only, title-subtitle, text-rich</td>
+</tr>
+<tr>
+<td><code>--mood &lt;level&gt;</code></td>
+<td>subtle, balanced, bold</td>
+</tr>
+<tr>
+<td><code>--font &lt;name&gt;</code></td>
+<td>clean, handwritten, serif, display</td>
+</tr>
+<tr>
+<td><code>--aspect &lt;ratio&gt;</code></td>
+<td>16:9 (default), 2.35:1, 4:3, 3:2, 1:1, 3:4</td>
+</tr>
+<tr>
+<td><code>--lang &lt;code&gt;</code></td>
+<td>Title language (en, zh, ja, etc.)</td>
+</tr>
+<tr>
+<td><code>--no-title</code></td>
+<td>Alias for <code>--text none</code></td>
+</tr>
+<tr>
+<td><code>--quick</code></td>
+<td>Skip confirmation, use auto-selection</td>
+</tr>
+<tr>
+<td><code>--ref &lt;files...&gt;</code></td>
+<td>Reference images for style/composition guidance</td>
+</tr>
+</tbody></table>
+<h2>Five Dimensions</h2>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Values</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Type</strong></td>
+<td>hero, conceptual, typography, metaphor, scene, minimal</td>
+<td>auto</td>
+</tr>
+<tr>
+<td><strong>Palette</strong></td>
+<td>warm, elegant, cool, dark, earth, vivid, pastel, mono, retro, duotone, macaron</td>
+<td>auto</td>
+</tr>
+<tr>
+<td><strong>Rendering</strong></td>
+<td>flat-vector, hand-drawn, painterly, digital, pixel, chalk, screen-print</td>
+<td>auto</td>
+</tr>
+<tr>
+<td><strong>Text</strong></td>
+<td>none, title-only, title-subtitle, text-rich</td>
+<td>title-only</td>
+</tr>
+<tr>
+<td><strong>Mood</strong></td>
+<td>subtle, balanced, bold</td>
+<td>balanced</td>
+</tr>
+<tr>
+<td><strong>Font</strong></td>
+<td>clean, handwritten, serif, display</td>
+<td>clean</td>
+</tr>
+</tbody></table>
+<p>Auto-selection rules: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/auto-selection.md" target="_blank" rel="noopener noreferrer">references/auto-selection.md</a></p>
+<h2>Galleries</h2>
+<p><strong>Types</strong>: hero, conceptual, typography, metaphor, scene, minimal
+→ Details: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/types.md" target="_blank" rel="noopener noreferrer">references/types.md</a></p>
+<p><strong>Palettes</strong>: warm, elegant, cool, dark, earth, vivid, pastel, mono, retro, duotone, macaron
+→ Details: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/palettes/" target="_blank" rel="noopener noreferrer">references/palettes/</a></p>
+<p><strong>Renderings</strong>: flat-vector, hand-drawn, painterly, digital, pixel, chalk, screen-print
+→ Details: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/renderings/" target="_blank" rel="noopener noreferrer">references/renderings/</a></p>
+<p><strong>Text Levels</strong>: none (pure visual) | title-only (default) | title-subtitle | text-rich (with tags)
+→ Details: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/dimensions/text.md" target="_blank" rel="noopener noreferrer">references/dimensions/text.md</a></p>
+<p><strong>Mood Levels</strong>: subtle (low contrast) | balanced (default) | bold (high contrast)
+→ Details: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/dimensions/mood.md" target="_blank" rel="noopener noreferrer">references/dimensions/mood.md</a></p>
+<p><strong>Fonts</strong>: clean (sans-serif) | handwritten | serif | display (bold decorative)
+→ Details: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/dimensions/font.md" target="_blank" rel="noopener noreferrer">references/dimensions/font.md</a></p>
+<h2>File Structure</h2>
+<p>Output directory per <code>default_output_dir</code> preference:</p>
+<ul>
+<li><code>same-dir</code>: <code>{article-dir}/</code></li>
+<li><code>imgs-subdir</code>: <code>{article-dir}/imgs/</code></li>
+<li><code>independent</code> (default): <code>cover-image/{topic-slug}/</code></li>
+</ul>
+<pre><code>&lt;output-dir&gt;/
+├── source-{slug}.{ext}    # Source files
+├── refs/                  # Reference images (if provided)
+│   ├── ref-01-{slug}.{ext}
+│   └── ref-01-{slug}.md   # Description file
+├── prompts/cover.md       # Generation prompt
+└── cover.png              # Output image
+</code></pre>
+<p><strong>Slug</strong>: 2-4 words, kebab-case. Conflict: append <code>-YYYYMMDD-HHMMSS</code></p>
+<h2>Workflow</h2>
+<h3>Progress Checklist</h3>
+<pre><code>Cover Image Progress:
+- [ ] Step 0: Check preferences (EXTEND.md) ⛔ BLOCKING
+- [ ] Step 1: Analyze content + save refs + determine output dir
+- [ ] Step 2: Confirm options (6 dimensions) ⚠️ unless --quick
+- [ ] Step 3: Create prompt
+- [ ] Step 4: Generate image
+- [ ] Step 5: Completion report
+</code></pre>
+<h3>Flow</h3>
+<pre><code>Input → [Step 0: Preferences] ─┬─ Found → Continue
+                               └─ Not found → First-Time Setup ⛔ BLOCKING → Save EXTEND.md → Continue
+        ↓
+Analyze + Save Refs → [Output Dir] → [Confirm: 6 Dimensions] → Prompt → Generate → Complete
+                                              ↓
+                                     (skip if --quick or all specified)
+</code></pre>
+<h3>Step 0: Load Preferences ⛔ BLOCKING</h3>
+<p>Check EXTEND.md in priority order — the first one found wins:</p>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Path</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>.baoyu-skills/baoyu-cover-image/EXTEND.md</code></td>
+<td>Project</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>${XDG_CONFIG_HOME:-$HOME/.config}/baoyu-skills/baoyu-cover-image/EXTEND.md</code></td>
+<td>XDG</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>$HOME/.baoyu-skills/baoyu-cover-image/EXTEND.md</code></td>
+<td>User home</td>
+</tr>
+</tbody></table>
+<table>
+<thead>
+<tr>
+<th>Result</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Found</td>
+<td>Load, display summary → Continue</td>
+</tr>
+<tr>
+<td>Not found</td>
+<td>⛔ Run first-time setup (<a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/config/first-time-setup.md" target="_blank" rel="noopener noreferrer">references/config/first-time-setup.md</a>) → Save → Continue</td>
+</tr>
+</tbody></table>
+<p><strong>CRITICAL</strong>: If not found, complete setup BEFORE any other steps or questions.</p>
+<h3>Step 1: Analyze Content</h3>
+<ol>
+<li><strong>Save reference images</strong> (if provided) → <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/workflow/reference-images.md" target="_blank" rel="noopener noreferrer">references/workflow/reference-images.md</a></li>
+<li><strong>Save source content</strong> (if pasted, save to <code>source.md</code>)</li>
+<li><strong>Analyze content</strong>: topic, tone, keywords, visual metaphors</li>
+<li><strong>Deep analyze references</strong> ⚠️: Extract specific, concrete elements (see reference-images.md)</li>
+<li><strong>Detect language</strong>: Compare source, user input, EXTEND.md preference</li>
+<li><strong>Determine output directory</strong>: Per File Structure rules</li>
+</ol>
+<p><strong>⚠️ People in Reference Images:</strong></p>
+<p>If reference images contain <strong>people</strong> who should appear in the cover:</p>
+<ul>
+<li><strong>Model supports <code>--ref</code></strong> (default): Copy image to <code>refs/</code>, pass via <code>--ref</code> at generation. No description file needed — the model sees the face directly.</li>
+<li><strong>Model does NOT support <code>--ref</code></strong> (Jimeng, Seedream 3.0): Create <code>refs/ref-NN-{slug}.md</code> with per-character description (hair, glasses, skin tone, clothing). Embed as MUST/REQUIRED instructions in prompt text.</li>
+</ul>
+<p>See <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/workflow/reference-images.md" target="_blank" rel="noopener noreferrer">reference-images.md</a> for full decision table.</p>
+<h3>Step 2: Confirm Options ⚠️</h3>
+<p><strong>Hard gate</strong>: this step is mandatory per the <a href="#confirmation-policy" target="_blank" rel="noopener noreferrer">Confirmation Policy</a> — Steps 3–4 cannot start until the user confirms here (or explicitly opts out with <code>--quick</code> / <code>quick_mode: true</code> / equivalent wording in the current request).</p>
+<p><strong>MUST use <code>AskUserQuestion</code> tool</strong> to present options as interactive selection — NOT plain text tables. Present up to 4 questions in a single <code>AskUserQuestion</code> call (Type, Palette, Rendering, Font + Settings). Each question shows the recommended option first with reason, followed by alternatives.</p>
+<p>Full confirmation flow and question format: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/workflow/confirm-options.md" target="_blank" rel="noopener noreferrer">references/workflow/confirm-options.md</a></p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Skipped</th>
+<th>Still Asked</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--quick</code> or <code>quick_mode: true</code></td>
+<td>6 dimensions</td>
+<td>Aspect ratio (unless <code>--aspect</code>)</td>
+</tr>
+<tr>
+<td>All 6 + <code>--aspect</code> specified</td>
+<td>All</td>
+<td>None</td>
+</tr>
+</tbody></table>
+<h3>Step 3: Create Prompt</h3>
+<p>Save to <code>prompts/cover.md</code>. Template: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/workflow/prompt-template.md" target="_blank" rel="noopener noreferrer">references/workflow/prompt-template.md</a></p>
+<p><strong>CRITICAL - References in Frontmatter</strong>:</p>
+<ul>
+<li>Files saved to <code>refs/</code> → Add to frontmatter <code>references</code> list</li>
+<li>Style extracted verbally (no file) → Omit <code>references</code>, describe in body</li>
+<li>Before writing → Verify: <code>test -f refs/ref-NN-{slug}.{ext}</code></li>
+</ul>
+<p><strong>Reference elements in body</strong> MUST be detailed, prefixed with "MUST"/"REQUIRED", with integration approach.</p>
+<h3>Step 4: Generate Image</h3>
+<ol>
+<li><strong>Backup existing</strong> <code>cover.png</code> if regenerating</li>
+<li><strong>Select backend</strong> via the <code>## Image Generation Tools</code> rule at the top: use whatever is available; if multiple, ask the user once. Do this once per session before any generation.</li>
+<li><strong>Write the full final prompt</strong> to <code>prompts/01-cover-[slug].md</code> (hard requirement) BEFORE invoking the backend.</li>
+<li><strong>Process references</strong> from prompt frontmatter:<ul>
+<li><code>direct</code> usage → pass via <code>--ref</code> (use ref-capable backend)</li>
+<li><code>style</code>/<code>palette</code> → extract traits, append to prompt</li>
+</ul>
+</li>
+<li><strong>Generate</strong>: Call the chosen backend with the prompt file, output path, aspect ratio.<ul>
+<li><strong><code>codex-imagegen</code></strong>: see <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/codex-imagegen.md" target="_blank" rel="noopener noreferrer">references/codex-imagegen.md</a> for the invocation contract (preferred <code>baoyu-image-gen --provider codex-cli</code> path, runtime wrapper discovery, parameter notes, stdout schema, batch semantics).</li>
+<li><strong>Codex <code>imagegen</code> (native)</strong> or other runtime-native tools / <code>baoyu-image-gen</code> skill: per the rule in <code>## Image Generation Tools</code> above.</li>
+</ul>
+</li>
+<li>On failure: auto-retry once</li>
+</ol>
+<h3>Step 5: Completion Report</h3>
+<pre><code>Cover Generated!
+
+Topic: [topic]
+Type: [type] | Palette: [palette] | Rendering: [rendering]
+Text: [text] | Mood: [mood] | Font: [font] | Aspect: [ratio]
+Title: [title or "visual only"]
+Language: [lang] | Watermark: [enabled/disabled]
+References: [N images or "extracted style" or "none"]
+Location: [directory path]
+
+Files:
+✓ source-{slug}.{ext}
+✓ prompts/cover.md
+✓ cover.png
+</code></pre>
+<h2>Image Modification</h2>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Steps</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Regenerate</strong></td>
+<td>Backup → Update prompt file FIRST → Regenerate</td>
+</tr>
+<tr>
+<td><strong>Change dimension</strong></td>
+<td>Backup → Confirm new value → Update prompt → Regenerate</td>
+</tr>
+</tbody></table>
+<p>Text correction policy:</p>
+<ul>
+<li>If the title/subtitle is misspelled, garbled, hard to read, or visually weak, do not patch the bitmap with code.</li>
+<li>For text-correction regenerations, write a new prompt file and a new output path so the flawed candidate is preserved for comparison.</li>
+<li>Post-processing is limited to crop, resize, compression, or format conversion that does not alter text or the main composition.</li>
+</ul>
+<h2>Composition Principles</h2>
+<ul>
+<li><strong>Whitespace</strong>: 40-60% breathing room</li>
+<li><strong>Visual anchor</strong>: Main element centered or offset left</li>
+<li><strong>Characters</strong>: Simplified silhouettes; NO realistic humans</li>
+<li><strong>Title</strong>: Use exact title from user/source; never invent</li>
+</ul>
+<h2>Changing Preferences</h2>
+<p>EXTEND.md lives at the path noted in <strong>Step 0</strong>. Three ways to change it:</p>
+<ul>
+<li><strong>Edit directly</strong> — open EXTEND.md and change fields. Full schema: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/config/preferences-schema.md" target="_blank" rel="noopener noreferrer">references/config/preferences-schema.md</a>.</li>
+<li><strong>Reconfigure interactively</strong> — delete EXTEND.md (or ask "reconfigure baoyu-cover-image preferences" / "重新配置"). The next run re-triggers first-time setup.</li>
+<li><strong>Common one-line edits</strong>:<ul>
+<li><code>preferred_image_backend: auto</code> — default; runtime-native tool wins, falls back to the only installed backend, asks only if multiple non-native are present.</li>
+<li><code>preferred_image_backend: codex-imagegen</code> — pin to Codex's built-in.</li>
+<li><code>preferred_image_backend: baoyu-image-gen</code> — pin to the baoyu-image-gen skill.</li>
+<li><code>preferred_image_backend: ask</code> — confirm backend every run.</li>
+<li><code>watermark.enabled: true</code>, <code>preferred_type</code>, <code>preferred_palette</code>, <code>preferred_rendering</code>, <code>default_aspect</code>, <code>quick_mode: true</code>, <code>language</code> — shift the auto-selection defaults and confirmation flow.</li>
+</ul>
+</li>
+</ul>
+<h2>References</h2>
+<p><strong>Dimensions</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/dimensions/text.md" target="_blank" rel="noopener noreferrer">text.md</a> | <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/dimensions/mood.md" target="_blank" rel="noopener noreferrer">mood.md</a> | <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/dimensions/font.md" target="_blank" rel="noopener noreferrer">font.md</a>
+<strong>Palettes</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/palettes/" target="_blank" rel="noopener noreferrer">references/palettes/</a>
+<strong>Renderings</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/renderings/" target="_blank" rel="noopener noreferrer">references/renderings/</a>
+<strong>Types</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/types.md" target="_blank" rel="noopener noreferrer">references/types.md</a>
+<strong>Auto-Selection</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/auto-selection.md" target="_blank" rel="noopener noreferrer">references/auto-selection.md</a>
+<strong>Style Presets</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/style-presets.md" target="_blank" rel="noopener noreferrer">references/style-presets.md</a>
+<strong>Compatibility</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/compatibility.md" target="_blank" rel="noopener noreferrer">references/compatibility.md</a>
+<strong>Visual Elements</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/visual-elements.md" target="_blank" rel="noopener noreferrer">references/visual-elements.md</a>
+<strong>Workflow</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/workflow/confirm-options.md" target="_blank" rel="noopener noreferrer">confirm-options.md</a> | <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/workflow/prompt-template.md" target="_blank" rel="noopener noreferrer">prompt-template.md</a> | <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/workflow/reference-images.md" target="_blank" rel="noopener noreferrer">reference-images.md</a>
+<strong>Config</strong>: <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/config/preferences-schema.md" target="_blank" rel="noopener noreferrer">preferences-schema.md</a> | <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/config/first-time-setup.md" target="_blank" rel="noopener noreferrer">first-time-setup.md</a> | <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-cover-image/references/config/watermark-guide.md" target="_blank" rel="noopener noreferrer">watermark-guide.md</a></p>

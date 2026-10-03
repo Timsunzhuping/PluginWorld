@@ -1,0 +1,171 @@
+<p><strong>Persona:</strong> You are a Go performance measurement engineer. You never draw conclusions from a single benchmark run — statistical rigor and controlled conditions are prerequisites before any optimization decision.</p>
+<p><strong>Thinking mode:</strong> Reason as thoroughly as possible for benchmark analysis, profile interpretation, and performance comparison tasks — deep reasoning prevents misinterpreting profiling data and ensures statistically sound conclusions. On Claude Code, use <code>ultrathink</code> to trigger extended thinking explicitly.</p>
+<p><strong>Dependencies:</strong></p>
+<ul>
+<li>benchstat: <code>go install golang.org/x/perf/cmd/benchstat@latest</code></li>
+</ul>
+<h1>Go Benchmarking &amp; Performance Measurement</h1>
+<p>Performance improvement does not exist without measures — if you can measure it, you can improve it.</p>
+<p>This skill covers the full measurement workflow: write a benchmark, run it, profile the result, compare before/after with statistical rigor, and track regressions in CI. For optimization patterns to apply after measurement, → See <code>samber/cc-skills-golang@golang-performance</code> skill. For pprof setup on running services, → See <code>samber/cc-skills-golang@golang-troubleshooting</code> skill.</p>
+<h2>Writing Benchmarks</h2>
+<h3>File and Ordering Conventions</h3>
+<p>Benchmark functions live in a <code>_bench_test.go</code> file named after the source file under benchmark, not after the individual function — <code>parser.go</code> -&gt; <code>parser_bench_test.go</code>, containing <code>BenchmarkParse</code>, <code>BenchmarkEncode</code>, etc., not a separate <code>benchmarkparse_test.go</code> per function.</p>
+<ul>
+<li>Keeping benchmarks in their own file (instead of mixed into <code>parser_test.go</code>) keeps <code>go test -bench=. ./pkg/parser</code> output free of unrelated <code>Test*</code> noise.</li>
+<li>It separates fixtures sized for measurement (large inputs, long-lived setup) from those sized for correctness — the two rarely share the same shape.</li>
+<li>The file still follows Go's one-test-file-per-source-file convention (→ See <code>samber/cc-skills-golang@golang-testing</code> skill), just with the <code>_bench</code> suffix marking its narrower purpose.</li>
+</ul>
+<p>Order <code>Benchmark*</code> functions inside <code>parser_bench_test.go</code> to mirror the order of the functions/methods they measure in <code>parser.go</code> — a reader comparing the two files top to bottom should find <code>BenchmarkParse</code> at the same relative position as <code>Parse</code>.</p>
+<h3><code>b.Loop()</code> (Go 1.24+) — preferred</h3>
+<p>For Go 1.24+, prefer <code>b.Loop()</code> for new benchmarks. It times only the loop body and keeps function arguments/results alive, which reduces dead-code-elimination mistakes.</p>
+<pre><code class="language-go">func BenchmarkParse(b *testing.B) {
+    data := loadFixture("large.json") // setup — excluded from timing
+    for b.Loop() {
+        Parse(data)  // compiler cannot eliminate this call
+    }
+}
+</code></pre>
+<p>Legacy <code>b.N</code> loops still compile and are fine to keep when preserving existing benchmarks or supporting Go &lt;1.24. They are easier to get wrong: setup may need <code>b.ResetTimer()</code>, and results may need a sink if the compiler can eliminate the work. Go 1.26 fixed an earlier <code>b.Loop()</code> inlining limitation — benchmarks on 1.24–1.25 already benefit from <code>b.Loop()</code> but may miss inlining optimizations that 1.26 delivers.</p>
+<p>Go 1.27's size-specialized allocator changes allocation-heavy benchmark baselines (faster sub-80-byte allocations, larger binaries) independent of any code change. Treat a <code>benchstat</code> comparison that straddles the Go 1.26→1.27 toolchain boundary as measuring the toolchain, not the code — rerun the "before" benchmark on the same toolchain as "after" before trusting the delta.</p>
+<h3>Memory tracking</h3>
+<pre><code class="language-go">func BenchmarkAlloc(b *testing.B) {
+    b.ReportAllocs() // or run with -benchmem flag
+    var sink []byte
+    for b.Loop() {
+        sink = make([]byte, 1024)
+    }
+    _ = sink
+}
+</code></pre>
+<p><code>b.ReportMetric()</code> adds custom metrics (e.g., throughput):</p>
+<pre><code class="language-go">b.ReportMetric(float64(totalBytes)/b.Elapsed().Seconds(), "bytes/s") // b.Elapsed() is only valid inside b.Loop()
+</code></pre>
+<h3>Sub-benchmarks and table-driven</h3>
+<pre><code class="language-go">func BenchmarkEncode(b *testing.B) {
+    for _, size := range []int{64, 256, 4096} {
+        b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+            data := make([]byte, size)
+            for b.Loop() {
+                Encode(data)
+            }
+        })
+    }
+}
+</code></pre>
+<h2>Running Benchmarks</h2>
+<pre><code class="language-bash">go test -bench=BenchmarkEncode -benchmem -count=10 ./pkg/... | tee bench.txt
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>-bench=.</code></td>
+<td>Run all benchmarks (regexp filter)</td>
+</tr>
+<tr>
+<td><code>-benchmem</code></td>
+<td>Report allocations (B/op, allocs/op)</td>
+</tr>
+<tr>
+<td><code>-count=10</code></td>
+<td>Run 10 times for statistical significance</td>
+</tr>
+<tr>
+<td><code>-benchtime=3s</code></td>
+<td>Minimum time per benchmark (default 1s)</td>
+</tr>
+<tr>
+<td><code>-cpu=1,2,4</code></td>
+<td>Run with different GOMAXPROCS values</td>
+</tr>
+<tr>
+<td><code>-cpuprofile=cpu.prof</code></td>
+<td>Write CPU profile</td>
+</tr>
+<tr>
+<td><code>-memprofile=mem.prof</code></td>
+<td>Write memory profile</td>
+</tr>
+<tr>
+<td><code>-trace=trace.out</code></td>
+<td>Write execution trace</td>
+</tr>
+</tbody></table>
+<p><strong>Output format:</strong> <code>BenchmarkEncode/size=64-8  5000000  230.5 ns/op  128 B/op  2 allocs/op</code> — the <code>-8</code> suffix is GOMAXPROCS, <code>ns/op</code> is time per operation, <code>B/op</code> is bytes allocated per op, <code>allocs/op</code> is heap allocation count per op.</p>
+<h2>Comparing Optimization Variants in Parallel</h2>
+<p>When several competing optimization hypotheses exist for the same bottleneck, implement each variant in its own isolated worktree via a separate sub-agent, so their code changes never collide in the shared working tree.</p>
+<p><strong>Run the benchmarks serially, not concurrently.</strong> Concurrent benchmark runs share the same CPU — the noisy-neighbor effect contaminates <code>ns/op</code> and reintroduces the exact statistical noise <code>-count</code> and <code>benchstat</code> exist to eliminate. Implementing in parallel is safe (isolated worktrees, no file contention); measuring in parallel is not (shared hardware, real contention). Run each variant's benchmark one at a time, back in the main tree or sequentially per worktree.</p>
+<p>Compare every variant's <code>benchstat</code> output against the <strong>same</strong> baseline report, keep the winner, and remove the worktrees for the rest.</p>
+<h2>Documenting Results in Commits</h2>
+<p>Paste benchstat output in the commit body when the change has a measurable performance impact. This documents <em>why</em> an optimization was made, prevents future readers from reverting it, and lets reviewers verify the claim without re-running benchmarks.</p>
+<p>Commit format:</p>
+<pre><code>perf(parser): reduce Parse allocations 50% with sync.Pool
+
+Replace per-call []byte allocation with a pooled buffer.
+
+goos: linux / goarch: amd64 / cpu: AMD Ryzen 9 5950X
+          │    old     │              new               │
+          │  sec/op    │  sec/op     vs base            │
+Parse-32    4.592µ ± 2%  3.041µ ± 1%  -33.78% (p=0.000 n=10)
+
+          │   old    │             new              │
+          │   B/op   │   B/op     vs base           │
+Parse-32   1.024Ki ± 0%  0.512Ki ± 0%  -50.00% (p=0.000 n=10)
+
+          │ old  │            new             │
+          │ allocs/op │ allocs/op  vs base    │
+Parse-32   12.00 ± 0%   6.000 ± 0%  -50.00% (p=0.000 n=10)
+</code></pre>
+<p><strong>Rules:</strong></p>
+<ul>
+<li>Only include benchmarks directly affected by the change — strip unrelated rows</li>
+<li>Never paste results with <code>~</code> (no statistical significance) — the improvement cannot be claimed</li>
+<li>Include the hardware context line (<code>goos/goarch/cpu</code>) so results are reproducible</li>
+<li>Use <code>perf(scope):</code> commit type for performance-only changes</li>
+</ul>
+<h2>Profiling from Benchmarks</h2>
+<p>Generate profiles directly from benchmark runs — no HTTP server needed:</p>
+<pre><code class="language-bash"># CPU profile
+go test -bench=BenchmarkParse -cpuprofile=cpu.prof ./pkg/parser
+go tool pprof cpu.prof
+
+# Memory profile (alloc_objects shows GC churn, inuse_space shows leaks)
+go test -bench=BenchmarkParse -memprofile=mem.prof ./pkg/parser
+go tool pprof -alloc_objects mem.prof
+
+# Execution trace
+go test -bench=BenchmarkParse -trace=trace.out ./pkg/parser
+go tool trace trace.out
+</code></pre>
+<p>For full pprof CLI reference (all commands, non-interactive mode, profile interpretation), see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/pprof.md" target="_blank" rel="noopener noreferrer">pprof Reference</a>. For execution trace interpretation, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/trace.md" target="_blank" rel="noopener noreferrer">Trace Reference</a>. For statistical comparison, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/benchstat.md" target="_blank" rel="noopener noreferrer">benchstat Reference</a>.</p>
+<h2>Reference Files</h2>
+<ul>
+<li><p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/pprof.md" target="_blank" rel="noopener noreferrer">pprof Reference</a></strong> — Interactive and non-interactive analysis of CPU, memory, and goroutine profiles. Full CLI commands, profile types (CPU vs alloc<em>objects vs inuse_space), web UI navigation, and interpretation patterns. Use this to dive deep into _where</em> time and memory are being spent in your code.</p>
+</li>
+<li><p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/benchstat.md" target="_blank" rel="noopener noreferrer">benchstat Reference</a></strong> — Statistical comparison of benchmark runs with rigorous confidence intervals and p-value tests. Covers output reading, filtering old benchmarks, interleaving results for visual clarity, and regression detection. Use this when you need to prove a change made a meaningful performance difference, not just a lucky run.</p>
+</li>
+<li><p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/trace.md" target="_blank" rel="noopener noreferrer">Trace Reference</a></strong> — Execution tracer for understanding <em>when</em> and <em>why</em> code runs. Visualizes goroutine scheduling, garbage collection phases, network blocking, and custom span annotations. Use this when pprof (which shows <em>where</em> CPU goes) isn't enough — you need to see the timeline of what happened.</p>
+</li>
+<li><p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/tools.md" target="_blank" rel="noopener noreferrer">Diagnostic Tools</a></strong> — Quick reference for ancillary tools: fieldalignment (struct padding waste), GODEBUG (runtime logging flags), fgprof (frame graph profiles), race detector (concurrency bugs), and others. Use this when you have a specific symptom and need a focused diagnostic — don't reach for pprof if a simpler tool already answers your question.</p>
+</li>
+<li><p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/compiler-analysis.md" target="_blank" rel="noopener noreferrer">Compiler Analysis</a></strong> — Low-level compiler optimization insights: escape analysis (when values move to the heap), inlining decisions (which function calls are eliminated), SSA dump (intermediate representation), and assembly output. Use this when benchmarks show allocations you didn't expect, or when you want to verify the compiler did what you intended.</p>
+</li>
+<li><p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/ci-regression.md" target="_blank" rel="noopener noreferrer">CI Regression Detection</a></strong> — Automated performance regression gating in CI pipelines. Covers three tools (benchdiff for quick PR comparisons, cob for strict threshold-based gating, gobenchdata for long-term trend dashboards), noisy neighbor mitigation strategies (why cloud CI benchmarks vary 5-10% even on quiet machines), and self-hosted runner tuning to make benchmarks reproducible. Use this when you want to ensure pull requests don't silently slow down your codebase — detecting regressions early prevents shipping performance debt.</p>
+</li>
+<li><p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/investigation-session.md" target="_blank" rel="noopener noreferrer">Investigation Session</a></strong> — Production performance troubleshooting workflow combining Prometheus runtime metrics (heap size, GC frequency, goroutine counts), PromQL queries to correlate metrics with code changes, runtime configuration flags (GODEBUG env vars to enable GC logging), and cost warnings (when you're hitting performance tax). Use this when production benchmarks look good but real traffic behaves differently.</p>
+</li>
+<li><p><strong><a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-benchmark/references/prometheus-go-metrics.md" target="_blank" rel="noopener noreferrer">Prometheus Go Metrics Reference</a></strong> — Complete listing of Go runtime metrics actually exposed as Prometheus metrics by <code>prometheus/client_golang</code>. Covers 30 default metrics, 40+ optional metrics (Go 1.17+), process metrics, and common PromQL queries. Distinguishes between <code>runtime/metrics</code> (Go internal data) and Prometheus metrics (what you scrape from <code>/metrics</code>). Use this when setting up monitoring dashboards or writing PromQL queries for production alerts.</p>
+</li>
+</ul>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-performance</code> skill for optimization patterns to apply after measuring ("if X bottleneck, apply Y")</li>
+<li>→ See <code>samber/cc-skills-golang@golang-troubleshooting</code> skill for pprof setup on running services (enable, secure, capture), Delve debugger, GODEBUG flags, root cause methodology</li>
+<li>→ See <code>samber/cc-skills-golang@golang-observability</code> skill for everyday always-on monitoring, continuous profiling (Pyroscope), distributed tracing (OpenTelemetry)</li>
+<li>→ See <code>samber/cc-skills-golang@golang-testing</code> skill for general testing practices</li>
+<li>→ See <code>samber/cc-skills@promql-cli</code> skill for querying Prometheus runtime metrics in production to validate benchmark findings</li>
+</ul>

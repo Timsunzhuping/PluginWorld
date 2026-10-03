@@ -1,0 +1,1028 @@
+<h1>Image Card Series Generator</h1>
+<p>Break down complex content into eye-catching image card series with multiple style options.</p>
+<h2>User Input Tools</h2>
+<p>When this skill prompts the user, follow this tool-selection rule (priority order):</p>
+<ol>
+<li><strong>Prefer built-in user-input tools</strong> exposed by the current agent runtime — e.g., <code>AskUserQuestion</code>, <code>request_user_input</code>, <code>clarify</code>, <code>ask_user</code>, or any equivalent.</li>
+<li><strong>Fallback</strong>: if no such tool exists, emit a numbered plain-text message and ask the user to reply with the chosen number/answer for each question.</li>
+<li><strong>Batching</strong>: if the tool supports multiple questions per call, combine all applicable questions into a single call; if only single-question, ask them one at a time in priority order.</li>
+</ol>
+<p>Concrete <code>AskUserQuestion</code> references below are examples — substitute the local equivalent in other runtimes.</p>
+<h2>Image Generation Tools</h2>
+<p>When this skill needs to render an image, resolve the backend in this order:</p>
+<ol>
+<li><strong>Current-request override</strong> — if the user names a specific backend in the current message, use it.</li>
+<li><strong>Saved preference</strong> — if <code>EXTEND.md</code> sets <code>preferred_image_backend</code> to a backend available right now, use it.</li>
+<li><strong>Auto-select</strong> (when the preference is <code>auto</code>, unset, or the pinned backend isn't available):<ul>
+<li><strong>Codex (<code>imagegen</code>)</strong> — first, inspect your available-skills / tool inventory. If a skill named <code>imagegen</code> is listed, you are running inside Codex and MUST use it: invoke via the <code>Skill</code> tool with <code>skill: "imagegen"</code>, passing the saved prompt file's content (plus output path and aspect ratio per Codex <code>imagegen</code>'s own args). Codex <code>imagegen</code> is the official raster backend in that runtime and outranks any non-native skill (e.g., <code>baoyu-image-gen</code>) unless the user has explicitly pinned a different <code>preferred_image_backend</code>.</li>
+<li><strong>Codex via <code>codex exec</code> (<code>codex-imagegen</code>)</strong> — if the current runtime exposes no native <code>imagegen</code> skill but the <code>codex</code> CLI is on <code>PATH</code> with an active <code>codex login</code>, route through <code>baoyu-image-gen --provider codex-cli</code> (preferred), or — if baoyu-image-gen is unavailable — invoke the bundled wrapper directly. Details, parameters, and the runtime-discovery procedure live in <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-xhs-images/references/codex-imagegen.md" target="_blank" rel="noopener noreferrer">references/codex-imagegen.md</a> — load that file only when this branch is selected.</li>
+<li><strong>Cursor (<code>GenerateImage</code>)</strong> — if the runtime exposes a native <code>GenerateImage</code> tool, you are running inside Cursor and it outranks any non-native skill the same way Codex <code>imagegen</code> does. Two hard caveats: (a) it has no aspect-ratio parameter — state the target aspect ratio / dimensions explicitly in the prompt text passed as <code>description</code>; (b) it does not accept an output directory — it saves to a tool-managed location, so after generation copy/move the file to the skill's expected output path (e.g., <code>outputs/.../NN-xxx.png</code>). Reference images go in <code>reference_image_paths</code>.</li>
+<li><strong>Other runtime-native tools</strong> — if the runtime exposes a different native image tool (e.g., Hermes <code>image_generate</code>), use it the same way.</li>
+<li>Otherwise, if exactly one non-native backend is installed (e.g., <code>baoyu-image-gen</code>), use it.</li>
+<li>Otherwise (multiple non-native backends with no runtime-native tool), ask the user once — batch with any other initial questions.</li>
+</ul>
+</li>
+<li><strong>If none are available</strong>, tell the user and ask how to proceed.</li>
+</ol>
+<p><strong>⛔ Never substitute SVG, HTML, canvas, or other code-based rendering for raster image generation.</strong> Codex <code>imagegen</code>'s own description says it should be used "when the output should be a bitmap asset rather than repo-native code or vector." If you cannot resolve a raster backend via step 3, fall through to step 4 and ask the user — do <strong>not</strong> silently emit SVG, write inline <code>&lt;svg&gt;</code> markup, or produce HTML/CSS art as a substitute. This applies even if the article/section seems "diagram-like": the consumer skill calling this rule has already decided that a raster image is what it needs.</p>
+<p><strong>⛔ Never repair rendered text by painting over a generated bitmap.</strong> Do not use ImageMagick, Pillow, Canvas, SVG, HTML/CSS, OCR scripts, or any other programmatic overlay to cover, rewrite, erase, stroke, or replace titles, body copy, tags, or any other text inside an already generated image card. If text is wrong or unclear, regenerate from a corrected prompt, switch to a layout with less on-card text, or ask the user which imperfect candidate to keep.</p>
+<p>Setting <code>preferred_image_backend: ask</code> forces the step-3 prompt every run regardless of available backends. Users change the pinned backend via the <code>## Changing Preferences</code> section below.</p>
+<p><strong>Prompt file requirement (hard)</strong>: write each image's full, final prompt to a standalone file under <code>prompts/</code> (naming: <code>NN-{type}-[slug].md</code>) BEFORE invoking any backend. The file is the reproducibility record and lets you switch backends without regenerating prompts.</p>
+<p>Concrete tool names (<code>imagegen</code>, <code>GenerateImage</code>, <code>image_generate</code>, <code>baoyu-image-gen</code>) above are examples — substitute the local equivalents under the same rule.</p>
+<h2>Batch Generation Policy</h2>
+<p>After every prompt file for the current generation group has been saved and verified, generate images in batches by default.</p>
+<p>Priority order:</p>
+<ol>
+<li>Use the chosen backend's native batch / multi-task interface if it exists. Each task must keep its own prompt file, output path, aspect ratio, session ID, and direct reference images.</li>
+<li>If no native batch interface exists but the runtime can issue parallel tool calls, dispatch up to <code>generation_batch_size</code> images at a time. Default: <code>4</code>. An explicit user request in the current message, such as <code>--batch-size 4</code> or "并行 4 张一起生成", overrides EXTEND.md.</li>
+<li>If neither native batch nor parallel tool calls are available, generate sequentially.</li>
+</ol>
+<p>Rules:</p>
+<ul>
+<li>Honor the image-1 anchor chain: generate image 1 first, then batch images 2+ using image 1 as the reference.</li>
+<li>Never start a batch until every selected prompt file for that batch exists on disk.</li>
+<li>Retry failed items once without regenerating successful items.</li>
+<li>Do not use subagents merely to parallelize image rendering. Use subagents only for separate prompt iteration or creative exploration.</li>
+</ul>
+<h2>Confirmation Policy</h2>
+<p>Default behavior: <strong>confirm before generation</strong>.</p>
+<ul>
+<li>Treat explicit skill invocation, a file path, matched signals/presets, and <code>EXTEND.md</code> defaults as <strong>recommendation inputs only</strong>. None of them authorizes skipping confirmation.</li>
+<li>Do <strong>not</strong> start Step 3 until the user completes Step 2.</li>
+<li>Skip confirmation only when the current request explicitly says to do so, for example: <code>--yes</code>, "直接生成", "不用确认", "跳过确认", "按默认出图", or equivalent wording.</li>
+<li>If confirmation is skipped explicitly, state the assumed strategy / style / layout / palette / count / backend in the next user-facing update before generating.</li>
+</ul>
+<h2>Language</h2>
+<p>Respond in the user's language across questions, progress, errors, and completion summary. Keep technical tokens (style names, file paths, code) in English.</p>
+<h2>Options</h2>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--style &lt;name&gt;</code></td>
+<td>Visual style (see Styles below)</td>
+</tr>
+<tr>
+<td><code>--layout &lt;name&gt;</code></td>
+<td>Information layout (see Layouts below)</td>
+</tr>
+<tr>
+<td><code>--palette &lt;name&gt;</code></td>
+<td>Color override: macaron / warm / neon</td>
+</tr>
+<tr>
+<td><code>--preset &lt;name&gt;</code></td>
+<td>Style + layout + optional palette shorthand (see Presets below; per-preset prompt fragments in <code>references/style-presets.md</code>)</td>
+</tr>
+<tr>
+<td><code>--ref &lt;files...&gt;</code></td>
+<td>Reference images applied to image 1 as the series anchor</td>
+</tr>
+<tr>
+<td><code>--batch-size &lt;n&gt;</code></td>
+<td>Temporary generation batch size for this run. Default: <code>generation_batch_size</code> from EXTEND.md, otherwise 4. Clamp to 1-8.</td>
+</tr>
+<tr>
+<td><code>--yes</code></td>
+<td>Non-interactive: skip all confirmations, use EXTEND.md or built-in defaults, auto-confirm recommended plan (Path A)</td>
+</tr>
+</tbody></table>
+<h2>Dimensions</h2>
+<p>Three independent knobs combine freely:</p>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Controls</th>
+<th>Options</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Style</strong></td>
+<td>Visual aesthetics (lines, decorations, rendering)</td>
+<td>12 styles (see Styles below)</td>
+</tr>
+<tr>
+<td><strong>Layout</strong></td>
+<td>Information structure (density, arrangement)</td>
+<td>8 layouts (see Layouts below)</td>
+</tr>
+<tr>
+<td><strong>Palette</strong> (optional)</td>
+<td>Color override, replaces the style's default colors</td>
+<td>macaron / warm / neon (see Palettes below)</td>
+</tr>
+</tbody></table>
+<p>Example: <code>--style notion --layout dense</code> makes an intellectual knowledge card; add <code>--palette macaron</code> to soften the colors without changing notion's rendering rules. A <code>--preset</code> is a shorthand for style + layout (+ optional palette).</p>
+<p><strong>Palette behavior</strong>: no <code>--palette</code> → style's built-in colors; <code>--palette &lt;name&gt;</code> → overrides colors only, rendering rules unchanged. Some styles declare a <code>default_palette</code> (e.g., sketch-notes defaults to macaron).</p>
+<h2>Styles (12)</h2>
+<table>
+<thead>
+<tr>
+<th>Style</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>cute</code> (Default)</td>
+<td>Sweet, adorable, girly aesthetic</td>
+</tr>
+<tr>
+<td><code>fresh</code></td>
+<td>Clean, refreshing, natural</td>
+</tr>
+<tr>
+<td><code>warm</code></td>
+<td>Cozy, friendly, approachable</td>
+</tr>
+<tr>
+<td><code>bold</code></td>
+<td>High impact, attention-grabbing</td>
+</tr>
+<tr>
+<td><code>minimal</code></td>
+<td>Ultra-clean, sophisticated</td>
+</tr>
+<tr>
+<td><code>retro</code></td>
+<td>Vintage, nostalgic, trendy</td>
+</tr>
+<tr>
+<td><code>pop</code></td>
+<td>Vibrant, energetic, eye-catching</td>
+</tr>
+<tr>
+<td><code>notion</code></td>
+<td>Minimalist hand-drawn line art, intellectual</td>
+</tr>
+<tr>
+<td><code>chalkboard</code></td>
+<td>Colorful chalk on black board, educational</td>
+</tr>
+<tr>
+<td><code>study-notes</code></td>
+<td>Realistic handwritten photo style, blue pen + red annotations + yellow highlighter</td>
+</tr>
+<tr>
+<td><code>screen-print</code></td>
+<td>Bold poster art, halftone textures, limited colors, symbolic storytelling</td>
+</tr>
+<tr>
+<td><code>sketch-notes</code></td>
+<td>Hand-drawn educational infographic, macaron pastels on warm cream, wobble lines</td>
+</tr>
+</tbody></table>
+<p>Per-style specifications: <code>references/presets/&lt;style&gt;.md</code>.</p>
+<h2>Layouts (8)</h2>
+<table>
+<thead>
+<tr>
+<th>Layout</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sparse</code> (Default)</td>
+<td>1-2 points, maximum impact</td>
+</tr>
+<tr>
+<td><code>balanced</code></td>
+<td>3-4 points, standard</td>
+</tr>
+<tr>
+<td><code>dense</code></td>
+<td>5-8 points, knowledge-card style</td>
+</tr>
+<tr>
+<td><code>list</code></td>
+<td>Enumeration / ranking (4-7 items)</td>
+</tr>
+<tr>
+<td><code>comparison</code></td>
+<td>Side-by-side contrast</td>
+</tr>
+<tr>
+<td><code>flow</code></td>
+<td>Process / timeline (3-6 steps)</td>
+</tr>
+<tr>
+<td><code>mindmap</code></td>
+<td>Center-radial (4-8 branches)</td>
+</tr>
+<tr>
+<td><code>quadrant</code></td>
+<td>Four-quadrant / circular sections</td>
+</tr>
+</tbody></table>
+<p>Layout specs: <code>references/elements/canvas.md</code>.</p>
+<h2>Palettes (optional override)</h2>
+<p>Replaces the style's colors while keeping rendering rules (line treatment, textures) intact.</p>
+<table>
+<thead>
+<tr>
+<th>Palette</th>
+<th>Background</th>
+<th>Zone Colors</th>
+<th>Accent</th>
+<th>Feel</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>macaron</code></td>
+<td>Warm cream #F5F0E8</td>
+<td>Blue #A8D8EA, Lavender #D5C6E0, Mint #B5E5CF, Peach #F8D5C4</td>
+<td>Coral #E8655A</td>
+<td>Soft, educational</td>
+</tr>
+<tr>
+<td><code>warm</code></td>
+<td>Soft peach #FFECD2</td>
+<td>Orange #ED8936, Terracotta #C05621, Golden #F6AD55, Rose #D4A09A</td>
+<td>Sienna #A0522D</td>
+<td>Earth tones, cozy</td>
+</tr>
+<tr>
+<td><code>neon</code></td>
+<td>Dark purple #1A1025</td>
+<td>Cyan #00F5FF, Magenta #FF00FF, Green #39FF14, Pink #FF6EC7</td>
+<td>Yellow #FFFF00</td>
+<td>High-energy, futuristic</td>
+</tr>
+</tbody></table>
+<p>Palette specs: <code>references/palettes/&lt;palette&gt;.md</code>.</p>
+<h2>Presets (style + layout shortcuts)</h2>
+<p>Quick-start combos, grouped by scenario. Use <code>--preset &lt;name&gt;</code> or recommend during Step 2.</p>
+<p><strong>Knowledge &amp; Learning</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Style</th>
+<th>Layout</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>knowledge-card</code></td>
+<td>notion</td>
+<td>dense</td>
+<td>干货知识卡、概念科普</td>
+</tr>
+<tr>
+<td><code>checklist</code></td>
+<td>notion</td>
+<td>list</td>
+<td>清单、排行榜</td>
+</tr>
+<tr>
+<td><code>concept-map</code></td>
+<td>notion</td>
+<td>mindmap</td>
+<td>概念图、知识脉络</td>
+</tr>
+<tr>
+<td><code>swot</code></td>
+<td>notion</td>
+<td>quadrant</td>
+<td>SWOT 分析、四象限</td>
+</tr>
+<tr>
+<td><code>tutorial</code></td>
+<td>chalkboard</td>
+<td>flow</td>
+<td>教程步骤、操作流程</td>
+</tr>
+<tr>
+<td><code>classroom</code></td>
+<td>chalkboard</td>
+<td>balanced</td>
+<td>课堂笔记、知识讲解</td>
+</tr>
+<tr>
+<td><code>study-guide</code></td>
+<td>study-notes</td>
+<td>dense</td>
+<td>学习笔记、考试重点</td>
+</tr>
+<tr>
+<td><code>hand-drawn-edu</code></td>
+<td>sketch-notes</td>
+<td>flow</td>
+<td>手绘教程、流程图解</td>
+</tr>
+<tr>
+<td><code>sketch-card</code></td>
+<td>sketch-notes</td>
+<td>dense</td>
+<td>手绘知识卡</td>
+</tr>
+<tr>
+<td><code>sketch-summary</code></td>
+<td>sketch-notes</td>
+<td>balanced</td>
+<td>手绘总结、图文笔记</td>
+</tr>
+</tbody></table>
+<p><strong>Lifestyle &amp; Sharing</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Style</th>
+<th>Layout</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>cute-share</code></td>
+<td>cute</td>
+<td>balanced</td>
+<td>少女风分享、日常种草</td>
+</tr>
+<tr>
+<td><code>girly</code></td>
+<td>cute</td>
+<td>sparse</td>
+<td>甜美封面、氛围感</td>
+</tr>
+<tr>
+<td><code>cozy-story</code></td>
+<td>warm</td>
+<td>balanced</td>
+<td>生活故事、情感分享</td>
+</tr>
+<tr>
+<td><code>product-review</code></td>
+<td>fresh</td>
+<td>comparison</td>
+<td>产品对比、测评</td>
+</tr>
+<tr>
+<td><code>nature-flow</code></td>
+<td>fresh</td>
+<td>flow</td>
+<td>健康流程、自然主题</td>
+</tr>
+</tbody></table>
+<p><strong>Impact &amp; Opinion</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Style</th>
+<th>Layout</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>warning</code></td>
+<td>bold</td>
+<td>list</td>
+<td>避坑指南、重要提醒</td>
+</tr>
+<tr>
+<td><code>versus</code></td>
+<td>bold</td>
+<td>comparison</td>
+<td>正反对比</td>
+</tr>
+<tr>
+<td><code>clean-quote</code></td>
+<td>minimal</td>
+<td>sparse</td>
+<td>金句、极简封面</td>
+</tr>
+<tr>
+<td><code>pro-summary</code></td>
+<td>minimal</td>
+<td>balanced</td>
+<td>专业总结、商务内容</td>
+</tr>
+</tbody></table>
+<p><strong>Trend &amp; Entertainment</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Style</th>
+<th>Layout</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>retro-ranking</code></td>
+<td>retro</td>
+<td>list</td>
+<td>复古排行、经典盘点</td>
+</tr>
+<tr>
+<td><code>throwback</code></td>
+<td>retro</td>
+<td>balanced</td>
+<td>怀旧分享</td>
+</tr>
+<tr>
+<td><code>pop-facts</code></td>
+<td>pop</td>
+<td>list</td>
+<td>趣味冷知识</td>
+</tr>
+<tr>
+<td><code>hype</code></td>
+<td>pop</td>
+<td>sparse</td>
+<td>炸裂封面、惊叹分享</td>
+</tr>
+</tbody></table>
+<p><strong>Poster &amp; Editorial</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Style</th>
+<th>Layout</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>poster</code></td>
+<td>screen-print</td>
+<td>sparse</td>
+<td>海报风封面、影评书评</td>
+</tr>
+<tr>
+<td><code>editorial</code></td>
+<td>screen-print</td>
+<td>balanced</td>
+<td>观点文章、文化评论</td>
+</tr>
+<tr>
+<td><code>cinematic</code></td>
+<td>screen-print</td>
+<td>comparison</td>
+<td>电影对比、戏剧张力</td>
+</tr>
+</tbody></table>
+<p>Full prompt-fragment definitions: <code>references/style-presets.md</code>.</p>
+<h2>Auto-Selection</h2>
+<p>Match content signals to the best combo. First row whose keywords appear wins; fall back to <code>cute-share</code> if nothing matches.</p>
+<table>
+<thead>
+<tr>
+<th>Signals in source</th>
+<th>Style</th>
+<th>Layout</th>
+<th>Recommended preset</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>beauty, fashion, cute, girl, pink</td>
+<td><code>cute</code></td>
+<td>sparse/balanced</td>
+<td><code>cute-share</code>, <code>girly</code></td>
+</tr>
+<tr>
+<td>health, nature, fresh, organic</td>
+<td><code>fresh</code></td>
+<td>balanced/flow</td>
+<td><code>product-review</code>, <code>nature-flow</code></td>
+</tr>
+<tr>
+<td>life, story, emotion, warm</td>
+<td><code>warm</code></td>
+<td>balanced</td>
+<td><code>cozy-story</code></td>
+</tr>
+<tr>
+<td>warning, important, must, critical</td>
+<td><code>bold</code></td>
+<td>list/comparison</td>
+<td><code>warning</code>, <code>versus</code></td>
+</tr>
+<tr>
+<td>professional, business, elegant</td>
+<td><code>minimal</code></td>
+<td>sparse/balanced</td>
+<td><code>clean-quote</code>, <code>pro-summary</code></td>
+</tr>
+<tr>
+<td>classic, vintage, traditional</td>
+<td><code>retro</code></td>
+<td>balanced</td>
+<td><code>throwback</code>, <code>retro-ranking</code></td>
+</tr>
+<tr>
+<td>fun, exciting, wow, amazing</td>
+<td><code>pop</code></td>
+<td>sparse/list</td>
+<td><code>hype</code>, <code>pop-facts</code></td>
+</tr>
+<tr>
+<td>knowledge, concept, productivity, SaaS</td>
+<td><code>notion</code></td>
+<td>dense/list</td>
+<td><code>knowledge-card</code>, <code>checklist</code></td>
+</tr>
+<tr>
+<td>education, tutorial, learning, classroom</td>
+<td><code>chalkboard</code></td>
+<td>balanced/dense</td>
+<td><code>tutorial</code>, <code>classroom</code></td>
+</tr>
+<tr>
+<td>notes, handwritten, study guide, realistic</td>
+<td><code>study-notes</code></td>
+<td>dense/list/mindmap</td>
+<td><code>study-guide</code></td>
+</tr>
+<tr>
+<td>movie, poster, opinion, editorial, cinematic</td>
+<td><code>screen-print</code></td>
+<td>sparse/comparison</td>
+<td><code>poster</code>, <code>editorial</code>, <code>cinematic</code></td>
+</tr>
+<tr>
+<td>hand-drawn, infographic, workflow, 手绘，图解</td>
+<td><code>sketch-notes</code></td>
+<td>flow/balanced/dense</td>
+<td><code>hand-drawn-edu</code>, <code>sketch-card</code>, <code>sketch-summary</code></td>
+</tr>
+</tbody></table>
+<h2>Style × Layout Matrix</h2>
+<p>Compatibility scores (✓✓ highly recommended, ✓ works well, ✗ avoid). Use when the user picks a non-default combo and you want to flag a poor match.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th align="center">sparse</th>
+<th align="center">balanced</th>
+<th align="center">dense</th>
+<th align="center">list</th>
+<th align="center">comparison</th>
+<th align="center">flow</th>
+<th align="center">mindmap</th>
+<th align="center">quadrant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>cute</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+</tr>
+<tr>
+<td>fresh</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+</tr>
+<tr>
+<td>warm</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+</tr>
+<tr>
+<td>bold</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+</tr>
+<tr>
+<td>minimal</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+</tr>
+<tr>
+<td>retro</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+</tr>
+<tr>
+<td>pop</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+</tr>
+<tr>
+<td>notion</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+</tr>
+<tr>
+<td>chalkboard</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+</tr>
+<tr>
+<td>study-notes</td>
+<td align="center">✗</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+</tr>
+<tr>
+<td>screen-print</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✗</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✗</td>
+<td align="center">✓✓</td>
+</tr>
+<tr>
+<td>sketch-notes</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓✓</td>
+<td align="center">✓</td>
+</tr>
+</tbody></table>
+<h2>Outline Strategies</h2>
+<p>Three differentiated approaches — each produces a structurally different outline. The workflow recommends one; Path C generates all three and lets the user choose.</p>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Concept</th>
+<th>Best for</th>
+<th>Structure</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>A — Story-Driven</strong></td>
+<td>Personal experience as the thread, emotional resonance first</td>
+<td>Reviews, personal shares, transformation</td>
+<td>Hook → Problem → Discovery → Experience → Conclusion</td>
+</tr>
+<tr>
+<td><strong>B — Information-Dense</strong></td>
+<td>Value-first, efficient information delivery</td>
+<td>Tutorials, comparisons, checklists</td>
+<td>Core conclusion → Info card → Pros/Cons → Recommendation</td>
+</tr>
+<tr>
+<td><strong>C — Visual-First</strong></td>
+<td>Visual impact as core, minimal text</td>
+<td>High-aesthetic products, lifestyle, mood content</td>
+<td>Hero image → Detail shots → Lifestyle scene → CTA</td>
+</tr>
+</tbody></table>
+<h2>Reference Images</h2>
+<p>User-supplied refs are <strong>separate from</strong> the internal "image-1 as anchor" chain (Step 3) — they layer on top of it.</p>
+<p><strong>Intake</strong>: via <code>--ref &lt;files...&gt;</code> or paths pasted in conversation.</p>
+<ul>
+<li>File path → copy to <code>refs/NN-ref-{slug}.{ext}</code></li>
+<li>Pasted with no path → ask for the path, or extract style traits as a text fallback</li>
+</ul>
+<p><strong>Usage modes</strong> (per reference):</p>
+<table>
+<thead>
+<tr>
+<th>Usage</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>direct</code></td>
+<td>Pass the file to the backend (typically on image 1 only, so the anchor propagates through the chain)</td>
+</tr>
+<tr>
+<td><code>style</code></td>
+<td>Extract style traits and append to every card's prompt body</td>
+</tr>
+<tr>
+<td><code>palette</code></td>
+<td>Extract hex colors and append to every card's prompt body</td>
+</tr>
+</tbody></table>
+<p>Record refs in each affected card's prompt frontmatter:</p>
+<pre><code class="language-yaml">references:
+  - ref_id: 01
+    filename: 01-ref-brand.png
+    usage: direct
+</code></pre>
+<p>At generation time: verify files exist. Image 1 with <code>usage: direct</code> + backend that accepts refs → pass via the backend's ref parameter (becomes the chain anchor). Images 2+ keep using image-1 as <code>--ref</code> per Step 3 — do NOT re-stack user refs on top (avoids conflicting signals). For <code>style</code>/<code>palette</code>, embed extracted traits in every prompt.</p>
+<h2>File Layout</h2>
+<pre><code>image-cards/{topic-slug}/
+├── source-{slug}.{ext}
+├── analysis.md
+├── outline-strategy-{a,b,c}.md    # Path C only
+├── outline.md
+├── prompts/NN-{type}-{slug}.md
+├── NN-{type}-{slug}.png
+└── refs/                          # only if --ref used
+</code></pre>
+<p><strong>Slug</strong>: 2-4 words, kebab-case. "AI 工具推荐" → <code>ai-tools-recommend</code>. On collision, append <code>-YYYYMMDD-HHMMSS</code>.</p>
+<p><strong>Backup rule</strong> (applies throughout): before overwriting any file — source, outline, prompt, image — rename the existing one to <code>&lt;name&gt;-backup-YYYYMMDD-HHMMSS.&lt;ext&gt;</code>. This protects user edits.</p>
+<h2>Workflow</h2>
+<pre><code>- [ ] Step 0: Load EXTEND.md ⛔ BLOCKING (interactive only)
+- [ ] Step 1: Analyze content → analysis.md
+- [ ] Step 2: Smart Confirm ⚠️ REQUIRED (Path A / B / C)
+- [ ] Step 3: Generate images
+- [ ] Step 4: Completion report
+</code></pre>
+<h3>Step 0: Load EXTEND.md ⛔ BLOCKING</h3>
+<p>Check these paths in order; first hit wins:</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>.baoyu-skills/baoyu-xhs-images/EXTEND.md</code></td>
+<td>Project</td>
+</tr>
+<tr>
+<td><code>${XDG_CONFIG_HOME:-$HOME/.config}/baoyu-skills/baoyu-xhs-images/EXTEND.md</code></td>
+<td>XDG</td>
+</tr>
+<tr>
+<td><code>$HOME/.baoyu-skills/baoyu-xhs-images/EXTEND.md</code></td>
+<td>User home</td>
+</tr>
+</tbody></table>
+<ul>
+<li><strong>Found</strong> → read, parse, print a summary (style / layout / watermark / language), continue.</li>
+<li><strong>Not found + interactive</strong> → run first-time setup (see <code>references/config/first-time-setup.md</code>) and save before anything else. Do NOT analyze content or ask style questions until preferences exist — this keeps first-run behavior predictable.</li>
+<li><strong>Not found + <code>--yes</code></strong> → skip setup, use built-in defaults (no watermark, style/layout auto-selected, language from content). Do not prompt, do not create EXTEND.md.</li>
+</ul>
+<p><strong>EXTEND.md keys</strong>: watermark, preferred style/layout, custom style definitions, language preference, preferred image backend, generation batch size. Schema: <code>references/config/preferences-schema.md</code>.</p>
+<h3>Step 1: Analyze Content → <code>analysis.md</code></h3>
+<ol>
+<li>Save the source (backup rule applies if <code>source.md</code> exists).</li>
+<li>Run the deep analysis in <code>references/workflows/analysis-framework.md</code>: content type, hook potential, audience, engagement signals, visual opportunity map, swipe flow.</li>
+<li>Detect source language, pick recommended image count (2-10).</li>
+<li>Auto-recommend strategy + style + layout + palette using the <strong>Auto-Selection</strong> table above.</li>
+<li>Write everything to <code>analysis.md</code>.</li>
+</ol>
+<h3>Step 2: Smart Confirm ⚠️ REQUIRED</h3>
+<p><strong>Hard gate</strong>: this step is mandatory per the <a href="#confirmation-policy" target="_blank" rel="noopener noreferrer">Confirmation Policy</a> — Step 3 cannot start until the user confirms here (or explicitly opts out with <code>--yes</code> / equivalent wording in the current request).</p>
+<p>Goal: present the auto-recommended plan and let the user confirm or adjust. Skip this step entirely under <code>--yes</code> — proceed with Path A using the analysis and any CLI overrides.</p>
+<p><strong>Display summary</strong> before asking:</p>
+<pre><code>📋 内容分析
+  主题：[topic] | 类型：[content_type]
+  要点：[key points]
+  受众：[audience]
+
+🎨 推荐方案（自动匹配）
+  策略：[A/B/C] [name]（[reason]）
+  风格：[style] · 布局：[layout] · 配色：[palette or 默认] · 预设：[preset]
+  图片：[N]张（封面+[N-2]内容+结尾）
+  元素：[background] / [decorations] / [emphasis]
+</code></pre>
+<p>Then ask one question — three paths. Verbatim option copy: <code>references/confirmation.md</code>.</p>
+<p><strong>Path A — Quick confirm</strong> (trust auto-recommendation): generate a single outline using the recommended strategy + style → save to <code>outline.md</code> → Step 3.</p>
+<p><strong>Path B — Customize</strong>: ask five questions (strategy/style, layout, palette, count, optional notes) with the recommendation pre-filled — blanks keep the recommendation. Generate one outline with the user's choices → <code>outline.md</code> → Step 3. See <code>references/confirmation.md</code>.</p>
+<p><strong>Path C — Detailed mode</strong>: two sub-confirmations.</p>
+<ul>
+<li><em>Step 2a — Content understanding</em>: ask selling points (multi-select), audience, style preference (authentic / professional / aesthetic / auto), optional context. Update <code>analysis.md</code>.</li>
+<li><em>Step 2b — Three outline variants</em>: generate <code>outline-strategy-a.md</code>, <code>outline-strategy-b.md</code>, <code>outline-strategy-c.md</code>. Each MUST have a different structure AND a different recommended style — include <code>style_reason</code> in the frontmatter. Page-count heuristic: A ~4-6, B ~3-5, C ~3-4. Template: <code>references/workflows/outline-template.md</code>; frontmatter example in <code>references/confirmation.md</code>.</li>
+<li><em>Step 2c — Selection</em>: ask three questions (outline A/B/C/Combined, style, visual elements). Save selected/merged outline to <code>outline.md</code> → Step 3.</li>
+</ul>
+<h3>Step 3: Generate Images</h3>
+<p>With confirmed outline + style + layout + palette:</p>
+<p><strong>Visual consistency — image-1 anchor chain</strong>: character / mascot / color rendering drifts between calls unless you anchor them. Generate image 1 (cover) first WITHOUT <code>--ref</code>, then pass image 1 as <code>--ref</code> to every subsequent image. This is the single most important consistency trick for this skill — don't skip it even if the backend also supports a session ID.</p>
+<p>Generation flow:</p>
+<ol>
+<li>Write the full prompt for every image to <code>prompts/NN-{type}-{slug}.md</code> in the user's preferred language (backup rule applies), then verify all selected prompt files exist.</li>
+<li>Generate <strong>image 1</strong> first without <code>--ref</code>; backup rule applies to the PNG file. This establishes the anchor.</li>
+<li>Build a task list for <strong>images 2+</strong> using image 1 as <code>--ref &lt;path-to-image-01.png&gt;</code>.</li>
+<li>Dispatch images 2+ in batches per the <code>## Batch Generation Policy</code>: backend native batch first, runtime parallel tool calls second, sequential only as fallback.</li>
+<li>Report progress after each completed image. On failure, retry only the failed item once from the same saved prompt file.</li>
+</ol>
+<p><strong>Watermark</strong> (if enabled in EXTEND.md): append to the generation prompt:</p>
+<pre><code>Include a subtle watermark "[content]" positioned at [position].
+The watermark should be legible but not distracting.
+</code></pre>
+<p>See <code>references/config/watermark-guide.md</code>.</p>
+<p><strong>Backend selection</strong>: per the Image Generation Tools rule at the top — use whatever is available, ask once if multiple, before any generation. Under <code>--yes</code>, use the EXTEND.md preference and fall back to the first available backend. Prompt files MUST exist before invoking any backend.</p>
+<p><strong><code>codex-imagegen</code> invocation</strong>: when the rule resolves to <code>codex-imagegen</code>, see <a href="https://github.com/jimliu/baoyu-skills/blob/HEAD/skills/baoyu-xhs-images/references/codex-imagegen.md" target="_blank" rel="noopener noreferrer">references/codex-imagegen.md</a> for the invocation contract (preferred <code>baoyu-image-gen --provider codex-cli</code> path, runtime wrapper discovery, parameter notes, stdout schema, batch semantics — n=1 per call so card batches must dispatch one wrapper call per card; the wrapper does NOT accept <code>--sessionId</code>, so chain consistency must come from <code>--ref</code> per Step 3 above).</p>
+<p><strong>Session ID</strong> (if the backend supports <code>--sessionId</code>): use <code>cards-{topic-slug}-{timestamp}</code> for every image; combined with the ref chain this gives maximum consistency.</p>
+<h3>Step 4: Completion Report</h3>
+<pre><code>Image Card Series Complete!
+
+Topic: [topic]
+Mode: [Quick / Custom / Detailed]
+Strategy: [A/B/C/Combined]
+Style: [name]
+Palette: [name or "default"]
+Layout: [name or "varies"]
+Location: [directory]
+Images: N total
+
+✓ analysis.md
+✓ outline.md
+✓ outline-strategy-a/b/c.md (detailed mode only)
+
+- 01-cover-[slug].png ✓ Cover (sparse)
+- 02-content-[slug].png ✓ Content (balanced)
+- ...
+- NN-ending-[slug].png ✓ Ending (sparse)
+</code></pre>
+<h2>Content Breakdown Principles</h2>
+<table>
+<thead>
+<tr>
+<th>Position</th>
+<th>Purpose</th>
+<th>Typical layout</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Cover (image 1)</td>
+<td>Hook + visual impact</td>
+<td><code>sparse</code></td>
+</tr>
+<tr>
+<td>Content (middle)</td>
+<td>Core value per image</td>
+<td><code>balanced</code> / <code>dense</code> / <code>list</code> / <code>comparison</code> / <code>flow</code></td>
+</tr>
+<tr>
+<td>Ending (last)</td>
+<td>CTA / summary</td>
+<td><code>sparse</code> or <code>balanced</code></td>
+</tr>
+</tbody></table>
+<p>For the style × layout compatibility matrix, see the <strong>Style × Layout Matrix</strong> above.</p>
+<h2>Image Modification</h2>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Edit</td>
+<td>Update <code>prompts/NN-{type}-{slug}.md</code> <strong>first</strong>, then regenerate with the same session ID</td>
+</tr>
+<tr>
+<td>Add</td>
+<td>Specify position, create prompt, generate, renumber subsequent files <code>NN+1</code>, update outline</td>
+</tr>
+<tr>
+<td>Delete</td>
+<td>Remove files, renumber subsequent <code>NN-1</code>, update outline</td>
+</tr>
+</tbody></table>
+<p>Always update the prompt file before regenerating — it's the source of truth and makes changes reproducible.</p>
+<p>Text correction policy:</p>
+<ul>
+<li>If a card's title, body copy, tags, or any other rendered text is misspelled, garbled, hard to read, or visually weak, do not patch the bitmap with code.</li>
+<li>For text-correction regenerations, write a new prompt file and a new output path so the flawed candidate is preserved for comparison.</li>
+<li>Post-processing is limited to crop, resize, compression, or format conversion that does not alter text or the main composition.</li>
+</ul>
+<h2>References</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>references/confirmation.md</code></td>
+<td>Verbatim AskUserQuestion copy for every confirmation path</td>
+</tr>
+<tr>
+<td><code>references/style-presets.md</code></td>
+<td>Full preset shortcut definitions</td>
+</tr>
+<tr>
+<td><code>references/presets/&lt;style&gt;.md</code></td>
+<td>Per-style element definitions</td>
+</tr>
+<tr>
+<td><code>references/palettes/&lt;name&gt;.md</code></td>
+<td>Per-palette color definitions</td>
+</tr>
+<tr>
+<td><code>references/elements/canvas.md</code></td>
+<td>Aspect ratios, safe zones, grid layouts</td>
+</tr>
+<tr>
+<td><code>references/elements/image-effects.md</code></td>
+<td>Cutout, stroke, filters</td>
+</tr>
+<tr>
+<td><code>references/elements/typography.md</code></td>
+<td>Decorated text, tags, text direction</td>
+</tr>
+<tr>
+<td><code>references/elements/decorations.md</code></td>
+<td>Emphasis marks, backgrounds, doodles, frames</td>
+</tr>
+<tr>
+<td><code>references/workflows/analysis-framework.md</code></td>
+<td>Content analysis framework</td>
+</tr>
+<tr>
+<td><code>references/workflows/outline-template.md</code></td>
+<td>Outline template with layout guide</td>
+</tr>
+<tr>
+<td><code>references/workflows/prompt-assembly.md</code></td>
+<td>Prompt assembly guide</td>
+</tr>
+<tr>
+<td><code>references/config/preferences-schema.md</code></td>
+<td>EXTEND.md schema</td>
+</tr>
+<tr>
+<td><code>references/config/first-time-setup.md</code></td>
+<td>First-time setup flow</td>
+</tr>
+<tr>
+<td><code>references/config/watermark-guide.md</code></td>
+<td>Watermark configuration</td>
+</tr>
+</tbody></table>
+<h2>Notes</h2>
+<ul>
+<li>Auto-retry once on generation failure before reporting an error.</li>
+<li>For sensitive public figures, use stylized cartoon alternatives.</li>
+<li>Smart Confirm (Step 2) is required; Detailed mode adds a second confirmation (2a + 2c).</li>
+</ul>
+<h2>Changing Preferences</h2>
+<p>EXTEND.md lives at the first matching path listed in Step 0. Three ways to change it:</p>
+<ul>
+<li><strong>Edit directly</strong> — open EXTEND.md and change fields. Full schema: <code>references/config/preferences-schema.md</code>.</li>
+<li><strong>Reconfigure interactively</strong> — delete EXTEND.md (or ask "reconfigure baoyu-xhs-images preferences" / "重新配置"). The next run re-triggers first-time setup.</li>
+<li><strong>Common one-line edits</strong>:<ul>
+<li><code>preferred_image_backend: auto</code> — default; runtime-native tool wins, falls back to the only installed backend, asks only if multiple non-native are present.</li>
+<li><code>preferred_image_backend: codex-imagegen</code> — pin to Codex's built-in.</li>
+<li><code>preferred_image_backend: baoyu-image-gen</code> — pin to the baoyu-image-gen skill.</li>
+<li><code>preferred_image_backend: ask</code> — confirm backend every run.</li>
+<li><code>generation_batch_size: 4</code> — default number of images to render concurrently when the backend/runtime supports batch or parallel generation.</li>
+<li><code>preferred_style: notion</code>, <code>preferred_layout: dense</code>, <code>preferred_palette: macaron</code>, <code>language: zh</code>.</li>
+<li><code>watermark.enabled: true</code> + <code>watermark.content: "@handle"</code> — add a watermark.</li>
+</ul>
+</li>
+</ul>

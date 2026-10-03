@@ -215,7 +215,7 @@ export default async function HomePage() {
           </h2>
           <p className="mt-3 max-w-lg text-[14.5px] leading-relaxed text-faint">
             Add the ecosystem topic to your repo — PluginWorld indexes, validates
-            and scores it automatically every 6 hours. No signup. No forms.
+            and scores it automatically daily. No signup. No forms.
           </p>
           <div className="mt-6 flex flex-wrap gap-3">
             <Link

@@ -1,0 +1,249 @@
+<h1>SwiftUI Expert Skill</h1>
+<h2>Operating Rules</h2>
+<ul>
+<li>Treat each <code>View</code> type as an invalidation boundary: give it only the data it reads and keep frequently changing dependencies close to the smallest affected subtree</li>
+<li>Search <code>references/latest-apis.md</code> when writing, reviewing, or migrating API usage; look up only the APIs relevant to the task</li>
+<li>Replace hard-deprecated APIs with modern equivalents. During feature work, flag soft-deprecated APIs and leave them in place (see <code>references/soft-deprecation.md</code>)</li>
+<li>Prefer native SwiftUI APIs over UIKit/AppKit bridging unless bridging is necessary</li>
+<li>Focus on correctness and performance; do not enforce specific architectures (MVVM, VIPER, etc.)</li>
+<li>Encourage separating business logic from views for testability without mandating how</li>
+<li>Follow Apple's Human Interface Guidelines and API design patterns</li>
+<li>Only adopt Liquid Glass when explicitly requested by the user (see <code>references/liquid-glass.md</code>)</li>
+<li>Present performance optimizations as suggestions, not requirements</li>
+<li>Use <code>#available</code> gating with sensible fallbacks for version-specific APIs</li>
+<li>For layout and rendering inputs, read the value nearest the SwiftUI view that consumes it; do not substitute process-global screen state</li>
+</ul>
+<h2>Task Workflow</h2>
+<h3>Review existing SwiftUI code</h3>
+<ul>
+<li>Read the code under review and identify which topics apply</li>
+<li>Flag deprecated APIs (compare against <code>references/latest-apis.md</code>); replace hard-deprecated APIs, and flag soft-deprecated APIs without rewriting them unless the user asked to migrate</li>
+<li>Run the Topic Router below for each relevant topic</li>
+<li>Validate <code>#available</code> gating and fallback paths for version-specific features</li>
+<li>For broad codebase reviews, first identify smaller focus areas and present them one at a time; if the user requests a whole-codebase review, divide it into a TODO list</li>
+</ul>
+<h3>Improve existing SwiftUI code</h3>
+<ul>
+<li>Audit current implementation against the Topic Router topics</li>
+<li>Replace hard-deprecated APIs with modern equivalents from <code>references/latest-apis.md</code>; flag soft-deprecated APIs and do not rewrite them during feature work</li>
+<li>Refactor hot paths to reduce unnecessary state updates</li>
+<li>Extract complex view bodies into separate subviews</li>
+<li>Suggest image downsampling when <code>UIImage(data:)</code> is encountered (optional optimization, see <code>references/image-optimization.md</code>)</li>
+</ul>
+<h3>Implement new SwiftUI feature</h3>
+<ul>
+<li>Design data flow first: identify owned vs injected state</li>
+<li>Structure views for optimal diffing (extract subviews early)</li>
+<li>Apply correct animation patterns (implicit vs explicit, transitions)</li>
+<li>Use <code>Button</code> for all tappable elements; add accessibility grouping and labels</li>
+<li>Gate version-specific APIs with <code>#available</code> and provide fallbacks</li>
+</ul>
+<h3>Record a new Instruments trace</h3>
+<p>Trigger when the user asks to "record a trace", "profile the app", "capture a session", etc. Full reference: <code>references/trace-recording.md</code>.</p>
+<ol>
+<li><strong>Confirm target</strong> — attach to a running app, launch an app, or record all processes? If the user didn't say, ask. List connected devices when useful:<pre><code class="language-bash">python3 "${SKILL_DIR}/scripts/record_trace.py" --list-devices
+</code></pre>
+</li>
+<li><strong>Pick a template based on target kind</strong> — the <code>SwiftUI</code> template populates the SwiftUI lane on any <strong>real device</strong>: a physical iOS/iPadOS device <strong>or the host Mac</strong>. The only exception is the <strong>iOS Simulator</strong>, where the SwiftUI lane comes back empty — switch to <code>--template "Time Profiler"</code> in that case (still gives Time Profiler + Hangs + Animation Hitches). Always check <code>--list-devices</code>: <code>simulators</code> kind → <code>Time Profiler</code>; <code>devices</code> kind (real devices and the host Mac) → default <code>SwiftUI</code>. Full decision table in <code>references/trace-recording.md</code>.</li>
+<li><strong>Start the recording</strong>. For agent-driven sessions where the user says "I'll tell you when I'm done", start in the background and use a stop-file:<pre><code class="language-bash">python3 "${SKILL_DIR}/scripts/record_trace.py" \
+    --device "&lt;name|udid&gt;" --attach "&lt;AppName&gt;" \
+    --stop-file /tmp/stop-trace --output ~/Desktop/session.trace
+</code></pre>
+For interactive sessions, just tell the user to press Ctrl+C when done.</li>
+<li><strong>Signal stop</strong> — when the user says they've finished exercising the app, <code>touch /tmp/stop-trace</code>. The script cleanly SIGINTs xctrace and waits up to 60s for finalisation.</li>
+<li><strong>Analyse</strong> the resulting trace (flow into the "Trace-driven improvement" workflow below).</li>
+</ol>
+<h3>Trace-driven improvement (Instruments <code>.trace</code> provided)</h3>
+<p>Trigger whenever the user's request references a <code>.trace</code> file. A target SwiftUI source file is <strong>optional</strong> — if given, cite specific lines; if not, recommend where to look based on view names and symbols the trace already reveals.</p>
+<p>Full reference: <code>references/trace-analysis.md</code>. Summary of the composition pattern:</p>
+<ol>
+<li><strong>Scope the analysis.</strong> Ask yourself: does the user want the whole trace, or a slice?<ul>
+<li>"focus on X / after X / between X and Y / during X" → <strong>resolve to a window first</strong> (see step 2).</li>
+<li>No scoping cue → analyse the whole trace.</li>
+</ul>
+</li>
+<li><strong>Resolve a window (only if the user scoped).</strong> The parser exposes two discovery modes:<pre><code class="language-bash"># Find a log that marks the start/end of the region of interest:
+python3 "${SKILL_DIR}/scripts/analyze_trace.py" --trace &lt;path&gt; \
+    --list-logs --log-message-contains "loaded feed" --log-limit 5
+# Or list os_signpost intervals (paired begin/end), filterable by name:
+python3 "${SKILL_DIR}/scripts/analyze_trace.py" --trace &lt;path&gt; \
+    --list-signposts --signpost-name-contains "ImageDecode"
+</code></pre>
+Both modes accept <code>--window START_MS:END_MS</code> to scope discovery. Pick the <code>time_ms</code> (for logs) or <code>start_ms</code>/<code>end_ms</code> (for signposts) that match the user's description. Build a window like <code>--window 10400:11700</code>.</li>
+<li><strong>Run the main analysis</strong> (with or without <code>--window</code>):<pre><code class="language-bash">python3 "${SKILL_DIR}/scripts/analyze_trace.py" --trace &lt;path&gt; \
+    --json-only --top 10 [--window START_MS:END_MS]
+</code></pre>
+</li>
+<li><strong>Interpret with <code>references/trace-analysis.md</code></strong> — key diagnostics:<ul>
+<li><code>main_running_coverage_pct</code> inside each correlation (&lt;25% = blocked; ≥75% = CPU-bound).</li>
+<li><code>swiftui-causes.top_sources</code> reveals <em>why</em> updates keep happening — high-edge-count sources like <code>UserDefaultObserver.send()</code> or wide <code>EnvironmentWriter</code> entries are structural invalidation bugs. Fixing one often collapses many downstream hot views.</li>
+</ul>
+</li>
+<li><strong>When a specific view shows as expensive, ask who's invalidating it.</strong> Use <code>--fanin-for "&lt;view name&gt;"</code> to get the ranked list of source nodes driving the updates.</li>
+<li><strong>Optionally ground in source.</strong> If the user pointed at a file, read it and match view names / user-code symbols against identifiers there. If not, recommend which files to open based on the view names SwiftUI reported.</li>
+<li><strong>Return a prioritised plan.</strong> Cite evidence (coverage %, hot symbol, overlapping view, log timestamp, cause-graph edges) and route each recommendation to a Topic Router reference.</li>
+<li>Only edit code if the user asked for edits.</li>
+</ol>
+<h3>Topic Router</h3>
+<p>Consult the reference file for each topic relevant to the current task:</p>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Reference</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>State management</td>
+<td><code>references/state-management.md</code></td>
+</tr>
+<tr>
+<td>Environment and <code>@Entry</code></td>
+<td><code>references/environment-patterns.md</code></td>
+</tr>
+<tr>
+<td>View composition</td>
+<td><code>references/view-structure.md</code></td>
+</tr>
+<tr>
+<td>View modifiers and identity</td>
+<td><code>references/modifier-patterns.md</code></td>
+</tr>
+<tr>
+<td>Performance</td>
+<td><code>references/performance-patterns.md</code></td>
+</tr>
+<tr>
+<td>Lists and ForEach</td>
+<td><code>references/list-patterns.md</code></td>
+</tr>
+<tr>
+<td>Resizable layout, safe areas, two-column reflow, foldable grids, arrangements, and reserved regions</td>
+<td><code>references/layout-best-practices.md</code></td>
+</tr>
+<tr>
+<td>iPhone Duo, foldable, or large-display screens (read first to choose the technique)</td>
+<td><code>references/iphone-duo.md</code></td>
+</tr>
+<tr>
+<td>Sheets, navigation, <code>NavigationSplitView</code> on large displays, and tab bar/sidebar (<code>sidebarAdaptable</code>)</td>
+<td><code>references/sheet-navigation-patterns.md</code></td>
+</tr>
+<tr>
+<td>ScrollView, scroll position, and scroll geometry</td>
+<td><code>references/scroll-patterns.md</code></td>
+</tr>
+<tr>
+<td>Focus management</td>
+<td><code>references/focus-patterns.md</code></td>
+</tr>
+<tr>
+<td>Animations (basics)</td>
+<td><code>references/animation-basics.md</code></td>
+</tr>
+<tr>
+<td>Animations (transitions)</td>
+<td><code>references/animation-transitions.md</code></td>
+</tr>
+<tr>
+<td>Animations (advanced)</td>
+<td><code>references/animation-advanced.md</code></td>
+</tr>
+<tr>
+<td>Accessibility</td>
+<td><code>references/accessibility-patterns.md</code></td>
+</tr>
+<tr>
+<td>Swift Charts</td>
+<td><code>references/charts.md</code></td>
+</tr>
+<tr>
+<td>Charts accessibility</td>
+<td><code>references/charts-accessibility.md</code></td>
+</tr>
+<tr>
+<td>Image optimization and display scale</td>
+<td><code>references/image-optimization.md</code></td>
+</tr>
+<tr>
+<td>Toolbars</td>
+<td><code>references/toolbar-patterns.md</code></td>
+</tr>
+<tr>
+<td>Document-based apps</td>
+<td><code>references/document-apps.md</code></td>
+</tr>
+<tr>
+<td>WebKit</td>
+<td><code>references/webkit-integration.md</code></td>
+</tr>
+<tr>
+<td>Styled text editing</td>
+<td><code>references/styled-text-editing.md</code></td>
+</tr>
+<tr>
+<td>Liquid Glass (iOS 26+)</td>
+<td><code>references/liquid-glass.md</code></td>
+</tr>
+<tr>
+<td>macOS scenes</td>
+<td><code>references/macos-scenes.md</code></td>
+</tr>
+<tr>
+<td>macOS window styling</td>
+<td><code>references/macos-window-styling.md</code></td>
+</tr>
+<tr>
+<td>macOS views</td>
+<td><code>references/macos-views.md</code></td>
+</tr>
+<tr>
+<td>Text patterns</td>
+<td><code>references/text-patterns.md</code></td>
+</tr>
+<tr>
+<td>Localization</td>
+<td><code>references/localization.md</code></td>
+</tr>
+<tr>
+<td>Deprecated API lookup</td>
+<td><code>references/latest-apis.md</code></td>
+</tr>
+<tr>
+<td>Handling soft-deprecated APIs</td>
+<td><code>references/soft-deprecation.md</code></td>
+</tr>
+<tr>
+<td>Previews</td>
+<td><code>references/previews.md</code></td>
+</tr>
+<tr>
+<td>Instruments trace analysis</td>
+<td><code>references/trace-analysis.md</code></td>
+</tr>
+<tr>
+<td>Instruments trace recording</td>
+<td><code>references/trace-recording.md</code></td>
+</tr>
+</tbody></table>
+<h2>Correctness Checklist</h2>
+<p>These are hard rules -- violations are always bugs:</p>
+<ul>
+<li> <code>@State</code> properties are <code>private</code></li>
+<li> <code>@Binding</code> only where a child modifies parent state</li>
+<li> Changing parent-owned inputs are not stored as <code>@State</code>/<code>@StateObject</code>; intentional state seeds are documented as one-time</li>
+<li> <code>@StateObject</code> for view-owned objects; <code>@ObservedObject</code> for injected</li>
+<li> iOS 17+: <code>@State</code> with <code>@Observable</code>; <code>@Bindable</code> for injected observables needing bindings</li>
+<li> <code>ForEach</code> uses stable identity (never <code>.indices</code>/<code>\.offset</code>; id outlives the view and isn't derived from mutable content)</li>
+<li> Constant number of views per <code>ForEach</code> element; <code>List</code> rows are unary</li>
+<li> No closures stored in custom <code>@Environment</code>/<code>@FocusedValue</code> keys</li>
+<li> Custom <code>@Entry</code> default values are stable (no <code>Model()</code>/<code>Date()</code>/<code>UUID()</code> expressions)</li>
+<li> SwiftUI display scale comes from <code>@Environment(\.displayScale)</code>, not global screen state</li>
+<li> Safe-area content does not double-apply <code>GeometryProxy.safeAreaInsets</code></li>
+<li> <code>.animation(_:value:)</code> always includes the <code>value</code> parameter</li>
+<li> <code>@FocusState</code> properties are <code>private</code></li>
+<li> No redundant <code>@FocusState</code> writes inside tap gesture handlers on <code>.focusable()</code> views</li>
+<li> Version-specific APIs are gated with <code>#available</code> and have sensible fallbacks</li>
+<li> <code>import Charts</code> present in files using chart types</li>
+<li> Previews use self-contained mock data; no dependency on live services or network</li>
+</ul>

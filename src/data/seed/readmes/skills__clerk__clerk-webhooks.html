@@ -1,0 +1,319 @@
+<h1>Webhooks</h1>
+<p>Output complete, working webhook handlers with <code>verifyWebhook(req)</code> verification in every handler.</p>
+<h2>When to Use Webhooks</h2>
+<p>Webhooks are <strong>asynchronous and eventually consistent</strong>. Delivery is fast but not guaranteed to be immediate, and may occasionally fail (Svix retries on a fixed schedule). Use them for:</p>
+<ul>
+<li>Database sync (a separate users / orgs table that follows Clerk)</li>
+<li>Notifications (welcome emails, Slack pings, internal alerts)</li>
+<li>Integrations triggered by lifecycle events</li>
+</ul>
+<p>Do NOT rely on webhook delivery as part of a synchronous flow such as onboarding ("user signs up, then we read X from our DB"). For data the user just created, read it from the <a href="https://clerk.com/docs/guides/sessions/session-tokens" target="_blank" rel="noopener noreferrer">Clerk session token</a> or call the Backend API directly. Webhooks fill the gap when you need data about <em>other</em> users or events the session token doesn't carry.</p>
+<h2>Verify Every Webhook</h2>
+<p>Use <code>verifyWebhook(req)</code> from the framework-specific package (<code>@clerk/nextjs/webhooks</code>, <code>@clerk/express/webhooks</code>, etc.). It reads <code>CLERK_WEBHOOK_SIGNING_SECRET</code> automatically and throws on bad signatures. Skipping verification, even for notification-only handlers, exposes the endpoint to spoofed events.</p>
+<h2>Make the Webhook Route Public</h2>
+<p>Webhook routes must be excluded from Clerk middleware protection. Without this, Clerk returns 401.</p>
+<pre><code class="language-typescript">// proxy.ts (Next.js &lt;=15: middleware.ts)
+import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
+
+const isPublicRoute = createRouteMatcher(['/api/webhooks(.*)'])
+
+export default clerkMiddleware(async (auth, req) =&gt; {
+  if (!isPublicRoute(req)) await auth.protect()
+})
+</code></pre>
+<h2>Complete Webhook Handler (Next.js App Router)</h2>
+<pre><code class="language-typescript">// app/api/webhooks/route.ts
+import { verifyWebhook } from '@clerk/nextjs/webhooks'
+import { NextRequest } from 'next/server'
+import { db } from '@/lib/db'
+
+export async function POST(req: NextRequest) {
+  // ALWAYS verify - never skip, even for notification-only handlers
+  let evt
+  try {
+    evt = await verifyWebhook(req) // uses CLERK_WEBHOOK_SIGNING_SECRET automatically
+  } catch (err) {
+    console.error('Webhook verification failed:', err)
+    return new Response('Verification failed', { status: 400 })
+  }
+
+  if (evt.type === 'user.created') {
+    const { id, email_addresses, first_name, last_name } = evt.data
+    const email = email_addresses[0]?.email_address
+    const name = `${first_name ?? ''} ${last_name ?? ''}`.trim()
+    await db.users.create({ data: { clerkId: id, email, name } })
+  }
+
+  if (evt.type === 'user.updated') {
+    const { id, email_addresses, first_name, last_name } = evt.data
+    const email = email_addresses[0]?.email_address
+    await db.users.update({ where: { clerkId: id }, data: { email, first_name, last_name } })
+  }
+
+  if (evt.type === 'user.deleted') {
+    const { id } = evt.data
+    await db.users.delete({ where: { clerkId: id } })
+  }
+
+  if (evt.type === 'organizationMembership.created') {
+    const { organization, public_user_data, role } = evt.data
+    const orgId = organization.id
+    const userId = public_user_data.user_id
+    await db.teamMembers.create({ data: { orgId, userId, role } })
+  }
+
+  if (evt.type === 'organizationMembership.deleted') {
+    const { organization, public_user_data } = evt.data
+    const orgId = organization.id
+    const userId = public_user_data.user_id
+    await db.teamMembers.delete({ where: { orgId_userId: { orgId, userId } } })
+  }
+
+  return new Response('OK', { status: 200 })
+}
+</code></pre>
+<h2>Full Example: Welcome Email (Resend) + Slack Notification on user.created</h2>
+<p>Notification-only handlers still verify the signature. Same pattern as the database-sync handler:</p>
+<pre><code class="language-typescript">// app/api/webhooks/route.ts
+import { verifyWebhook } from '@clerk/nextjs/webhooks'
+import { NextRequest } from 'next/server'
+import { Resend } from 'resend'
+
+const resend = new Resend(process.env.RESEND_API_KEY)
+
+export async function POST(req: NextRequest) {
+  // Step 1: ALWAYS verify the webhook signature - NEVER skip this
+  let evt
+  try {
+    evt = await verifyWebhook(req) // uses CLERK_WEBHOOK_SIGNING_SECRET env var
+  } catch (err) {
+    console.error('Webhook verification failed:', err)
+    return new Response('Verification failed', { status: 400 })
+  }
+
+  // Step 2: Listen for user.created event
+  if (evt.type === 'user.created') {
+    // Step 3: Extract user email and name from webhook payload
+    const { id, email_addresses, first_name, last_name } = evt.data
+    const email = email_addresses[0]?.email_address
+    const name = `${first_name ?? ''} ${last_name ?? ''}`.trim()
+
+    // Step 4: Call Resend API to send welcome email
+    await resend.emails.send({
+      from: 'noreply@yourdomain.com',
+      to: email,
+      subject: 'Welcome!',
+      html: `&lt;p&gt;Hi ${name}, welcome to our app!&lt;/p&gt;`,
+    })
+
+    // Step 5: Post notification to Slack channel
+    await fetch(process.env.SLACK_WEBHOOK_URL!, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: `New user signed up: ${name} (${email})`,
+      }),
+    })
+  }
+
+  // Always return 200 to acknowledge receipt
+  return new Response('OK', { status: 200 })
+}
+</code></pre>
+<p><strong>Also include proxy.ts (Next.js &lt;=15: middleware.ts) to make the route public:</strong></p>
+<pre><code class="language-typescript">// proxy.ts (Next.js &lt;=15: middleware.ts)
+import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
+const isPublicRoute = createRouteMatcher(['/api/webhooks(.*)'])
+export default clerkMiddleware(async (auth, req) =&gt; {
+  if (!isPublicRoute(req)) await auth.protect()
+})
+</code></pre>
+<h2>Full Example: Organization Membership Sync to Database</h2>
+<pre><code class="language-typescript">// app/api/webhooks/route.ts
+import { verifyWebhook } from '@clerk/nextjs/webhooks'
+import { NextRequest } from 'next/server'
+import { db } from '@/lib/db' // your database client
+
+export async function POST(req: NextRequest) {
+  // ALWAYS verify signature - never skip, even for simple handlers
+  let evt
+  try {
+    evt = await verifyWebhook(req) // uses CLERK_WEBHOOK_SIGNING_SECRET env var
+  } catch (err) {
+    console.error('Webhook verification failed:', err)
+    return new Response('Verification failed', { status: 400 })
+  }
+
+  if (evt.type === 'organization.created') {
+    const { id, name } = evt.data
+    await db.workspaces.create({
+      data: { orgId: id, name, createdAt: new Date() },
+    })
+  }
+
+  if (evt.type === 'organizationMembership.created') {
+    // Extract organization ID, user ID, and role from payload
+    const { organization, public_user_data, role } = evt.data
+    const orgId = organization.id
+    const userId = public_user_data.user_id
+
+    // Add to team_members table
+    await db.team_members.create({
+      data: { orgId, userId, role },
+    })
+
+    // Create workspace record for new member
+    await db.workspaces.create({
+      data: { orgId, userId, createdAt: new Date() },
+    })
+  }
+
+  if (evt.type === 'organizationMembership.deleted') {
+    // Extract organization ID and user ID from payload
+    const { organization, public_user_data } = evt.data
+    const orgId = organization.id
+    const userId = public_user_data.user_id
+
+    // Remove from team_members table
+    await db.team_members.delete({
+      where: { orgId, userId },
+    })
+
+    // Remove workspace record
+    await db.workspaces.deleteMany({
+      where: { orgId, userId },
+    })
+  }
+
+  // Return 200 status on success
+  return new Response('OK', { status: 200 })
+}
+</code></pre>
+<h2>Other Frameworks</h2>
+<p>For Express, Astro, Fastify, Nuxt, React Router, and TanStack Start, use the framework-specific <code>verifyWebhook</code> adapter. Each Clerk SDK package ships its own (<code>@clerk/express/webhooks</code>, <code>@clerk/astro/webhooks</code>, <code>@clerk/fastify/webhooks</code>, etc.).</p>
+<p>See <code>references/frameworks.md</code> for full handler examples per framework.</p>
+<h2>Type Narrowing for <code>evt.data</code></h2>
+<p><code>verifyWebhook</code> returns <code>WebhookEvent</code>, a discriminated union of all event types. Narrow with <code>evt.type</code> to get type-safe access to <code>evt.data</code>:</p>
+<pre><code class="language-typescript">const evt = await verifyWebhook(req)
+
+if (evt.type === 'user.created') {
+  // evt.data is now UserJSON, autocompletes id, email_addresses, etc.
+  console.log(evt.data.id)
+}
+</code></pre>
+<p>For manual typing of nested payloads, import the JSON types from your framework's webhook subpath: <code>DeletedObjectJSON</code>, <code>EmailJSON</code>, <code>OrganizationInvitationJSON</code>, <code>OrganizationJSON</code>, <code>OrganizationMembershipJSON</code>, <code>SessionJSON</code>, <code>SMSMessageJSON</code>, <code>UserJSON</code>.</p>
+<h2>Payload Field Reference</h2>
+<h3>User events (<code>user.created</code>, <code>user.updated</code>, <code>user.deleted</code>)</h3>
+<pre><code class="language-typescript">const {
+  id,                  // Clerk user ID
+  email_addresses,     // array; [0].email_address is primary email
+  first_name,
+  last_name,
+  image_url,
+  public_metadata,
+} = evt.data
+</code></pre>
+<h3>Organization events (<code>organization.created</code>, <code>organization.updated</code>, <code>organization.deleted</code>)</h3>
+<pre><code class="language-typescript">const {
+  id,    // org ID
+  name,  // org name
+  slug,
+} = evt.data
+</code></pre>
+<h3>Organization Membership events (<code>organizationMembership.created</code>, <code>organizationMembership.updated</code>, <code>organizationMembership.deleted</code>)</h3>
+<pre><code class="language-typescript">const {
+  organization,        // { id, name, ... }
+  public_user_data,    // { user_id, first_name, last_name, ... }
+  role,                // e.g. 'org:admin', 'org:member'
+} = evt.data
+// Access: organization.id, public_user_data.user_id, role
+</code></pre>
+<h2>Supported Events (Full Catalog)</h2>
+<p><strong>User</strong>: <code>user.created</code> <code>user.updated</code> <code>user.deleted</code></p>
+<p><strong>Session</strong>: <code>session.created</code> <code>session.ended</code> <code>session.removed</code> <code>session.revoked</code></p>
+<p><strong>Organization</strong>: <code>organization.created</code> <code>organization.updated</code> <code>organization.deleted</code></p>
+<p><strong>Organization Membership</strong>: <code>organizationMembership.created</code> <code>organizationMembership.updated</code> <code>organizationMembership.deleted</code></p>
+<p><strong>Organization Domain</strong>: <code>organizationDomain.created</code> <code>organizationDomain.updated</code> <code>organizationDomain.deleted</code></p>
+<p><strong>Organization Invitation</strong>: <code>organizationInvitation.accepted</code> <code>organizationInvitation.created</code> <code>organizationInvitation.revoked</code></p>
+<p><strong>Communication</strong>: <code>email.created</code> <code>sms.created</code></p>
+<p><strong>Waitlist</strong>: <code>waitlistEntry.created</code> <code>waitlistEntry.updated</code></p>
+<p><strong>Permission</strong>: <code>permission.created</code> <code>permission.updated</code> <code>permission.deleted</code></p>
+<p><strong>Role</strong>: <code>role.created</code> <code>role.updated</code> <code>role.deleted</code></p>
+<p><strong>Subscription</strong>: <code>subscription.created</code> <code>subscription.updated</code> <code>subscription.active</code> <code>subscription.pastDue</code></p>
+<p><strong>Subscription Item</strong>: <code>subscriptionItem.created</code> <code>subscriptionItem.active</code> <code>subscriptionItem.updated</code> <code>subscriptionItem.canceled</code> <code>subscriptionItem.upcoming</code> <code>subscriptionItem.ended</code> <code>subscriptionItem.abandoned</code> <code>subscriptionItem.incomplete</code> <code>subscriptionItem.pastDue</code> <code>subscriptionItem.freeTrialEnding</code></p>
+<p><strong>Payment</strong>: <code>paymentAttempt.created</code> <code>paymentAttempt.updated</code></p>
+<h2>Webhook Reliability</h2>
+<p><strong>Retries</strong>: Svix retries failed webhooks on a set schedule (see <a href="https://docs.svix.com/retries" target="_blank" rel="noopener noreferrer">Svix Retry Schedule</a>). Return 2xx to succeed, 4xx/5xx to retry. Use the <code>svix-id</code> header as an idempotency key to deduplicate retried events.</p>
+<p><strong>Replay</strong>: Failed webhooks can be replayed from Dashboard.</p>
+<h2>Common Pitfalls</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Cause</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Verification fails (Next.js)</td>
+<td>Wrong import or usage</td>
+<td>Use <code>@clerk/nextjs/webhooks</code>, pass <code>req</code> directly</td>
+</tr>
+<tr>
+<td>Verification fails (Express)</td>
+<td>Using <code>express.json()</code></td>
+<td>Use <code>express.raw({ type: 'application/json' })</code> for webhook route</td>
+</tr>
+<tr>
+<td>Route not found (404)</td>
+<td>Wrong path</td>
+<td>Use <code>/api/webhooks</code> or preserve existing path</td>
+</tr>
+<tr>
+<td>Not authorized (401)</td>
+<td>Route is protected by middleware</td>
+<td>Make route public in <code>clerkMiddleware()</code></td>
+</tr>
+<tr>
+<td>No data in DB</td>
+<td>Async job pending</td>
+<td>Wait/check logs</td>
+</tr>
+<tr>
+<td>Duplicate entries</td>
+<td>Only handling <code>user.created</code></td>
+<td>Also handle <code>user.updated</code></td>
+</tr>
+<tr>
+<td>Timeouts</td>
+<td>Handler too slow</td>
+<td>Queue async work, return 200 first</td>
+</tr>
+</tbody></table>
+<h2>Testing &amp; Deployment</h2>
+<p><strong>Local</strong>: Use the Clerk CLI's first-party tunnel — no auth or linked project needed:</p>
+<pre><code class="language-sh">clerk webhooks listen --token "$(clerk webhooks token)" --forward-to http://localhost:3000/api/webhooks
+</code></pre>
+<p>Add the printed relay URL (<code>https://webhooks.clerk.com/in/c_.../</code>) as a webhook endpoint in the Dashboard — events don't flow until you do. <code>svix-*</code> headers are preserved, so <code>verifyWebhook()</code> works against that endpoint's signing secret as usual. Flags, offline signature checks (<code>clerk webhooks verify</code>), and agent-mode behavior are in the <code>clerk-cli</code> skill. Without the CLI, tunnel <code>localhost:3000</code> yourself (<code>ngrok</code>, <code>localtunnel</code>, <code>Cloudflare Tunnel</code>) and add the public URL to the Dashboard endpoint.</p>
+<p><strong>Production</strong>: Update webhook endpoint URL to production domain. Copy <code>CLERK_WEBHOOK_SIGNING_SECRET</code> to production env vars.</p>
+<h2>References</h2>
+<table>
+<thead>
+<tr>
+<th>Reference</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>references/frameworks.md</code></td>
+<td>Webhook handler examples for Express, Astro, Fastify, Nuxt, React Router, TanStack Start</td>
+</tr>
+</tbody></table>
+<h2>See Also</h2>
+<ul>
+<li><code>clerk-cli</code> - <code>clerk webhooks listen</code>/<code>verify</code> for local webhook testing</li>
+<li><code>clerk-setup</code> - Initial Clerk install</li>
+<li><code>clerk-orgs</code> - Org membership events</li>
+<li><code>clerk-billing</code> - Subscription, subscription item, and payment attempt events</li>
+<li><code>clerk-backend-api</code> - Sync via direct API calls</li>
+</ul>

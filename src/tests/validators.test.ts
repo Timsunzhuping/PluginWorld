@@ -196,8 +196,9 @@ describe("Agent Skill (SKILL.md) spec validation", () => {
       validateSkillManifest({ name: "a".repeat(70), description: "A skill that does things." }).valid,
     ).toBe(false);
   });
-  it("✗ description too short / null manifest", () => {
-    expect(validateSkillManifest({ name: "tdd", description: "short" }).valid).toBe(false);
+  it("✗ description empty or over spec limit / null manifest", () => {
+    expect(validateSkillManifest({ name: "tdd", description: "" }).valid).toBe(false);
+    expect(validateSkillManifest({ name: "tdd", description: "x".repeat(1025) }).valid).toBe(false);
     expect(validateSkillManifest(null).valid).toBe(false);
   });
 });

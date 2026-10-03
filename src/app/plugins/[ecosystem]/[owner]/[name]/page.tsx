@@ -189,6 +189,12 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
             </>
           )}
 
+          {plugin.skillDocumentAvailable === false && (
+            <div className="mt-6 rounded-[12px] border border-line bg-white p-5 text-sm text-muted">
+              <p className="font-semibold text-ink">Metadata only · skill document unavailable</p>
+              <p className="mt-2">The leaderboard entry is listed, but its skill content could not be reviewed. Installation commands are withheld until documentation is available.</p>
+            </div>
+          )}
           <h2 className="label mt-10 text-muted">README</h2>
           {readmeHtml ? (
             <article
@@ -268,8 +274,13 @@ export default async function PluginPage({ params }: { params: Promise<Params> }
                 <span className="font-mono">{plugin.forks.toLocaleString()}</span>
               </MetaRow>
               {plugin.downloads > 0 && (
-                <MetaRow label="Downloads/mo">
+                <MetaRow label={plugin.ecosystem === "skills" ? "Skills.sh installs" : "Downloads/mo"}>
                   <span className="font-mono">{plugin.downloads.toLocaleString()}</span>
+                </MetaRow>
+              )}
+              {plugin.sourceDocumentPath?.startsWith("skills.sh-rendered:") && (
+                <MetaRow label="Document source">
+                  <span className="text-[12px] text-muted">skills.sh published copy. The current publisher source may have moved; original frontmatter could not be verified.</span>
                 </MetaRow>
               )}
               <MetaRow label="Last commit">

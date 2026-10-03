@@ -1,0 +1,148 @@
+<p><strong>Persona:</strong> You are a Go engineer who treats caching as a system design decision. You choose eviction algorithms based on measured access patterns, size caches from working-set data, and always plan for expiration, loader failures, and monitoring.</p>
+<h1>Using samber/hot for In-Memory Caching in Go</h1>
+<p>Generic, type-safe in-memory caching library for Go 1.22+ with 9 eviction algorithms, TTL, loader chains with singleflight deduplication, sharding, stale-while-revalidate, and Prometheus metrics.</p>
+<p><strong>Official Resources:</strong></p>
+<ul>
+<li><a href="https://pkg.go.dev/github.com/samber/hot" target="_blank" rel="noopener noreferrer">pkg.go.dev/github.com/samber/hot</a></li>
+<li><a href="https://github.com/samber/hot" target="_blank" rel="noopener noreferrer">github.com/samber/hot</a></li>
+</ul>
+<p>This skill is not exhaustive — refer to library documentation and code examples for more information:</p>
+<ul>
+<li>For Go package docs, symbols, versions, importers, and known vulnerabilities, → See <code>samber/cc-skills-golang@golang-pkg-go-dev</code> skill (<code>godig</code>), preferred over Context7 for Go package facts.</li>
+<li>To navigate this library's usage in your own code (definitions, call sites, diagnostics), → See <code>samber/cc-skills-golang@golang-gopls</code> skill (<code>gopls</code>).</li>
+<li>Context7 remains a fallback for docs not indexed on pkg.go.dev.</li>
+</ul>
+<pre><code class="language-bash">go get -u github.com/samber/hot
+</code></pre>
+<h2>Algorithm Selection</h2>
+<p>Pick based on your access pattern — the wrong algorithm wastes memory or tanks hit rate.</p>
+<table>
+<thead>
+<tr>
+<th>Algorithm</th>
+<th>Constant</th>
+<th>Best for</th>
+<th>Avoid when</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>W-TinyLFU</strong></td>
+<td><code>hot.WTinyLFU</code></td>
+<td>General-purpose, mixed workloads (default)</td>
+<td>You need simplicity for debugging</td>
+</tr>
+<tr>
+<td><strong>LRU</strong></td>
+<td><code>hot.LRU</code></td>
+<td>Recency-dominated (sessions, recent queries)</td>
+<td>Frequency matters (scan pollution evicts hot items)</td>
+</tr>
+<tr>
+<td><strong>LFU</strong></td>
+<td><code>hot.LFU</code></td>
+<td>Frequency-dominated (popular products, DNS)</td>
+<td>Access patterns shift (stale popular items never evict)</td>
+</tr>
+<tr>
+<td><strong>TinyLFU</strong></td>
+<td><code>hot.TinyLFU</code></td>
+<td>Read-heavy with frequency bias</td>
+<td>Write-heavy (admission filter overhead)</td>
+</tr>
+<tr>
+<td><strong>S3FIFO</strong></td>
+<td><code>hot.S3FIFO</code></td>
+<td>High throughput, scan-resistant</td>
+<td>Small caches (&lt;1000 items)</td>
+</tr>
+<tr>
+<td><strong>ARC</strong></td>
+<td><code>hot.ARC</code></td>
+<td>Self-tuning, unknown patterns</td>
+<td>Memory-constrained (2x tracking overhead)</td>
+</tr>
+<tr>
+<td><strong>TwoQueue</strong></td>
+<td><code>hot.TwoQueue</code></td>
+<td>Mixed with hot/cold split</td>
+<td>Tuning complexity is unacceptable</td>
+</tr>
+<tr>
+<td><strong>SIEVE</strong></td>
+<td><code>hot.SIEVE</code></td>
+<td>Simple scan-resistant LRU alternative</td>
+<td>Highly skewed access patterns</td>
+</tr>
+<tr>
+<td><strong>FIFO</strong></td>
+<td><code>hot.FIFO</code></td>
+<td>Simple, predictable eviction order</td>
+<td>Hit rate matters (no frequency/recency awareness)</td>
+</tr>
+</tbody></table>
+<p><strong>Decision shortcut:</strong> Start with <code>hot.WTinyLFU</code>. Switch only when profiling shows the miss rate is too high for your SLO.</p>
+<p>For detailed algorithm comparison, benchmarks, and a decision tree, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-hot/references/algorithm-guide.md" target="_blank" rel="noopener noreferrer">Algorithm Guide</a>.</p>
+<h2>Core Usage</h2>
+<h3>Basic Cache with TTL</h3>
+<pre><code class="language-go">import "github.com/samber/hot"
+
+cache := hot.NewHotCache[string, *User](hot.WTinyLFU, 10_000).
+    WithTTL(5 * time.Minute).
+    WithJanitor().
+    Build()
+defer cache.StopJanitor()
+
+cache.Set("user:123", user)
+cache.SetWithTTL("session:abc", session, 30*time.Minute)
+
+value, found, err := cache.Get("user:123")
+</code></pre>
+<h3>Loader Pattern (Read-Through)</h3>
+<p>Loaders fetch missing keys automatically with singleflight deduplication — concurrent <code>Get()</code> calls for the same missing key share one loader invocation:</p>
+<pre><code class="language-go">cache := hot.NewHotCache[int, *User](hot.WTinyLFU, 10_000).
+    WithTTL(5 * time.Minute).
+    WithLoaders(func(ids []int) (map[int]*User, error) {
+        return db.GetUsersByIDs(ctx, ids) // batch query
+    }).
+    WithJanitor().
+    Build()
+defer cache.StopJanitor()
+
+user, found, err := cache.Get(123) // triggers loader on miss
+</code></pre>
+<h2>Capacity Sizing</h2>
+<p>Before setting the cache capacity, estimate how many items fit in the memory budget:</p>
+<ol>
+<li><strong>Estimate single-item size</strong> — estimate size of the struct, add the size of heap-allocated fields (slices, maps, strings). Include the key size. A rough per-entry overhead of ~100 bytes covers internal bookkeeping (pointers, expiry timestamps, algorithm metadata).</li>
+<li><strong>Ask the developer</strong> how much memory is dedicated to this cache in production (e.g., 256 MB, 1 GB). This depends on the service's total memory and what else shares the process.</li>
+<li><strong>Compute capacity</strong> — <code>capacity = memoryBudget / estimatedItemSize</code>. Round down to leave headroom.</li>
+</ol>
+<pre><code>Example: *User struct ~500 bytes + string key ~50 bytes + overhead ~100 bytes = ~650 bytes/entry
+         256 MB budget → 256_000_000 / 650 ≈ 393,000 items
+</code></pre>
+<p>If the item size is unknown, ask the developer to measure it with a unit test that allocates N items and checks <code>runtime.ReadMemStats</code>. Guessing capacity without measuring leads to OOM or wasted memory.</p>
+<h2>Common Mistakes</h2>
+<ol>
+<li><strong>Forgetting <code>WithJanitor()</code></strong> — without it, expired entries stay in memory until the algorithm evicts them. Always chain <code>.WithJanitor()</code> in the builder and <code>defer cache.StopJanitor()</code>.</li>
+<li><strong>Calling <code>SetMissing()</code> without missing cache config</strong> — panics at runtime. Enable <code>WithMissingCache(algorithm, capacity)</code> or <code>WithMissingSharedCache()</code> in the builder first.</li>
+<li><strong><code>WithoutLocking()</code> + <code>WithJanitor()</code></strong> — mutually exclusive, panics. <code>WithoutLocking()</code> is only safe for single-goroutine access without background cleanup.</li>
+<li><strong>Oversized cache</strong> — a cache holding everything is a map with overhead. Size to your working set (typically 10-20% of total data). Monitor hit rate to validate.</li>
+<li><strong>Ignoring loader errors</strong> — <code>Get()</code> returns <code>(zero, false, err)</code> on loader failure. Always check <code>err</code>, not just <code>found</code>.</li>
+</ol>
+<h2>Best Practices</h2>
+<ol>
+<li>Always set TTL — unbounded caches serve stale data indefinitely because there is no signal to refresh</li>
+<li>Use <code>WithJitter(lambda, upperBound)</code> to spread expirations — without jitter, items created together expire together, causing thundering herd on the loader</li>
+<li>Monitor with <code>WithPrometheusMetrics(cacheName)</code> — hit rate below 80% usually means the cache is undersized or the algorithm is wrong for the workload</li>
+<li>Use <code>WithCopyOnRead(fn)</code> / <code>WithCopyOnWrite(fn)</code> for mutable values — without copies, callers mutate cached objects and corrupt shared state</li>
+</ol>
+<p>For advanced patterns (revalidation, sharding, missing cache, monitoring setup), see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-hot/references/production-patterns.md" target="_blank" rel="noopener noreferrer">Production Patterns</a>.</p>
+<p>For the complete API surface, see <a href="https://github.com/samber/cc-skills-golang/blob/HEAD/skills/golang-samber-hot/references/api-reference.md" target="_blank" rel="noopener noreferrer">API Reference</a>.</p>
+<p>If you encounter a bug or unexpected behavior in samber/hot, open an issue at <a href="https://github.com/samber/hot/issues" target="_blank" rel="noopener noreferrer">https://github.com/samber/hot/issues</a>.</p>
+<h2>Cross-References</h2>
+<ul>
+<li>→ See <code>samber/cc-skills-golang@golang-performance</code> skill for general caching strategy and when to use in-memory cache vs Redis vs CDN</li>
+<li>→ See <code>samber/cc-skills-golang@golang-observability</code> skill for Prometheus metrics integration and monitoring</li>
+<li>→ See <code>samber/cc-skills-golang@golang-database</code> skill for database query patterns that pair with cache loaders</li>
+<li>→ See <code>samber/cc-skills@promql-cli</code> skill for querying Prometheus cache metrics via CLI</li>
+</ul>
