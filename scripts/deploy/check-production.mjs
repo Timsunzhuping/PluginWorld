@@ -18,5 +18,7 @@ const query=await (await get('/api/v1/plugins?ecosystem=skills&q=tdd')).json();
 assert.ok(query.items.some(p=>p.slug==='skills/mattpocock/tdd'));
 const detail=await (await get('/api/v1/plugins/skills/mattpocock/tdd?include=readme')).json();
 assert.ok(detail.readme_html?.length>50);assert.ok(detail.install.some(i=>i.command.includes('--skill tdd')));
+const metadataOnly=await (await get('/api/v1/plugins/skills/microsoft/azure-rbac')).json();
+if (metadataOnly.skill_document_available === false) assert.deepEqual(metadataOnly.install,[]);
 for(const path of ['/','/browse?ecosystem=skills','/admin/sync','/plugins/skills/mattpocock/tdd','/sitemap.xml'])await get(path);
 console.log('Production acceptance passed',JSON.stringify(status.deployment));

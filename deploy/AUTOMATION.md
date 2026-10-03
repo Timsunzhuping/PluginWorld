@@ -20,7 +20,7 @@ A dedicated **non-root**, non-sudo `pwdeploy` account owns only `/opt/pluginworl
 restrict,command="/usr/local/bin/pluginworld-deploy-receiver" <dedicated public key>
 ```
 
-The root-owned receiver is installed from `deploy/receive-release.sh` with mode 755. This account cannot run arbitrary SSH commands, forward ports, open a PTY or modify the root-owned receiver. It receives a Git source archive over stdin, rejects unsafe archive paths/links, serializes releases, installs locked dependencies, typechecks, lints, tests and builds as the non-root account. Release directories are keyed by commit under `/opt/pluginworld/releases`. PM2 switches only after building; a failed health check restores the previous application configuration. `/opt/pluginworld/state/deployment.json` is written atomically. Old releases are retained for recovery.
+The root-owned receiver is installed from `deploy/receive-release.sh` with mode 755. This account cannot run arbitrary SSH commands, forward ports, open a PTY or modify the root-owned receiver. GitHub builds the Linux release with Node 22 and two SSG workers, matching production. The receiver receives source plus the verified `.next` build over stdin, rejects unsafe archive paths/links, verifies the exact build commit, serializes releases, installs locked dependencies, typechecks, lints and tests as the non-root account. No production build runs on the live server. Release directories are keyed by commit under `/opt/pluginworld/releases`. PM2 switches only after validating the received build; a failed health check restores the previous application configuration. `/opt/pluginworld/state/deployment.json` is written atomically. Old releases are retained for recovery.
 
 Secrets in ApollaAI/PluginWorld:
 
