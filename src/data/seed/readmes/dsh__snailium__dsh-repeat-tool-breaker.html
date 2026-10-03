@@ -522,6 +522,68 @@ budget it is enforcing.</li>
 <li>Excluded tools (<code>exclude</code>, default <code>todo_write</code>; <code>*</code>-wildcards supported) are
 fully transparent: they neither count nor reset.</li>
 </ul>
+<h2>The fetch tool: <code>web_fetch_file</code></h2>
+<p>The block refuses a shell fetch and points at this tool, so the two ship together: a refusal that
+names a tool the profile does not have is worse than no refusal. The tool fetches a URL and writes
+the body to a <strong>file</strong>, returning the path plus <code>statusCode</code>, <code>bytes</code>, <code>contentType</code>, <code>kind</code> and
+<code>finalUrl</code> — never the body, because a fetched document in the context is the cost this tool
+exists to remove.</p>
+<p><strong>It has two backends, and the difference is a risk, not a detail.</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>fetchWithCurl: true</code> (default)</th>
+<th><code>fetchWithCurl: false</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>retrieval</td>
+<td>a <code>curl</code> subprocess</td>
+<td><code>ctx.web</code>, the platform's web service</td>
+</tr>
+<tr>
+<td>content types</td>
+<td>anything: PDFs, images, archives</td>
+<td><code>text/html</code>, <code>text/*</code>, `application/json</td>
+</tr>
+<tr>
+<td>redirects</td>
+<td>followed, cross-origin included</td>
+<td>same-origin only; a cross-origin hop is refused</td>
+</tr>
+<tr>
+<td>local addresses</td>
+<td>reached, loopback and RFC1918 included</td>
+<td>refused (the SSRF guard owns that)</td>
+</tr>
+<tr>
+<td>cookies</td>
+<td>one jar per session, so a login carries between fetches</td>
+<td>none</td>
+</tr>
+<tr>
+<td>guard</td>
+<td>ours: scheme restricted to http/https, optional private-host refusal, size and time caps</td>
+<td>the platform's SSRF validation, per hop</td>
+</tr>
+</tbody></table>
+<p><strong>curl is the default</strong>, because the platform backend is not merely stricter — it dead-ends. It
+classifies the response and <strong>cancels the body</strong> of anything it does not recognise, so a PDF
+cannot be fetched at all; measured in session <code>b623d414</code>, where the model needed two public PDFs
+and every path failed: this tool returned <code>unsupported content type "application/pdf"</code> twice, the
+shell was refused by this plugin's own block, and a text extractor had nothing to extract. Three
+calls, nothing produced. A steering block that leads to a dead end is worse than no block.</p>
+<p>The switch is still there, and it is a decision about <strong>what the model may reach</strong>: set
+<code>fetchWithCurl: false</code> to put the tool back behind the platform's guard — text only, same-origin
+redirects only, no loopback or RFC1918. What the curl backend still refuses: any scheme other than http or https (it
+will not read <code>file:///etc/passwd</code>), anything the URL looks like as an option (<code>--</code> precedes the
+URL, and nothing is ever interpolated into a shell), and — with <code>allowPrivateHosts: false</code> — any
+host that resolves to loopback, link-local or RFC1918. It is a subprocess with a fixed argv, not a
+shell.</p>
+<p>Both backends keep the property the block depends on: the outcome is a <strong>fact</strong> in the tool's
+structured output. A piped <code>curl -o /dev/null</code> reports nothing; this reports the status, the byte
+count, the content type and where the file went.</p>
 <h2>Configuration</h2>
 <p>Mount via a profile bundle (Option A above — no <code>config:</code> in the bundle layer,
 defaults apply), a <code>--patch</code> overlay, or a profile's <code>cordis.patch.yml</code>. The
@@ -537,7 +599,13 @@ at which point <code>ctx.tools.guard</code> is the genuine method.</p>
         localHosts: deny            # deny | allow — see "Local addresses"
         # Refuse HTTP made from the shell; send the model to web_fetch_file instead.
         blockShellHttp: true        # refuse a shell call that fetches over HTTP; fail-safe (no-op without the tool)
-        blockLocalHttp: false       # local addresses stay in the shell — the fetch tool cannot reach them
+        blockLocalHttp: false       # local addresses stay in the shell; the fetch tool reaches them too
+        # Which backend web_fetch_file retrieves with. On (the default): curl — ANY content type
+        # (so PDFs and images can be downloaded at all), redirects anywhere, a per-session cookie
+        # jar, and whatever the shell can reach, loopback included. Off: the platform web service —
+        # text only, no cross-origin redirects, no loopback or RFC1918. This decides what the MODEL
+        # may reach, so set it to false if the model should not touch your own network.
+        fetchWithCurl: true
         shellHttpBlock:             # the verbs the block REFUSES; `[]` switches the block off entirely
           - curl
           - wget
@@ -545,9 +613,16 @@ at which point <code>ctx.tools.guard</code> is the genuine method.</p>
           # the short HTTPie name is deliberately NOT a default: as a segment's first token it
           # is almost always data (a status write-out format string, a JSON scheme value), and a
           # refusal there has no address to exempt. Add it back here if you want it.
-        # web_fetch_file — registered only when the profile has ctx.web
+        # web_fetch_file — always registered; `blockShellHttp` only fires when it can FETCH,
+        # which means the curl backend is on or the profile actually mounts ctx.web.
         outputDir: fetched          # relative to the workspace root; /tmp does NOT survive between shell calls
-        maxBytes: 8388608           # our own cap; the web provider caps first
+        maxBytes: 8388608           # the cap: --max-filesize for curl, our own clip for the provider
+        # curl backend only, all optional:
+        timeoutMs: 30000            # --max-time, whole transfer
+        maxRedirects: 5             # --max-redirs; cross-origin hops ARE followed
+        allowPrivateHosts: true     # false resolves the host and refuses loopback/RFC1918
+        cookieJar: true             # one jar per SESSION, so a login carries between fetches
+        curlPath: curl              # the binary; a missing one is reported, not ignored
         warnAt: 7                   # occurrence stage 1; 0 / negative / null disables it
         summarizeAt: 11             # occurrence stage 2; 0 / negative / null disables it
         failWarnAt: 3               # failure stage 1; same off-switch as `warnAt`

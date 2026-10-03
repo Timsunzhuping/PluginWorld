@@ -248,9 +248,12 @@
 <ul>
 <li><strong>Fallback Model</strong> — A task can run on the cheap model by default and still finish on the strong one: set <code>fallbackModel</code> (and optionally <code>fallbackProvider</code>) and a failed run — <code>error</code> or <code>timeout</code> — is retried <strong>once</strong> on that model before the ordinary retry backoff applies. History records which model produced the result and whether the fallback was used, usage and cost of both attempts are summed, and the <code>{model}</code> template variable renders the model that finished the run. Only agent-mediated tasks (<code>llm</code>, <code>skill</code>, <code>workflow</code>) can use a fallback.</li>
 <li><strong>Token &amp; Cost Burn Guard</strong> — Prevent runaway spending by configuring per-task limits: <code>costLimitUsd</code> (lifetime spend limit in USD), <code>dailyCostLimitUsd</code> (rolling 24-hour spend limit in USD), and <code>tokenLimit</code> (lifetime token limit). If a task exceeds any threshold, execution is halted, the task is automatically paused with <code>pausedReason</code> (<code>cost_limit_exceeded</code>, <code>daily_cost_limit_exceeded</code>, or <code>token_limit_exceeded</code>), and an alert notification is dispatched across all active channels.</li>
+<li><strong>Event-Driven Token &amp; Cost Extraction</strong> — Reads real token usage from DSH session stream events (<code>assistant/message</code>, <code>assistant/chunk</code> usage, and <code>assistant/attempt</code>), accounting for uncached input, cached reads, output tokens, and paid failed attempts across retries.</li>
+<li><strong>Rolling 24-Hour Cost Ledger</strong> — Daily burn guard (<code>dailyCostLimitUsd</code>) maintains an independent rolling 24h cost ledger per task, preserved in <code>store.json</code>. Expenses remain fully counted across history archive rotations (beyond 100 runs) and survive daemon restarts.</li>
 </ul>
 <h3>8. Session Integration &amp; Permissions</h3>
 <ul>
+<li><strong>Real Assistant Output &amp; Terminal Status Extraction</strong> — Isolates current turn session events, extracts the actual assistant message text (excluding previous turn history in persistent sessions), and validates terminal turn status (<code>turn/end</code> errors or interruptions) to guarantee accurate reporting, chaining, and structured action execution.</li>
 <li><strong>Per-task permission presets</strong> — <code>default</code>, <code>read-only</code>, <code>workspace-write</code>, or <code>full</code> are applied to the task's agent session before the prompt runs.</li>
 <li><strong>Session auto-archive</strong> — isolated cron sessions are archived after each run (best-effort) so they do not clutter the chat list.</li>
 <li><strong>History → session navigation</strong> — every LLM run records its session; open it straight from the run history entry.</li>
@@ -300,12 +303,15 @@ Configured via incoming webhook and restricted to chat/user IDs specified in <co
 <li><strong><code>replace</code></strong>: aborts the active run via <code>AbortController</code> and launches a fresh execution.</li>
 </ul>
 </li>
+<li><strong>Croner Overlap Policy Delegation</strong> — Scheduled cron ticks fire without upstream suppression (<code>Croner protect: false</code>), allowing <code>skip</code> (with history logging), <code>queue</code> (delayed execution), and <code>replace</code> (clean abort) to govern recurring cron ticks and manual triggers consistently.</li>
+<li><strong>Context-Preserving Queues</strong> — Both the global concurrency queue and task overlap queue retain full immutable execution context (<code>chainDepth</code>, <code>prevOutput</code>, <code>prevTaskId</code>, <code>prevStatus</code>, <code>prevCostUsd</code>), preventing data loss under load.</li>
 </ul>
 <p>If the daemon was offline at a scheduled time, the run is recorded as <code>missed</code> on startup, so gaps in the history stay visible.</p>
 <h3>14. Heartbeat Monitoring (#16-style dead man's switch)</h3>
 <ul>
 <li>Set <code>heartbeatUrl</code> and <code>heartbeatIntervalSec</code> in the plugin settings and the scheduler pings that URL on schedule — an external monitor alerts when the pings stop.</li>
 <li>A built-in <code>GET /dsh-cron/heartbeat</code> endpoint reports liveness, active task count and the last run time for your own watchdogs.</li>
+<li><strong>Missed Heartbeat Alerts in <code>onlyOnFailure</code> Mode</strong> — Missed heartbeats (<code>status === 'missed'</code>) are recognized as active failure events across all channel delivery predicates (<code>channels.js</code>, <code>telegram.js</code>, <code>integrations.js</code>), guaranteeing that Telegram, Discord, Webhook, and Kanban integrations alert immediately when an external process fails to report.</li>
 </ul>
 <h3>15. Declarative Jobs From the Profile Config (#50)</h3>
 <p>Long-lived operational jobs can be declared in the profile configuration instead of being recreated by hand in the UI. The config file owns the jobs it declares: at every plugin start they are created or updated, and a job that disappears from the file is removed.</p>
@@ -378,6 +384,9 @@ Configured via incoming webhook and restricted to chat/user IDs specified in <co
 </tr>
 </tbody></table>
 <p>The operations reuse the panel handlers, so the <code>x-dsh-cron-confirm: script</code> gate for code-executing types and the <code>409</code> refusals for config-owned tasks behave exactly as in the UI.</p>
+<ul>
+<li><strong>Bearer-Guarded Remote Access</strong> — Remote clients can create and update tasks, ping heartbeats (<code>/dsh-cron/api/heartbeat/:id</code>), and preview schedules (<code>/dsh-cron/api/schedule/preview</code>) with valid <code>Authorization: Bearer &lt;token&gt;</code> credentials without loopback IP restrictions.</li>
+</ul>
 <pre><code class="language-bash">BASE="http://127.0.0.1:3080"
 TOKEN="&lt;API_TOKEN&gt;"
 
@@ -456,6 +465,8 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "x-dsh-cron-confirm: script
 <li><strong>Priority Queues &amp; Concurrency Pools</strong>: When the concurrent run limit is reached, queued tasks are ordered by <code>priority</code> (1 = highest, 10 = lowest) to ensure critical system alerts execute ahead of bulk background jobs.</li>
 <li><strong>Self-Healing Runbooks &amp; Auto-Diagnosis</strong>: Failed tasks automatically execute an optional compensatory <code>selfHealingCommand</code> (e.g. system service restart or temp cleanup). Model failures can trigger <code>autoDiagnose: true</code> to append an instant root-cause diagnosis.</li>
 <li><strong>Web UI Archive &amp; Pipeline Visualization</strong>: Interactive archive drawer with pagination and full log viewing; visual indicators for <code>➜ onSuccess</code> and <code>↳ onFailure</code> task connections.</li>
+<li><strong>Shell &amp; Disk Pre-flight Gate Hardening</strong>: Supports both <code>command</code> and <code>shell</code> types with fail-closed semantics for invalid syntax, unknown types, or inspection failures. Disk space checks support exact path and threshold syntax (e.g. <code>/:10%</code>, <code>/data:500MB</code>).</li>
+<li><strong>Complete Reliability Field Persistence</strong>: HTTP POST task creation/editing and <code>cron_create_task</code> tool fully preserve and store all 13 reliability and session configuration fields (<code>agentPreset</code>, <code>targetSessionId</code>, <code>targetSessionReset</code>, <code>onSuccess</code>, <code>onFailure</code>, <code>heartbeatIntervalSeconds</code>, <code>gracePeriodSeconds</code>, <code>preflightType</code>, <code>preflightTarget</code>, <code>priority</code>, <code>concurrencyGroup</code>, <code>selfHealingCommand</code>, <code>autoDiagnose</code>, <code>fallbackProvider</code>, <code>fallbackModel</code>, <code>silentRule</code>, <code>inspectOnFailure</code>).</li>
 </ul>
 <hr />
 <h3>24. Automatic Agent Preset Mounting &amp; Tool Availability (#141 / GH-1, Added in v0.2.12)</h3>
@@ -517,6 +528,7 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "x-dsh-cron-confirm: script
 <li><strong>Modular Client Architecture (#150)</strong>: Decomposed monolithic <code>lib/client.js</code> (~3950 lines) into 14 focused, single-responsibility fragments under <code>lib/client-src/</code> (none exceeding 580 lines). Integrated zero-dependency build script <code>scripts/build-client.mjs</code> wired into <code>package.json</code> (<code>build:client</code>, <code>pretest</code>). Development fragments are excluded from npm distribution via <code>"files": ["lib/*.js", ...]</code>.</li>
 <li><strong>DSH Theme Tokens &amp; Visual Standardization (#149)</strong>: Replaced inline styles on task type badges (<code>onSuccess</code>, <code>onFailure</code>, <code>heartbeat</code>, <code>targetSession</code>, <code>preflight</code>) with dedicated <code>.dsh-cron-tag-*</code> CSS classes powered by semantic <code>--dsh-cron-*</code> theme variables. Modal overlay now adapts dynamically using <code>var(--dsw-alias-bg-mask, rgba(0, 0, 0, 0.75))</code>, and keyframe pulse animations use theme variables without hardcoded RGBA.</li>
 <li><strong>Label Governance &amp; Triage Audit (#95)</strong>: Standardized 100% of repository issues and triage on the canonical repo-level label set.</li>
+<li><strong>Style Self-Healing on Dynamic DOM Sweeps (#263 / GH-4)</strong>: Watches <code>&lt;head&gt;</code> and <code>&lt;html&gt;</code> via <code>MutationObserver</code> alongside a 2s backstop interval and <code>visibilitychange</code> listener (<code>startStyleSelfHeal</code>), automatically re-attaching or repairing the <code>&lt;style id="dsh-cron-styles"&gt;</code> tag if swept by host head re-renders, theme switches, or neighbor cleanups.</li>
 </ul>
 <hr />
 <h3>28. In-App One-Click Auto-Updater &amp; Error Resilience (v0.2.16, #147, #155, #156)</h3>

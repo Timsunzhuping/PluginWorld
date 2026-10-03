@@ -16,16 +16,16 @@ these local workflows.</p>
 <li>Creating and modifying Terraform configurations</li>
 </ul>
 <h2>🎉 Current Release</h2>
-<p>tfmcp v0.2.3 is the current release:</p>
-<pre><code class="language-bash">cargo install tfmcp --version 0.2.3
+<p>tfmcp v0.2.4 is the current release:</p>
+<pre><code class="language-bash">cargo install tfmcp --version 0.2.4
 </code></pre>
-<h3>What's new in v0.2.3</h3>
+<h3>What's new in v0.2.4</h3>
 <ul>
-<li>Saved plans shared by analysis, review, PR summaries, and apply</li>
-<li>Local execution preparation with workspace, backend, validation, and state checks</li>
-<li>Correct Terraform JSON parsing and sensitive-value redaction</li>
-<li>Non-interactive execution, timeouts, and structured apply/state verification</li>
-<li>RMCP 3.1.2 and updated Rust tooling with the Rust 1.88 MSRV retained</li>
+<li>Reviewed destroy plans with the same saved-plan and permission checks as apply</li>
+<li>Saved-plan listing and disposal to reclaim the 64-plan capacity</li>
+<li>Retained apply results, failed/unknown outcomes, and recovery guidance</li>
+<li>Sensitive output redaction for both full and named output queries</li>
+<li>RMCP 3.5.0, updated dependencies and images, with the Rust 1.88 MSRV retained</li>
 </ul>
 <h2>Features</h2>
 <table>
@@ -194,23 +194,44 @@ creates a new plan. A review decision is advisory and does not authorize apply.<
 <code>TFMCP_ALLOW_DANGEROUS_OPS=true</code> and <code>TFMCP_ALLOW_AUTO_APPROVE=true</code> must already
 be configured on the server. The saved plan determines the applied changes,
 including when configuration files have subsequently been edited.</li>
-<li>Check <code>success</code>, <code>exit_code</code>, <code>diagnostics</code>, and <code>state_verified</code> in the apply
-result. Retrieve the plan's final status with
+<li>Check <code>success</code>, <code>status</code>, <code>exit_code</code>, <code>diagnostics</code>, <code>state_verified</code>, and
+<code>recovery.next_steps</code> in the apply result. Retrieve the plan's final status and
+retained <code>apply_result</code> with
 <code>get_terraform_plan({"plan_id":"&lt;returned ID&gt;"})</code>. After failure or timeout,
 inspect state and create a new plan; the attempted ID cannot be applied again.</li>
 </ol>
 <p><strong>Migration from v0.2.2:</strong> <code>apply_terraform</code> requires <code>plan_id</code>; calls that only
 provide <code>auto_approve</code> now return an explanatory error. Approval happens in the
 client before the call, because Terraform receives no interactive input.</p>
+<p>For a reviewed teardown, create a plan with <code>get_terraform_plan({"destroy":true})</code>,
+review its <code>plan_id</code>, then call <code>destroy_terraform</code> with that ID and
+<code>auto_approve:true</code>. The server must also have <code>TFMCP_DELETE_ENABLED=true</code>, in
+addition to both apply permissions. Passing a destroy plan to <code>apply_terraform</code>
+enforces the same permissions. <code>destroy</code> cannot be combined with <code>refresh_only</code>
+or <code>replace</code>. <strong>Migration from v0.2.3:</strong> <code>destroy_terraform</code> now requires a saved
+destroy plan; it no longer creates an unreviewed plan or waits for a prompt.</p>
+<p>Use <code>list_terraform_plans</code> to find retained IDs and their targets and statuses.
+Use <code>discard_terraform_plan({"plan_id":"&lt;ID&gt;"})</code> to delete an unneeded plan's
+temporary files and free capacity. Discard does not change infrastructure,
+cancel an operation, or roll back an apply; inspect failed or unknown outcomes
+before removing their records. These tools are available in the default and
+Terraform toolsets.</p>
 <p>Saved plans use private temporary directories and are bound to the project,
 workspace, initialized backend metadata, Terraform version, and provider
 lockfile. Plan IDs remain valid only for the current server process, with a
 maximum of 64 retained plans. Normal server shutdown removes the temporary
-files. <code>outcome_unknown</code> means an interrupted attempt has no confirmed result;
-inspect state before continuing. Status retrieval waits for an ongoing operation
+files. <code>failed</code> means Terraform returned a nonzero exit code and may have applied
+some changes. <code>outcome_unknown</code> means no definitive exit result was obtained,
+including timeout or cancellation. Both prevent reapplying the same plan and
+include recovery guidance: confirm operations have stopped, inspect the recorded
+target and actual resources, resolve the cause, then generate and review a new
+plan. No rollback or automatic retry is performed. <code>apply_result</code> is null when a
+request was cancelled before a result could be retained. State verification checks
+resource addresses, not all attribute values or output values.
+Status retrieval waits for an ongoing operation
 to finish; live progress and restart recovery are not provided in this release.</p>
 <h2>MCP Tools</h2>
-<p>tfmcp provides 82 MCP tools for AI assistants:</p>
+<p>tfmcp provides the following MCP tools for AI assistants:</p>
 <h3>Core Terraform Operations</h3>
 <table>
 <thead>
@@ -228,6 +249,14 @@ to finish; live progress and restart recovery are not provided in this release.<
 <td>Generate a saved plan, or retrieve its redacted result and status by plan ID</td>
 </tr>
 <tr>
+<td><code>list_terraform_plans</code></td>
+<td>List saved plan IDs, targets, statuses, and destroy flags</td>
+</tr>
+<tr>
+<td><code>discard_terraform_plan</code></td>
+<td>Remove an unneeded saved plan and free retention capacity</td>
+</tr>
+<tr>
 <td><code>analyze_plan</code></td>
 <td><strong>NEW</strong> Analyze plan with risk scoring and recommendations</td>
 </tr>
@@ -237,7 +266,7 @@ to finish; live progress and restart recovery are not provided in this release.<
 </tr>
 <tr>
 <td><code>destroy_terraform</code></td>
-<td>Destroy Terraform-managed infrastructure</td>
+<td>Apply a reviewed saved destroy plan with explicit deletion permissions</td>
 </tr>
 <tr>
 <td><code>validate_terraform</code></td>
@@ -331,7 +360,7 @@ to finish; live progress and restart recovery are not provided in this release.<
 </tr>
 <tr>
 <td><code>terraform_output</code></td>
-<td><strong>NEW</strong> Get output values</td>
+<td>Get output values with sensitive values redacted, including named queries</td>
 </tr>
 <tr>
 <td><code>terraform_providers</code></td>
@@ -650,6 +679,7 @@ to finish; live progress and restart recovery are not provided in this release.<
 <ul>
 <li><code>ENABLE_TF_OPERATIONS</code>: Set to <code>true</code> to enable gated HCP Terraform / Terraform Enterprise write tools (default: <code>false</code>)</li>
 <li><code>TFMCP_ALLOW_DANGEROUS_OPS</code>: Set to <code>true</code> to enable apply/destroy operations (default: <code>false</code>)</li>
+<li><code>TFMCP_DELETE_ENABLED</code>: Set to <code>true</code> to apply saved destroy plans; both apply permissions are also required (default: <code>false</code>)</li>
 <li><code>TFMCP_ALLOW_AUTO_APPROVE</code>: Set to <code>true</code> to enable auto-approve for dangerous operations (default: <code>false</code>)</li>
 <li><code>TFMCP_MAX_RESOURCES</code>: Set maximum number of resources that can be managed (default: 50)</li>
 <li><code>TFMCP_AUDIT_ENABLED</code>: Set to <code>false</code> to disable audit logging (default: <code>true</code>)</li>
@@ -752,16 +782,24 @@ to run the same fast feedback while developing.</p>
 <p>Releases are done manually after the local release gate passes:</p>
 <ol>
 <li>Confirm <code>Cargo.toml</code>, <code>Cargo.lock</code>, <code>server.json</code>, <code>Dockerfile</code>, README, and <code>CHANGELOG.md</code> use the target version.</li>
-<li>Run the local release gate: <code>./Release.sh v0.2.3</code>.</li>
+<li>Run the local release gate: <code>./Release.sh v0.2.4</code>.</li>
 <li>Review <code>CHANGELOG.md</code> and the generated package.</li>
 <li>Commit and push <code>main</code>, then confirm CI passed for that exact commit.</li>
-<li>From the clean commit, publish with <code>./Release.sh v0.2.3 --publish</code>.</li>
+<li>From the clean commit, publish with <code>./Release.sh v0.2.4 --publish</code>.</li>
 </ol>
 <h2>Roadmap</h2>
 <p>Here are some planned improvements and future features for tfmcp:</p>
 <p>For the consolidated v0.2.1 scope and future work, see
 <a href="https://github.com/nwiizo/tfmcp/blob/HEAD/docs/releases/v0.2-roadmap.md" target="_blank" rel="noopener noreferrer">docs/releases/v0.2-roadmap.md</a>. Release changes
 are recorded in <a href="https://github.com/nwiizo/tfmcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a>.</p>
+<p>The <a href="https://github.com/nwiizo/tfmcp/blob/HEAD/.claude/docs/local-development-requirements.md" target="_blank" rel="noopener noreferrer">local development requirements</a>
+compare the current implementation with Terraform documentation and the local
+Terraform in Depth / Terraform at Scale source material, with prioritized jobs
+and acceptance criteria for future work.</p>
+<p>For a hands-on check with a real local Web app, see the
+<a href="https://github.com/nwiizo/tfmcp/blob/HEAD/example/local-app/README.md" target="_blank" rel="noopener noreferrer">local application example</a>. It verifies saved-plan
+deployment, HTTP responses, actual Terraform arguments, audit records, and
+teardown, and retains the report and logs.</p>
 <h3>Completed</h3>
 <ul>
 <li><p> <strong>Basic Terraform Integration</strong>

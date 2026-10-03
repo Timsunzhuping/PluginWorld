@@ -109,13 +109,19 @@
 <li>缺它时请求面不同：当前后端宽容，但这正是收紧后会变成 400/403 的那一行；</li>
 </ul>
 </li>
+<li><strong>读取参数默认值与官方 Codex 一致</strong>（依据订阅目录 <code>GET /backend-api/codex/models</code>，与官方随包的 <code>codex-rs/models-manager/models.json</code> 同源）：<ul>
+<li><strong>推理摘要默认不发</strong>：目录里每个模型都声明 <code>default_reasoning_summary: none</code>，官方以此为准。此前本插件在未配置时发 <code>summary: auto</code>，而摘要属于<strong>计费生成</strong>，等于每一轮都多花一块官方从不花的额度；现在默认省略该字段，用户显式选择 <code>auto</code> / <code>concise</code> / <code>detailed</code> 时照旧发送，选「无」也改为<strong>省略字段</strong>而不是发 <code>summary: none</code>（后者是让后端先生成再丢弃）。</li>
+<li><strong>输出详细程度默认发目录值 <code>low</code></strong>：官方客户端每轮都发送模型目录里的 <code>default_verbosity</code>（当前全部为 <code>low</code>）。此前本插件在未配置时<strong>整个不发</strong> <code>text</code> 字段，于是服务端套用隐含的 <code>medium</code>——一个从未打开过该设置的用户，会拿到比官方客户端更啰嗦、也更贵的回答。现在未配置时按目录发 <code>low</code>，显式选择仍以用户为准。</li>
+<li>目录里<strong>没有记录</strong>的模型不猜：仅对该表声明了 <code>supportsOutputVerbosity</code> 的模型发送 <code>text</code>，避免把一个模型可能拒收的字段强加给它；</li>
+</ul>
+</li>
 <li><strong>多轮续传</strong>，避免每轮重发整个历史：<ul>
 <li>每个会话发送稳定的 <code>prompt_cache_key</code>，让后端复用提示前缀；</li>
 <li>回传后端在响应头给出的 <code>x-codex-turn-state</code>，让它续接该轮；</li>
 <li>后端不再下发该头时立即停止回送——不重放过期值；</li>
 </ul>
 </li>
-<li><strong>始终发送 <code>max_output_tokens</code></strong>，按 <code>min(调用方请求, 模型上限)</code> 封顶（详见「模型目录」）；</li>
+<li><strong>对话报文绝不发送 <code>max_output_tokens</code></strong>：订阅版 Responses 端点在部分账号/模型上直接以 <code>400 Unsupported parameter: max_output_tokens</code> 拒收该字段（<a href="https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29" target="_blank" rel="noopener noreferrer">#29</a>，实测 <code>gpt-6-sol</code> / <code>gpt-6.1-sol</code>），官方 CLI 的请求结构里也没有这个字段；输出长度由服务端默认值决定，撞上限仍以 <code>max-tokens</code> 结束原因上报（详见「模型目录」）；</li>
 <li>Antigravity（Gemini / Claude）线路同样接受图片输入：DSH 以 <code>{ type: 'image', attachment }</code> 下发的粘贴图片会经附件服务读出字节并按 Gemini <code>inlineData</code> 发出，读不出的图片降级为一条可见的说明文本而不是被静默丢弃。单次请求的图片 base64 负载超过 12 MiB 时，最旧的图片按上游同款占位文案替换为文本，避免整条请求被体积上限拒绝；</li>
 <li>原样转发 DSH 暴露的工具 schema；命令工具兼容 <code>pwsh</code> / <code>powershell</code>、<code>bash</code>、<code>sh</code> 与 <code>shell</code>，并按 PowerShell、Bash 或 POSIX sh 注入对应说明；</li>
 <li>429/5xx 由 DSH retry policy 接管；401 只强制刷新并重试一次，支持 <code>AbortSignal</code>；</li>
@@ -355,7 +361,7 @@
 </ul>
 <h3>设置页</h3>
 <ul>
-<li>展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；</li>
+<li>展示账号（脱敏 email、套餐、账号 ID 后四位）、连接状态、额度与订阅增强功能开关；「输出详细程度」「推理摘要」两项的默认值即官方 Codex 客户端的取值；</li>
 <li><strong>偏好落盘位置随 harness 生成</strong>：<ul>
 <li>有 <code>settings.register</code> 的一代（≤0.1.6）仍写进 harness 的设置文档；</li>
 <li>0.1.7 起该 API 被 <code>SettingsForms</code> 取代，偏好改由插件自己持久化到 <code>&lt;dshHome&gt;/storages/dsh-chatgpt-subscription-preferences.json</code>（0600、原子写；读取失败或校验不过就回落默认值）；</li>
@@ -365,7 +371,7 @@
 <li>子代理的模型与思考深度沿用 DSH 自身设置：<strong>设置 → Subagent</strong> 卡片授权 Agent 可以为子代理挑选的模型（来自 DSH 已接入的全部 Provider，包含本插件的 Codex / Antigravity），新 Agent 的默认路由由 DSH 的 <code>agent-default-model</code> 设置提供；</li>
 <li>最大嵌套深度不在本插件设置内，由 DSH 侧决定：0.1.5 及以前是 preset 中 <code>tool-subagent</code> 行的 <code>maxDepth</code>（默认 3），0.1.6 起改由 <code>subagent</code> 服务的设置项提供（默认 1）；<code>provider-managed</code> 表示把预算交给进程外提供方；</li>
 <li>GPT-6 系列（6 Astra / 6 Sol / 6 Luna）默认使用 384K 有效上下文，可配置最高 872K；5.6 Sol / Terra / Luna 保持 272K，最高 1M，用于 DSH 压缩与溢出判断；其他模型保持目录声明值；</li>
-<li>单次输出上限按模型区分：GPT-6 系列为 128K（官方对 6 Astra / 6 Sol / 6 Luna 均标 128K），更早的模型保持 32768。调用方未显式指定时按模型上限发送；显式指定时按 <code>min(请求值, 模型上限)</code> 封顶——超出模型能力的请求会被上游直接拒绝，因此必须向下封而不是原样透传。<strong><code>max_output_tokens</code> 始终出现在请求中</strong>：不发送时由上游套用自己的默认值，本插件既无法预测也无法上报，某一轮撞上上限会看起来像一次普通的短回答。</li>
+<li>单次输出上限按模型区分：GPT-6 系列为 128K（官方对 6 Astra / 6 Sol / 6 Luna 均标 128K），更早的模型保持 32768。<strong>这个数字只在本插件进程内使用，不会写进请求</strong>：订阅版 Responses 端点会以 <code>400 Unsupported parameter: max_output_tokens</code> 拒收该参数（<a href="https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29" target="_blank" rel="noopener noreferrer">#29</a>），官方 Codex CLI 的 <code>ResponsesApiRequest</code> 里同样没有这个字段。它的实际用途是作为 DSH 侧的输出预留量（<code>defaultMaxTokens</code>），供压缩判定把完成部分计入上下文窗口；请求本身交给服务端决定长度。撞上服务端上限时该轮仍以 <code>max-tokens</code> 结束原因呈现（后端以 <code>response.incomplete</code> 收尾）。</li>
 <li>可访问的进度条、窄窗口/200% 缩放布局、深浅主题与 reduced-motion。</li>
 </ul>
 <h2>模型目录</h2>
@@ -1223,7 +1229,7 @@ npm pack --dry-run
 </tr>
 <tr>
 <td>回答在中途被截断</td>
-<td>可能是撞到输出上限。插件始终发送 <code>max_output_tokens</code>（按模型上限或调用方请求的较小值），被截断会以 <code>max-tokens</code> 结束原因呈现；可用<strong>增强功能</strong>里的上下文覆盖或换模型调整</td>
+<td>可能是撞到服务端的输出上限。对话报文不发送 <code>max_output_tokens</code>（该参数会被上游 400 拒收，见「模型目录」），长度由服务端决定；被截断会以 <code>max-tokens</code> 结束原因呈现，可用<strong>增强功能</strong>里的上下文覆盖或换模型调整</td>
 </tr>
 <tr>
 <td>断网后首次打开设置页很慢</td>

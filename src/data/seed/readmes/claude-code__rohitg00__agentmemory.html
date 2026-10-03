@@ -1153,6 +1153,7 @@ SessionStart hook fires
 </tbody></table>
 <p>Fused with Reciprocal Rank Fusion (RRF, k=60) and session-diversified (max 3 results per session).</p>
 <p>When a vector index is populated, <code>mem::search</code> (behind <code>memory_recall</code>) uses the hybrid BM25 + vector ranker. Without embeddings it uses BM25. <code>smart-search</code> can additionally fuse structural graph matches when graph data exists, including in keyless mode. Lesson recall runs on a dedicated in-memory BM25 index instead of scanning the whole corpus per query. Superseded memory versions are excluded from every recall path; the version chain keeps their history.</p>
+<p>Vectors survive a crash or force-kill. The vector index is saved in buckets at most every <code>AGENTMEMORY_INDEX_SAVE_INTERVAL_MS</code> (10 minutes). Every vector added or removed in between is also written right away to a small pending log in the state store, and the next start replays it without calling the embedding provider. Each successful save empties the log. Documents that still have no vector after the replay are re-embedded in the background in batches of <code>AGENTMEMORY_VECTOR_BACKFILL_MAX</code> (500) until none are left, and a backfill that is stopped continues at the next start. <code>/agentmemory/status</code> and the viewer show the pending log size and the backfill state. Keyless installs write nothing.</p>
 <p>BM25 tokenizes Greek, Cyrillic, Hebrew, Arabic, and accented Latin out of the box. For Chinese / Japanese / Korean memories, install the optional segmenters (<code>npm install @node-rs/jieba tiny-segmenter</code>) to split CJK runs into word-level tokens; without them, agentmemory soft-falls to whole-run tokenization and prints a one-time hint on stderr.</p>
 <h3>Embedding providers</h3>
 <p>Keyless installs disable vector embeddings: <code>mem::search</code> uses BM25, while <code>smart-search</code> can also use existing structural graph data. To opt into free on-device semantic embeddings, add this to <code>~/.agentmemory/.env</code> and restart agentmemory:</p>
@@ -2127,7 +2128,7 @@ AGENTMEMORY_AUTO_COMPRESS=true
 # AGENTMEMORY_TOOLS=core
 </code></pre>
 <hr />
-<h2><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"></source><img src="https://raw.githubusercontent.com/rohitg00/agentmemory/HEAD/assets/tags/section-api.svg" alt="API" height="32" /></picture></h2><p>135 endpoints on port <code>3111</code>. The REST API binds to <code>127.0.0.1</code> by default. Protected endpoints require <code>Authorization: Bearer &lt;secret&gt;</code>, and mesh sync endpoints require an explicitly set <code>AGENTMEMORY_SECRET</code> on both peers.</p>
+<h2><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"></source><img src="https://raw.githubusercontent.com/rohitg00/agentmemory/HEAD/assets/tags/section-api.svg" alt="API" height="32" /></picture></h2><p>138 endpoints on port <code>3111</code>. The REST API binds to <code>127.0.0.1</code> by default. Protected endpoints require <code>Authorization: Bearer &lt;secret&gt;</code>, and mesh sync endpoints require an explicitly set <code>AGENTMEMORY_SECRET</code> on both peers.</p>
 <p><strong>Authentication is on by default.</strong> When <code>AGENTMEMORY_SECRET</code> is not set (in the shell or in <code>~/.agentmemory/.env</code>), the server generates a random secret on first start and stores it in <code>~/.agentmemory/secret</code> with mode <code>0600</code>. Every bundled client reads it from there when it talks to a local server: the CLI, the viewer, the hooks under <code>plugin/scripts</code>, the MCP server and the <code>@agentmemory/mcp</code> shim, the configs written by <code>agentmemory connect</code>, and the bundled OpenCode, Pi, OpenClaw, Hermes and filesystem-watcher integrations. The stored secret is only sent to loopback URLs (<code>localhost</code>, <code>127.0.0.0/8</code>, <code>::1</code>). An explicit <code>AGENTMEMORY_SECRET</code> always wins, and remote clients still need it set. Docker and the <code>deploy/</code> entrypoints already generate and export their own secret. To call the API by hand:</p>
 <pre><code class="language-bash">curl -H "Authorization: Bearer $(cat ~/.agentmemory/secret)" http://localhost:3111/agentmemory/health
 </code></pre>
@@ -2161,7 +2162,22 @@ AGENTMEMORY_AUTO_COMPRESS=true
 <tr>
 <td><code>POST</code></td>
 <td><code>/agentmemory/observe</code></td>
-<td>Capture observation</td>
+<td>Capture observation (see capture delivery below)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/agentmemory/capture</code></td>
+<td>Capture inbox, dead letters and offline spool</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/agentmemory/capture/retry</code></td>
+<td>Retry dead-letter captures</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/agentmemory/capture/drain</code></td>
+<td>Send the local offline spool now</td>
 </tr>
 <tr>
 <td><code>POST</code></td>
@@ -2225,7 +2241,44 @@ AGENTMEMORY_AUTO_COMPRESS=true
 </tr>
 </tbody></table>
 <p>Full endpoint list: <a href="https://github.com/rohitg00/agentmemory/blob/HEAD/src/triggers/api.ts" target="_blank" rel="noopener noreferrer"><code>src/triggers/api.ts</code></a></p>
-</details><p><strong>Compacting graph provenance.</strong> Each knowledge graph node and edge keeps the ids of the newest 32 observations it came from. Stores written before that cap can hold thousands of ids per hot node, which makes graph search and the viewer slow or drops the worker. agentmemory fixes this by itself: on the first start after upgrading it trims every node, edge, superseded edge (the temporal graph history) and the cached snapshot to the cap in the background, in small slices with a pause between them, so search, capture and the viewer keep working. It saves its progress, resumes after a restart and never runs again once it has finished. <code>/agentmemory/status</code> and the viewer Health page show it as pending, running (with the current scope and position), done or failed. Set <code>AGENTMEMORY_GRAPH_COMPACT_ON_BOOT=false</code> to turn it off.</p>
+</details><p><strong>Capture delivery.</strong> Hooks send each observation once to <code>POST /agentmemory/observe</code> with an <code>eventId</code>. It is the host's own id for the call when the payload has one (for example Claude Code's <code>tool_use_id</code>), otherwise a hash of the session, hook type, tool name, input, output and host timestamp. The server writes the event to a capture inbox in the state store, stores the observation, then removes the inbox entry. The status code says what happened:</p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th><code>status</code> field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>201</code></td>
+<td><code>accepted</code></td>
+<td>Stored. <code>observationId</code> is the new observation.</td>
+</tr>
+<tr>
+<td><code>202</code></td>
+<td><code>accepted</code> (<code>state: "retrying"</code>)</td>
+<td>Accepted, but storing failed. The server retries it, also after a restart.</td>
+</tr>
+<tr>
+<td><code>200</code></td>
+<td><code>duplicate</code></td>
+<td>This <code>eventId</code> was already accepted. <code>observationId</code> is the existing observation; nothing new is stored.</td>
+</tr>
+<tr>
+<td><code>400</code> / <code>422</code></td>
+<td><code>rejected</code></td>
+<td>Invalid payload, or storing failed for good (the event is kept as a dead letter).</td>
+</tr>
+<tr>
+<td><code>503</code></td>
+<td><code>rejected</code> (<code>retryable: true</code>)</td>
+<td>The inbox is full (<code>AGENTMEMORY_CAPTURE_INBOX_MAX</code>). Hooks spool the event and send it later.</td>
+</tr>
+</tbody></table>
+<p>Failed events are retried every <code>AGENTMEMORY_CAPTURE_RETRY_INTERVAL_MS</code> (10 s) with doubling backoff, up to <code>AGENTMEMORY_CAPTURE_MAX_ATTEMPTS</code> (5). Events that still fail stay in the inbox as dead letters, are listed on <code>/agentmemory/status</code> and the viewer Health page, and can be retried with <code>POST /agentmemory/capture/retry</code> (<code>{"eventId": "..."}</code> or <code>{"all": true}</code>). Accepted event ids are remembered for <code>AGENTMEMORY_CAPTURE_DEDUP_HOURS</code> (168 hours, at most <code>AGENTMEMORY_CAPTURE_EVENTS_MAX</code> ids), so a hook replayed after a timeout or a restart is stored once, while two separate tool calls with their own host ids are stored twice even when their content is identical. When an observation is deleted (forget, session delete, eviction, auto-forget or an import that replaces the store), its event is marked as deleted before the observation is removed, so a replay of that event inside the same window is answered as a duplicate and stores nothing. The state store writes to disk every 2 seconds, so an answered event can still be only in memory for a moment. To cover that, every <code>2xx</code> answer also carries the server's <code>bootId</code> (new at every start), <code>acceptedAt</code> and <code>durableAfterMs</code> (the save interval plus 1.5 s on the file store, 1.5 s on redis, where persistence is the operator's setting). Hooks keep the event in the local spool until that window has passed and delete it on a later call without another request. If the <code>bootId</code> has changed by then, the server restarted, so the hook sends the event again with the same <code>eventId</code>; an event that did reach the disk is not stored twice. The server also sends such events itself at start and every retry interval, so a restart loses nothing even when no hook runs afterwards. Older hooks ignore the extra fields, and new hooks against an older server discard the event on <code>2xx</code> as before.</p>
+<p>When the server is down, does not answer in time or returns a 5xx, the hook appends the observation to a local spool file, <code>&lt;data dir&gt;/capture-spool/&lt;host&gt;-&lt;port&gt;.jsonl</code> (override the folder with <code>AGENTMEMORY_CAPTURE_SPOOL_DIR</code>). The file is private to your user (mode 600), secrets are redacted the same way the server redacts them, it holds at most <code>AGENTMEMORY_CAPTURE_SPOOL_MAX_BYTES</code> (5 MiB) and drops entries older than <code>AGENTMEMORY_CAPTURE_SPOOL_MAX_AGE_HOURS</code> (168). When it is full, new entries are dropped and counted, and <code>/agentmemory/status</code> reports it. The hook still exits 0 within its time limit and adds no request when the server is healthy. The spool is sent at the next start and by the first hook that reaches the server again, in a background process so the agent does not wait. Event ids make this safe: an observation that did arrive before a timeout is not stored twice. <code>npx @agentmemory/agentmemory capture</code> shows the spool and the server inbox, <code>--drain</code> sends the spool now, and <code>GET /agentmemory/capture</code> returns the same as JSON. Set <code>AGENTMEMORY_CAPTURE_SPOOL=false</code> to turn the spool off.</p>
+<p><strong>Compacting graph provenance.</strong> Each knowledge graph node and edge keeps the ids of the newest 32 observations it came from. Stores written before that cap can hold thousands of ids per hot node, which makes graph search and the viewer slow or drops the worker. agentmemory fixes this by itself: on the first start after upgrading it trims every node, edge, superseded edge (the temporal graph history) and the cached snapshot to the cap in the background, in small slices with a pause between them, so search, capture and the viewer keep working. It saves its progress, resumes after a restart and never runs again once it has finished. <code>/agentmemory/status</code> and the viewer Health page show it as pending, running (with the current scope and position), done or failed. Set <code>AGENTMEMORY_GRAPH_COMPACT_ON_BOOT=false</code> to turn it off.</p>
 <p>To run it by hand, call <code>POST /agentmemory/graph/compact</code>. It walks the name and edge-key indexes instead of listing every node and edge, and is safe to re-run. When it trims ids it writes a <code>graph_compact</code> audit entry.</p>
 <pre><code class="language-bash">curl -X POST http://localhost:3111/agentmemory/graph/compact -H "Content-Type: application/json" -d '{}'
 </code></pre>
