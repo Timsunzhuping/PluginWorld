@@ -23,13 +23,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build and validate away from the production server
+        run: npm ci && npm run typecheck && npm run lint && npm test && npm run build
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
       - name: Configure dedicated deployment identity
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          test -n "$DEPLOY_SSH_KEY" && test -n "$DEPLOY_KNOWN_HOSTS" && test -n "$DEPLOY_HOST"
+          if [ -z "$DEPLOY_SSH_KEY" ] || [ -z "$DEPLOY_KNOWN_HOSTS" ] || [ -z "$DEPLOY_HOST" ]; then
+            echo 'Deployment identity is not configured: SSH key, host and verified known_hosts are required.' >&2
+            exit 1
+          fi
           install -d -m 700 ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/pluginworld_deploy
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
@@ -40,7 +51,12 @@ jobs:
         run: |
           set -euo pipefail
           RELEASE_SHA=$(git rev-parse HEAD)
-          git archive --format=tar.gz HEAD | \
+          mkdir release
+          git archive HEAD | tar -x -C release
+          cp -a .next release/.next
+          rm -rf release/.next/cache
+          printf '%s\n' "$RELEASE_SHA" > release/.build-commit
+          tar -czf - -C release . | \
             ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i ~/.ssh/pluginworld_deploy \
             "$DEPLOY_HOST" "deploy $RELEASE_SHA"
       - name: Public production acceptance

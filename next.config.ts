@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  experimental: { cpus: 2 },
   // Snapshot mode: README HTML and seed data ship with the serverless bundle
   outputFileTracingIncludes: {
     "/plugins/**": ["./src/data/seed/**"],

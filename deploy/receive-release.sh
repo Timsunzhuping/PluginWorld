@@ -44,7 +44,7 @@ import tarfile,sys,pathlib,os
 archive,dest=sys.argv[1:]
 with tarfile.open(archive,'r:gz') as t:
  members=t.getmembers()
- if len(members)>20000 or sum(m.size for m in members)>768*1024*1024: raise ValueError('archive exceeds release size limit')
+ if len(members)>50000 or sum(m.size for m in members)>1536*1024*1024: raise ValueError('archive exceeds release size limit')
  for m in members:
   p=pathlib.PurePosixPath(m.name)
   if p.is_absolute() or '..' in p.parts or not (m.isfile() or m.isdir()): raise ValueError('unsafe archive member')
@@ -58,7 +58,8 @@ npm ci --no-audit --no-fund
 npm run typecheck
 npm run lint
 npm test
-npm run build
+test -f .next/BUILD_ID
+test "$(cat .build-commit)" = "$sha"
 # Preserve the exact current process configuration for rollback (single app only).
 pm2 jlist | node -e 'let t="";process.stdin.on("data",s=>t+=s);process.stdin.on("end",()=>{const p=JSON.parse(t).find(p=>p.name==="pluginworld");if(!p)process.exit(1);const e=p.pm2_env;console.log(JSON.stringify({apps:[{name:"pluginworld",script:e.pm_exec_path,args:e.args,cwd:e.pm_cwd,interpreter:e.exec_interpreter,env:{...(e.env||{})}}]}))})' > "$old_config"
 python3 - "$ROOT/state/next-pm2.json" "$release" "$ROOT/state/deployment.json" "$sha" <<'PY'
