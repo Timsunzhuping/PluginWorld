@@ -30,6 +30,7 @@ Free, with no usage cap.</em></p>
 <li><strong>无浏览器界面也能跑</strong>——插件只把 <code>llm</code> 当作硬依赖，没有 web server 的 composition（<code>dsh-tui</code> 这类）里照样启动、照样出模型；看板半身挂在一条自己的 fiber 上，等 <code>webServer</code> 出现再挂载，所以既不会把模型车道拖下水，也不会因为插件先于 web 服务加载就永远丢掉设置页。</li>
 <li><strong>用量看板，全部留在本机</strong>——Token 热力图、总量曲线（可看总计或单个模型）、输出速度与首字延迟逐次采样。不上传任何东西。</li>
 <li><strong>OpenAI 兼容转发端口</strong>——本机其它工具用一个 base URL + Key 就能调用这些模型。</li>
+<li><strong>EAC 渠道（桌面端专属）</strong>——在 DeepSeek Harness 桌面端与 DSHEAC AIO 桌面端里自动解锁一条协付通道，模型以 <code>EAC</code> 前缀显示（如 <code>EAC DeepSeek V4.1 Flash</code>）；凭据加密密封、宿主指纹闸门把守，命令行与其余宿主上整条通道不存在。见 <a href="#eac-%E6%B8%A0%E9%81%93%E6%A1%8C%E9%9D%A2%E7%AB%AF%E4%B8%93%E5%B1%9E" target="_blank" rel="noopener noreferrer">EAC 渠道</a>。</li>
 <li><strong>接口有鉴权围栏</strong>——插件的 HTTP 路由优先级高于内核 <code>/api</code>，因此自带与内核一致的信任检查（优先复用 composition 的 connection 服务，缺失时退回结构化围栏）。</li>
 </ul>
 <h2>你会看到什么</h2>
@@ -128,6 +129,17 @@ del "%DSH_HOME%\profiles\web\pnpm-lock.yaml"
 POST /v1/chat/completions     流式与非流式
 POST /v1/responses
 </code></pre>
+<p>端口被别的程序占着时，插件不会哑掉：先在同一端口重试几轮（刚关闭的监听、刚删掉的
+portproxy 规则通常会在几百毫秒内放开），仍然占着就顺延到下一个可用端口，并在设置页写明
+"请求的 18899 不可用，实际监听 18900"，落盘的也是这个实际端口。Windows 上最常见的占用
+来源是一条 <code>netsh interface portproxy</code> 规则（由 IP Helper 服务承载）：它对 <code>0.0.0.0</code> 的
+监听会让回环绑定直接报 <code>EACCES</code>（而不是 <code>EADDRINUSE</code>）。<code>netsh interface portproxy show all</code> 能列出规则，<code>netsh interface portproxy reset</code> 能清掉。</p>
+<p>转发端点是<strong>全流式</strong>的：除了 <code>data:</code> 帧，思考期的静默还会被周期性写出的 SSE 注释帧
+（<code>:</code> 开头）填上，客户端的 idle 超时因此不会把"上游在想"读成"连接已死"。思考内容按
+<code>reasoning</code>、<code>reasoning_content</code>、<code>reasoning_text</code> 三个字段名识别——同一个思考若被上游同时
+写在两个字段里只计一次——<code>reasoning_details</code> 数组同样识别。上游本身不流式思考的模型，这里
+也不会有思考帧，见<a href="#%E5%B7%B2%E7%9F%A5%E8%BE%B9%E7%95%8C" target="_blank" rel="noopener noreferrer">已知边界</a>。</p>
+<p><strong>给同一网络的其它设备用</strong>：同一个面板下方还有"局域网访问"。它默认关闭；打开后中继绑一个可路由地址（默认 <code>0.0.0.0</code>），并且要求<strong>一把单独的局域网 Key</strong>——与上面那把小 Key 互不通用，所以哪一边泄露都只需要轮换那一边，本机已接好的工具不受影响。中继把请求原样转给本机监听，模型清单、流式、错误语义与本机完全一致。端口填 <code>0</code> 表示自动分配（本机 18899 常常已被占用或已被端口代理占着），应用后面板会显示实际端口与局域网地址。开启期间，能连到这台机器的任何人都可以用这把 Key 花掉本机的免费额度，所以只在信任的网络里开，必要时用防火墙限制来源网段。</p>
 <p><strong>重新核对地区</strong>：点"重新探测可用性"，会按当前出口重跑探测。开/关 VPN 后再点一次，
 地区受限模型会在两个分组之间自动迁移。</p>
 <p><strong>接收公告</strong>：一切自动。仓库主人推送新公告后，运行中的插件在一个轮询周期内（默认
@@ -211,7 +223,9 @@ reasoning token 从分子里剔掉，<code>decodeWindow()</code> 拒掉短到没
 <h3>长思考截断后的自动恢复（issue #12）</h3>
 <p>所有模型默认启用一次有界恢复，Chat Completions、Messages、Responses 三种上游协议
 共用这项行为。触发条件是：第一段只有非空思考、没有正文或工具调用，且上游在没有正常
-结束帧时直接关闭流；用户取消、正常结束、达到输出上限和明确的上游错误不会触发恢复。</p>
+结束帧时直接关闭流；或上游发了正常 <code>stop</code> 收尾、却同样只有思考没有正文——宿主会把
+这种「空停」回合判成空响应，恢复会接着要一次正文。用户取消、已经输出正文或工具调用
+的正常结束、达到输出上限和明确的上游错误不会触发恢复。</p>
 <p>插件把已收到的思考作为检查点文本，与原始输入一起发起<strong>一个新请求</strong>，要求直接整理回答。
 这不是上游原生 resume，也不会重新播放已经显示的思考。恢复段关闭工具调用；已经输出
 正文或开始调用工具的截断回合不会恢复，避免重复内容或重复执行。</p>
@@ -556,12 +570,14 @@ Tauri 通知通道存在，纯浏览器路径可用，被拒时设置页如实�
 <li><strong>"不限量"指的是没有额度这套东西</strong>：不充值、不按 token 计费、没有套餐和用量面板。但这条车道按 session 记速率，短时间内打满会回 <code>429</code>。插件把该模型标成"已达限额"而不是隐藏，下一轮探测自动恢复。</li>
 <li><strong>个别模型上游本身很慢</strong>。<code>nemotron-3.5-lightning-free</code> 有一次实测首字超过 30 秒。这是上游延迟，看板会如实显示。</li>
 <li><strong>输出速度有时会显示 <code>—</code></strong>。答案只落在一两个大帧里、或者思考过程根本不流式返回的模型，没有值得相除的时间窗。看板宁可空着，也不会把"想的时间"算成"写的速度"。</li>
-<li><strong>自动恢复有次数、时间和上下文边界</strong>。只恢复纯思考 EOF，最多追加一个请求；已有正文、工具调用、取消和明确错误不会恢复。它是用检查点重新请求，无法保留上游未发出的内部状态，也不能保证成功。缺失 usage 的用量仅为已知部分。</li>
+<li><strong>思考是静默的等待，而且与正文共用输出预算</strong>。实测 <code>mimo-v2.6-flash-free</code> 可以在思考阶段静默 60–70 秒，期间上游计费 3024 个 reasoning token 却一帧思考都不发；这种回合会以 <code>stop</code> 收尾而正文为空，客户端很容易报"空响应"。转发端点与局域网中继会用心跳把连接保活——但这救的是连接而不是超时：注释帧会被 SSE 解析器跳过，pi-ai 的空闲看门狗（<code>streamIdleTimeoutMs</code>，默认 300 秒）只有读到真实内容帧才会重置，链路滞留超过它仍会以 TIMEOUT 失败（实测时间线见 issue #34）。<strong>预算</strong>只有调用方给得出来：把单次输出上限提到 16k 以上，或改用模型卡里 <code>reasoning: false</code> 的模型。</li>
+<li><strong>自动恢复有次数、时间和上下文边界</strong>。只恢复纯思考 EOF 和纯思考空停（正常 stop 收尾但没有正文），最多追加一个请求；已有正文、工具调用、取消和明确错误不会恢复。它是用检查点重新请求，无法保留上游未发出的内部状态，也不能保证成功。缺失 usage 的用量仅为已知部分。</li>
 <li><strong>能力只到探测能证明的程度</strong>。公开清单和实测都拿不到证据的，就不标注。</li>
 <li><strong>源码是明文 JavaScript</strong>。作为本地插件必须如此。能拿到这个目录的人就能读懂网关逻辑——请把它当成这种分发形态的固有属性，而不是"混淆一下就能解决"的问题。</li>
 <li><strong>桌面端安装需要真实目录</strong>，原因见<a href="#%E5%AE%89%E8%A3%85" target="_blank" rel="noopener noreferrer">安装</a>一节。</li>
 <li><strong>升级与热重载的信任边界</strong>：应用内升级的信任根自 v1.3.2 起是插件内 pin 的 Ed25519 公钥，而不是"HTTPS 到仓库"——清单必须带发布私钥的签名才可安装，镜像（含 jsDelivr）被投毒只会导致升级失败而不是代码被执行。能拿到<strong>发布私钥</strong>的人能推送任意代码，这与"能推送仓库的人"在信任模型上等同，但把"仓库账号被接管"从直接 RCE 降级成了"所有用户升级失败"。文件层面的完整性由签名+SHA-256 清单双重保障，代码层面的安全由客户端的白名单 HTML 渲染器与宿主的插件隔离承担。</li>
 <li><strong>DSHEAC AIO 的 WebView2 权限策略可能拒绝通知授权</strong>（本机实测 <code>denied</code>）。被拒时公告中心的开关会如实提示；纯浏览器访问 dsh web 不受影响。</li>
+<li><strong>转发端口不是"必须抢到 18899"</strong>。端口被占时监听顺延到下一个可用端口，并把实际端口写回设置（设置页给出提示）。这是有意的：宁可换端口，也不让本地转发静默停摆；占用者是谁由操作系统的错误码决定，插件只如实转述它。</li>
 <li><strong>插件接口的鉴权取决于 composition</strong>：挂了 connection 服务的 composition（dsh web、AIO 桌面端）下与内核 <code>/api</code> 同级（需要应用自己的 cookie/token）；没有 connection 服务的极简 composition 退回到结构化围栏（loopback + 同源检查），本机其它进程仍可访问——与内核在同类 composition 下的行为一致。</li>
 </ul>
 <h2>开发</h2>
@@ -597,6 +613,19 @@ node scripts/build-manifest.mjs     # 发布：重新生成 feed/manifest.json�
 <p>需要 Node <code>^22.19.0 || &gt;=24.0.0</code>。无安装步骤、无依赖。</p>
 <pre><code class="language-bash">npm run typecheck                 # tsc --noEmit，严格检查 adapter/ 接缝（可选：需要 typescript）
 </code></pre>
+<h2>EAC 渠道（桌面端专属）</h2>
+<p>除免费车道外，插件内置一条协付渠道（EAC）。它<strong>只在两个桌面宿主里存在</strong>：</p>
+<ul>
+<li><strong>DSHEAC AIO</strong>（Tauri 壳）：内核路径、内嵌 node、<code>web-desktop</code> profile 三重信号同时命中才解锁；</li>
+<li><strong>DeepSeek Harness 桌面端</strong>（Electron 壳）：内核自身提供的 <code>desktop</code> profile 上下文（CLI 按设计拒绝这个 profile）加上桌面壳给内核进程打的运行标记。</li>
+</ul>
+<p>命令行、纯 <code>dsh web</code>、以及任何其它运行方式里，这条通道<strong>整体不存在</strong>：没有模型、没有请求、没有报错，连解密尝试都不会发生。</p>
+<ul>
+<li><strong>显示规则</strong>：模型名只显示模型本名并带渠道前缀，如 <code>EAC DeepSeek V4.1 Flash</code>、<code>EAC Kimi K3</code>；设置页的模型卡上另有独立的 <code>EAC</code> 渠道徽章。</li>
+<li><strong>加密密封</strong>：渠道凭据与端点从不以可读形式出现在插件里——它们只以 AES-256-GCM 密文存在，解开密文的密钥由分散在两个文件中的三片掩码分片在解锁时即时派生；非授权宿主不进派生路径，密文对所有搜索引擎和字符串扫描都只是噪声。</li>
+<li><strong>凭据不落盘、不出进程</strong>：解锁按请求即时发生，明文只活在构造请求的那一帧里，不写文件、不进日志、不出现在任何 API 响应或错误消息中。</li>
+<li><strong>签名网关（推荐形态）</strong>：<code>worker/</code> 目录附带一个 Cloudflare Worker 网关——插件密封的只有网关地址与 HMAC 签名密钥，请求按 <code>时间戳 + HMAC-SHA256(方法/路径/ body 摘要)</code> 签名，中继的真实 key 只存在 Worker 的环境变量里；防重放时间窗、模型白名单、可选按 IP 限速都在网关执行，签名密钥泄露只需在网关侧轮换即全体吊销。部署与轮换见 <code>worker/README.md</code>。</li>
+</ul>
 <h2>上游是哪些源</h2>
 <p>只有一个，而且它不是中转站：<strong>OpenCode 的 Zen 网关</strong>，<code>https://opencode.ai/zen/v1/*</code>。
 装上插件之后，你的会话内容从这台机器直达它，中间没有任何第三方经手。</p>
@@ -641,6 +670,7 @@ node scripts/build-manifest.mjs     # 发布：重新生成 feed/manifest.json�
 <ul>
 <li>所有状态写在 <code>DSH_HOME/our-free-model/</code>；用量与设置只落本地，不上传任何地方。</li>
 <li>转发监听<strong>只绑回环地址</strong>，默认 <code>127.0.0.1</code>，无 Key 请求一律拒绝。把地址改成可路由接口会被直接拒绝（<code>POST /settings</code> 回 400 并写明原因；没有 web server 的 composition 里手工写进 <code>settings.json</code> 也一样不起监听）——这一格流量花的是本机这条免密车道，不该由一个字符串决定要不要给整个子网用。</li>
+<li><strong>局域网访问是另开的一扇门，不是放宽上面那条规则</strong>：本机监听照旧只绑回环、改地址照旧被拒；要跨机器用必须显式打开"局域网访问"，中继绑可路由地址，并且<strong>每个请求都要局域网 Key</strong>——连 <code>/</code>、<code>/health</code> 这类存活探针也一并鉴权（只有本机监听才免 Key 回答存活），否则一个未鉴权的应答就等于把"这台机器在代理"告诉整个子网。中继只转发 <code>/v1/models</code>、<code>/v1/chat/completions</code>、<code>/v1/responses</code> 三条白名单路径，不是任意 loopback 服务的通用代理；进门时把局域网 Key 换成本机 Key，因此两把 Key 互不通用；带跳数标记的请求直接拒（<code>508</code>），所以端口就算配成本机监听同一个也不会自己打转。局域网 Key 同样由 <code>crypto</code> 生成、<code>timingSafeEqual</code> 比对、落在同一个 <code>0600</code> 文件里，可在面板上单独轮换。</li>
 <li>转发 Key 由 <code>crypto</code> 运行时生成、用 <code>timingSafeEqual</code> 比对、存在 <code>0600</code> 文件里。本仓库不含任何硬编码凭据。<code>/</code> 与 <code>/health</code> 是存活探针，先于 Key 检查应答，但只回答"在不在"，模型清单要 Key。</li>
 <li>插件的 HTTP 路由带<strong>请求信任围栏</strong>（v1.1 起修复）：插件的 <code>/api/our-free-model</code> 前缀在 webServer 的最长前缀分发下优先于内核 <code>/api</code>，曾绕过内核鉴权。现在每个请求先走 composition 的 <code>connection</code> 服务准入（与内核 <code>/api</code> 完全同级的 cookie/token 校验）；connection 缺席的 composition 退回结构化围栏——loopback Host、拒绝跨站 <code>sec-fetch-site</code>、<code>Origin</code>/<code>Referer</code> 必须与 Host 同源同端口，<strong>Host 缺失或为空也拒</strong>（fail closed，不退回 socket 本地地址）。实测：异源 Host/Origin 403，无 cookie 回环请求 401。<code>connection</code> 是逐请求取的，因为浏览器半身要到插件加载之后才把它 provide 出来——快照式地在 apply 时读一次，围栏会整轮进程退化成结构化那一层（本轮把这条读取改回快照，picker-test 的 401 断言当场变红）。</li>
 <li><strong>公告 HTML 在客户端经严格白名单渲染</strong>：<code>scripts/sanitize-test.mjs</code> 用 XSS 语料（脚本注入、事件属性、<code>javascript:</code>/<code>data:</code> URL、iframe/svg/form、样式注入、畸形标签）验证全部丢弃；不经过任何 <code>innerHTML</code> sink。公告源的 <code>feedUrl</code> 可被用户改指向任意 URL，因此渲染器按不可信输入对待。</li>

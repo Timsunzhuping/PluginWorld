@@ -147,7 +147,84 @@
 <h3>🎯 4. Model-Aware Routing</h3>
 <ul>
 <li><strong>Model Sub-Pools (<code>lib/pool.js</code>)</strong>: Configure dedicated key pools for specific model tiers (e.g. reasoning/heavy models vs fast/cheap utility models).</li>
+<li><strong>Per-Model Per-Key Token Quotas (<code>lib/model-quota.js</code>)</strong>: Give one credential its own local token budget for one model. A key that spends its budget is skipped <strong>for that model only</strong> — an exhausted <code>claude-sonnet</code> budget never disables the same key for <code>claude-opus</code>.</li>
 <li><strong>Tag-Based Routing</strong>: Assign operational tags (<code>production</code>, <code>background</code>, <code>eval</code>) to match key usage with workload priorities.</li>
+</ul>
+<h4>Per-Model Per-Key Token Quotas</h4>
+<p><code>tokenLimit</code> applies to <strong>one credential in one configured model pool</strong>. The same
+credential can hold an independent budget in every model pool it belongs to:</p>
+<pre><code class="language-yaml">dsh-key-rotation:
+  quotaResetWindow:
+    type: midnight_utc
+    hour: 0
+
+  providers:
+    - provider: anthropic
+
+      keys:
+        - CLAUDE_KEY_A
+        - CLAUDE_KEY_B
+
+      models:
+        claude-sonnet:
+          keys:
+            - CLAUDE_KEY_A
+            - CLAUDE_KEY_B
+          quotas:
+            CLAUDE_KEY_A:
+              tokenLimit: 1000000
+            CLAUDE_KEY_B:
+              tokenLimit: 1000000
+
+        claude-opus:
+          keys:
+            - CLAUDE_KEY_A
+            - CLAUDE_KEY_B
+          quotas:
+            CLAUDE_KEY_A:
+              tokenLimit: 200000
+            CLAUDE_KEY_B:
+              tokenLimit: 200000
+</code></pre>
+<p>Behaviour:</p>
+<pre><code class="language-text">claude-sonnet request
+  → CLAUDE_KEY_A still has Sonnet budget
+  → dispatched on CLAUDE_KEY_A
+  → actual usage is charged to CLAUDE_KEY_A / Sonnet
+  → CLAUDE_KEY_A / Sonnet reaches its limit
+  → later Sonnet requests skip CLAUDE_KEY_A and use CLAUDE_KEY_B
+  → claude-opus requests may still use CLAUDE_KEY_A
+</code></pre>
+<p>Rules and limits worth knowing:</p>
+<ul>
+<li><strong><code>tokenLimit</code></strong> is the number of tokens one credential may spend on one model
+pool within the current quota window. A missing, <code>null</code>, non-numeric or
+non-positive value means <strong>no local model token limit</strong> — omitting <code>quotas</code>
+entirely leaves behaviour byte-identical to previous releases.</li>
+<li><strong><code>quotaResetWindow</code></strong> controls reset timing for these budgets, reusing the
+existing <code>midnight_utc</code> / <code>midnight_pst</code> / <code>rolling_24h</code> settings. Resets are
+lazy: the counter returns to zero when the window elapses, with no per-key timer.</li>
+<li><strong>Usage is tracked from the usage returned by successful LLM responses.</strong> Only a
+completed request with usable <code>usage</code> is charged. Failed, aborted or refused
+requests are never billed.</li>
+<li><strong>Providers that do not report usage cannot be tracked precisely.</strong> Such
+requests are <strong>not guessed at and not deducted</strong>, so a model budget can only be
+exhausted by responses that actually reported token usage.</li>
+<li>The final request that fits is allowed to overshoot the configured limit
+slightly, and concurrent in-flight requests can also overshoot. This is expected
+behaviour in this version — there is no token reservation.</li>
+<li>Local model quotas <strong>fail closed</strong>: when no credential has budget left, the
+request is not sent upstream and the original credential is <strong>not</strong> used as a
+fallback. The pool enters the existing exhaustion / cascade flow instead.</li>
+<li>Exhaustion is a <strong>budget</strong> state, not a credential failure. It never sets a
+cooldown, a failure count or a broken flag, and upstream QUOTA errors stay
+isolated to the model pool that served the request.</li>
+<li>Editing a limit takes effect immediately: lowering it below the tokens already
+spent marks the credential exhausted at once, raising it restores headroom
+without clearing usage, and deleting <code>quotas.&lt;REF&gt;</code> restores <code>Unlimited</code>.</li>
+<li>Only credential <strong>refs</strong> and counters are stored in the state file. The limit
+itself stays in Settings Config, and no API key value is ever written to disk or
+returned by the status API.</li>
 </ul>
 <h3>📊 5. Observability, Telemetry &amp; Webhooks</h3>
 <ul>
@@ -210,6 +287,10 @@
 <td>Non-destructive undo bar for accidental key or pool removals.</td>
 </tr>
 <tr>
+<td><strong>Model Sub-Pools &amp; Token Quota Editing</strong></td>
+<td>Maintain per-model key lists under each provider, with per-key token limits, live used/limit, percentage, remaining tokens and reset countdown.</td>
+</tr>
+<tr>
 <td><strong>Usage Analytics Chart</strong></td>
 <td>Interactive breakdown of lifetime requests and daily trends per key.</td>
 </tr>
@@ -220,7 +301,7 @@
 <li><strong>Zero Plaintext Secrets in Plugin Config</strong>: Configuration files store only environment variable reference names (e.g. <code>MY_PROVIDER_API_KEY</code>).</li>
 <li><strong>Secure Vault Storage</strong>: Actual secret values reside securely in <code>$DSH_HOME/.credentials.yaml</code> managed by the DSH <code>Credentials</code> service.</li>
 <li><strong>5-Character Masking (<code>keyTail</code>)</strong>: Full secret values are never sent to the client browser; only the trailing 5 characters are exposed for visual identification. Short keys (&lt;= 5 characters) return a fixed masked placeholder (<code>***</code>) to prevent credential disclosure.</li>
-<li><strong>Fail-Closed Loopback &amp; Same-Origin Fencing</strong>: Administrative endpoints strictly enforce loopback origin checks (<code>isTrustedBridgeRequest</code>), requiring valid <code>Origin</code> headers, matching <code>Host</code> headers, and rejecting <code>cross-site</code> or non-loopback requests without fallbacks.</li>
+<li><strong>Fail-Closed Loopback &amp; Same-Origin Fencing</strong>: Administrative endpoints strictly enforce loopback checks (<code>isTrustedBridgeRequest</code>): the socket peer and the <code>Host</code> header must both be loopback (<code>127.0.0.1</code>, <code>::1</code>, <code>localhost</code>), and <code>sec-fetch-site: cross-site</code> is always refused. An attached <code>Origin</code> must be an http(s) loopback origin matching <code>Host</code> exactly. <code>Origin</code> is required on <code>POST</code>/<code>PUT</code>/<code>PATCH</code>/<code>DELETE</code> but optional on <code>GET</code>/<code>HEAD</code>/<code>OPTIONS</code>, because browsers omit it on same-origin reads — requiring it there would reject the Settings card's own requests.</li>
 <li><strong>Fail-Closed Resolver on Pool Exhaustion</strong>: When all credentials in a managed pool are exhausted, paused, expired, or blocked by RPM/TPM limits, the resolver fails closed with <code>LOCAL_POOL_EXHAUSTED</code> error rather than falling back to leaking unmanaged credentials.</li>
 <li><strong>SSRF Protection &amp; Rebinding Guard</strong>: Remote provider pool import strictly enforces HTTPS-only URLs, validates all resolved IP addresses including IPv4-mapped and IPv4-compatible IPv6 addresses (<code>::ffff:127.0.0.1</code>, <code>::ffff:7f00:1</code>, <code>64:ff9b::/96</code>), and enforces connect-time DNS validation via undici agent dispatchers to prevent TOCTOU DNS rebinding.</li>
 <li><strong>Cross-Pool Revocation &amp; Inheritance</strong>: Model pools automatically inherit pause, revoke, and expiry states from their base provider; runtime 401 permanent authentication failures revoke the credential across all shared pools immediately.</li>
@@ -350,7 +431,7 @@ Restart DeepSeek Harness web service after installation and refresh your browser
 <td><code>quotaResetWindow</code></td>
 <td><code>object</code></td>
 <td><code>null</code></td>
-<td>Calendar reset alignment (<code>midnight_utc</code>, <code>midnight_pst</code>, <code>rolling_24h</code>).</td>
+<td>Calendar reset alignment for both provider-reported quota cooldowns and local per-model token budgets (<code>midnight_utc</code>, <code>midnight_pst</code>, <code>rolling_24h</code>).</td>
 </tr>
 <tr>
 <td><code>cascade</code></td>
@@ -368,7 +449,19 @@ Restart DeepSeek Harness web service after installation and refresh your browser
 <td><code>providers</code></td>
 <td><code>array</code></td>
 <td><code>[]</code></td>
-<td>List of <code>{ provider, keys, rpmLimit, tpmLimit, modelPools }</code> definitions.</td>
+<td>List of <code>{ provider, keys, rpmLimit, tpmLimit, models }</code> definitions.</td>
+</tr>
+<tr>
+<td><code>providers[].models</code></td>
+<td><code>object</code></td>
+<td><code>{}</code></td>
+<td>Per-model sub-pools: <code>{ &lt;model&gt;: { keys: [...], weights: [...], quotas: { &lt;REF&gt;: { tokenLimit } } } }</code>. A model pool may also use credentials the provider base pool does not list.</td>
+</tr>
+<tr>
+<td><code>providers[].models.&lt;model&gt;.quotas</code></td>
+<td><code>object</code></td>
+<td><code>{}</code></td>
+<td>Local token budgets keyed by credential ref. Omit for unlimited. See <a href="#per-model-per-key-token-quotas" target="_blank" rel="noopener noreferrer">Per-Model Per-Key Token Quotas</a>.</td>
 </tr>
 </tbody></table>
 <hr />
@@ -385,7 +478,7 @@ Restart DeepSeek Harness web service after installation and refresh your browser
 <tbody><tr>
 <td><code>/dsh-key-rotation/status</code></td>
 <td><code>GET</code></td>
-<td>Real-time health, keys, cooldowns. Since v0.8.0 also <code>providers[].circuit</code> and <code>meta</code> (<code>expectedClones</code>, <code>notifyQueue</code>).</td>
+<td>Real-time health, keys, cooldowns. Since v0.8.0 also <code>providers[].circuit</code> and <code>meta</code> (<code>expectedClones</code>, <code>notifyQueue</code>). Model sub-pools appear as their own entries with an additive <code>model</code> field, and each key carries <code>modelQuota</code> (<code>null</code> = unlimited).</td>
 </tr>
 <tr>
 <td><code>/dsh-key-rotation/config</code></td>

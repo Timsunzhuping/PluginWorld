@@ -83,7 +83,7 @@
 </thead>
 <tbody><tr>
 <td><strong>pi</strong></td>
-<td><a href="https://github.com/ranxianglei/billion-context-pi" target="_blank" rel="noopener noreferrer"><code>billion-context-pi</code></a> (in-process extension)</td>
+<td><a href="https://github.com/ranxianglei/billion-context" target="_blank" rel="noopener noreferrer"><code>billion-context</code></a> — <code>bili pi</code> (launcher) or <code>bili plugin install pi</code> (native); standalone <a href="https://github.com/ranxianglei/billion-context-pi" target="_blank" rel="noopener noreferrer"><code>billion-context-pi</code></a> remains usable</td>
 </tr>
 <tr>
 <td><strong>opencode</strong> (1.x / 2.x)</td>
@@ -359,15 +359,36 @@ bili --auto-restart-on-update   # self-restart when a new version is installed (
 <p><code>bili --debug</code> (or env <code>ACP_DEBUG=1</code>, or <code>"debug": true</code> in config — flag &gt; env &gt; config) logs every <code>processTurn</code> (tag counts, token usage), the nudge decision (growth/usage/pendingT1/shouldInject), client headers, and SSE rewrites.</p>
 <h3>Log file</h3>
 <p>All logs tee to <code>~/.local/state/billion-context/bili.log</code> by default (XDG state dir) and still print to stderr. Override with <code>"logFile"</code> in config or <code>ACP_LOG_FILE</code> (<code>off</code> disables the file). Auto-rotates at 10 MB (<code>bili.log.old</code>). Per-request cache-hit stats log as <code>[acp-usage] round N input=X cached=Y (cache hit Z%)</code> so you can measure prefix-cache health directly from the log.</p>
+<h3>Connection lifecycle tuning (#1982)</h3>
+<p>Client-facing connections close gracefully after the final response: when the proxy initiates the close (<code>Connection: close</code>), it waits up to <code>BILI_POST_RESPONSE_LINGER_MS</code> (default <code>5000</code>) for the client's close signal before releasing the socket, so pooled clients see a clean EOF instead of a possible RST from racing bytes. Related knobs: <code>BILI_KEEP_ALIVE_TIMEOUT_MS</code> (idle-reap budget, default <code>5000</code>) and <code>BILI_CLIENT_ERROR_BACKSTOP_MS</code> (terminal backstop for the error-drain path, default <code>30000</code>) — full semantics in <a href="https://github.com/ranxianglei/billion-context/blob/HEAD/CONFIGURATION.md#environment-variables" target="_blank" rel="noopener noreferrer">CONFIGURATION.md</a>.</p>
 <h3>Self-update</h3>
 <p>The proxy checks npm on startup and every 3 minutes; a newer version is installed in place and a notice is logged — <strong>restart <code>bili</code> to pick it up</strong>, unless you enable opt-in self-restart (<code>--auto-restart-on-update</code> flag, env <code>ACP_AUTO_RESTART_ON_UPDATE=1</code>, or <code>"autoRestartOnUpdate": true</code> in config — default OFF): with zero in-flight requests it verifies the new install, stops accepting connections, drains, spawns a replacement on the same port, and exits once it accepts connections (clients reconnect automatically; session state survives on disk). Safety gates: zero in-flight through the drain window, an install sanity check before re-exec, and a 10-minute cooldown marker so a flapping version can never loop-restart; any failure resumes the original listener and falls back to the plain reminder.</p>
 <p>While the running process is behind the on-disk install ("stale"), the web UI shows a banner (running vs installed version, auto-restart state) and <code>GET /__bili/status</code> returns <code>{version, diskVersion, stale, autoRestartOnUpdate, advisory, inFlight}</code> for scripting (<code>advisory</code> is the active critical-defect entry or <code>null</code>, see below). Disable permanently via <code>"autoUpdate": false</code> in config or <code>ACP_AUTO_UPDATE=0</code>.</p>
+<p>In <strong>plugin mode</strong> (<code>bili opencode</code> / <code>bili pi</code> / <code>bili dsh</code> — the proxy runs embedded in a long-lived host), "restart bili" means restarting the <strong>host</strong>: the embedded process cannot exit on its own, so a host left open keeps serving whatever code it started with, silently missing every fix auto-update reports as installed (#1603). Enable <code>--auto-restart-on-update</code> to have it self-restart at a safe point, or run <code>/acp</code> — the status panel now appends a one-line staleness warning (running vs installed version) whenever the on-disk install is ahead of the live process.</p>
+<p>When an install keeps failing (unwritable or host-managed dir, network error, …), auto-update no longer re-downloads and retries on every 3-minute cycle forever. After three consecutive failures it backs off exponentially (5 min → 10 → 20 …, capped at 6 h), logs a one-time actionable hint (fix permissions / npm prefix, reinstall user-level, or disable via <code>"autoUpdate": false</code> / <code>ACP_AUTO_UPDATE=0</code>), and logs nothing further about the failure while cooling down (no download, no retry line); it resumes as soon as the failure clears or a different version is targeted (#1603).</p>
 <h3>Critical-defect advisories (forced updates)</h3>
 <p>Independent of auto-update (#1481): even with <code>autoUpdate</code> off, the proxy polls a small companion npm package (<code>billion-context-advisories</code>, published by CI from this repo's <a href="https://github.com/ranxianglei/billion-context/blob/HEAD/advisories/" target="_blank" rel="noopener noreferrer"><code>advisories/</code></a> directory) on the same 3-minute cadence. Each advisory names a semver range of broken versions (<code>affected</code>), the exact version to install (<code>target</code> — which may be <em>older</em> than the current one, i.e. a rollback), and a user-facing <code>reason</code>. When the local version falls inside <code>affected</code>, bili force-installs <code>target</code> through the self-updater's full safety chain (cross-process lock, backup + verify + rollback; source checkouts and host-managed installs are refused with manual instructions instead) and warns prominently: a one-time <code>[advisory] ⚠️ …</code> log line per process per advisory id, a banner on the web UI showing the reason and the exact manual upgrade command, and the active entry under <code>advisory</code> in <code>/__bili/status</code>. The check is fail-open by design: an unreachable or malformed advisory source only produces a warning — model traffic is never blocked by it. Disable via config (<code>"advisoryCheck": false</code>) or env (<code>BILI_ADVISORY_CHECK=0</code>); point at a custom document with <code>"advisoryUrl"</code> / <code>BILI_ADVISORY_URL</code>.</p>
 <h2>Configuration</h2>
 <p>The full configuration reference — config file location, top-level keys,
 providers, compression tuning, environment variables — lives in
 <strong><a href="https://github.com/ranxianglei/billion-context/blob/HEAD/CONFIGURATION.md" target="_blank" rel="noopener noreferrer">CONFIGURATION.md</a></strong>.</p>
+<h3>Config file</h3>
+<p>One JSON document at <code>~/.config/billion-context/billion-context.json</code>
+(<code>$XDG_CONFIG_HOME/billion-context/</code>; override the path with <code>BILI_CONFIG_FILE</code>).
+Precedence when several sources set the same knob: <strong>CLI flag (where one exists) &gt; env var &gt; config file &gt; built-in default</strong> — every env var keeps working as the override tier.</p>
+<p>What's inside (details in CONFIGURATION.md):</p>
+<ul>
+<li><code>providers</code> — per-provider routing table: upstream override, model context windows, per-provider/model compress tuning, wire-protocol declaration, compaction opt-in.</li>
+<li><code>compress</code> — three-level compression tuning (global → provider → model): thresholds, nudge cadence, preservation rules, prompts, tiers.</li>
+<li>Server-level blocks — process-wide behavior, including the #2030 additions: <code>network</code> (timeouts / retry / keep-alive / preflight cadence), <code>persist</code> (session persistence format + tail), <code>sessions</code> (cap + GC policy), <code>update</code> (registry mirror + check interval), <code>diagnostics</code> (dumps, render-tag mode, injection switches), <code>fakeCompletion</code>, plus scalars <code>codexCompact</code> / <code>ccrRetrievalTtlMs</code> / <code>decompressTmpCap</code> and extensions <code>mitm.handshakeTimeoutMs</code>, <code>compat.noCacheControl</code>, <code>compat.keepResponseId</code>.</li>
+</ul>
+<p>Minimal example:</p>
+<pre><code class="language-json">{
+  "network": { "upstreamTimeoutMs": 900000 },
+  "persist": { "zstd": true },
+  "sessions": { "gc": { "enabled": true, "maxAgeDays": 14 } }
+}
+</code></pre>
 <p>Two knobs people look for first:</p>
 <ul>
 <li><strong>Upstream proxy (firewall/GFW)</strong> — routing the proxy's own outbound traffic through v2rayA/clash: full resolution order, empty-string = explicit direct, SOCKS5 rejection, both egress paths, and the <code>mitm://</code> vs <code>https://</code> key schemes live in <a href="https://github.com/ranxianglei/billion-context/blob/HEAD/CONFIGURATION.md" target="_blank" rel="noopener noreferrer">CONFIGURATION.md</a> (Server Settings → <code>proxy</code>; Providers → key schemes).</li>

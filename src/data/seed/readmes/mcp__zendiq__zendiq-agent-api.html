@@ -1,0 +1,382 @@
+<h1>ZendIQ Agent API</h1>
+<p>ZendIQ gives agents a paid, machine-readable Solana swap triage verdict before they sign. The public surface includes the MCP client, x402 client, budget controls, response contract, and a runnable example.</p>
+<h2>What's open, and what isn't</h2>
+<p>This repository contains the complete agent-facing integration surface:</p>
+<ul>
+<li>MCP server exposing <code>zendiq_screen_token</code>, <code>zendiq_triage_swap</code> and <code>zendiq_optimize_swap</code></li>
+<li>x402 payment client</li>
+<li>Execution client — build, verify, and submit an optimized unsigned swap (<code>/optimize</code>)</li>
+<li>Autonomous candidate feed and triage loop</li>
+<li>Decision ledger with a hard local spend ceiling</li>
+<li>Public request and response contract</li>
+<li>Payment network read from the live API (<code>GET /v1/agent</code>), with a required spend ceiling on mainnet</li>
+</ul>
+<p>The scoring model is intentionally not included. Each response surfaces the individual signals, their observed values, their status, and each factor's point contribution to the score — so an agent can act on any single signal (for example, refuse on a serial-deployer flag) rather than only the headline verdict. But <strong>how</strong> those signals are derived and combined — the data sources, thresholds, and weighting model — runs behind the hosted <code>/analyse</code> endpoint and remains ZendIQ's proprietary engine. The contract is open so integrators can inspect exactly what is sent, returned, paid for, and acted on.</p>
+<p>This repository contains no extension analytics, user telemetry, production deployment configuration, database schema, facilitator wallet, or production credentials. It has fresh history independent of ZendIQ's private backend.</p>
+<h2>Requirements</h2>
+<ul>
+<li>Node.js 22.5 or newer</li>
+<li>A Solana keypair holding mainnet USDC for paid calls (it needs no SOL)</li>
+<li>Network access to ZendIQ's hosted API at <code>https://api.zendiq.ai</code>, where scoring runs — see <a href="#where-your-calls-go" target="_blank" rel="noopener noreferrer">Where your calls go</a> before running anything.</li>
+</ul>
+<h2>Quickstart</h2>
+<p><strong>Start free, with nothing installed.</strong> Screening a token needs no wallet, no payment, no key and no clone. This returns a real risk score, usually in a few seconds:</p>
+<pre><code class="language-bash">curl -s -X POST https://api.zendiq.ai/v1/agent/analyse-token \
+  -H "content-type: application/json" \
+  -d '{"mint":"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"}'
+</code></pre>
+<p>PowerShell:</p>
+<pre><code class="language-powershell">Invoke-RestMethod -Method Post https://api.zendiq.ai/v1/agent/analyse-token `
+  -ContentType 'application/json' `
+  -Body '{"mint":"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"}' | Select-Object -ExpandProperty tokenRisk
+</code></pre>
+<p>Python (standard library only):</p>
+<pre><code class="language-python">import json, urllib.request
+
+req = urllib.request.Request(
+    "https://api.zendiq.ai/v1/agent/analyse-token",
+    data=json.dumps({"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"}).encode(),
+    headers={"content-type": "application/json"},
+)
+with urllib.request.urlopen(req, timeout=30) as resp:
+    body = json.load(resp)
+
+risk = body["tokenRisk"]
+print(risk["symbol"], risk["score"], risk["level"], "signals", body["signals_resolved"])
+</code></pre>
+<p>The response holds <code>tokenRisk</code> (score and level), the 16 <code>signals</code> behind it with coverage in <code>signals_resolved</code>, and an <code>analysisId</code> that <code>/optimize</code> can reuse for 60 s.</p>
+<p><strong>Paid calls.</strong> The steps below run on your machine. The only calls to ZendIQ are the scoring and <code>/optimize</code> requests to the hosted API; no URL needs setting for those. The <code>npm</code> commands are the same in bash and PowerShell.</p>
+<p><strong>1. Install and set a local spend ceiling.</strong> <code>budget:init</code> reads the payment network from the API (<code>GET /v1/agent</code>, free) and writes a <code>$1.00</code> ledger for it under <code>runtime/</code>. It spends nothing. On mainnet every payment is reserved against this ceiling, and nothing here pays without one.</p>
+<pre><code class="language-bash">npm ci
+npm run budget:init
+</code></pre>
+<p><strong>2. Provide and fund the paying key.</strong> This code never generates or writes a mainnet key. Put a Solana keypair you control at <code>runtime/payer-mainnet.key.json</code>: any file <code>solana-keygen</code> writes, for example <code>solana-keygen new -o runtime/payer-mainnet.key.json</code>. Fund its address with a little USDC on Solana mainnet. No SOL is needed: the x402 facilitator pays the payment's network fee. $1 covers 100 calls at <code>$0.01</code>. Use a dedicated wallet, because the ledger only bounds what is paid through this code.</p>
+<p><strong>3. Make one paid call</strong> (<code>$0.01</code> in mainnet USDC):</p>
+<pre><code class="language-bash">npm run analyse
+</code></pre>
+<p><strong>4. Run the MCP server with the same key and ledger:</strong></p>
+<pre><code class="language-bash">npm run mcp
+</code></pre>
+<p>Or skip the clone entirely: <code>npx -y @zendiq/mcp@latest</code> runs the same server from npm. See <a href="#connect-it-to-an-agent-mcp" target="_blank" rel="noopener noreferrer">Connect it to an agent</a>.</p>
+<p>The MCP server uses newline-delimited JSON-RPC over stdio. Diagnostics go to stderr so stdout remains a valid MCP transport.</p>
+<p><strong>5. Optional: try <code>/optimize</code> build-only.</strong> <code>/optimize</code> builds a mainnet swap for a <code>taker</code>. The <code>taker</code> is only a public key and nothing is signed, so any funded mainnet address shows the full plan, simulation and venue decision. For the default 0.003 SOL swap, pick one holding a little more than 0.003 SOL:</p>
+<pre><code class="language-bash">npm run optimize -- --taker &lt;ANY_FUNDED_MAINNET_ADDRESS&gt;
+</code></pre>
+<p>This is <strong>build-only</strong>: it pays $0.02 in USDC and signs nothing, and you cannot sign a transaction built for a wallet you do not control. A <code>taker</code> that cannot fund the trade gets <code>422 taker_insufficient_balance</code>, uncharged. To land a trade, see <a href="#execution--build-a-signable-swap-optimize" target="_blank" rel="noopener noreferrer">Execution</a>.</p>
+<p>Set variables in your shell. Nothing in this repository loads a <code>.env</code> file; <code>.env.example</code> only lists the variables for reference.</p>
+<p>The first scan of a token typically takes 1–5 s and at most about 12 s; a token scanned by anyone in the last 60 s comes back in under a second. Details: <a href="https://zendiq.ai/agents/#latency" target="_blank" rel="noopener noreferrer">How long a call takes</a>.</p>
+<p>A paid call can also hold its response for up to 90 seconds while payment settlement is confirmed on chain, which happens when the facilitator cannot confirm the transfer itself. Allow at least 120 seconds on <code>/analyse</code> and <code>/optimize</code>. MCP hosts often time out a tool call sooner; raise that limit if your host allows it. Details: <a href="https://zendiq.ai/agents/#settlement" target="_blank" rel="noopener noreferrer">Settlement can hold the response</a>.</p>
+<p>If that ends in <code>402</code> with <code>settlement_pending</code>, keep the payment header and retry once with the same header: a payment that landed late is redeemed for one fresh response on the same route, within 24 h. <code>zendiq-client.js</code> and the MCP server do this for you. Details: <a href="https://zendiq.ai/agents/#redeem" target="_blank" rel="noopener noreferrer">Retry once after settlement_pending</a>.</p>
+<h2>Where your calls go</h2>
+<p><strong>Runs on your machine:</strong> the MCP server (a local stdio adapter), x402 payment signing, the budget ledger, the candidate feed, the triage loop, transaction verification and signing, and the demo visualizer.</p>
+<p><strong>Calls ZendIQ's hosted API:</strong> token screening, <code>/analyse</code> and <code>/optimize</code>. The scoring engine is not in this repository and has no local mode — every score comes from the hosted API.</p>
+<p><strong>Calls third parties directly:</strong> DexScreener (candidate feed), Jupiter <code>/execute</code> and a Solana RPC (only when you pass <code>--execute</code>), and the x402 facilitator (payment settlement).</p>
+<p><strong>The default endpoint is ZendIQ's live hosted API.</strong> If you clone this repo and run it without setting a URL, your calls hit our production service and are billed as real x402 payments:</p>
+<pre><code class="language-js">const BASE_URL = process.env.ZENDIQ_API_URL ?? 'https://api.zendiq.ai';
+</code></pre>
+<p>That default is deliberate — it makes the quickstart work without infrastructure. It is not a sandbox. Two consequences worth understanding before you run a loop:</p>
+<ul>
+<li><strong>Payments are real settlements</strong> in mainnet USDC: <code>$0.01</code> per <code>/analyse</code>, <code>$0.02</code> per <code>/optimize</code>. They are on-chain transactions, not mocks.</li>
+<li><strong><code>npm run watch</code> is an autonomous loop.</strong> It pays per candidate until the local budget ceiling stops it. Set <code>budget:init</code> deliberately; it is the only thing bounding spend.</li>
+</ul>
+<p>The endpoint can be overridden — <code>ZENDIQ_AGENT_URL</code> for the MCP server, <code>ZENDIQ_API_URL</code> for the examples and the demo runner — but it must point at a ZendIQ Agent API. These are two separate variables reading two separate code paths; setting one does not affect the other. The demo runner is the exception: it passes its <code>ZENDIQ_API_URL</code> to the MCP server it spawns, so there <code>ZENDIQ_AGENT_URL</code> is ignored.</p>
+<p><strong>Payment rail:</strong> the examples, <code>budget:init</code> and the demo runner read the payment network from the API (<code>GET /v1/agent</code>, field <code>network</code>). <code>AGENT_NETWORK</code> is optional; if set, it must agree with the API or they refuse to run. <code>budget:init</code> is the exception: an explicit <code>AGENT_NETWORK</code> is taken as given there, so a ledger can be created before a server switches. The MCP server reads <code>ZENDIQ_AGENT_NETWORK</code>, which defaults to <code>mainnet</code>; any value other than <code>mainnet</code> or <code>devnet</code> makes its paid tools refuse. The hosted API settles in <strong>mainnet USDC</strong>, analyses mainnet, and <code>/optimize</code> returns a real mainnet transaction.</p>
+<p>No ZendIQ credentials ship in this repository. The paying key is yours, signs your payments, and never leaves your machine.</p>
+<h2>Connect it to an agent (MCP)</h2>
+<p>The server speaks the Model Context Protocol over stdio (newline-delimited JSON-RPC), so any MCP-capable client — Claude Desktop, Cursor, Cline, or your own harness — can call it directly. It exposes three tools, one per workflow stage. They are independent entry points, not a required sequence: call whichever matches the question you actually have.</p>
+<p><strong><code>zendiq_screen_token</code></strong> — <strong>screen</strong> stage. Call it first, whenever you are considering a token and have no trade yet (an agent scanning many fresh mints has none). <strong>Free and rate-limited</strong>, cacheable across callers. Returns the token risk score, its signal breakdown, <code>signals_resolved</code> coverage, and a <code>cache</code> block (<code>hit</code>, <code>ageSeconds</code>, <code>observedAt</code>) so you can decide whether to force fresh.</p>
+<table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Type</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>mint</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Base58 mint of the token to screen</td>
+</tr>
+</tbody></table>
+<p><strong><code>zendiq_triage_swap</code></strong> — <strong>decide</strong> stage. Call it before signing a swap, to decide whether and how to trade it. Paid. Returns the <strong>full token score inline</strong> (so screening first is optional, never required), plus sandwich exposure, the route and the recommended execution. Builds no transaction.</p>
+<table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Type</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>inputMint</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Base58 mint being sold</td>
+</tr>
+<tr>
+<td><code>outputMint</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Base58 mint being bought</td>
+</tr>
+<tr>
+<td><code>amount</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Amount to sell, in the input mint's atomic units (e.g. <code>"1000000000"</code> for 1 SOL)</td>
+</tr>
+<tr>
+<td><code>slippageBps</code></td>
+<td>integer</td>
+<td>no</td>
+<td>Slippage tolerance in basis points; omit for the route default</td>
+</tr>
+</tbody></table>
+<p>Output (<code>structuredContent</code>):</p>
+<ul>
+<li><code>verdict</code> — <code>Safe</code> (route normally), <code>Protect</code> (route through a Jito bundle), or <code>Refuse</code> (do not execute)</li>
+<li><code>recommendedExecution</code> — <code>{ path, priorityFeeLamports, jitoTipLamports }</code></li>
+<li><code>reasons</code> — plain-language justification</li>
+</ul>
+<p>The full risk breakdown (token-risk factors, sandwich exposure, provenance fingerprint) is returned unchanged alongside these committed fields, so the MCP result is byte-identical to the HTTP <code>/analyse</code> response. Each call costs <code>$0.01</code> in USDC, paid automatically via x402 using the configured keypair.</p>
+<p><strong><code>zendiq_optimize_swap</code></strong> — <strong>execute</strong> stage. Call it once you have decided to trade and need the transaction. Paid. Returns an unsigned swap transaction (the Jupiter route, or a direct venue or Jito bundle that beats it after every cost by more than 0.1% of the trade, capped at $1), the <code>plan</code> to verify it against, <code>submit</code> instructions, a simulation, an itemised <code>netBenefit</code>, and the same verdict as <code>zendiq_triage_swap</code>. Zero custody — nothing is signed here.</p>
+<table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Type</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>inputMint</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Base58 mint being sold</td>
+</tr>
+<tr>
+<td><code>outputMint</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Base58 mint being bought</td>
+</tr>
+<tr>
+<td><code>amount</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Amount to sell, in the input mint's atomic units</td>
+</tr>
+<tr>
+<td><code>taker</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Base58 mainnet wallet the swap is built for; must hold the input amount and SOL for fees and rent (a gasless Jupiter Ultra fill is exempt from the SOL)</td>
+</tr>
+<tr>
+<td><code>slippageBps</code></td>
+<td>integer</td>
+<td>no</td>
+<td>Slippage tolerance in basis points; omit for the route default</td>
+</tr>
+<tr>
+<td><code>method</code></td>
+<td><code>"jito"</code></td>
+<td>no</td>
+<td>Force a Jito bundle venue even where risk scoring would not bundle. <code>plan.choice</code> is then <code>forced</code>; no unbundled route is substituted if none builds. Submit the signed bundle to <code>POST /v1/agent/bundle</code></td>
+</tr>
+</tbody></table>
+<p>This tool also returns the Safe / Protect / Refuse <code>verdict</code> and its <code>reasons</code>, the same as <code>zendiq_triage_swap</code>, but it builds the transaction even on a Refuse, because it assumes the decision to trade has been taken. Read <code>verdict</code> before signing. Each call costs <code>$0.02</code> in USDC; a build that fails charges nothing.</p>
+<p>Payment settles in mainnet USDC from the paying wallet, and the swap is routed against mainnet liquidity for <code>taker</code>. The API accepts the paying wallet as <code>taker</code>; the examples here keep the two keys apart and refuse a taker key that is the payer.</p>
+<p>Register it in your MCP client's config. The package runs straight from npm, with no clone. In Claude Code it is one command:</p>
+<pre><code class="language-bash">claude mcp add --scope user zendiq -- npx -y @zendiq/mcp@latest
+</code></pre>
+<p>For any other client, paste the JSON below into its user config (<code>~/.claude.json</code> for Claude Code, or the client's own config file), which connects straight away. A project <code>.mcp.json</code> works too, but the client asks you to approve the server first.</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "zendiq": {
+      "command": "npx",
+      "args": ["-y", "@zendiq/mcp@latest"]
+    }
+  }
+}
+</code></pre>
+<p>That is enough for <code>zendiq_screen_token</code>, which is free and needs no wallet. The paid tools need two more things, both kept in <code>~/.zendiq</code> (or <code>AGENT_STATE_DIR</code>):</p>
+<ol>
+<li>A spend ceiling: <code>npx -y @zendiq/mcp@latest budget init 1.00</code> writes <code>budget-mainnet.json</code>. It spends nothing. <code>npx -y @zendiq/mcp@latest budget</code> shows what has been spent.</li>
+<li>A paying key holding mainnet USDC at <code>~/.zendiq/payer-mainnet.key.json</code>: any file <code>solana-keygen</code> writes, for example <code>solana-keygen new -o ~/.zendiq/payer-mainnet.key.json</code>. It is never generated for you. At startup the server logs the paying address and the file it came from to stderr.</li>
+</ol>
+<p>The server refuses to keep keys or the ledger inside <code>node_modules</code> or the npx cache, because npm deletes those folders without warning and a funded key there would be lost.</p>
+<p>From a clone, point the client at the file instead (paths must be absolute):</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "zendiq": {
+      "command": "node",
+      "args": ["/absolute/path/to/ZendIQ-Agent-API/src/mcp-server.js"]
+    }
+  }
+}
+</code></pre>
+<p>There the key and ledger default to <code>runtime/</code> beside the clone, as for the examples.</p>
+<table>
+<thead>
+<tr>
+<th>Env</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ZENDIQ_AGENT_URL</code></td>
+<td><code>https://api.zendiq.ai</code></td>
+<td>API base URL. <strong>The default is ZendIQ's live service</strong> — see <a href="#where-your-calls-go" target="_blank" rel="noopener noreferrer">Where your calls go</a></td>
+</tr>
+<tr>
+<td><code>ZENDIQ_AGENT_NETWORK</code></td>
+<td><code>mainnet</code></td>
+<td>Payment rail: <code>mainnet</code> or <code>devnet</code>; must match the network the API settles on. Any other value makes the paid tools refuse</td>
+</tr>
+<tr>
+<td><code>AGENT_STATE_DIR</code></td>
+<td><code>~/.zendiq</code> (npm), <code>runtime/</code> (clone)</td>
+<td>Where the paying key and the budget ledger live</td>
+</tr>
+<tr>
+<td><code>ZENDIQ_AGENT_BUDGET_FILE</code></td>
+<td><code>&lt;state dir&gt;/budget-&lt;network&gt;.json</code></td>
+<td>Budget ledger every payment is reserved against. On mainnet a paid call refuses without it. See <a href="#what-the-budget-ceiling-guarantees" target="_blank" rel="noopener noreferrer">What the budget ceiling guarantees</a></td>
+</tr>
+<tr>
+<td><code>ZENDIQ_AGENT_KEYPAIR</code></td>
+<td>—</td>
+<td><strong>Devnet only.</strong> Solana keypair JSON that holds USDC; signs x402 payments only. Refused on mainnet</td>
+</tr>
+</tbody></table>
+<p>On mainnet the paying key is only loaded together with a mainnet ledger.</p>
+<p>Diagnostics go to stderr so stdout stays a clean JSON-RPC transport. Transport is stdio only — the standard local MCP transport every client supports; a remote/HTTP transport is not currently provided.</p>
+<p>To sanity-check the wiring without a client, drive it by hand — <code>initialize</code> then <code>tools/list</code> need no keypair or payment:</p>
+<pre><code class="language-bash">printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | npx -y @zendiq/mcp@latest
+</code></pre>
+<p>PowerShell:</p>
+<pre><code class="language-powershell">'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}',
+'{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | npx -y @zendiq/mcp@latest
+</code></pre>
+<h2>Autonomous agent</h2>
+<p>The complete test agent is public under <code>examples/</code>. It watches DexScreener's live Solana boost feed, enriches each candidate, pays ZendIQ for a verdict, and records whether it would refuse, protect, or route the trade normally.</p>
+<pre><code class="language-bash">npm run budget:init
+npm run feed
+npm run watch
+</code></pre>
+<p><code>watch</code> begins with USDC as a control, so a run proves that the agent discriminates rather than refusing everything. It then prints a run ledger containing triage spend, refused candidates, protected candidates, and candidates cleared for direct routing.</p>
+<p>The autonomous agent is advisory — it reports the recommended path and fees without claiming that money moved. To build and submit a real optimized swap, see <strong>Execution</strong> below. Keys and budget ledgers live under the gitignored <code>runtime/</code> directory.</p>
+<h2>What the budget ceiling guarantees</h2>
+<p>The ledger (<code>examples/budget.js</code>) is a hard ceiling on what the paying wallet spends on ZendIQ calls. It holds under these conditions, and only these:</p>
+<ul>
+<li><strong>What it counts.</strong> Every x402 payment made through <code>ZendIQClient</code>: the examples, the demo runner, and the MCP server, which all share that one payment path. Each payment is reserved before it is signed and resolved afterwards. An outcome that might have been charged is counted as spent, so the ceiling over-counts rather than under-counts.</li>
+<li><strong>On mainnet the paying key is fenced.</strong><ul>
+<li>It is loaded only by <code>loadAgentSigner</code>, from its own file, <code>runtime/payer-mainnet.key.json</code>, and only with a mainnet ledger attached; without one it throws.</li>
+<li>Advanced override for CI: <code>AGENT_SECRET_SEED</code> takes the paying key as a JSON array of exactly 32 bytes (a seed). If a key file is also present and holds a different key, nothing starts and both addresses are printed.</li>
+<li>A ledger records the one key that pays against it, and a key is bound to one ledger.</li>
+<li>The wallet a swap is built for (<code>--taker</code>, <code>ZENDIQ_TAKER_KEYPAIR</code>) is a separate key, and it is refused if it is the payer.</li>
+</ul>
+</li>
+<li><strong>More than one process may share a ledger.</strong> Every change takes a lockfile (<code>&lt;ledger&gt;.lock</code>, holding the owner's PID) and re-reads the file, so two processes cannot both reserve the same remaining budget.</li>
+<li><strong>A crashed process does not wedge the ledger.</strong> If the lock holder is killed mid-operation, the next spender sees that its PID is gone and takes the lock over at once. If the holder is still alive, the spender waits up to 5 s and then <strong>refuses to pay</strong>. The error names the PID and the lockfile; it never hangs. A lock older than 30 s is taken over regardless. <strong>Manual recovery:</strong> stop every agent using that ledger, then delete <code>&lt;ledger&gt;.lock</code>.</li>
+<li><strong>What it cannot see:</strong><ul>
+<li>Anything signed with the paying key outside this code, for example a script that reads the key file itself.</li>
+<li>The funding transfer into the paying wallet, and any later top-ups.</li>
+<li>Network fees and token-account rent. The facilitator pays the payment's network fee, so in normal use the paying wallet spends USDC only.</li>
+<li>Swaps, which the taker signs and pays for, from a different wallet.</li>
+</ul>
+</li>
+</ul>
+<p><strong>What "exact reconciliation" means.</strong> Compare two lists for one paying address: every <strong>USDC transfer out of that address</strong> on chain, and every ledger entry in state <code>settled</code>, <strong>matched by transaction signature</strong> (the entry's <code>note</code>, which holds the settlement signature from the server's <code>PAYMENT-RESPONSE</code>). For a key used only through this code they match one to one. The single expected exception is a <code>settled</code> entry noted <code>unconfirmed_settlement_may_have_landed</code>, which may have no transfer, because the ledger counts a payment it cannot rule out. Inflows (funding, top-ups) are not ledger entries and are not part of the comparison. Any outflow with no matching entry means the key was used outside the ledger.</p>
+<p><strong>Reconciling a fresh key</strong></p>
+<ol>
+<li>Generate the key and fund it with USDC. Record the funding transaction's signature; it is the only expected inflow.</li>
+<li>Create a <strong>new</strong> ledger for it (<code>AGENT_NETWORK=mainnet node examples/budget.js init &lt;ceilingUsd&gt;</code>). Never point a new key at a ledger that already has entries: its history belongs to another key and can never reconcile. <code>init</code> refuses to overwrite an existing file, so move an old one aside first.</li>
+<li>Make paid calls only through this code. The first load binds the key to the ledger (<code>payer</code> in the ledger, <code>runtime/payer-bindings.json</code>).</li>
+<li>List the paying address's USDC token-account history on chain. Drop the funding transfer and any top-ups. The remaining outflows' signatures must equal the <code>note</code> signatures of the ledger's <code>settled</code> entries, and their amounts must equal each entry's <code>atomic</code> (USDC, 6 decimals).</li>
+</ol>
+<h2>Execution — build a signable swap (<code>/optimize</code>)</h2>
+<p><code>/analyse</code> is advisory. <code>/optimize</code> goes one step further: it returns an <strong>unsigned</strong> swap transaction, with the venue, priority fee and MEV posture chosen from the same risk model and a net-benefit comparison across venues — plus the plan, an on-chain simulation, and the net-benefit arithmetic. You verify the bytes against the stated plan, then sign and submit with your own wallet. ZendIQ never holds a key.</p>
+<pre><code class="language-bash">npm run budget:init
+# Stop at simulation — pays $0.02 USDC, prints the plan + simulation, signs nothing:
+npm run optimize -- --taker &lt;YOUR_MAINNET_PUBKEY&gt;
+
+# Real landing — signs the returned tx and submits it as the response's submit block directs:
+export ZENDIQ_TAKER_KEYPAIR=/path/to/mainnet-keypair.json
+npm run optimize -- --taker &lt;YOUR_MAINNET_PUBKEY&gt; --execute
+</code></pre>
+<p>In PowerShell, set the key path with <code>$env:ZENDIQ_TAKER_KEYPAIR = 'C:\path\to\mainnet-keypair.json'</code> instead of <code>export</code>.</p>
+<p>The swap routes on <strong>mainnet</strong>, so <code>--taker</code> must be a wallet that holds the input amount and SOL for fees and rent; the x402 payment is a separate USDC transfer from the paying wallet. By default the example <strong>stops at simulation and spends nothing on-chain</strong> — pass <code>--execute</code> (with <code>ZENDIQ_TAKER_KEYPAIR</code>) to sign and land a real swap. On <code>jupiter_ultra</code> the example submits through Jupiter's <code>/execute</code>; on <code>jupiter_swap</code> it sends through <code>SOLANA_RPC_URL</code>, which defaults to the public mainnet RPC; on a Jito bundle venue it posts the signed transaction to ZendIQ's <code>/v1/agent/bundle</code> and polls until it lands. The response carries the unsigned <code>transaction</code>, the <code>plan</code>, the <code>submit</code> instructions for the chosen venue, the <code>simulation</code> result, and the <code>netBenefit</code> breakdown — everything needed to confirm the transaction matches the stated intent before signing.</p>
+<p>The example also prints the verdict and the venue decision. The venue decision lists every candidate with its net value, priority fee, Jito tip, modelled sandwich cost and bundle landing risk, the margin it had to beat, and why the winner won. It is <code>plan.venueDecision</code> from the response, so an agent can check the choice rather than trust it. With <code>--execute</code> the example will not sign a trade whose <code>verdict</code> is <code>Refuse</code>, just as it will not sign one whose simulation failed; pass <code>--sign-refused</code> to override it.</p>
+<h2>Demo visualizer</h2>
+<p>A local spectator view that renders one real swap-triage call as a live, animated sequence across two transports side by side — the MCP agent tool and the direct x402 HTTP rail — then verifies that both returned the same token-risk evidence fingerprint. It then runs <code>/optimize</code> for the same swap and shows the execution sequence — <strong>Optimize → Sign → Land</strong> — ending at an on-chain simulation (or a real mainnet landing with <code>--execute</code>). Every value on screen is real: live risk score, real USDC settlement, real transaction. Nothing is staged.</p>
+<h3>Prerequisites</h3>
+<ul>
+<li>Node.js 22.5+ and <code>npm ci</code> already run.</li>
+<li>The funded paying key and budget ledger from the <a href="#quickstart" target="_blank" rel="noopener noreferrer">Quickstart</a>, steps 1–2. The runner uses the same <code>runtime/payer-mainnet.key.json</code> and <code>runtime/budget-mainnet.json</code>; the key signs USDC payment authorizations only and never leaves your machine (<code>runtime/</code> is gitignored). <strong>No SOL is required.</strong> The runner never creates a mainnet ledger itself.</li>
+<li>The visualizer and runner run locally; the calls they display go to the hosted API. The runner reads <code>ZENDIQ_API_URL</code> and hands the same URL to its MCP lane, so <code>ZENDIQ_AGENT_URL</code> has no effect here.</li>
+</ul>
+<h3>Run it</h3>
+<p>Start the visualizer in one terminal:</p>
+<pre><code class="language-bash">npm run demo
+</code></pre>
+<p>Open <code>http://127.0.0.1:4173</code>, then in a second terminal:</p>
+<pre><code class="language-bash">npm run demo:run -- --mint DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 --taker &lt;YOUR_MAINNET_PUBKEY&gt;
+</code></pre>
+<p>To finish with a real on-chain landing, add <code>--execute</code> and set <code>ZENDIQ_TAKER_KEYPAIR</code> to the mainnet keypair for <code>--taker</code>. Without <code>--execute</code>, the execution lane stops at simulation and spends nothing on-chain.</p>
+<p>Both lanes fill in — request → <code>402</code> → USDC authorization signed → payment settled → analysis returned — and the footer shows <strong>Verified · identical token-risk evidence</strong> with the shared fingerprint. The fingerprint covers the deterministic token screening (mint, score, level, signals, inputs); the live route economics shown per lane (sandwich exposure, price impact) are re-fetched on each call and can drift a fraction of a percent with price movement between the two sequential requests. The runner exits <code>0</code> on a fingerprint match, non-zero on mismatch. The event stream deliberately excludes payment authorizations, secrets, RPC URLs, and complete wallet addresses.</p>
+<h3>Troubleshooting</h3>
+<ul>
+<li><strong><code>Preflight failed</code> / <code>fetch failed</code></strong> — the runner needs both the Agent API and the visualizer (<code>npm run demo</code>) up at the same time. Start the visualizer first and leave it running.</li>
+<li><strong><code>Payment was rejected</code></strong> — the paying wallet holds too little mainnet USDC. Fund it (<a href="#quickstart" target="_blank" rel="noopener noreferrer">Quickstart</a>, step 2) and re-run; a rejected payment is never charged.</li>
+<li><strong>UI stays on "Waiting for an agent call…"</strong> — the page is passive; it only fills once <code>demo:run</code> emits events. Confirm the runner printed <code>Demo complete</code>.</li>
+</ul>
+<h2>Contract</h2>
+<p>The complete machine-readable contract is <a href="https://github.com/ZendIQ/ZendIQ-Agent-API/blob/HEAD/openapi.json" target="_blank" rel="noopener noreferrer"><code>openapi.json</code></a> (OpenAPI 3.1): every endpoint, request body, response shape, error code, and worked examples. It is the same file served at <a href="https://zendiq.ai/openapi.json" target="_blank" rel="noopener noreferrer">https://zendiq.ai/openapi.json</a>. For the live prices, rate limits and field-stability tiers, <code>GET /v1/agent</code> on the API is authoritative. The summary below covers what most integrations need.</p>
+<p><code>POST /v1/agent/analyse-token</code> — <strong>free</strong>, rate-limited (screen stage)</p>
+<pre><code class="language-json">{ "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263" }
+</code></pre>
+<p>Screen a token by mint, with no trade size. Returns the token risk score, its signal breakdown, <code>signals_resolved</code> coverage, and a <code>cache</code> block (<code>hit</code>, <code>ageSeconds</code>, <code>observedAt</code>) — a cached score reports the slot and time it was computed at, never the current one. No payment; rate-limited per IP.</p>
+<p><code>POST /v1/agent/analyse</code> — paid (decide stage)</p>
+<pre><code class="language-json">{
+  "inputMint": "So11111111111111111111111111111111111111112",
+  "outputMint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+  "amount": "500000000",
+  "slippageBps": 100
+}
+</code></pre>
+<p>Stable response fields:</p>
+<ul>
+<li><code>verdict</code>: <code>Safe</code>, <code>Protect</code>, or <code>Refuse</code></li>
+<li><code>recommendedExecution.path</code></li>
+<li><code>recommendedExecution.priorityFeeLamports</code></li>
+<li><code>recommendedExecution.jitoTipLamports</code></li>
+<li><code>reasons</code></li>
+<li><code>disclaimer</code></li>
+</ul>
+<p>Additional fields are experimental and may change within <code>v1</code>. Stable fields are additive-only within <code>v1</code>; breaking changes ship under a new API version.</p>
+<p><code>POST /v1/agent/optimize</code></p>
+<p>Same request body as <code>/analyse</code> plus a <code>taker</code> public key. Returns an <strong>unsigned</strong> swap <code>transaction</code>, the <code>plan</code> (venue, slippage, priority fee, and the <code>venueDecision</code> comparison behind the venue), a <code>simulation</code> result, the <code>netBenefit</code> breakdown, and the same <code>verdict</code>, <code>confidence</code> and <code>reasons</code> as <code>/analyse</code>. Zero custody — you verify, sign, and submit. Priced per call in USDC.</p>
+<p>The venue is chosen by risk, so read <code>plan.venue</code> rather than assuming one. <strong>Jupiter Ultra</strong> is used for low-risk trades and for sandwich-driven risk, where its upstream MEV protection is the instrument that addresses the exposure; it sizes the priority fee itself. The <strong>Jupiter Swap API</strong> (Quote + Build) is used when risk scoring calls for a specific priority fee, which Ultra cannot honour — there <code>plan.priorityFee</code> reports the fee actually applied, read back out of the build, and the route carries no upstream MEV protection.</p>
+<p>A direct venue is quoted alongside and replaces the Jupiter route only when it beats it after every cost: priority fee, Jito tip, expected sandwich loss, and for a bundle its landing risk (an assumed 5% chance of paying for a rebuild). It must win by a margin of 0.1% of the trade, capped at $1: enough that quote noise cannot flip the venue, small enough that a real saving still wins. Unprotected <strong>Raydium</strong> competes only on a Safe verdict. The Jito bundle venues (<strong>Raydium + Jito</strong>, <strong>Jupiter Swap + Jito</strong>) compete on every verdict; on Safe they step aside while ZendIQ's shared Jito submission budget is busy, so protected trades keep it. <code>plan.venueDecision</code> shows every candidate's arithmetic; often the answer is Jupiter.</p>
+<p><strong>Submission differs by venue</strong> — follow the returned <code>submit</code> object rather than hardcoding a path. On <code>jupiter_ultra</code>, sign <code>transaction</code> and POST <code>{ signedTransaction, requestId }</code> to <code>https://lite-api.jup.ag/ultra/v1/execute</code>; submitting through your own RPC instead forfeits Ultra's MEV protection and invalidates the <code>netBenefit</code> figures. On <code>jupiter_swap</code> and <code>raydium</code> there is no <code>requestId</code> (it is <code>null</code>) and no <code>/execute</code> step — sign and send to your own RPC, with the priority fee already inside the transaction. Send a <code>raydium</code> transaction promptly: Raydium embeds its own blockhash and <code>submit.lastValidBlockHeight</code> is <code>null</code>. On a Jito bundle venue (<code>submit.method: "jito_bundle"</code>), sign and POST <code>{ "signedTransaction": "&lt;base64&gt;" }</code> to <code>/v1/agent/bundle</code> on this API (free): ZendIQ forwards those exact bytes to Jito and reports landing. Never send a bundle transaction to an RPC yourself; it would sit in the public mempool and still pay the tip.</p>
+<p><code>netBenefit.netUsd = expectedMevLossUsd − zendiqFeeUsd − jitoTipUsd − jupiterPlatformFeeUsd − priorityFeeUsd</code>: the sandwich loss the route avoids, less every fee you pay to execute it. It is stated only on routes that claim MEV protection (Jupiter Ultra and the bundle venues). <code>jupiterPlatformFeeUsd</code> is Jupiter's own fee on an Ultra trade (0–50 bps by pair, 2 bps on SOL–USDC; already inside the quoted amounts) and <code>0</code> elsewhere. <code>priorityFeeUsd</code> is decoded from the transaction: what your taker pays, <code>0</code> on a bundle or a gasless fill. The 5,000-lamport base signature fee is the same on every route and is not included. When a cost cannot be priced, <code>netUsd</code> is <code>null</code> and <code>netUsdBasis</code> says why.</p>
+<p><code>/optimize</code> returns the same <code>verdict</code> (Safe / Protect / Refuse) as <code>/analyse</code> but does not refuse to build: a <code>Refuse</code> still comes back with a transaction, even for a token that scores <code>CRITICAL</code>. Read <code>verdict</code> and <code>tokenRisk</code> before signing, and do not sign a <code>Refuse</code> unless you mean to trade against it.</p>
+<h3>When token screening does not complete</h3>
+<p>Screening can time out or fail upstream. Neither endpoint blocks on it — both still return <code>200</code> — but the gap is always explicit, never a clean-looking score:</p>
+<ul>
+<li><code>tokenRisk</code> is <code>{ mint, available: false, error, assumedScore: 50, assumedLevel: "HIGH", note }</code>, with no <code>score</code> or <code>level</code>.</li>
+<li>Fees and overall risk are sized as if the token scored <code>HIGH</code>, not as if it scored 0.</li>
+<li><code>/analyse</code> fails closed: <code>verdict</code> is <code>Protect</code> with <code>confidence: "low"</code>, <code>degraded</code> contains <code>token_screening:&lt;reason&gt;</code>, and <code>reasons</code> states that screening did not complete. A <code>Protect</code> reached this way means the token was <strong>not checked</strong>, not that it was found risky.</li>
+<li><code>/optimize</code> still returns a transaction. The example prints <code>token risk UNAVAILABLE</code> and warns before signing, but does not refuse — check <code>tokenRisk.available</code> yourself if your agent should.</li>
+</ul>
+<h2>Security</h2>
+<p>Never commit keypairs, seeds, <code>.env</code>, budget ledgers, or RPC URLs containing credentials. This repository configures a mandatory pre-push secret scan through <code>.githooks/pre-push</code>; install either <a href="https://github.com/gitleaks/gitleaks" target="_blank" rel="noopener noreferrer">gitleaks</a> or <a href="https://github.com/trufflesecurity/trufflehog" target="_blank" rel="noopener noreferrer">trufflehog</a> before pushing.</p>

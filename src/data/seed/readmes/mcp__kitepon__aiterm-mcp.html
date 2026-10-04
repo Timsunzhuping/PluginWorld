@@ -172,7 +172,7 @@ canonical dotagents config explicitly sets <code>collection.enabled: true</code>
 collection is off by default and performs no network I/O. It ships via
 tag-triggered CI with npm provenance (OIDC Trusted Publishing); the GitHub
 Release re-registers the Official MCP Registry entry.</p>
-<p><strong>Status:</strong> actively maintained · current public release <strong>v0.48.0</strong> · runs on Linux · WSL2 · macOS · native Windows (tmux on POSIX, the tmux-CLI-compatible <a href="https://github.com/psmux/psmux" target="_blank" rel="noopener noreferrer">psmux</a> on native Windows — no WSL required) · MIT · see the <a href="https://github.com/kitepon/aiterm-mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG</a>.</p>
+<p><strong>Status:</strong> actively maintained · current public release <strong>v0.51.1</strong> · runs on Linux · WSL2 · macOS · native Windows (tmux on POSIX, the tmux-CLI-compatible <a href="https://github.com/psmux/psmux" target="_blank" rel="noopener noreferrer">psmux</a> on native Windows — no WSL required) · MIT · see the <a href="https://github.com/kitepon/aiterm-mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG</a>.</p>
 <h3>Update and rollback</h3>
 <p>The npm package is the standalone distribution; dotagents is not involved. For a global install,
 update with <code>aiterm-update</code>. It reinstalls the requested version into the same npm prefix, then reruns the new version's
@@ -259,11 +259,16 @@ pty_read("codex1", { agent_transcript: true })           → collect the full an
 <td>GPT, Claude, Grok, or another Cursor catalog model; normal transcript completion</td>
 </tr>
 </tbody></table>
+<p>A new terminal gets the environment of the MCP process that opened it (since 0.50.0, ADR 0081).
+Values from another caller that happened to start the tmux server first no longer appear in it.
+<code>AITERM_SESSION_ID</code> and <code>AITERM_AGENT_*</code> are not inherited; aiterm sets them per terminal. If a harness
+passes only a few variables to its MCP process, the terminal has only those (Codex passes <code>HOME</code>, <code>PATH</code>,
+<code>SHELL</code>, and <code>TERM</code> by default; forward more with <code>env_vars</code> under <code>[mcp_servers.aiterm]</code>).</p>
 <p><code>env_vars</code> is an allowlist of environment-variable <strong>names</strong>, not a name/value map. At launch,
 aiterm reads each valid name from its current MCP process, shell-quotes present values, and places
 them on that one harness launch command. Missing names are omitted; invalid shell variable names
-fail before session creation. There is no implicit whole-environment copy, backend-server restart,
-retry, or fallback. Values do not enter the MCP tool arguments, but they are delivered through the
+fail before session creation. Only the named values can be read back with <code>env_keys</code> in <code>pty_list</code>.
+Values do not enter the MCP tool arguments, but they are delivered through the
 PTY launch command and retained in aiterm's per-session <code>.lastcmd</code>; the launched harness and other
 processes with access to the same OS user may read them. Use this for non-secret seat identity and
 workflow variables, not as a secret transport.</p>
@@ -485,8 +490,8 @@ aiterm          →  cwd=/tmp var=hello123  # one persistent PTY holds both
 <h2>Tools</h2>
 <h3>Session observation and startup</h3>
 <p><code>pty_open</code> defaults to bash on POSIX and PowerShell 7 on Windows. Ordinary terminals and agents receive
-<code>AITERM_SESSION_ID</code>. Pass environment-variable names in <code>env_vars</code> to inherit ownership information from the MCP process.
-<code>pty_list({ env_keys: ["JOB_OWNER"] })</code> returns only the requested non-secret values in <code>environment</code>; missing values are null.
+<code>AITERM_SESSION_ID</code>. A terminal inherits the environment of the MCP process that opened it. Pass names in <code>env_vars</code> to register them on the session.
+<code>pty_list({ env_keys: ["JOB_OWNER"] })</code> returns only registered non-secret values in <code>environment</code>; unregistered and missing values are null.
 Its <code>aiterm.pty-list-result.v1</code> receipt contains <code>observed_at</code> and <code>sessions</code>, whose entries include <code>session_id</code>,
 <code>current_command</code>, <code>attached</code>, <code>width</code>, <code>height</code>, <code>harness</code>, and <code>environment</code>. Existing text remains available.</p>
 <p><code>pty_observe({ session_id, cursor? })</code> returns <code>aiterm.pty-observe-result.v1</code> with <code>exists</code>, <code>observed_at</code>, <code>state</code>
@@ -501,6 +506,23 @@ between observations, the delta covers only observed increments and <code>cpu_de
 <code>background_cpu_seconds</code>, <code>background_cpu_delta_seconds</code>, and <code>background_cpu_delta_complete</code> apply the same measurement
 only to descendants created at least 60 seconds after the pane, excluding startup MCP processes. <code>token_hint</code> is the latest
 displayed token count or null. Callers do not need raw argv or pane-text parsing.</p>
+<p>Two fields tell a caller what closing an agent session would lose. <code>activity.post_startup_process_count</code> is the number of
+processes in the session that did not exist when <code>agent_launch</code> finished startup (before the first prompt), so background work
+started in the first minute is counted too. Two kinds of process are not counted: Codex's own <code>codex-code-mode-host</code> helper, and
+the direct children of an <code>mcp-lazy</code> relay (the MCP server it starts on first use and its wake predicate). What runs below them
+is counted. A startup process that the harness restarted (a process with the same parent and the same arguments as a startup
+process that has exited, such as a reconnected MCP server) is not counted either. <code>pending_child_deliveries</code>
+is the number of sub-agent results this session is still waiting for as a parent, whoever the caller is. Both are null when
+Aiterm cannot tell (ordinary terminals, agents launched by 0.48.0 or earlier for the process count, or an unresolved harness
+process), and may be absent when a remote host runs an older Aiterm. Treat null or absent as unknown, not as zero.</p>
+<p>When Aiterm is registered behind a relay that starts the MCP server only on first use, a sleeping server cannot take over the
+deliveries of an owner that has exited. <code>aiterm-delivery-wake --parent &lt;codex|claude|cursor&gt;</code> answers whether one needs to start:
+exit 0 when an exited owner still holds a delivery for that parent kind, exit 1 otherwise, exit 2 for bad arguments. It prints
+nothing, starts no child process, and marks the delivery so that only one of the seats running the same check starts its server
+(the mark is retaken after 30 seconds if nobody took the delivery over). For <code>mcp-lazy</code>, pass it as the wake predicate with the
+same environment as the server:
+<code>MCP_LAZY_WAKE_COMMAND='["/absolute/path/to/node","/absolute/path/to/aiterm-mcp/dist/delivery-wake-cli.js","--parent","claude"]'</code>.
+Owner start times are checked through <code>/proc</code> on Linux; elsewhere an existing PID is treated as a live owner.</p>
 <p><code>agent_launch({ harness, cwd, trust_project: true })</code> completes known workspace, project-hook, and project-MCP startup
 consent even without a prompt, then verifies input readiness and harness liveness before returning <code>startup.status="ready"</code>.
 For Claude Code's first-run text-style menu, it confirms the item already selected on screen before continuing startup.
@@ -796,9 +818,8 @@ aiterm-setup --json
 symlink, filter, or replace harness configuration, authentication, MCP, plugin, skill, permission,
 trust, memory, or history stores. Cleanup removes only aiterm-owned launch metadata and completion
 correlation files.</p>
-<p>The ordinary environment still comes from the persistent shell session. When a caller needs a value that
-belongs to the current MCP process rather than the older persistent multiplexer server, every harness
-accepts <code>env_vars: ["NAME", ...]</code>. Only those names are refreshed at launch; this is a narrow
-per-launch overlay, not a replacement environment or configuration snapshot.</p>
+<p>The ordinary environment comes from the MCP process that opened the terminal, not from whichever caller
+started the persistent multiplexer server (since 0.50.0). Every harness still accepts
+<code>env_vars: ["NAME", ...]</code>; those names are placed on the launch command and registered on the session.</p>
 <h2>License</h2>
 <p>MIT</p>
