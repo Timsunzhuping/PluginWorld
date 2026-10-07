@@ -200,3 +200,54 @@ which service instance an unscoped request belongs to.</p>
 <h3>Embedded memory API and scheduling</h3>
 <p>Hosts can mount the <a href="https://github.com/AgentToolkit/altk-evolve/blob/HEAD/docs/guides/embedded-memory-api.md" target="_blank" rel="noopener noreferrer">scoped REST router</a> with their own client and authentication dependencies. Evolve owns <a href="https://github.com/AgentToolkit/altk-evolve/blob/HEAD/docs/guides/retention-scheduling.md" target="_blank" rel="noopener noreferrer">retention schedules and worker execution</a>, using Kubernetes-compatible cron, timezone, concurrency, deadline, and suspension fields. Use <code>evolve retention schedules</code> to manage schedules and <code>start</code>/<code>stop</code> to enable or suspend them. The Evolve service owns background execution.</p>
 <p>The <a href="https://github.com/AgentToolkit/altk-evolve/blob/HEAD/docs/guides/retention-api.md" target="_blank" rel="noopener noreferrer">public retention service</a> is available as <code>client.retention(namespace_id, agent_id=...)</code>; CLI, REST, MCP, and scheduling share its operations and scope checks.</p>
+<h3>OpenTelemetry service instrumentation</h3>
+<p>Evolve's Python operations use the OpenTelemetry API and inherit the host's
+provider. Constructing <code>EvolveClient</code> never installs or replaces a provider.
+Standalone MCP services export telemetry by default. Compatible SDK and exporter
+versions are declared as dependencies and enforced at installation. To configure a destination:</p>
+<pre><code class="language-bash">uv pip install altk-evolve
+export OTEL_SERVICE_NAME=evolve
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+python -m altk_evolve.frontend.mcp --transport sse
+</code></pre>
+<p>Without an endpoint setting, the OTLP exporter uses localhost:4318. Export runs
+in the background with bounded queues; an absent collector does not block memory
+operations. Unsent telemetry may be dropped. Requests default to a one-second
+export timeout, overridable through standard OTEL timeout settings. Set
+<code>EVOLVE_OTEL_ENABLED=false</code> to disable Evolve-owned export. If exporter packages
+cannot be imported, Evolve logs a warning and continues without an exporter.
+Invalid exporter configuration also logs a warning and leaves service startup
+unaffected; correct the settings and retry initialization to enable export.</p>
+<p>Use an actual reachable collector address. OpenLIT and other OTLP backends are
+supported without their SDKs. This exporter uses HTTP/protobuf; the signal-specific
+<code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code> and <code>OTEL_EXPORTER_OTLP_METRICS_ENDPOINT</code>
+include <code>/v1/traces</code> and <code>/v1/metrics</code>, respectively. Standard resource, sampling,
+batch-size, export-timeout and metric-interval environment settings apply.
+<code>OTEL_TRACES_EXPORTER=none</code> and <code>OTEL_METRICS_EXPORTER=none</code> disable each exporter;
+<code>OTEL_SDK_DISABLED=true</code> prevents Evolve's service initialization. An existing
+host tracer provider is left untouched, including ownership of its shutdown.
+Custom service hosts can explicitly call <code>configure_service_telemetry()</code> from
+<code>altk_evolve.telemetry</code> at startup. The SDK installs process-exit shutdown hooks;
+the MCP lifespan does not synchronously flush or wait for a collector.</p>
+<p>Spans cover memory search, query embeddings and PostgreSQL retrieval, write
+preparation/commit, fact extraction and conflict resolution, model calls,
+processing stages/processors, active hooks, and retention marking/sweeping/jobs.
+FastMCP propagates MCP trace metadata; the scoped REST router accepts W3C trace
+headers. Independent scheduled attempts start separate traces with job references.
+Duration histograms and outcome counters have bounded operation/result labels,
+never namespace, user, conversation or entity IDs. Namespace attribution belongs
+on spans. Evolve's instrumentation excludes contents, prompts, SQL values and
+exception messages. Evolve-owned export forwards Evolve's instrumentation and
+sanitized FastMCP transport spans that retain timing, IDs, kind and status code
+to preserve the trace tree. Transport names are fixed; attributes, exception
+events, links and status descriptions are omitted. Metrics only forward the
+<code>altk_evolve</code> scope. A host-owned provider controls
+its own exporters and third-party capture settings.
+Traces are diagnostic and may be sampled; durable retention receipts remain the
+authoritative audit record.</p>
+<p>MCP clients must send <code>notifications/cancelled</code> to cancel server work; stopping a
+local wait alone does not cancel the request. Evolve checks cooperative
+cancellation around model calls and before committing prepared memory writes.
+An in-flight provider call may still finish, and earlier committed writes remain.
+These checkpoints do not provide rollback or interrupt arbitrary synchronous work.</p>

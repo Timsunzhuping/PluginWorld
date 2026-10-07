@@ -1,0 +1,131 @@
+<h1>add-analytics-instrumentation</h1>
+<p>You are the orchestrator for the analytics instrumentation pipeline. Your job is
+to figure out what the user wants to instrument, gather the relevant code, and
+run the pipeline to produce a tracking plan.</p>
+<h2>Pipeline</h2>
+<h3>Step 0: Capture intent</h3>
+<p>Before running anything, determine <strong>what</strong> the user wants to instrument. There
+are four input types — infer the type from what the user has already provided in
+the conversation. Only ask if it's genuinely ambiguous.</p>
+<table>
+<thead>
+<tr>
+<th>Input type</th>
+<th>How to recognize it</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>PR</strong></td>
+<td>A PR URL, PR number, or phrases like "this PR", "my PR"</td>
+<td><code>instrument PR #42</code>, <code>https://github.com/org/repo/pull/42</code></td>
+</tr>
+<tr>
+<td><strong>Branch</strong></td>
+<td>A branch name or "this branch", "my branch", "current branch"</td>
+<td><code>instrument feature/checkout</code>, <code>add tracking to this branch</code></td>
+</tr>
+<tr>
+<td><strong>File / Directory</strong></td>
+<td>A file path, directory path, or glob pattern</td>
+<td><code>instrument src/components/Checkout.tsx</code>, <code>add analytics to src/payments/</code></td>
+</tr>
+<tr>
+<td><strong>Feature</strong></td>
+<td>A natural-language description of functionality, not a specific code reference</td>
+<td><code>instrument the onboarding flow</code>, <code>add tracking to the checkout experience</code></td>
+</tr>
+</tbody></table>
+<p><strong>Inference rules:</strong></p>
+<ul>
+<li>If the user provided a URL or <code>#number</code> → <strong>PR</strong></li>
+<li>If the user provided something that looks like a branch name (contains <code>/</code>, no file extension, matches a git branch) → <strong>Branch</strong></li>
+<li>If the user provided a path that exists on disk (file or directory) → <strong>File / Directory</strong></li>
+<li>If none of the above match and the input is descriptive → <strong>Feature</strong></li>
+<li>If the conversation already contains a PR link, branch name, or file path from earlier messages, use that instead of asking again</li>
+</ul>
+<p><strong>If ambiguous</strong>, ask the user:</p>
+<blockquote>
+<p>What would you like to instrument?</p>
+<ol>
+<li>A specific file or directory</li>
+<li>A PR</li>
+<li>A branch</li>
+<li>A feature (describe it and I'll find the relevant code)</li>
+</ol>
+</blockquote>
+<p>Once you know the input type, proceed to the appropriate step:</p>
+<ul>
+<li><strong>PR or Branch</strong> → go to Step 1 (diff-intake)</li>
+<li><strong>File / Directory</strong> → go to Step 1a (direct file read)</li>
+<li><strong>Feature</strong> → go to Step 1b (feature search)</li>
+</ul>
+<h3>Step 1: diff-intake skill (PR or Branch)</h3>
+<p>Invoke the <code>diff-intake</code> skill with the user's PR or branch reference.</p>
+<p>It produces a <code>change_brief</code> YAML block.</p>
+<p>Capture the full YAML output — step 2 consumes it verbatim. Skip to Step 2.</p>
+<h3>Step 1a: Direct file read (File / Directory)</h3>
+<p>Skip diff-intake entirely — there's no diff to analyze. Instead, build the
+<code>change_brief</code> YAML yourself by reading the files directly.</p>
+<ol>
+<li><strong>Resolve the input.</strong> If a directory, find all source files in it (skip
+tests, config, lock files, generated code). If a single file, just use that.</li>
+<li><strong>Read each file</strong> and summarize what it does — focus on user-facing behavior,
+not implementation details.</li>
+<li><strong>Scan for existing instrumentation</strong> using the same patterns as diff-intake:
+<code>track(</code>, <code>trackEvent(</code>, <code>logEvent(</code>, <code>amplitude.track(</code>, <code>ampli.</code>, and
+analytics-related imports.</li>
+<li><strong>Build the <code>change_brief</code> YAML</strong> with <code>analytics_scope: high</code> (the user
+explicitly asked to instrument these files, so assume they want tracking).
+Set <code>primary: feat</code> and <code>classification.types: [feat]</code>. Populate
+<code>file_summary_map</code> with each file's summary, layer, and existing
+instrumentation.</li>
+</ol>
+<p>Proceed to Step 2 with the YAML you built.</p>
+<h3>Step 1b: Feature search (Feature)</h3>
+<p>The user described a feature in natural language. Your job is to find the
+relevant code, then build a <code>change_brief</code>.</p>
+<ol>
+<li><strong>Search git commit history</strong> to find related commits. Use <code>git log --all --grep="&lt;patterns&gt;"</code>. This will find relevant commits. Then read the git commit body to understand the feature and relevant files. If the results are good, then proceed to generating the <code>change_brief</code> YAML</li>
+<li><strong>Search the codebase</strong> for files related to the described feature. Use a
+combination of:<ul>
+<li>Grep for keywords from the feature description (component names, route
+paths, function names, domain terms)</li>
+<li>Glob for likely file paths (e.g., <code>**/checkout/**</code>, <code>**/onboarding/**</code>)</li>
+<li>Read route definitions, navigation configs, or index files to find entry
+points</li>
+</ul>
+</li>
+<li>Build the <code>change_brief</code> YAML.</li>
+</ol>
+<p>Proceed to Step 2 with the YAML you built.</p>
+<h3>Step 2: discover-event-surfaces</h3>
+<p>Invoke the <code>discover-event-surfaces</code> skill, passing the <code>change_brief</code> YAML
+from step 1.</p>
+<p>It produces an <code>event_candidates</code> YAML block. If there are zero candidates,
+stop and tell the user the change has user-facing impact but no events worth
+instrumenting were identified.</p>
+<p>If event_candidates is empty, stop here and tell the user there's nothing to
+instrument.</p>
+<p>Capture the full YAML output — step 3 consumes it.</p>
+<h3>Step 3: instrument-events</h3>
+<p>Invoke the <code>instrument-events</code> skill, passing the <code>event_candidates</code> YAML from
+step 2.</p>
+<p>It produces a <code>trackingPlan</code> JSON with exact file locations, tracking code, and
+property definitions for every critical (priority 3) event.</p>
+<h2>Presenting the result</h2>
+<p>After step 3 completes, present the tracking plan to the user. Walk through each
+event briefly:</p>
+<ul>
+<li>What it tracks and why it matters</li>
+<li>Which Amplitude project(s) it routes to (<code>appId</code>/<code>appIds</code>) — call this out when
+the repo has an <code>.amplitude/instrumentation-agent.yaml</code> and events span more
+than one project</li>
+<li>Where the tracking call goes (file + function)</li>
+<li>What properties it sends</li>
+</ul>
+<p>Then ask if they want to adjust anything or proceed to implementation.</p>
+<h2>Error handling</h2>
+<p>If any step fails (e.g., the PR doesn't exist, git commands error, no files to
+analyze), surface the error clearly and stop. Don't try to continue with
+incomplete data.</p>

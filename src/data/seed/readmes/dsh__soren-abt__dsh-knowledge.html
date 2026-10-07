@@ -74,7 +74,7 @@
 <p>不下载模型也可以使用关键词检索。扫描件 OCR、本地 embedding 和本地 rerank 只有在对应模型已下载并通过就绪检查后才启用。</p>
 <details>
 <summary>其他安装方式</summary><pre><code class="language-bash"># GitHub Release 或 npm pack 生成的 tarball
-dsh plugin --profile &lt;name&gt; add ./dsh-knowledge-0.5.0.tgz
+dsh plugin --profile &lt;name&gt; add ./dsh-knowledge-0.5.1.tgz
 
 # 本地源码目录，需要先完成构建
 dsh plugin --profile &lt;name&gt; add file:/path/to/dsh-knowledge
@@ -149,6 +149,8 @@ allowBuilds:
 <li>Ollama 页面支持查看、拉取、取消和删除模型；浏览或拉取不会隐式更改当前 embedding 配置。</li>
 <li>管理面板提供知识库导航、资料表格、批量重建/删除、原文与分块预览、召回测试、全局和每库设置及 Toast 反馈。</li>
 </ul>
+<p><strong>v0.5.1 修复（issue #42）：</strong> 本地模型缓存目录的「浏览／打开目录」与 MinerU 安装目录选择兼容 DSH 0.2 的新接口及旧版接口。取消选择保留原输入；宿主缺少对应能力时，缓存目录显示提示，MinerU 隐藏选择按钮，路径仍可手动填写。</p>
+<p>「打开目录」在输入为空时使用实际缓存目录，由后端展开 <code>~</code>，并可创建尚不存在的目标目录。此操作不保存配置、不移动模型，也不启动下载。</p>
 <details>
 <summary>本地模型运行方式</summary><p>默认本地 embedding 模型为 <code>onnx-community/Qwen3-Embedding-0.6B-ONNX</code>，约 585 MB、1024 维。它在带版本 IPC 的独立 child process 中运行；空闲时可释放 ONNX session，崩溃或硬超时后只重建干净的子进程，无需重启 DSH。下载使用模型专属 staging 目录，只有隔离加载和真实向量 probe 成功后才会提升到正式缓存，并写入带文件指纹的 readiness marker。</p>
 <p><code>rerankModel: local:Xenova/bge-reranker-base</code> 在另一个独立 child process 中运行，与 embedding process 生命周期完全隔离。搜索不会隐式下载 rerank 模型；模型必须先在本地模型页面下载并通过健康检查。自定义 Hugging Face ONNX reranker 属于实验性能力，需要通过单 logit 能力验证和正负样例自检。</p>
@@ -174,7 +176,32 @@ allowBuilds:
 <li><code>knowledge_reindex_base</code></li>
 </ul>
 <p><code>knowledge_search</code> 返回 citations、<code>chunkIndex</code> 和有序 <code>ContextWindow</code>。<code>knowledge_read_document</code> 支持字符区间读取和正则定位，<code>knowledge_get_document</code> 支持分页及围绕检索锚点续读。</p>
-</details><h3>存储与索引</h3>
+</details><h4>按请求排除篇目（issue #39，待发布）</h4>
+<p>HTTP <code>POST /knowledge/search</code> 在 <code>filter</code> 内接受 <code>excludeDocIds</code> 和 <code>titleExcludes</code>；<code>knowledge_search</code> 工具使用同名顶层参数。例如，只检索正文、排除书目与处理记录：</p>
+<pre><code class="language-json">{
+  "query": "方剂用法",
+  "topK": 5,
+  "filter": {
+    "titleExcludes": ["书目信息", "目录", "处理记录"]
+  }
+}
+</code></pre>
+<p>以上是 HTTP 请求体。工具参数为：</p>
+<pre><code class="language-json">{
+  "query": "方剂用法",
+  "topK": 5,
+  "titleExcludes": ["书目信息", "目录", "处理记录"]
+}
+</code></pre>
+<ul>
+<li><code>excludeDocIds</code> 按文档 ID 精确排除，可由 <code>GET /knowledge/bases/&lt;baseId&gt;/documents</code> 或 <code>knowledge_list_documents</code> 取得 ID。规范字段名为 <code>excludeDocIds</code>，不支持 <code>notDocIds</code> 别名。</li>
+<li><code>titleExcludes</code> 是字符串数组。每项去除首尾空白后按大小写不敏感的普通子串匹配，任一非空项命中即排除；不解释正则表达式。</li>
+<li>两项可以与 <code>docIds</code>、<code>titleIncludes</code>、<code>sourceTypes</code>、<code>updatedAfter</code> 和 <code>updatedBefore</code> 叠加；包含与排除重叠时，排除优先。空排除数组、空白标题项和未知 ID 无影响；<code>docIds: []</code> 仍匹配零篇。</li>
+<li>排除在词法、向量和内存检索的候选截断前生效，覆盖短词回退、多查询、融合、MMR 和重排；被排除的篇目不占用 TopK 配额。ID 过滤集合支持超过 500 项。</li>
+<li>HTTP 的两个新增字段必须是字符串数组，否则返回 <code>400 invalid_request</code>；工具按参数 schema 校验。省略 <code>baseId</code> 的 HTTP 请求搜索全部库，工具仍遵守已启用知识库范围；限定单库时传入真实 <code>baseId</code>，不要传空字符串。</li>
+</ul>
+<p>这些条件仅作用于本次请求，无需数据库迁移、重新索引或移动书籍；未传排除条件的请求保持原有行为。</p>
+<h3>存储与索引</h3>
 <ul>
 <li>知识库、文档和运行时配置通过 DSH <code>storageDomain</code> 持久化。</li>
 <li>分块保存在独立 SQLite 文件 <code>&lt;DSH_HOME&gt;/storages/knowledge-chunks.sqlite</code>，可通过 <code>chunkStorePath</code> 调整。</li>
@@ -182,6 +209,14 @@ allowBuilds:
 <li>旧 JSON 分块数据在首次启动时执行幂等迁移；没有存储后端时自动退化为内存模式。</li>
 <li>修改分块或 embedding 配置后，可以重建单条资料或整个知识库的索引。</li>
 </ul>
+<hr />
+<h2>v0.5.1 更新重点</h2>
+<ul>
+<li><strong>检索排除（#39）</strong>：HTTP <code>filter</code> 和 <code>knowledge_search</code> 新增 <code>excludeDocIds</code>、<code>titleExcludes</code>，可与包含条件叠加，排除条件在候选池与 TopK 截断前生效。</li>
+<li><strong>目录操作兼容（#42）</strong>：恢复 DSH 0.2 的缓存目录选择／打开与 MinerU 目录选择，兼容旧版接口，并保留取消选择和手动输入。</li>
+<li><strong>升级方式</strong>：从 0.5.0 升级无需数据库迁移、重新索引或迁移书籍；本版本没有新增依赖。</li>
+</ul>
+<p><a href="https://github.com/Soren-ABT/dsh-knowledge/blob/HEAD/docs/releases/v0.5.1.md" target="_blank" rel="noopener noreferrer">查看 v0.5.1 发布说明</a> · <a href="https://github.com/Soren-ABT/dsh-knowledge/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">查看 CHANGELOG</a></p>
 <hr />
 <h2>v0.5.0 更新重点</h2>
 <ul>

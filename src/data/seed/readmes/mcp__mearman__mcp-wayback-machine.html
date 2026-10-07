@@ -1,0 +1,507 @@
+<h1>MCP Wayback Machine Server</h1>
+<p><a href="https://github.com/Mearman/mcp-wayback-machine" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/GitHub-181717?logo=github&amp;logoColor=white" alt="GitHub" /></a> <a href="https://www.npmjs.com/package/mcp-wayback-machine" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/npm-CB3837?logo=npm&amp;logoColor=white" alt="npm" /></a> <a href="https://github.com/Mearman/mcp-wayback-machine/releases/latest" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/v/release/Mearman/mcp-wayback-machine" alt="Release" /></a> <a href="https://github.com/Mearman/mcp-wayback-machine/actions" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/actions/workflow/status/Mearman/mcp-wayback-machine/ci.yml?branch=main" alt="CI" /></a></p>
+<blockquote>
+<p>MCP server and CLI tool for interacting with the Internet Archive's Wayback Machine. Supports full CDX search, snapshot content retrieval, screenshot listing, snapshot comparison, and optional authentication for higher SPN2 rate limits.</p>
+</blockquote>
+<p><a href="https://www.npmjs.com/package/mcp-wayback-machine" target="_blank" rel="noopener noreferrer"><img src="https://shieldcn.dev/chart/npm/mcp-wayback-machine.svg?bg=transparent&amp;logo=false&amp;yScale=log" alt="npm downloads chart, log scale" /></a>
+<a href="https://github.com/Mearman/mcp-wayback-machine/stargazers" target="_blank" rel="noopener noreferrer"><img src="https://shieldcn.dev/chart/stars/Mearman/mcp-wayback-machine.svg?bg=transparent&amp;logo=false&amp;yScale=log" alt="GitHub stars chart, log scale" /></a></p>
+<p><strong>Stack:</strong> TypeScript · Node.js 22+ · ES Modules · pnpm · Turbo · Zod</p>
+<h2>Getting started</h2>
+<p>Requires Node.js 22+ and <a href="https://pnpm.io" target="_blank" rel="noopener noreferrer">pnpm</a>.</p>
+<pre><code class="language-bash">pnpm install
+</code></pre>
+<p>Optional credentials (anonymous access works, but authenticated requests get higher SPN2 rate limits):</p>
+<pre><code class="language-bash">export WAYBACK_ACCESS_KEY="your-access-key"
+export WAYBACK_SECRET_KEY="your-secret-key"
+</code></pre>
+<p>Obtain credentials at <a href="https://archive.org/account/s3.php" target="_blank" rel="noopener noreferrer">archive.org/account/s3.php</a>.</p>
+<h2>Build, test, and lint</h2>
+<pre><code class="language-bash">pnpm validate          # typecheck + lint + build + test + untested-files check (the full CI gate)
+pnpm check             # typecheck + lint + build only
+pnpm build             # compile TypeScript to dist/
+pnpm test              # run unit and integration tests
+pnpm test:coverage     # run tests with coverage (80% line/branch/function threshold)
+pnpm lint              # lint with ESLint
+pnpm lint:fix          # auto-fix lint issues
+</code></pre>
+<p>To run a single test file:</p>
+<pre><code class="language-bash">node --test tests/tools/save.unit.test.ts
+</code></pre>
+<p>End-to-end tests hit the live Wayback Machine API and are opt-in:</p>
+<pre><code class="language-bash">pnpm test:e2e          # sets WAYBACK_LIVE_TESTS=1 internally via turbo
+</code></pre>
+<p><code>pnpm validate</code> is the gate that must pass before a release. <code>prepublishOnly</code> runs it automatically.</p>
+<h2>Architecture</h2>
+<p><code>src/bin.ts</code> is the entry point. It detects whether it is invoked as a CLI or loaded as an MCP server and routes accordingly.</p>
+<pre><code>src/
+  bin.ts          — entry point; dispatches to CLI or MCP server
+  cli.ts          — Commander-based CLI implementation
+  server.ts       — MCP server wiring (ListTools + CallTool handlers)
+  contexts.ts     — shared context (rate limiter, cache, credentials)
+  schemas.ts      — Zod schemas for all tool inputs; single source of truth
+  tools/
+    save.ts       — save_url tool (SPN2 API)
+    retrieve.ts   — get_archived_url tool
+    search.ts     — search_archives tool (CDX API)
+    status.ts     — check_archive_status tool (sparkline API)
+    screenshots.ts — list_screenshots tool
+    compare.ts    — compare_snapshots tool
+    cache.ts      — clear_cache tool
+    context.ts    — injects shared context into tool handlers
+  utils/
+    http.ts       — fetch wrapper with rate limiting and Retry-After handling
+    cache.ts      — in-memory + disk cache with per-endpoint TTLs
+    rate-limit.ts — 15 req/min token bucket
+    validation.ts — shared Zod validation helpers
+</code></pre>
+<p>Each tool module exports a schema (consumed by <code>ListToolsRequestSchema</code>) and an execution function (consumed by <code>CallToolRequestSchema</code>). New tools need both registrations in <code>server.ts</code>.</p>
+<p>Caching TTLs are intentional — do not normalise them:</p>
+<table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>TTL</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Snapshot content</td>
+<td>24 h</td>
+<td>Immutable once captured</td>
+</tr>
+<tr>
+<td>Availability, CDX, sparkline</td>
+<td>1 h</td>
+<td>Grows but never mutates</td>
+</tr>
+<tr>
+<td>Save operations</td>
+<td>30 min</td>
+<td>Idempotent per URL</td>
+</tr>
+<tr>
+<td>Save status polling</td>
+<td>30 s</td>
+<td>Changes during active jobs</td>
+</tr>
+</tbody></table>
+<h2>Conventions</h2>
+<ul>
+<li><strong>TypeScript strict mode</strong> with <code>noUncheckedIndexedAccess</code> and <code>exactOptionalPropertyTypes</code> — no <code>any</code>, no <code>as</code> assertions.</li>
+<li><strong>ES Modules throughout</strong> — <code>"type": "module"</code> in <code>package.json</code>. Always use <code>.ts</code> extensions in relative imports (rewritten to <code>.js</code> at build time via <code>rewriteRelativeImportExtensions</code>).</li>
+<li><strong>Zod is the single source of truth</strong> for all tool input shapes. <code>schemas.ts</code> defines them; <code>zodToJsonSchema</code> derives the MCP-compatible JSON Schema.</li>
+<li><strong>Prettier</strong> formats all TypeScript: 4-space indent, double quotes, trailing commas (<code>es5</code>), 80-char print width, LF line endings.</li>
+<li><strong>Conventional commits</strong> are enforced by commitlint. Allowed scopes: <code>retrieve</code>, <code>save</code>, <code>search</code>, <code>status</code>, <code>fetch</code>, <code>http</code>, <code>validation</code>, <code>cli</code>, <code>build</code>, <code>release</code>, <code>ci</code>, <code>deps</code>. Commit messages must use British English.</li>
+<li><strong>Test colocation</strong>: unit tests in <code>tests/tools/*.unit.test.ts</code> and <code>tests/utils/*.unit.test.ts</code>; integration tests in <code>tests/*.integration.test.ts</code>. Use the Node.js built-in test runner — no Jest or Vitest.</li>
+<li><strong><code>erasableSyntaxOnly: true</code></strong> — no TypeScript syntax that cannot be stripped without transformation (no <code>enum</code>, no decorators, no <code>namespace</code>).</li>
+</ul>
+<h2>Gotchas</h2>
+<ul>
+<li><strong><code>pnpm validate</code> before pushing.</strong> CI runs <code>check + test + coverage + untested-files</code>. <code>pnpm validate</code> replicates this locally via Turbo.</li>
+<li><strong>Turbo caches aggressively.</strong> If you change a config file that Turbo doesn't track as an input, cached task results may be stale. Clear with <code>pnpm turbo run &lt;task&gt; --force</code> if results look wrong.</li>
+<li><strong><code>WAYBACK_LIVE_TESTS</code> must be set</strong> to run <code>test:e2e</code>. The Turbo config passes it through via <code>globalPassThroughEnv</code>; don't set it in <code>.env</code> files — export it in your shell before running.</li>
+<li><strong>Coverage excludes</strong> <code>src/contexts.ts</code>, <code>src/cli.ts</code>, <code>src/bin.ts</code>, and <code>src/tools/context.ts</code> — these are wiring/entry-point files. The 80% threshold applies to the remaining surface.</li>
+<li><strong>Rate limiting is 15 req/min</strong> across all Wayback Machine API calls, with automatic Retry-After handling for 429 responses. Tests that mock HTTP must respect this — don't call real endpoints from unit tests.</li>
+<li><strong><code>noUncheckedIndexedAccess</code></strong> means <code>Record&lt;string, T&gt;</code> lookups return <code>T | undefined</code>. Never fall back to <code>?? default</code> — narrow explicitly or restructure to a concrete type.</li>
+<li><strong>Node version</strong> is pinned in <code>.tool-versions</code>. CI tests against Node 22, 24, and 26. Do not use Node APIs that aren't available in 22.</li>
+</ul>
+<h2>Contributing</h2>
+<p>Commits follow <a href="https://www.conventionalcommits.org/" target="_blank" rel="noopener noreferrer">Conventional Commits</a> and are lint-checked by commitlint on PRs. PRs target <code>main</code>; CI must pass (<code>check</code>, <code>test</code>, <code>coverage</code>). Releases are fully automated via semantic-release on push to <code>main</code>.</p>
+<p>After release, alias packages (<code>wayback-machine-mcp</code>, <code>mcp-internet-archive</code>, <code>internet-archive-mcp</code>, <code>@mearman/mcp-wayback-machine</code>) are published automatically by CI — do not publish these manually.</p>
+<h2>Installation</h2>
+<h3>As an MCP server</h3>
+<h4>CLI shorthand</h4>
+<p><strong>Claude Code (MCP):</strong></p>
+<pre><code class="language-bash">claude mcp add wayback-machine -- npx -y mcp-wayback-machine
+</code></pre>
+<p><strong>Claude Code (plugin marketplace):</strong></p>
+<pre><code class="language-bash">/plugin marketplace add https://github.com/Mearman/mcp-wayback-machine.git
+/plugin install mcp-wayback-machine@mcp-wayback-machine
+</code></pre>
+<p><strong>OpenAI Codex:</strong></p>
+<pre><code class="language-bash">codex mcp add wayback-machine -- npx -y mcp-wayback-machine
+</code></pre>
+<p>To include optional credentials:</p>
+<pre><code class="language-bash">claude mcp add wayback-machine --env WAYBACK_ACCESS_KEY=xxx --env WAYBACK_SECRET_KEY=xxx -- npx -y mcp-wayback-machine
+</code></pre>
+<h4>Manual configuration</h4>
+<p>Add to the appropriate config file:</p>
+<pre><code class="language-json">{
+  "wayback-machine": {
+    "command": "npx",
+    "args": ["-y", "mcp-wayback-machine"],
+    "env": {
+      "WAYBACK_ACCESS_KEY": "your-access-key",
+      "WAYBACK_SECRET_KEY": "your-secret-key"
+    }
+  }
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Harness</th>
+<th>Config file</th>
+<th>Config key</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Claude Code</td>
+<td><code>.mcp.json</code> (project) / <code>~/.claude.json</code> (user)</td>
+<td><code>mcpServers</code></td>
+</tr>
+<tr>
+<td>Codex</td>
+<td><code>~/.codex/config.toml</code></td>
+<td><code>[mcp_servers.wayback-machine]</code></td>
+</tr>
+<tr>
+<td>Gemini CLI</td>
+<td><code>~/.gemini/settings.json</code></td>
+<td><code>mcpServers</code></td>
+</tr>
+<tr>
+<td>Crush</td>
+<td><code>.crush.json</code> / <code>~/.config/crush/crush.json</code></td>
+<td><code>mcp</code></td>
+</tr>
+<tr>
+<td>Cline</td>
+<td><code>.cline/mcp.json</code></td>
+<td><code>mcpServers</code></td>
+</tr>
+<tr>
+<td>Cursor</td>
+<td><code>.cursor/mcp.json</code></td>
+<td><code>mcpServers</code></td>
+</tr>
+<tr>
+<td>Zed</td>
+<td><code>~/.config/zed/settings.json</code></td>
+<td><code>context_servers</code></td>
+</tr>
+<tr>
+<td>Claude Desktop</td>
+<td><code>~/Library/Application Support/Claude/claude_desktop_config.json</code></td>
+<td><code>mcpServers</code></td>
+</tr>
+</tbody></table>
+<p>The <code>env</code> block is optional — the server works anonymously without credentials.</p>
+<h3>As a CLI tool</h3>
+<pre><code class="language-bash">npx mcp-wayback-machine save https://example.com
+</code></pre>
+<p>Or install globally:</p>
+<pre><code class="language-bash">npm install -g mcp-wayback-machine
+wayback save https://example.com
+</code></pre>
+<h3>As a Cloudflare Worker</h3>
+<p>Deploy the MCP server as a stateless Cloudflare Worker. Runs on the <strong>free tier</strong> with no paid bindings — all persistent state uses the <a href="https://developers.cloudflare.com/workers/runtime-apis/cache/" target="_blank" rel="noopener noreferrer">Cache API</a> which has no published daily limits.</p>
+<pre><code class="language-bash">pnpm add -D wrangler
+wrangler deploy
+</code></pre>
+<p>The Worker uses the SDK's <code>StreamableHTTPServerTransport</code> in stateless mode (no session IDs), so each request is independent and cold starts are handled gracefully.</p>
+<p><strong>Environment variables</strong> (set via <code>wrangler secret put</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Required</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>WAYBACK_ACCESS_KEY</code></td>
+<td>No</td>
+<td>Fallback IA S3 credentials for higher SPN2 rate limits</td>
+</tr>
+<tr>
+<td><code>WAYBACK_SECRET_KEY</code></td>
+<td>No</td>
+<td>Fallback IA S3 credentials</td>
+</tr>
+<tr>
+<td><code>MCP_AUTH_TOKEN</code></td>
+<td>No</td>
+<td>Bearer token for client authentication</td>
+</tr>
+</tbody></table>
+<p>When <code>MCP_AUTH_TOKEN</code> is set, clients must send <code>Authorization: Bearer &lt;token&gt;</code>. When absent, the Worker accepts unauthenticated requests.</p>
+<p><strong>Per-request credentials.</strong> Clients can pass their own IA S3 credentials on each request via HTTP headers, overriding the server's environment variables:</p>
+<pre><code>X-Archive-Access-Key: &lt;your-access-key&gt;
+X-Archive-Secret-Key: &lt;your-secret-key&gt;
+</code></pre>
+<p>This lets multiple users share a single Worker deployment while each using their own credentials for higher SPN2 rate limits. When both headers are present, they take precedence over <code>WAYBACK_ACCESS_KEY</code>/<code>WAYBACK_SECRET_KEY</code>. When absent, the Worker falls back to its environment variables.</p>
+<p><strong>Worker-specific files</strong> are excluded from the main <code>tsconfig.json</code> and type-checked separately via <code>tsconfig.worker.json</code> (which adds <code>@cloudflare/workers-types</code>).</p>
+<p><strong>Architecture.</strong> The stdio and Worker deployments share the same tool logic through pluggable interfaces:</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Stdio</th>
+<th>Worker</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Caching</td>
+<td><code>DiskCacheBackend</code> (OS cache dir)</td>
+<td><code>CacheApiBackend</code> (<code>caches.open()</code>)</td>
+</tr>
+<tr>
+<td>Rate limiting</td>
+<td><code>InMemoryRateLimiter</code></td>
+<td><code>CacheApiRateLimiter</code></td>
+</tr>
+<tr>
+<td>Auth</td>
+<td>None</td>
+<td><code>StaticTokenAuthProvider</code> (optional)</td>
+</tr>
+<tr>
+<td>Credentials</td>
+<td>Environment variables</td>
+<td>Request headers, then environment variables</td>
+</tr>
+</tbody></table>
+<h2>Quick examples</h2>
+<pre><code>Archive https://example.com to the Wayback Machine
+Find all archived snapshots of https://example.com from 2023
+What's the earliest archived version of https://example.com?
+Compare the oldest and newest snapshots of https://example.com
+Check how many times https://example.com has been archived
+</code></pre>
+<h2>Tools</h2>
+<h3><code>save_url</code></h3>
+<p>Archive a URL to the Wayback Machine using the SPN2 API.</p>
+<details>
+<summary>Parameters</summary><table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>url</code></td>
+<td>Yes</td>
+<td>The URL to archive</td>
+</tr>
+<tr>
+<td><code>captureScreenshot</code></td>
+<td>No</td>
+<td>Capture a screenshot as a PNG image</td>
+</tr>
+<tr>
+<td><code>captureOutlinks</code></td>
+<td>No</td>
+<td>Also archive up to 100 outlinked pages</td>
+</tr>
+<tr>
+<td><code>ifNotArchivedWithin</code></td>
+<td>No</td>
+<td>Skip if archived within timeframe, e.g. <code>"30d"</code></td>
+</tr>
+<tr>
+<td><code>jsBehaviorTimeout</code></td>
+<td>No</td>
+<td>Run JavaScript for N seconds before capturing (max 30)</td>
+</tr>
+<tr>
+<td><code>forceGet</code></td>
+<td>No</td>
+<td>Use simple HTTP GET instead of browser rendering</td>
+</tr>
+<tr>
+<td><code>delayWbAvailability</code></td>
+<td>No</td>
+<td>Delay indexing ~12 hours to reduce server load</td>
+</tr>
+</tbody></table>
+</details><h3><code>get_archived_url</code></h3>
+<p>Retrieve an archived snapshot's content and metadata.</p>
+<details>
+<summary>Parameters</summary><table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>url</code></td>
+<td>Yes</td>
+<td>The URL to retrieve</td>
+</tr>
+<tr>
+<td><code>timestamp</code></td>
+<td>No</td>
+<td>Specific timestamp (<code>YYYYMMDDhhmmss</code>) or <code>"latest"</code></td>
+</tr>
+<tr>
+<td><code>modifier</code></td>
+<td>No</td>
+<td>URL modifier: <code>id_</code> (raw), <code>im_</code> (screenshot), <code>js_</code> (JS), <code>cs_</code> (CSS)</td>
+</tr>
+</tbody></table>
+</details><h3><code>search_archives</code></h3>
+<p>Search the CDX API for archived versions of a URL.</p>
+<details>
+<summary>Parameters</summary><table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>url</code></td>
+<td>Yes</td>
+<td>The URL pattern to search for</td>
+</tr>
+<tr>
+<td><code>matchType</code></td>
+<td>No</td>
+<td><code>exact</code>, <code>prefix</code>, <code>host</code>, or <code>domain</code></td>
+</tr>
+<tr>
+<td><code>from</code></td>
+<td>No</td>
+<td>Start date (<code>YYYYMMDD</code> or <code>YYYY-MM-DD</code>)</td>
+</tr>
+<tr>
+<td><code>to</code></td>
+<td>No</td>
+<td>End date (<code>YYYYMMDD</code> or <code>YYYY-MM-DD</code>)</td>
+</tr>
+<tr>
+<td><code>limit</code></td>
+<td>No</td>
+<td>Maximum results (default 10)</td>
+</tr>
+<tr>
+<td><code>offset</code></td>
+<td>No</td>
+<td>Skip the first N results</td>
+</tr>
+<tr>
+<td><code>collapse</code></td>
+<td>No</td>
+<td>Collapse duplicates, e.g. <code>"timestamp:8"</code> (per hour), <code>"digest"</code></td>
+</tr>
+<tr>
+<td><code>filter</code></td>
+<td>No</td>
+<td>Filter by field regex, e.g. <code>["statuscode:200", "!mimetype:image.*"]</code></td>
+</tr>
+<tr>
+<td><code>resolveRevisits</code></td>
+<td>No</td>
+<td>Resolve warc/revisit entries to original metadata</td>
+</tr>
+<tr>
+<td><code>showDupeCount</code></td>
+<td>No</td>
+<td>Show duplicate count per capture</td>
+</tr>
+<tr>
+<td><code>page</code></td>
+<td>No</td>
+<td>Page number for pagination</td>
+</tr>
+<tr>
+<td><code>pageSize</code></td>
+<td>No</td>
+<td>Results per page</td>
+</tr>
+</tbody></table>
+</details><h3><code>check_archive_status</code></h3>
+<p>Check archival statistics for a URL — capture counts, yearly breakdowns, and first/last capture dates.</p>
+<details>
+<summary>Parameters</summary><table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>url</code></td>
+<td>Yes</td>
+<td>The URL to check</td>
+</tr>
+</tbody></table>
+</details><h3><code>list_screenshots</code></h3>
+<p>List available screenshots for a URL.</p>
+<details>
+<summary>Parameters</summary><table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>url</code></td>
+<td>Yes</td>
+<td>The URL to find screenshots for</td>
+</tr>
+<tr>
+<td><code>limit</code></td>
+<td>No</td>
+<td>Maximum results (default 10)</td>
+</tr>
+</tbody></table>
+</details><h3><code>compare_snapshots</code></h3>
+<p>Compare two archived snapshots of a URL. Fetches the raw content of both and provides a visual diff URL.</p>
+<details>
+<summary>Parameters</summary><table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>url</code></td>
+<td>Yes</td>
+<td>The URL to compare snapshots for</td>
+</tr>
+<tr>
+<td><code>timestampA</code></td>
+<td>No</td>
+<td>First timestamp. Defaults to oldest available.</td>
+</tr>
+<tr>
+<td><code>timestampB</code></td>
+<td>No</td>
+<td>Second timestamp. Defaults to newest available.</td>
+</tr>
+</tbody></table>
+</details><h3><code>clear_cache</code></h3>
+<p>Clear all cached API responses. Use when fresh data is needed or after saving a new URL.</p>
+<h2>CLI usage</h2>
+<pre><code class="language-bash">wayback save https://example.com
+wayback get https://example.com
+wayback get https://example.com --timestamp 20231225120000
+wayback search https://example.com --from 2023-01-01 --to 2023-12-31 --limit 20
+wayback status https://example.com
+wayback screenshots https://example.com
+wayback compare https://example.com
+wayback compare https://example.com --timestamp-a 20230101000000 --timestamp-b 20240101000000
+</code></pre>
+<h2>References</h2>
+<ul>
+<li><a href="https://archive.org/developers/" target="_blank" rel="noopener noreferrer">Internet Archive Developer Portal</a></li>
+<li><a href="https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server" target="_blank" rel="noopener noreferrer">CDX Server Documentation</a></li>
+<li><a href="https://docs.google.com/document/d/1Nsv52MvSjbLb2PCpHlat0gkzw0EvtSgpKHu4mk0MnrA/" target="_blank" rel="noopener noreferrer">Save Page Now 2 (SPN2) API</a></li>
+<li><a href="https://archive.org/developers/bots.html" target="_blank" rel="noopener noreferrer">Bots, LLMs, and Automated Access</a></li>
+<li><a href="https://github.com/internetarchive/internet-archive-skills" target="_blank" rel="noopener noreferrer">internet-archive-skills</a> — Official Claude Code skill for the <code>ia</code> Python CLI; complements this server.</li>
+</ul>
+<h2>License</h2>
+<p><a href="http://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noopener noreferrer">Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International</a>.</p>
+<p><a href="http://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noopener noreferrer"><img src="https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png" alt="CC BY-NC-SA 4.0" /></a></p>

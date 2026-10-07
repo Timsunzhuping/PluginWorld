@@ -1,0 +1,240 @@
+<h1>dsail</h1>
+<p><code>pip install dsail</code> — the thin client for the DSAIL hosted service, from Jaxon.</p>
+<p>Some rules are already settled on paper: which clauses a subcontract must carry, which conditions a guideline treats as disqualifying and which of them mitigate, what a derived document must cite and in which field, which criteria an export licence determination turns on. Nobody needs a model's opinion on those. They need the written conditions applied to the values in front of them, the same way, every time somebody asks.</p>
+<p>DSAIL is for exactly that. Turn a written policy into rules a program can check, and get the same answer every time. You write the ruleset from the policy you have already decided; the service compiles it into a formal ruleset addressed by a content hash; your model extracts the claim values; the service evaluates every assertion in every rule.</p>
+<p>Results come back per assertion — <code>TRUE</code>, <code>FALSE</code>, <code>UNKNOWN</code> or <code>AMBIGUOUS</code>. There is no overall verdict, no severity and no pass/fail grade; what a <code>FALSE</code> should cost is your decision. Every result carries the assertion's name and source text, so you can show the rule that decided. A value your model could not determine goes in as <code>"unknown"</code> and the assertions that need it answer <code>UNKNOWN</code>: unknown is an answer, not a guess.</p>
+<p><strong>No model in the loop on our side.</strong> The service never receives your document and never calls a language model. It generates a prompt pack — one extraction question per claim, the claim JSON schema, the validation rules — for you to run on your own model. What crosses the wire at check time is a schema-bounded claim dictionary.</p>
+<p>If you have sketched the design for this yourself, it is probably this one: rules compiled from the written policy, addressed by a content hash so a check run months later evaluates the exact bytes a person approved, the same answer every time, every result names the rule that decided, and your model extracts and never decides. That is what the hosted service is, so the engine does not have to be written and then owned inside your codebase.</p>
+<p>Where it does not fit: a call that needs a judgment nobody wrote down (how severe, how risky, what two conflicting rules mean together); a figure to compute or a threshold to watch; deciding at request time who may act on what.</p>
+<p>The package holds no parser, no compiler and no solver — everything formal runs on the hosted service. It gives you <code>dsail.Client</code>, the <code>dsail mcp</code> stdio proxy, the <code>dsail serve</code> review UI and <code>dsail init</code> for a repo. Docs, every page also served as markdown: <a href="https://docs.agents.jaxon.ai" target="_blank" rel="noopener noreferrer">https://docs.agents.jaxon.ai</a></p>
+<h2>Install</h2>
+<pre><code class="language-bash">pip install dsail
+dsail version
+</code></pre>
+<p>Python 3.10 or newer. The REST client itself is standard-library only; the
+<code>mcp</code> dependency exists for <code>dsail mcp</code> and is imported only there.</p>
+<h2>Sixty seconds, end to end</h2>
+<pre><code class="language-bash">dsail init                                    # once per repository; commit what it writes
+cat &gt; policies/expenses.dsail &lt;&lt;'EOF'
+version 1.3;
+// @ask amount What is the total amount of this expense claim, in USD?
+// @unit amount USD
+declare amount as numeric;
+// @ask has_receipt Is an itemised receipt attached?
+declare has_receipt as boolean;
+assert receipt_over_75 { Implies(amount &gt; 75 "USD", has_receipt) };
+assert within_cap { amount &lt;= 5000 "USD" };
+EOF
+dsail compile policies/expenses.dsail --review   # what a person would be signing
+dsail prompt-pack policies/expenses.dsail --render
+echo '{"amount": "120 USD", "has_receipt": false}' &gt; claims.json
+dsail check policies/expenses.dsail --claims claims.json --summary
+dsail serve policies/expenses.dsail              # hand the reviewer the printed link
+</code></pre>
+<h2>The client, in a production service</h2>
+<pre><code class="language-python">import dsail
+
+client = dsail.Client()                                  # DSAIL_URL, DSAIL_CREDENTIAL honoured
+compiled = client.compile(open("policies/expenses.dsail").read())
+pack = client.prompt_pack(ruleset_hash=compiled.ruleset_hash)
+
+claims = pack.empty_claims()                             # every claim "unknown" to start
+for prompt in pack.prompts:                              # run each on YOUR model
+    claims[prompt.claim] = my_model.extract(document, prompt.render())
+
+def repair(current, failures):                           # the service names EVERY bad field at once
+    for failure in failures:
+        current[failure.field] = my_model.re_extract(document, failure.field, failure.expected)
+    return current
+
+result = client.check_with_repair(claims, repair, ruleset_hash=compiled.ruleset_hash)
+for assertion in result.assertions:
+    print(assertion.name, assertion.check, assertion.source)
+violated = result.where(dsail.FALSE)                     # your system decides what a FALSE costs
+</code></pre>
+<p>Errors are exceptions you can branch on: <code>ValidationRejected</code> (with
+<code>.failures</code>), <code>CompileFailed</code> (with <code>.diagnostics</code> and <code>.hint</code>),
+<code>BudgetExceeded</code>, <code>RulesetNotFound</code>, <code>BadRequest</code>, <code>EvaluationLimitReached</code>,
+and <code>ServiceUnreachable</code>. Every one carries the service's whole error envelope
+in <code>.payload</code>.</p>
+<h2>Examples</h2>
+<ul>
+<li><code>examples/expense_service.py</code> — a production-shaped integration: compile the
+repo's policy, fetch the prompt pack, run extraction on <em>your</em> model (a
+stand-in extractor is included so it runs without one), check with repair,
+and decide what a FALSE or an UNKNOWN costs. <code>python examples/expense_service.py</code>
+against <code>DSAIL_URL</code>; covered by <code>test/test_examples.py</code>.</li>
+<li><code>examples/adverse_action.py</code> — the same shape on a regulatory procedure:
+adverse action notices under Regulation B (12 CFR 1002.9), one rule per
+clause in <code>examples/policies/adverse_action.dsail</code>, each named for the clause
+it enforces. A FALSE sends the notice back, an UNKNOWN holds it. Walkthrough:
+<a href="https://docs.agents.jaxon.ai/guides/adverse-action-reasons.md" target="_blank" rel="noopener noreferrer">https://docs.agents.jaxon.ai/guides/adverse-action-reasons.md</a>. Also covered
+by <code>test/test_examples.py</code>.</li>
+<li><code>examples/typescript/</code> — a TypeScript client typed from the bundled OpenAPI
+document (<code>openapi-typescript</code>), with auto-acquired evaluation credential and
+a demo that returns correct results. <code>examples/typescript/run.sh &lt;url&gt;</code> runs
+generation, type-check and demo inside the repo's node image; nothing in the
+generated client is hand-typed from the wire.</li>
+</ul>
+<h2>Review from a coding agent</h2>
+<p>Neither Claude Code nor Codex renders the review widget, so the proxy carries
+one tool the hosted service does not have: <code>dsail_open_review</code>. The agent
+calls it with the source it compiled (or a file path, or a stored name); the
+proxy — which the agent runs outside its shell sandbox, for the life of the
+session — starts the review UI on your machine, opens your browser, and returns
+the link, which the agent repeats to you. Approve there is recorded on the
+service against the exact hash. <code>dsail serve</code> is the same page as a command,
+for when there is no MCP layer; the agent is told to hand you that command
+rather than run it from a sandboxed shell.</p>
+<h2>When the network is blocked</h2>
+<p>In an environment that blocks outbound calls from the shell (Claude Code cloud
+sessions and Codex cloud tasks today), every call raises <code>EgressBlocked</code>, whose
+text is written to be relayed to a person as-is. It names the fix for the agent
+environment the process is in, and only that one:</p>
+<ul>
+<li><strong>Claude Code:</strong> enable the DSAIL connector in claude.ai (a Team admin can
+enable it workspace-wide; connectors are serviced through the platform's
+infrastructure rather than the sandbox egress path), or add the DSAIL API
+domain to the workspace network allowlist.</li>
+<li><strong>Codex:</strong> add the DSAIL API domain to the cloud environment's internet-access
+allowlist. Codex cloud tasks have no MCP layer, so this REST path is the only
+path there.</li>
+</ul>
+<p>Detection reads the environment (<code>CODEX_*</code> variables mean Codex; <code>CLAUDECODE</code>
+or <code>CLAUDE_CODE_*</code> mean Claude Code); <code>DSAIL_AGENT_ENV=codex|claude</code> overrides
+it. The CLI exits 3 in that case and prints the same text.</p>
+<h2>Codex</h2>
+<p><code>dsail init</code> covers Codex as well as Claude Code: the skill is also written to
+<code>.agents/skills/dsail/SKILL.md</code>, and a marked <code>[mcp_servers.dsail]</code> table goes
+into <code>.codex/config.toml</code>. Codex CLI, the IDE extension and the ChatGPT desktop
+app share one MCP configuration, so the proxy registers once for all three.
+<code>--no-codex</code> skips both.</p>
+<p><code>dsail codex-plugin [DIR] [--app-id ID]</code> (or <code>./release.sh codex-plugin</code>) builds
+the plugin bundle: <code>.agents/plugins/marketplace.json</code> plus
+<code>plugins/dsail/</code> holding <code>.codex-plugin/plugin.json</code>, <code>.mcp.json</code>, the skill
+and, only with <code>--app-id</code>, the <code>.app.json</code> naming the ChatGPT connector by the
+id OpenAI assigned it. Install with <code>codex plugin marketplace add &lt;DIR&gt;</code> and
+<code>/plugins</code>. Private at this stage — never a directory submission.</p>
+<p>In a <strong>Codex cloud task</strong> there is no MCP layer at all, and the CLI and
+<code>dsail.Client</code> carry the whole workflow over REST; the <code>AGENTS.md</code> stanza says
+so to the agent. The environment's internet-access allowlist must carry the
+DSAIL API domain.</p>
+<h2>Terms, privacy and data handling</h2>
+<p>The hosted service is offered under versioned terms:
+<a href="https://docs.agents.jaxon.ai/legal/terms.md" target="_blank" rel="noopener noreferrer">https://docs.agents.jaxon.ai/legal/terms.md</a>, with
+<a href="https://docs.agents.jaxon.ai/legal/privacy.md" target="_blank" rel="noopener noreferrer">https://docs.agents.jaxon.ai/legal/privacy.md</a> and
+<a href="https://docs.agents.jaxon.ai/legal/data-handling.md" target="_blank" rel="noopener noreferrer">https://docs.agents.jaxon.ai/legal/data-handling.md</a> stating what is stored (your
+rules text and DSAIL source, never your documents), what is never done with it,
+and how the one derived field — a category label your own model produces, from
+a published vocabulary — is kept from pointing back at anyone's policy.
+<code>dsail whoami</code> (or <code>Client.account()</code>) reports the terms version that governs
+your credential's tier in its <code>terms</code> block.</p>
+<h2>Credentials</h2>
+<p>There is no sign-up. On first contact the hosted service answers with the route
+that issues an <strong>evaluation credential</strong>, the client takes it up, stores it
+(<code>~/.config/dsail/credential</code>, readable by you only) and retries — one command,
+first result, no human gate. An evaluation credential compiles and checks, is
+capped per day and over its lifetime, and expires; the service marks every
+result it produces <code>x-jaxon-credential-grade: evaluation</code>, and <code>dsail whoami</code>
+shows your position against the caps.</p>
+<p>Storage — saving, listing, approving, adding unit converters — and production
+volume need a <strong>full credential</strong>, which Jaxon issues. Store it with
+<code>dsail credential set &lt;token&gt;</code>; the proxy and the review UI pick it up too. An
+evaluation credential asking for storage raises <code>CredentialScopeExceeded</code>; one
+past its cap raises <code>EvaluationLimitReached</code>. Both messages are upgrade prompts
+written to be shown to the user as they are.</p>
+<h2>Signing in, and why a credential is not enough for teams</h2>
+<p>A credential names a <strong>workspace</strong>. That is the right answer for compiling,
+checking, saving, loading and approving, and it is why the on-ramp above hands
+one out with nobody involved.</p>
+<p>Teams are about <strong>people</strong> — invite this colleague, remove that one, make
+somebody an administrator — and there is nobody inside a credential to attribute
+that to, nor anybody to hold responsible if it leaks. So those operations need a
+signed-in person:</p>
+<pre><code class="language-bash">dsail login        # one browser round trip; stores ~/.config/dsail/session
+dsail signed-in    # whether this terminal has a person behind it
+dsail logout       # leaves your credential exactly where it is
+</code></pre>
+<p><code>dsail login</code> runs the hosted service's own OAuth flow against a loopback
+listener this process opens for the seconds it takes. <strong>Your API key is
+untouched</strong> — signing in adds an identity beside it rather than replacing it,
+and both travel on every call, because they answer different questions. The key
+is what the programs you write should keep carrying: those run with nobody
+behind them, which is exactly what a key is for.</p>
+<p>Working with teams:</p>
+<pre><code class="language-bash">dsail workspaces                                   # where you may work, and where you are
+dsail team create compliance                       # starts empty
+dsail team invite team-abc123 bob@example.com      # a single-use link you pass on
+dsail copy cap-policy --to compliance --from personal
+dsail use personal                                 # switch back
+</code></pre>
+<p>A team's rulesets are shared with every member, the team is its own billing
+account, and a check against a team's ruleset bills that team wherever you are
+working. Full walkthrough: <a href="https://docs.agents.jaxon.ai/guides/share-rulesets-with-colleagues" target="_blank" rel="noopener noreferrer">share policy rulesets with
+colleagues</a>.</p>
+<h2>Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DSAIL_URL</code></td>
+<td>the service (default: the hosted deployment)</td>
+</tr>
+<tr>
+<td><code>DSAIL_CREDENTIAL</code></td>
+<td>the credential to send; else <code>~/.config/dsail/credential</code> (<code>dsail credential set</code>)</td>
+</tr>
+<tr>
+<td><code>DSAIL_SESSION</code></td>
+<td>the session token to send; else <code>~/.config/dsail/session</code> (<code>dsail login</code>)</td>
+</tr>
+<tr>
+<td><code>DSAIL_CONFIG_DIR</code></td>
+<td>where both files live</td>
+</tr>
+<tr>
+<td><code>Client(auto_credential=False)</code></td>
+<td>never obtain an evaluation credential; surface the 401 instead</td>
+</tr>
+</tbody></table>
+<h2>Distribution</h2>
+<p><code>dsail</code> is published to PyPI, and this repository is a <strong>read-only mirror</strong> of
+Jaxon's private source repository, which is authoritative. Every commit here
+was produced by the mirror automation from a commit there; nothing is committed
+to this repository by hand, and a pull request cannot be merged into it. See
+<a href="https://github.com/JaxonAI/dsail/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a> for the route a change actually takes.</p>
+<p>A given PyPI version and this repository at the matching <code>v</code> tag are the same
+bytes, because one release action produced both from one source commit. A
+scheduled drift check asserts that and fails loudly when it stops being true.</p>
+<pre><code class="language-bash">pip install dsail                     # the published package
+pip install dsail==1.0.0              # a pinned version
+</code></pre>
+<p>This repository is also a plugin marketplace for <strong>Claude Code</strong> and for
+<strong>Codex</strong>: <code>.claude-plugin/marketplace.json</code> and <code>.agents/plugins/marketplace.json</code>
+both point at <code>plugins/dsail/</code>, one plugin carrying the DSAIL skills and the
+<code>dsail</code> MCP server: Claude's manifest names the hosted server, Codex's launches
+the <code>dsail mcp</code> proxy. In Claude Code, <code>/plugin marketplace add JaxonAI/dsail</code> then <code>/plugin install dsail@jaxon</code>; in Codex, <code>codex plugin marketplace add https://github.com/JaxonAI/dsail</code>. The bundle is generated by
+<code>dsail plugin-bundle</code> and checked against the package on every build.</p>
+<p>The hosted MCP server is listed on the official MCP Registry as <code>ai.jaxon/dsail</code>
+(the <code>mcp-name</code> comment at the top of this file is how the registry verifies
+that this package belongs to that listing).</p>
+<p>Building from a checkout of this mirror is supported and reproduces the
+published artifact:</p>
+<pre><code class="language-bash">python -m build --sdist --wheel .
+</code></pre>
+<h2>The contract bundle is generated</h2>
+<p><code>src/dsail/contract/</code> is generated from the service's own API definition and
+is never edited by hand. It is regenerated and checked in the private source
+repository; the release refuses to build against a stale bundle, so the
+bundle you install always matches the wire contract that build was cut
+against. <code>dsail.contract.versions()</code> reports which one.</p>
+<h2>Tests</h2>
+<pre><code class="language-bash">scripts/test.sh                       # the unit suite
+DSAIL_TEST_URL=https://... scripts/test.sh   # and the live tests, against a running service
+</code></pre>
+<p>The unit suite is what CI runs on every change, and it needs no credential
+and no network.</p>

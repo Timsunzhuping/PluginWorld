@@ -19,7 +19,7 @@ loading, and dyld_shared_cache module and dylib loading are single tool
 calls with explicit parameters, not scripts the agent has to write. In a
 measured Claude Code run, selecting and analyzing the x86_64 slice of a
 universal binary took one call and about five seconds.</li>
-<li><strong>Fast and lean.</strong> A native Rust server driving IDA in-process; a 28-tool
+<li><strong>Fast and lean.</strong> A native Rust server driving IDA through idalib; a 28-tool
 <code>--profile=lean</code> measured 25% cheaper than the full set on real tasks with
 the same correctness, and the full set is there when you need it.</li>
 <li><strong>Safe to leave running.</strong> Exact-target edits, <code>save_idb</code> checkpoints,
@@ -201,6 +201,19 @@ miss changes nothing and returns up to eight similar names with their addresses.
 A returned <code>target</code> record identifies the database, resolved symbol (or <code>null</code>),
 and requested and effective addresses. Check the operation's result to determine
 whether the change succeeded.</p>
+<p>For Hex-Rays locals and arguments, use <code>list_lvars</code> with one function address
+or exact <code>target_name</code>. <code>rename_lvar</code> and <code>set_lvar_type</code> take the same function
+selector plus an exact, unique <code>lvar_name</code>. They return the variable as it was
+before the edit and the resolved function target. The edits appear in subsequent
+decompilations; use <code>save_idb</code> to checkpoint them to disk.</p>
+<pre><code class="language-text">list_lvars(target_name: "interesting_function")
+rename_lvar(target_name: "interesting_function", lvar_name: "v1", new_name: "count")
+set_lvar_type(target_name: "interesting_function", lvar_name: "count", decl: "unsigned int")
+save_idb()
+</code></pre>
+<p><code>list_lvars</code> is in the <code>decompile</code> toolset, <code>rename_lvar</code> in <code>editing</code>, and
+<code>set_lvar_type</code> in <code>types</code>. Add them to lean with
+<code>--profile=lean --tools=list_lvars,rename_lvar,set_lvar_type</code>.</p>
 <h2>Opening binaries</h2>
 <h3>Raw blobs</h3>
 <p>Raw inputs use IDA's normal loader by default and save to <code>&lt;input&gt;.i64</code>. Pass
@@ -302,18 +315,21 @@ run_script(code: "import ida_bytes; print(ida_bytes.get_bytes(0x1000, 16).hex())
 <p>All <code>ida_*</code> modules, <code>idc</code>, and <code>idautils</code> are available. See the <a href="https://python.docs.hex-rays.com" target="_blank" rel="noopener noreferrer">IDAPython API reference</a>.</p>
 <h2>Structured results</h2>
 <p><code>analysis_status</code>, <code>list_functions</code>, <code>resolve_function</code>, <code>function_at</code>,
-<code>xrefs_to</code>, <code>xrefs_from</code>, and <code>strings</code> advertise an <code>outputSchema</code> and return
-<code>structuredContent</code> alongside the same JSON as text. Other tools return JSON
-text only; tools whose result is a bare array or a per-call shape have no
-schema yet.</p>
+<code>xrefs_to</code>, <code>xrefs_from</code>, <code>strings</code>, and <code>list_lvars</code> advertise an
+<code>outputSchema</code> and return <code>structuredContent</code> alongside the same JSON as
+text. <code>rename_lvar</code> and <code>set_lvar_type</code> also return structured results but
+omit their output schemas to keep the tool inventory smaller. Other tools
+return JSON text only; tools whose result is a bare array or a per-call shape
+have no schema yet.</p>
 <h2>Saving and crash handling</h2>
 <p><code>save_idb</code> writes the open database to disk without closing it and returns
 the database path it wrote. Use it to checkpoint renames, comments, types, and
 patches; <code>close_idb</code> also saves. If the client exits without closing, the
 server attempts a graceful shutdown on stdin EOF and on SIGTERM, SIGINT,
 SIGQUIT, or SIGHUP, which closes and packs the open database; the log names
-the signal. That attempt is bounded (the process exits a few seconds after the
-signal even if a client never closes stdin), a SIGKILL skips it, and a caught
+the signal. Default stdio and HTTP allow up to 120 seconds for the active
+operation to settle and the database to save before retiring the child. A SIGKILL
+skips graceful shutdown, and a caught
 SDK crash deliberately discards unsaved changes, so <code>save_idb</code> remains the
 only guarantee for edits. Finished auto-analysis is flushed to the database
 as soon as a raw open or <code>analyze_funcs</code> completes, because some MCP clients
@@ -322,12 +338,21 @@ after such a kill the analysis is on disk and only later edits are lost.</p>
 <p>If a call crashes inside the IDA SDK (SIGSEGV/SIGBUS), ida-mcp returns an error
 for that call (a top-level error even from batch tools that normally report
 per-item failures) and then stops using that database state: the database is closed
-without saving, so changes since the last <code>save_idb</code> are lost, and pooled or
-workspace child workers are replaced. Call <code>open_idb</code> again to continue.</p>
-<p>The default stdio server and single-worker HTTP host IDA in the server process
-itself, so after a crash they keep running in a process whose native state may
-be damaged. Pooled HTTP (<code>--max-workers N</code>) and <code>--workspace</code> run IDA in child
-processes that are killed and replaced instead.</p>
+without saving, so changes since the last <code>save_idb</code> are lost, and the child
+worker is replaced (stdio, HTTP, and <code>--workspace</code>). Call
+<code>open_idb</code> again to continue.</p>
+<p>The default stdio and HTTP servers run IDA in one supervised child process (the same
+binary in <code>worker</code> mode), as pooled HTTP (<code>--max-workers N</code>) and <code>--workspace</code>
+do. A call that overruns its <code>timeout_secs</code> (or the 1800 s operation watchdog,
+<code>--workspace-worker-op-timeout-secs</code> for stdio, <code>--worker-op-timeout-secs</code> for
+HTTP) kills that child and returns a timeout:
+the database is then no longer open, changes since the last <code>save_idb</code> are
+lost, and the next <code>open_idb</code> gets a fresh worker. If its replacement is still
+starting, that open waits for startup, bounded to 30 seconds. This is what makes a
+native IDA call that never returns recoverable; nothing can interrupt it in
+place. On shared HTTP, cancelling a request or disconnecting stops that
+client's wait; an already dispatched call continues under its watchdog so
+other clients keep their database and unsaved edits.</p>
 <h3>Removed tools</h3>
 <table>
 <thead>
@@ -368,7 +393,7 @@ reconnected over stateless HTTP, can use it to find an open database again
 instead of leaving it stranded until the idle timeout. It is read-only and only
 appears when the server runs with <code>--workspace</code>.</p>
 <h3>HTTP/SSE worker pool</h3>
-<p><code>serve-http</code> runs one in-process IDA worker by default. To serve several
+<p><code>serve-http</code> shares one supervised IDA child by default. To serve several
 stateful HTTP/SSE clients at once, set <code>--max-workers</code> above <code>1</code>. Each session
 then gets its own child <code>ida-mcp worker</code> process:</p>
 <pre><code class="language-bash">ida-mcp serve-http --bind 127.0.0.1:8765 --max-workers 4 --min-workers 1
@@ -480,7 +505,7 @@ without changing the database.</li>
 <p><code>--read-only</code> removes <code>lumina_apply</code> but keeps <code>lumina_lookup</code>, since a lookup
 doesn't modify the database.</p>
 <h2>Context optimization</h2>
-<p>By default <code>tools/list</code> returns 71 tools. The full tool list is roughly 12k
+<p>By default <code>tools/list</code> returns 74 tools. The full tool list is roughly 14k
 tokens, estimated at four characters per token. Seven more are opt-in: the six
 debugger tools and <code>list_databases</code> appear only with
 <code>--enable-debugger</code> or <code>--workspace</code>. Clients with dynamic tool discovery defer
@@ -520,7 +545,7 @@ surface to what you need:</p>
 <td>Strips mutating/arbitrary-code tools (<code>run_script</code>, <code>save_idb</code>, <code>patch*</code>, <code>rename</code>, <code>set_comments</code>, <code>lumina_apply</code>, type/stack edits, <code>dsc_add_*</code>, <code>analyze_funcs</code>, and debugger process control); keeps lifecycle/discovery</td>
 </tr>
 </tbody></table>
-<p>With no flags you get all 71 baseline tools (51.9 KB of schemas). Categories: <code>core</code>, <code>functions</code>,
+<p>With no flags you get all 74 baseline tools (57.2 KB of schemas). Categories: <code>core</code>, <code>functions</code>,
 <code>disassembly</code>, <code>decompile</code>, <code>xrefs</code>, <code>control_flow</code>, <code>memory</code>, <code>search</code>,
 <code>metadata</code>, <code>types</code>, <code>editing</code>, <code>scripting</code>; <code>debug</code> exists only when the
 debugger is enabled on a supported platform (run <code>tool_catalog</code> to list them).
@@ -538,7 +563,7 @@ everything else. <code>tool_catalog</code>/<code>tool_help</code> are left out b
 are already advertised; the server instructions adapt to whatever is enabled.
 The profile composes with the other flags: <code>--tools</code> adds to it,
 <code>--exclude-tools</code> and <code>--read-only</code> subtract (<code>--profile=lean --read-only</code> is
-21 tools, 21.8 KB). The default stays the full set for compatibility; the
+21 tools, 21.9 KB). The default stays the full set for compatibility; the
 profile is the measured recommendation for Claude Code (below).</p>
 <pre><code class="language-bash">ida-mcp --profile=lean
 </code></pre>
@@ -557,7 +582,7 @@ request. No other client was measured.</p>
 <li><strong>Codex CLI:</strong> current models with tool search defer MCP tools automatically. For models without tool search, or to limit what the agent can do, pick a focused subset:<pre><code class="language-bash">ida-mcp --toolsets=core,functions,disassembly,decompile,xrefs
 </code></pre>
 </li>
-<li><strong>Clients without lazy tool loading:</strong> every session receives the full tool list, estimated at ~12k tokens. Pick a focused subset as shown above.</li>
+<li><strong>Clients without lazy tool loading:</strong> every session receives the full tool list, estimated at ~14k tokens. Pick a focused subset as shown above.</li>
 <li><strong>Gemini CLI:</strong> filtering is optional, but a smaller surface cuts down on wrong tool picks when several MCP servers are enabled:<pre><code class="language-bash">ida-mcp --toolsets=core,functions,disassembly,decompile --read-only
 </code></pre>
 </li>

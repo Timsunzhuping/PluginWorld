@@ -1,0 +1,132 @@
+<h1>diff-intake</h1>
+<p>Follow this skill step by step.
+You are step 1 of the analytics instrumentation workflow. Produce a compact
+YAML change brief that downstream skills (discover-event-surfaces,
+instrument-events) will consume. Keep the output machine-readable and
+precise — no prose around the YAML block.</p>
+<h2>Step 1: Gather changed files and categorize</h2>
+<p>Fetch the list of changed files from the source, then categorize each one.</p>
+<h3>Fetching changes</h3>
+<ul>
+<li><strong>PR URL</strong>
+<code>gh pr view &lt;number-or-url&gt;</code>
+<code>gh pr view &lt;pr-number&gt; --json files --jq '.files[] | "\(.path)\t+\(.additions) -\(.deletions)\t"'</code></li>
+<li><strong>Branch comparison</strong>
+<code>git log &lt;main|master&gt;..&lt;branch&gt;</code>
+<code>git diff --stat &lt;main|master&gt;..&lt;branch&gt;</code></li>
+<li><strong>Ambiguous mention</strong> (PR number, branch name): infer the right form and fetch without asking unless auth fails.</li>
+</ul>
+<h3>Categorize files</h3>
+<p>Assign each file to a category based on its path:</p>
+<ul>
+<li><strong>Core Logic</strong>: application source (e.g. src/auth/login.py, database/models.ts)</li>
+<li><strong>Generated</strong>: anything with <code>generated</code> in its path</li>
+<li><strong>Testing</strong>: test files</li>
+<li><strong>Config / Dependencies</strong>: package.json, docker-compose.yml, etc.</li>
+<li><strong>Documentation</strong>: READMEs, docs/</li>
+<li><strong>Noise</strong>: lock-files, .svg, auto-generated migrations</li>
+</ul>
+<p>For each file, record: path, category, change type (Added / Modified / Deleted), and analytics likelihood (1–5).</p>
+<h2>Step 2: Build the file summary map</h2>
+<p>Read every single <strong>Core Logic</strong> file and create the file summary map.
+Only process and include <strong>Core Logic</strong> files.</p>
+<h3>Fetching detailed diffs</h3>
+<ul>
+<li><strong>PR</strong>
+<code>gh pr view &lt;number-or-url&gt; --json baseRefOid,headRefOid</code>
+Using the response, get a detailed diff
+<code>git diff &lt;baseRefOid&gt;...&lt;headRefOid&gt; -- &lt;file1&gt; &lt;file2&gt; &lt;file_n&gt;</code></li>
+<li><strong>Branch comparison</strong>
+<code>git diff main..feature/foo  -- &lt;file1&gt; &lt;file2&gt; &lt;file_n&gt;</code></li>
+</ul>
+<h3>For each file, record</h3>
+<ul>
+<li><code>summary</code> — 2-line summary of what changed</li>
+<li><code>stack</code> — frontend, backend, or shared</li>
+</ul>
+<h3>Also derive user-facing changes and touched surfaces</h3>
+<p>While reading the diff and the changed files, also produce the higher-level
+signals that downstream event discovery needs:</p>
+<ul>
+<li><code>user_facing_changes</code> — a flat list of concrete behavior changes that matter
+to a user, PM, or analyst. Each item should describe what a user can now do,
+see, or experience differently. Omit purely internal refactors.</li>
+<li><code>surfaces.components</code> — the UI components, routes, pages, handlers, or other
+interaction surfaces directly involved in those user-facing changes. Prefer
+likely instrumentation points over low-level helpers.</li>
+</ul>
+<p>For each surface, record:</p>
+<ul>
+<li><code>name</code> — component, route, page, hook, or surface name</li>
+<li><code>file</code> — repo-relative path</li>
+<li><code>change</code> — <code>added</code>, <code>modified</code>, or <code>deleted</code></li>
+</ul>
+<p>If the change is backend-only or has no clear interactive surface, omit
+<code>surfaces.components</code> rather than inventing one.</p>
+<h2>Step 3: Classify the overall change</h2>
+<p>Infer the change type and analytics scope:</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Analytics implication</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>feat</td>
+<td>High — new surfaces likely need tracking</td>
+</tr>
+<tr>
+<td>fix</td>
+<td>Low–Medium — may affect existing event conditions</td>
+</tr>
+<tr>
+<td>refactor</td>
+<td>Low — tracking paths may move, regression risk</td>
+</tr>
+<tr>
+<td>perf</td>
+<td>Low — usually no tracking impact</td>
+</tr>
+<tr>
+<td>revert</td>
+<td>Medium — need to check what tracking was lost</td>
+</tr>
+<tr>
+<td>style / docs / test / build / ci / chore</td>
+<td>None — skip analytics analysis</td>
+</tr>
+</tbody></table>
+<p><code>analytics_scope</code> = highest implication present:</p>
+<ul>
+<li><code>none</code> — only no-impact types</li>
+<li><code>low</code> — only perf/refactor</li>
+<li><code>medium</code> — fix</li>
+<li><code>high</code> — any feature or capability addition</li>
+</ul>
+<p>If <code>analytics_scope</code> is <code>none</code>, emit the brief and note that downstream skills are not needed.</p>
+<h2>Step 4: Emit the YAML brief</h2>
+<p>Output only the YAML block — no prose before or after. Follow the format exactly.
+List each file individually in file_summary_map (no globs).</p>
+<pre><code class="language-yaml">change_brief:
+  classification:
+    primary: feat           # dominant conventional commit type
+    types: [feat, fix]      # all types detected
+    analytics_scope: high   # none | low | medium | high
+    stack: frontend         # frontend | backend | fullstack
+  summary: "One sentence describing the overall change"
+  user_facing_changes:
+    - "Users can now upload an avatar with drag-and-drop and preview it before saving."
+  surfaces:
+    components:
+      - name: "AvatarUpload"
+        file: "src/components/AvatarUpload.tsx"
+        change: modified
+  file_summary_map:         # each entry includes a layer field
+    - file: "src/components/AvatarUpload.tsx"
+      summary: "New component for avatar upload with drag-and-drop and preview"
+      layer: frontend       # frontend | backend | shared
+    - file: "src/api/upload.ts"
+      summary: "Upload endpoint handler, validates file type and persists to S3"
+      layer: backend
+</code></pre>

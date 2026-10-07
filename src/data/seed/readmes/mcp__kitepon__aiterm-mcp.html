@@ -172,7 +172,7 @@ canonical dotagents config explicitly sets <code>collection.enabled: true</code>
 collection is off by default and performs no network I/O. It ships via
 tag-triggered CI with npm provenance (OIDC Trusted Publishing); the GitHub
 Release re-registers the Official MCP Registry entry.</p>
-<p><strong>Status:</strong> actively maintained · current public release <strong>v0.51.1</strong> · runs on Linux · WSL2 · macOS · native Windows (tmux on POSIX, the tmux-CLI-compatible <a href="https://github.com/psmux/psmux" target="_blank" rel="noopener noreferrer">psmux</a> on native Windows — no WSL required) · MIT · see the <a href="https://github.com/kitepon/aiterm-mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG</a>.</p>
+<p><strong>Status:</strong> actively maintained · current public release <strong>v0.57.2</strong> · runs on Linux · WSL2 · macOS · native Windows (tmux on POSIX, the tmux-CLI-compatible <a href="https://github.com/psmux/psmux" target="_blank" rel="noopener noreferrer">psmux</a> on native Windows — no WSL required) · MIT · see the <a href="https://github.com/kitepon/aiterm-mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG</a>.</p>
 <h3>Update and rollback</h3>
 <p>The npm package is the standalone distribution; dotagents is not involved. For a global install,
 update with <code>aiterm-update</code>. It reinstalls the requested version into the same npm prefix, then reruns the new version's
@@ -196,6 +196,7 @@ release and artifact rollback are specified in the product-owned <a href="https:
 <p>aiterm predates Build Week, so the event work is kept visible in dated commits. During the submission window (July 14–16, 2026), I extended it with safe serialized delivery for long PTY input, correlated operation IDs and bounded result recovery, machine-readable launch and idempotent close receipts, and a hardened readiness gate that prevents prompts from disappearing during TUI startup redraws. The public comparison from the pre-event release is <a href="https://github.com/kitepon/aiterm-mcp/compare/v0.12.2...main" target="_blank" rel="noopener noreferrer"><code>v0.12.2...main</code></a>.</p>
 <p>I used <strong>Codex with GPT-5.6</strong> as an engineering collaborator: it inspected the implementation, challenged the API and recovery contracts, generated focused regression cases, and helped verify race, security, timeout, and malformed-event paths. I reviewed the diffs and test evidence and retained the final product and architecture decisions. At that Build Week checkpoint, the regression suite contained 262 tests covering normal operation as well as failure and recovery behavior; current release receipts live in the <a href="https://github.com/kitepon/aiterm-mcp/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG</a> and release ADRs.</p>
 <p>ClaudeがAPIエラーや安全判定の拒否で終了した時は、Stop hookが発火しなくても次の<code>pty_send</code>を新しいturnとして扱う。現在のturn開始後のエラー記録だけを確認し、過去のエラーで実行中のturnを解除しない。上流の拒否はエラーのまま返す。</p>
+<p>Codexがサービスの誤りや通信の失敗でturnを打ち切った時は、完了待ちが<code>done</code>ではなく<code>error</code>を返す（<code>aiterm-wait</code>はexit 7、親への配送は<code>outcome=error</code>）。<code>error</code>は応答の本文とURLを落とした1行の文で、Codexが記録した種類（<code>internal_server_error</code>・<code>http_connection_failed</code>など）は<code>error_kind</code>に載る。利用上限は今までどおり<code>rate_limited</code>。誤りで終わった後の席は、次の<code>pty_send</code>を新しいturnとして受ける。</p>
 <h2>Two ways to use it</h2>
 <h3>1. Drive SSH, containers, and REPLs in one persistent terminal — the primitive</h3>
 <p>This is the base, and it works with just the platform backend — tmux on POSIX or psmux on native Windows. <code>pty_open</code> grabs one local terminal; <code>ssh host</code>, <code>docker exec -it x bash</code>, or a REPL are just text you <code>pty_send</code> into it — <strong>once</strong>. Every command after that rides the same already-authenticated session. Session kind is never a tool-level distinction.</p>
@@ -208,6 +209,9 @@ pty_read(id, { wait: true })       → read the token-reduced output, completion
 <h3>2. Launch other coding agents into that terminal — the orchestration flagship</h3>
 <p>The same primitive hosts another agent's TUI. <code>agent_launch</code> starts a selected execution harness inside a fresh persistent terminal and returns a <code>session_id</code>. <code>harness</code> names the component that owns the agent loop, authentication, hooks, session, and transcript; <code>model</code> remains an independent choice. The launched process sees the same project and user environment as a direct CLI invocation: normal configuration, MCPs, plugins, skills, permissions, trust decisions, memory, and history are not copied, filtered, or replaced. Aiterm adds only completion correlation and a non-user sub-agent context containing <code>role=subagent</code>, the parent session, delegation depth, lineage, and <code>delegation_allowed=true</code>.</p>
 <p>起動結果には正規<code>harness</code>を含む<code>aiterm.agent-launch-result.v1</code>が付き、旧<code>provider</code>は互換fieldとして残る。同じ<code>harness</code>はagent dispatch、<code>aiterm-wait</code>、<code>agent_configure</code>、<code>pty_list</code>にも載る。Codexは通常rollout、Grokは通常session event、Claudeはlaunch固有Stop hook、Cursorは通常agent transcriptの<code>turn_ended</code>を完了正本に使う。agentへの送信は<code>pty_send</code>だけで行い、Aitermが送る時点で子の状態を見て振り分ける。Claudeは画面の実行中表示ではなくStopまで残るturnの印で判定する。実行中のturnへは差し込み（<code>mode=agent_steer</code>、新しい<code>event_cursor</code>と配送は作らない）、それ以外は非ブロックdispatch（<code>mode=agent_dispatch</code>）で、harnessごとの完了境界を表す整数<code>event_cursor</code>を返す。Codex親は選択に応じて公式Steerまたはqueue、Claude Code親は公式非同期hookで本文を自動受信する。他の親は<a href="#completion-push-for-parent-agents-aiterm-wait" target="_blank" rel="noopener noreferrer"><code>aiterm-wait</code></a>を使う。CursorのsubmitはadapterがCLIのextended keyboard protocolへ変換し、送信本文がcomposerへ残る場合は明示errorにする。</p>
+<p>Set <code>require_agent:true</code> on <code>pty_send</code> when the integration requires agent delivery. If the agent registration is missing, Aiterm refuses before sending any text and returns <code>AGENT_SESSION_REQUIRED</code> with an explicit unsent message. The default preserves ordinary PTY sends; combining it with <code>force:true</code> is rejected before sending.</p>
+<p><code>pty_send</code> to an agent session accepts an optional <code>preface</code>: one line placed before the text, so the message reads "<code>preface</code>, blank line, <code>text</code>". For a Claude Code session Aiterm enters the <code>preface</code> without the terminal's paste markers and pastes the blank line and the text in one paste. Claude Code wraps long pasted text in <code>&lt;pasted_content&gt;</code> and follows instructions inside it only where the user's own words outside the tags ask it to, so this keeps an integration's header (who the message is from) outside the wrapper. For Codex, Grok and Cursor sessions the three parts are joined and pasted as before. The <code>preface</code> must be a single line of at most 200 characters with no control characters, must not start with a symbol or whitespace, and must not contain <code>@</code>; otherwise Aiterm returns <code>AGENT_PREFACE_INVALID</code> and "文字列は送信していません。" before sending anything. It cannot be used with ordinary PTY sends, <code>force:true</code>, or <code>remote</code>.</p>
+<p>Overlapping <code>pty_send</code> calls to the same agent session are handled one at a time. A later call picks its route only after the earlier one has been sent, so the result matches calls made in sequence (a call that overlaps the first send to a freshly started Claude Code session returns <code>mode=agent_steer</code>). It returns later by however long the earlier call waits for the session to accept input. If its turn does not come within the limit (60 seconds on POSIX, 180 seconds on Windows), Aiterm refuses before sending any text and returns <code>AGENT_SEND_BUSY</code> with an explicit unsent message. A lock left by a process that exited mid-send is cleared by the next send.</p>
 <p><code>agent_launch</code> and <code>pty_send</code> (to an agent session) accept an optional <code>image</code>: an array of absolute paths to image files (png/jpg/jpeg/gif/webp). Aiterm appends an attachment block to the prompt, and every harness opens the path with its own file-reading tool and sees the image; the caller never learns harness-specific attachment tricks. Invalid paths are rejected before anything is sent.</p>
 <p><code>agent_launch</code> accepts an optional <code>write_scope</code>: either <code>"read-only"</code> or a human-readable description of writable paths. Codex/Grok use <code>--sandbox read-only</code>; Cursor uses its official read-only <code>--mode ask</code>. A path description remains declaration-only because these CLI launch surfaces provide no equivalent path allowlist flag.</p>
 <p>Grokの無人起動は公式<code>--trust</code>で指定された作業フォルダを信頼登録し、確認画面を完了してから初回promptを送る。この登録はGrok CLIの信頼ストアへ保存され、フォルダ内のhook・MCP・LSPにも適用される。read-only sandboxの制限は維持する。画面に残る完了済みhookの結果は実行中と判定しない。</p>
@@ -335,7 +339,10 @@ pty_read("t1", { wait: true })      → "hello"   (token-reduced, completion det
 pty_close("t1")                     → terminal released
 </code></pre>
 <p><code>pty_close</code> is idempotent and returns a structured <code>closed</code> / <code>already_closed</code>
-receipt, so durable callers can retry the same <code>session_id</code> after losing the MCP response.</p>
+receipt, so durable callers can retry the same <code>session_id</code> after losing the MCP response.
+On Windows, closing a Claude Code session first asks Claude Code to exit on its own (Ctrl-C twice, then a wait of up to 4 seconds)
+so that its <code>SessionEnd</code> hooks run; psmux stops a session without the hangup signal that tmux sends on POSIX. The session is stopped
+afterwards either way.</p>
 <p>That's it. The terminal in <code>t1</code> is real and persistent — <code>ssh</code>, <code>docker exec</code>, a REPL, or a launched agent's TUI are just things that live inside it. To launch a worker agent instead, one call does it: <code>agent_launch({ harness: "codex-cli" })</code> returns a <code>session_id</code> you drive with the same <code>pty_read</code> / <code>pty_send</code>.</p>
 <p><strong>Prefer a global install, or a different client?</strong></p>
 <pre><code class="language-bash"># install globally, then register the command name
@@ -511,10 +518,20 @@ processes in the session that did not exist when <code>agent_launch</code> finis
 started in the first minute is counted too. Two kinds of process are not counted: Codex's own <code>codex-code-mode-host</code> helper, and
 the direct children of an <code>mcp-lazy</code> relay (the MCP server it starts on first use and its wake predicate). What runs below them
 is counted. A startup process that the harness restarted (a process with the same parent and the same arguments as a startup
-process that has exited, such as a reconnected MCP server) is not counted either. <code>pending_child_deliveries</code>
+process that has exited, such as a reconnected MCP server) is not counted either, and neither are the processes Aiterm itself
+starts to read the process table (<code>ps</code>, or PowerShell and its console host on Windows). <code>pending_child_deliveries</code>
 is the number of sub-agent results this session is still waiting for as a parent, whoever the caller is. Both are null when
 Aiterm cannot tell (ordinary terminals, agents launched by 0.48.0 or earlier for the process count, or an unresolved harness
 process), and may be absent when a remote host runs an older Aiterm. Treat null or absent as unknown, not as zero.</p>
+<p>Another product that needs to deliver an answer to a Codex parent can ask Aiterm with <code>aiterm-parent-delivery</code> instead of registering its own hooks.
+Aiterm's registered hooks and the official queue deliver it. <code>codex verify --thread &lt;uuid&gt;</code> checks the parent and reports configuration in <code>steer</code>
+(<code>enabled</code>: the hooks are registered and trusted and the parent started after they were installed; <code>disabled</code>: official queue only, so the text arrives
+after the turn ends). <code>codex submit --thread &lt;uuid&gt; --delivery &lt;uuid&gt; --text-file &lt;file|-&gt;</code> hands the text over once and returns the queue's acceptance id.
+<code>codex state --thread &lt;uuid&gt; --delivery &lt;uuid&gt;</code> reports how it arrived (<code>hook:"emitted"</code> with <code>turn_id</code>: the hook put the text into that turn; <code>queued</code>:
+whether it is still in the official queue). Each result is one JSON line; failures are <code>{ok:false, code, message, outcome_unknown}</code> with exit 1, and a
+reused delivery id is refused with <code>PARENT_DELIVERY_DUPLICATE</code>. Only Codex parents are supported. <code>aiterm-setup</code> records the command's location in
+<code>~/.config/aiterm-mcp/delivery-provider.json</code>. Node products can call it through <code>aiterm-steer-delivery</code> (0.3.0 or later), for example
+<code>submitCodexParentAnswerViaAiterm</code>.</p>
 <p>When Aiterm is registered behind a relay that starts the MCP server only on first use, a sleeping server cannot take over the
 deliveries of an owner that has exited. <code>aiterm-delivery-wake --parent &lt;codex|claude|cursor&gt;</code> answers whether one needs to start:
 exit 0 when an exited owner still holds a delivery for that parent kind, exit 1 otherwise, exit 2 for bad arguments. It prints
@@ -523,6 +540,7 @@ nothing, starts no child process, and marks the delivery so that only one of the
 same environment as the server:
 <code>MCP_LAZY_WAKE_COMMAND='["/absolute/path/to/node","/absolute/path/to/aiterm-mcp/dist/delivery-wake-cli.js","--parent","claude"]'</code>.
 Owner start times are checked through <code>/proc</code> on Linux; elsewhere an existing PID is treated as a live owner.</p>
+<p><code>aiterm-setup</code> does not rewrite a registration that wraps the same server in the <code>mcp-lazy</code> relay. When the registered command is an executable whose name starts with <code>mcp-lazy</code> and its args are the direct registration's command followed by its args (relay flags before <code>--</code> are allowed), the Claude Code, Codex, Grok, and Cursor registrations are left as they are. If the wrapped server path differs, setup writes the direct registration.</p>
 <p><code>agent_launch({ harness, cwd, trust_project: true })</code> completes known workspace, project-hook, and project-MCP startup
 consent even without a prompt, then verifies input readiness and harness liveness before returning <code>startup.status="ready"</code>.
 For Claude Code's first-run text-style menu, it confirms the item already selected on screen before continuing startup.
@@ -532,7 +550,10 @@ waits up to 50 seconds from startup. If nothing is drawn by then, it still retur
 A prompt-free launch without this option retains <code>startup.status="not_checked"</code>. <code>initial_prompt.status</code> distinguishes
 <code>not_requested</code>, <code>not_sent</code>, <code>submitted_unconfirmed</code>, and <code>started</code>. Failure responses retain structured session information.
 WindowsのCodexもhook確認を認識し、npm shim経由の起動を一つのharnessとして識別する。
-Do not resend an unconfirmed prompt; observe or wait using its returned cursor.</p>
+<code>submitted_unconfirmed</code> (the prompt left the composer, but the turn start was not observed within the confirmation window) is
+not a tool error: <code>isError</code> is not set, the text carries an unconfirmed-start note, the session is alive and the parent
+delivery stays registered. Do not resend an unconfirmed prompt or relaunch the agent; observe with <code>pty_observe</code> or wait
+using its returned cursor.</p>
 <p>For a live Codex approval, inspect with <code>agent_approval({ action: "inspect", session_id })</code>, review <code>prompt</code> and <code>choices</code>,
 then respond with <code>observed_prompt_digest</code> and <code>approval_choice</code> (<code>approve_once</code> or <code>deny</code>). Unknown or changed dialogs return
 <code>status="blocked"</code> and <code>isError:true</code> without sending input. Permanent approval is not exposed. Correlated Claude approvals
@@ -553,7 +574,7 @@ continue to use <code>claude_approval</code>.</p>
 <tr>
 <td><code>pty_send</code></td>
 <td>Send text. On an agent session Aiterm picks the route when it sends: if the child's turn is running, it steers the text into that turn (<code>agent_steer</code>); otherwise it is a non-blocking <strong>dispatch</strong> returning an <code>event_cursor</code> (<code>agent_dispatch</code>). Steering fails when Grok does not queue the text or Cursor leaves it in the composer</td>
-<td><code>session_id</code>, <code>text</code>, <code>enter=true</code>, <code>mark</code>, <code>force</code>, <code>rtk</code>, <code>raw</code></td>
+<td><code>session_id</code>, <code>text</code>, <code>enter=true</code>, <code>mark</code>, <code>force</code>, <code>require_agent=false</code>, <code>preface</code>, <code>rtk</code>, <code>raw</code></td>
 </tr>
 <tr>
 <td><code>pty_read</code></td>
@@ -588,7 +609,7 @@ continue to use <code>claude_approval</code>.</p>
 <tr>
 <td><code>agent_auth</code></td>
 <td>公式CLIの認証を開始・確認・取消し、公式URL・device code・入力待ちを返す</td>
-<td><code>harness</code>, <code>action</code>, <code>session_id?</code>, <code>cwd?</code>, <code>env_vars?</code></td>
+<td><code>harness</code>, <code>action</code>, <code>session_id?</code>, <code>cwd?</code>, <code>env_vars?</code>, <code>relogin?</code></td>
 </tr>
 <tr>
 <td><code>agent_models</code></td>
@@ -646,7 +667,38 @@ enables collection on that host.</p>
 <h3>Interactive agent harnesses</h3>
 <p><code>agent_launch</code> starts a selected harness's interactive coding-agent TUI inside a fresh persistent PTY and returns its <code>session_id</code>. The harness owns the agent loop, authentication, hooks, session, and transcript; <code>model</code> is independent. The TUI is a full-screen app, so read it with <code>pty_read({ screen: true })</code> for the rendered view.</p>
 <p><code>agent_configure({ session_id, model?, reasoning_effort? })</code> changes a running Claude, Codex, Grok, or Cursor TUI through the harness's standard controls, preserving the PTY and conversation context.</p>
-<p><code>agent_auth({ harness, action:"start"|"status"|"cancel", session_id?, cwd?, env_vars? })</code>は、各harnessの公式CLIで認証を進める。Claudeは<code>claude auth login</code>、CodexとGrokは<code>login --device-auth</code>、Cursorは<code>NO_OPEN_BROWSER=1 cursor-agent login</code>を使い、資格情報は各CLIだけが保存する。Aitermは資格情報を読取り・copy・編集せず、独自OAuthも実装しない。<code>remote</code>は他toolと同じ標準対応。</p>
+<p><code>agent_auth({ harness, action:"start"|"status"|"cancel", session_id?, cwd?, env_vars?, relogin? })</code>は、各harnessの公式CLIで認証を進める。Claudeは<code>claude auth login</code>、CodexとGrokは<code>login --device-auth</code>、Cursorは<code>NO_OPEN_BROWSER=1 cursor-agent login</code>を使い、資格情報は各CLIだけが保存する。Aitermは資格情報を読取り・copy・編集せず、独自OAuthも実装しない。<code>remote</code>は他toolと同じ標準対応。</p>
+<p><code>start</code>は、公式の状態が認証済みなら何も起こさず<code>authenticated</code>（<code>session_id:null</code>）を返す。<code>relogin:true</code>を付けると、認証済みに見えても公式ログインを開始し、<code>session_id</code>付きの結果を返す。別のアカウントへ入り直す時と、ログインの期限切れを状態から見抜けない時に使う。Aitermは資格情報を消さず、置き換えは公式CLIが行う。ただし、公式CLIがログインを始めた時点で元のログインを消す事がある（Codex 0.160.0の<code>codex login --device-auth</code>は、始めた時点で<code>auth.json</code>を消す。途中で<code>cancel</code>しても戻らない）。Claude CodeとCursorは、途中で<code>cancel</code>すれば元の資格情報が残る（無効な資格情報で確認）。</p>
+<p><code>status</code>（sessionなし）は、公式CLIに今の状態を聞く。</p>
+<table>
+<thead>
+<tr>
+<th>harness</th>
+<th>聞き方</th>
+<th>期限が切れたログイン</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Codex</td>
+<td><code>codex login status</code>が「Logged in」の時、公式App Serverの<code>getAuthStatus</code>→<code>account/read</code></td>
+<td><code>blocked</code>（<code>account</code>が<code>null</code>）。<code>codex login status</code>だけでは「Logged in」のままで見抜けない</td>
+</tr>
+<tr>
+<td>Claude Code</td>
+<td><code>claude auth status --json</code></td>
+<td><strong>見抜けない</strong>（公式の答えが<code>loggedIn:true</code>のまま）。起動は通り、最初のturnが認証の誤りで終わる</td>
+</tr>
+<tr>
+<td>Grok</td>
+<td><code>grok models</code>（状態の命令は無い）</td>
+<td><code>blocked</code>（<code>You are not authenticated.</code>）。Grokは使えない資格情報を自分で消す</td>
+</tr>
+<tr>
+<td>Cursor</td>
+<td><code>cursor-agent status</code></td>
+<td><code>failed</code>（<code>Logged in (unable to fetch user details)</code>。期限切れか通信できないかは区別できない）。<code>relogin:true</code>で入り直す</td>
+</tr>
+</tbody></table>
 <p>結果は<code>aiterm.agent-auth-result.v1</code>。<code>status</code>は<code>waiting</code>／<code>authenticated</code>／<code>blocked</code>／<code>failed</code>、<code>session_id</code>・<code>url</code>・<code>user_code</code>・<code>input_required</code>・<code>message</code>を返す。<code>start</code>のsession IDを保存して<code>status</code>へ渡す。公式HTTPS URLと明示device codeだけを返し、CLIの生出力・token・OAuth callback codeを結果へ載せない。<code>input_required:true</code>なら同じsessionの<code>pty_read(screen:true)</code>で公式画面を表示し、<code>pty_send</code>／<code>pty_key</code>で人の入力を中継する。</p>
 <p>Grokには公式認証status commandが無いため、session付きの確認は公式loginのexit 0を正本にし、session無しの確認は<code>blocked</code>を返す。他harnessは公式statusも照合する。Claudeは認証後の公式初回案内を同じsessionで進め、選択待ちは<code>blocked</code>／<code>input_required:true</code>で返す。<code>authenticated</code>は認証結果であり、<code>agent_launch</code>の起動準備完了は別途確認する。<code>cancel</code>は指定した認証sessionだけを閉じ、資格情報を削除しない。</p>
 <p>PTYが消失した場合は、相関記録の有無にかかわらず<code>status</code>が<code>failed</code>、<code>cancel</code>が既に終了・取消済みを示す<code>blocked</code>を返し、どちらも<code>session_id:null</code>となる。保存したsession IDを解除して<code>start</code>で再開始できる。生存中の通常PTYやharness不一致、記録の破損・読取り失敗はエラーを返す。</p>
@@ -719,7 +771,7 @@ cannot be combined with <code>launch_operation_id</code>, and leaves the source 
 unchanged. Optional <code>throughline_supplement_file</code> is passed unchanged to Throughline and requires
 <code>throughline_source_session</code> and Throughline 0.10.8 or later; Aiterm does not read or classify the supplement. Throughline is resolved through <code>THROUGHLINE_BIN</code> and then <code>PATH</code>; a missing or invalid
 export fails before the PTY exists instead of silently launching clean.</p>
-<p>When an agent's answer is longer than the on-screen tail (pane height ≈ 24 lines), callers recover it in full with <code>pty_read({ agent_transcript: true })</code>. It returns the most recently completed turn's final assistant message in plain text with no re-prompting. The existing human-readable content keeps its diagnostic suffix; machine callers read the answer alone from <code>structuredContent.text</code> in <code>aiterm.pty-read-result.v1</code>. Claude reads the bounded owner-only result captured by the launch-correlated Stop hook and verifies its digest/byte count; it never reads Claude's private transcript. Durable machine callers should use <code>claude_turn</code>: <code>issue</code> sends once, <code>recover</code> never sends, <code>pending</code> is distinct from unsafe or malformed state, and only <code>completed</code> carries the exact verified <code>raw_output</code>. Codex uses the normal rollout transcript's <code>task_complete.turn_id</code>; Grok returns the last non-empty assistant message after the last real user row, excluding tool-use preambles; Cursor uses the normal agent transcript bound to the launch ID and current turn. Missing or ambiguous attribution remains an explicit error.</p>
+<p>When an agent's answer is longer than the on-screen tail (pane height ≈ 24 lines), callers recover it in full with <code>pty_read({ agent_transcript: true })</code>. It returns the most recently completed turn's final assistant message in plain text with no re-prompting. The existing human-readable content keeps its diagnostic suffix; machine callers read the answer alone from <code>structuredContent.text</code> in <code>aiterm.pty-read-result.v1</code>. Claude reads the bounded owner-only result captured by the launch-correlated Stop hook and verifies its digest/byte count; it never reads Claude's private transcript. Durable machine callers should use <code>claude_turn</code>: <code>issue</code> sends once, <code>recover</code> never sends, <code>pending</code> is distinct from unsafe or malformed state, and only <code>completed</code> carries the exact verified <code>raw_output</code>. Codex uses the normal rollout transcript's <code>task_complete.turn_id</code>; Grok returns the last non-empty assistant message after the last real user row, excluding tool-use preambles; Cursor uses the normal agent transcript bound to the launch ID and current turn. A turn that completed with an empty answer is not an error: <code>text</code> is the empty string and <code>answer_empty</code> is <code>true</code>, so callers can tell it apart from an answer that could not be read. Missing or ambiguous attribution, including an answer that cannot be located in the record, remains an explicit error.</p>
 <h3>Completion detection (5 layers)</h3>
 <p>For PowerShell over SSH, <code>mark:true</code> recognizes the current standard <code>PS ...&gt;</code> prompt and emits PowerShell syntax even when Aiterm runs on macOS or Linux. A prompt left in earlier output is not used to select the syntax.</p>
 <p><code>pty_read({ wait: true })</code> decides "is the command done?" via five layers: process exit / a <code>mark:true</code> sentinel / an <code>until</code> match / output quiescence with shell return / timeout. <code>mark</code> emits the shell's exit status on POSIX shells and <code>0</code> (success) or <code>1</code> (failure) on PowerShell; fish/csh/tcsh are rejected before send because they do not share either status syntax. When <code>mark</code> or <code>until</code> is active, that requested evidence takes precedence and a momentarily quiet shell cannot complete the read as quiescent. Agent sessions add a sixth exact layer: Codex observes normal rollout <code>task_complete</code>; Grok observes normal session <code>turn_ended</code>; Claude observes its additive launch-correlated Stop event; Cursor observes <code>turn_ended(status:"success")</code> in the launch-bound normal agent transcript. <code>aiterm-wait --cursor</code> performs that harness-specific observation without the parent blocking or polling. Pre-send readiness failures are MCP errors, and late completion remains recoverable without resending.</p>
@@ -729,7 +781,7 @@ export fails before the PTY exists instead of silently launching clean.</p>
 <p>For queue delivery, use a Codex runtime that supplies MCP <code>_meta.threadId</code> and the official <code>thread/queue</code> API (verified with Codex CLI 0.154.0). <code>aiterm-setup</code> checks the installed queue entry point; Aiterm verifies the requesting thread before each dispatch. Codex native sub-agents reject external queue input and cannot be automatic-delivery parents. Steer相当の選択時も公式キューへ投入し、専用hookが同一ターンへ取り込みます。</p>
 <p>Claude Codeは2.1.259以上の対話sessionに対応する。<code>aiterm-setup</code>が専用の<code>PreToolUse</code>、<code>PostToolUse</code>、<code>SessionEnd</code>を登録するため、Channelsの起動flagは不要。公式<code>asyncRewake</code> hookだけが裏で待ち、親はその間も次のturnへ進める。回答は<code>Stop hook feedback</code>として届く。hookのexit 2は親の再開信号であり、子の成功・失敗は本文の<code>outcome</code>で区別する。</p>
 <p><code>/clear</code>等の会話終了後は未送信の旧回答を送らず、本文を保存する。受信hookの上限は24時間。hookの終了・出力失敗・無効化を成功扱いせず、別の待機経路へ黙って切り替えない。Claude Desktopのチャット、Web、<code>agent_id</code>付きの会話（<code>--agent</code>起動とnative subagent）はこの受信契約に含めない。</p>
-<p>hookを持たない旧版へ戻す時は、install前に<code>aiterm-setup --remove-claude-parent-hooks</code>を実行する。Aiterm専用hookだけを解除し、他製品のhookと設定は保持する。</p>
+<p>hookを持たない旧版、または0.52.2以前へ戻す時は、install前に<code>aiterm-setup --remove-claude-parent-hooks</code>を実行する。Aiterm専用hookだけを解除し、他製品のhookと設定は保持する。</p>
 <p>Cursor parents (<code>clientInfo.name</code> of <code>cursor-vscode</code>) use the same completion capture. <code>aiterm-setup</code> adds <code>afterMCPExecution</code> and <code>postToolUse</code> to <code>~/.cursor/hooks.json</code> and keeps every other hook and its position. A missing registration fails the dispatch with <code>CURSOR_PARENT_HOOK_UNAVAILABLE</code> before the child is sent. While the parent keeps calling tools, the answer is injected through <code>additional_context</code> on the next tool result. If the parent ends the turn, start the receipt <code>wait_process</code> in the background first; that receiver exits when the answer arrives. <code>wait_command</code> is null. <code>submitted</code> means the hook or the receiver claimed the text, not that the model has read it. No claim within 24 hours is <code>failed</code>, the text is kept, and nothing is resent. Remove only Aiterm's entries with <code>aiterm-setup --remove-cursor-parent-hooks</code>. Cursor Cloud Agents and Background Agents are outside this contract.</p>
 <p>Claudeをリンク経由の<code>cwd</code>から起動した場合も、実体パスに対応する会話記録を参照する。</p>
 <p><strong>For other parent hosts</strong>, dispatch and start the receipt's waiter in a separate process:</p>

@@ -77,7 +77,7 @@
 <td>references/enterprise-sso.md</td>
 </tr>
 <tr>
-<td>Next.js adaptations for orgs (role/permission middleware, slug invariants, orgId-scoped writes)</td>
+<td>Next.js adaptations for orgs (per-page role/permission checks, slug invariants, orgId-scoped writes)</td>
 <td>references/nextjs-patterns.md</td>
 </tr>
 </tbody></table>
@@ -220,9 +220,10 @@ if (!orgId) {
 app/orgs/[slug]/settings/page.tsx
 </code></pre>
 <p>Always verify the URL slug matches the active org slug — otherwise users can hit <code>/orgs/other-org/...</code> with a stale <code>orgSlug</code> in their session:</p>
-<pre><code class="language-typescript">export default async function OrgPage({ params }: { params: { slug: string } }) {
+<pre><code class="language-typescript">export default async function OrgPage({ params }: { params: Promise&lt;{ slug: string }&gt; }) {
+  const { slug } = await params
   const { orgSlug } = await auth()
-  if (orgSlug !== params.slug) {
+  if (orgSlug !== slug) {
     redirect('/dashboard')  // or whatever your "no-access" flow is
   }
   return &lt;div&gt;Welcome to {orgSlug}&lt;/div&gt;
@@ -235,11 +236,12 @@ if (!has({ role: 'org:admin' })) {
   return &lt;div&gt;Admin access required&lt;/div&gt;
 }
 </code></pre>
-<p>Permission checks use the same <code>has()</code> surface:</p>
-<pre><code class="language-typescript">if (!has({ permission: 'org:sys_memberships:manage' })) {
+<p>Permission checks use the same <code>has()</code> surface, for custom Permissions you create in the Dashboard:</p>
+<pre><code class="language-typescript">if (!has({ permission: 'org:invoices:create' })) {
   redirect('/unauthorized')
 }
 </code></pre>
+<p>On the server, <code>has({ permission })</code> works only with custom Permissions: System Permissions (<code>org:sys_*</code>) aren't in the session token, so checking one there always returns <code>false</code>. Clerk documents permission checks in <code>&lt;Show when={{ permission }}&gt;</code> for custom Permissions only. To require a System Permission, check a role that carries it (<code>has({ role: 'org:admin' })</code>).</p>
 <p><strong>Permission naming convention.</strong> System Permissions prefix with <code>org:sys_</code>; custom Permissions use <code>org:&lt;resource&gt;:&lt;action&gt;</code>. The full System Permissions catalog lives in <code>references/roles-permissions.md</code> — the short list is:</p>
 <ul>
 <li><code>org:sys_memberships:{read, manage}</code></li>
@@ -255,8 +257,8 @@ if (!has({ role: 'org:admin' })) {
   &lt;AdminPanel /&gt;
 &lt;/Show&gt;
 
-&lt;Show when={{ permission: 'org:sys_memberships:manage' }}&gt;
-  &lt;MembersTab /&gt;
+&lt;Show when={{ permission: 'org:invoices:create' }}&gt;
+  &lt;NewInvoiceButton /&gt;
 &lt;/Show&gt;
 </code></pre>
 <blockquote>
@@ -380,9 +382,9 @@ await clerk.organizations.updateOrganization(orgId, {
 <td>Enable in Dashboard → Organizations; check Membership mode; surface <code>&lt;OrganizationSwitcher /&gt;</code></td>
 </tr>
 <tr>
-<td><code>has({ permission: 'org:manage_members' })</code> always <code>false</code></td>
-<td>Using an invented permission slug</td>
-<td>Use <code>org:sys_memberships:manage</code> (see roles-permissions.md catalog)</td>
+<td><code>has({ permission: ... })</code> always <code>false</code></td>
+<td>An invented slug (<code>org:manage_members</code>), or a System Permission (<code>org:sys_*</code>), which <code>has()</code> can't check</td>
+<td>Check the role (<code>has({ role: 'org:admin' })</code>) or a custom Permission created in the Dashboard (see roles-permissions.md)</td>
 </tr>
 <tr>
 <td><code>has({ role })</code> returns <code>false</code> but user looks like an admin</td>
@@ -415,31 +417,34 @@ await clerk.organizations.updateOrganization(orgId, {
 <pre><code class="language-typescript">import { auth } from '@clerk/nextjs/server'
 import { redirect } from 'next/navigation'
 
-export default async function AdminPage({ params }: { params: { slug: string } }) {
+export default async function AdminPage({ params }: { params: Promise&lt;{ slug: string }&gt; }) {
+  const { slug } = await params
   const { orgSlug, has } = await auth()
 
-  if (orgSlug !== params.slug) redirect('/dashboard')
+  if (orgSlug !== slug) redirect('/dashboard')
   if (!has({ role: 'org:admin' })) redirect(`/orgs/${orgSlug}`)
 
   return &lt;div&gt;Admin settings for {orgSlug}&lt;/div&gt;
 }
 </code></pre>
-<p>For middleware-level protection (Next.js) see <code>references/nextjs-patterns.md</code>.</p>
+<p>For per-page role and permission checks with <code>auth.protect()</code> (Next.js) see <code>references/nextjs-patterns.md</code>.</p>
 <h2>Invitations (short form)</h2>
 <p>Send from a server action or route handler:</p>
 <pre><code class="language-typescript">import { clerkClient, auth } from '@clerk/nextjs/server'
 
-export async function inviteMember(organizationId: string, emailAddress: string, role: string) {
-  const { userId, has } = await auth()
+export async function inviteMember(emailAddress: string, role: string) {
+  const { userId, orgId, has } = await auth()
 
-  if (!userId) throw new Error('Not signed in')
-  if (!has({ permission: 'org:sys_memberships:manage' })) {
+  if (!userId || !orgId) throw new Error('No active organization')
+  // Inviting needs the System Permission org:sys_memberships:manage, which
+  // has() can't check, so check a role that carries it.
+  if (!has({ role: 'org:admin' })) {
     throw new Error('Not authorized to invite members')
   }
 
   const clerk = await clerkClient()
   return clerk.organizations.createOrganizationInvitation({
-    organizationId,
+    organizationId: orgId,       // the active org that has() checked
     inviterUserId: userId,       // required per Backend API
     emailAddress,
     role,                        // e.g. 'org:admin' or 'org:member'
@@ -453,7 +458,7 @@ export async function inviteMember(organizationId: string, emailAddress: string,
 <li><strong>Enable</strong> — Organizations + Membership mode in Dashboard</li>
 <li><strong>Create org</strong> — via UI component or Backend API</li>
 <li><strong>Invite members</strong> — Backend API or built-in UI, with <code>inviterUserId</code></li>
-<li><strong>Gate access</strong> — <code>has({ role })</code> / <code>has({ permission })</code> with canonical <code>org:sys_*</code> names</li>
+<li><strong>Gate access</strong> — <code>has({ role })</code>, or <code>has({ permission })</code> with a custom Permission. <code>has()</code> can't check System Permissions (<code>org:sys_*</code>)</li>
 <li><strong>Scope routes</strong> — <code>orgSlug === params.slug</code> on every protected page</li>
 <li><strong>Switch orgs</strong> — <code>&lt;OrganizationSwitcher /&gt;</code> handles the whole flow</li>
 </ol>

@@ -1,0 +1,317 @@
+<h1>discover-event-surfaces</h1>
+<p>You are step 2 of the analytics instrumentation workflow. Read a <code>change_brief</code>
+YAML and produce an exhaustive candidate list of analytics events — named well,
+organized by category, and ready for PM review.</p>
+<p>Think like an engineer who ships the feature AND cares about whether it
+succeeds. Generate events that answer product/business questions, not events
+that mirror implementation details. Aim for <strong>breadth and quality</strong> — a
+downstream skill will narrow the list.</p>
+<p>Read the <code>taxonomy</code> skill at <code>../taxonomy/SKILL.md</code> to understand core
+analytics philosophy and naming standards.</p>
+<hr />
+<h2>1. Parse the change_brief</h2>
+<ul>
+<li><code>classification.analytics_scope</code> — if <code>none</code>, stop and tell the user there's nothing to instrument.</li>
+<li><code>summary</code> — one-line description of the change.</li>
+<li><code>user_facing_changes</code> — primary signal. Each entry = something a user can now do or see differently.</li>
+<li><code>surfaces.components</code> — modified UI components; where interactions happen.</li>
+<li><code>file_summary_map</code> — read summaries for files in <code>surfaces</code> or touching user-facing logic. Skip tests/config/tooling.</li>
+</ul>
+<h2>2. Scan the codebase and map user flows</h2>
+<p>Before generating any events, build a concrete understanding of how users move
+through the feature. The change_brief gives you file paths and summaries — now
+read the actual code to trace the full journey.</p>
+<h3>What to read</h3>
+<ul>
+<li>Every file listed in <code>surfaces.components</code> — read them fully.</li>
+<li>Files from <code>file_summary_map</code> that touch user-facing logic (skip tests, config,
+tooling).</li>
+<li>Follow imports and references one level out: if a component calls a hook, API
+function, or navigates to another route, read that target file too. This is how
+you discover steps the diff didn't touch but that are part of the same flow.</li>
+</ul>
+<h3>What to look for</h3>
+<p>Trace the path a user takes from entry to outcome:</p>
+<ul>
+<li><strong>Entry points</strong> — how does the user arrive? Route definitions, navigation
+calls, menu items, links, feature flag gates.</li>
+<li><strong>Interaction sequence</strong> — what does the user do step by step? Form fills,
+selections, confirmations, uploads. Look at handler wiring (<code>onClick</code>,
+<code>onSubmit</code>, <code>onChange</code>) and what state they mutate.</li>
+<li><strong>Async boundaries</strong> — API calls, mutations, server actions. These are where
+"attempted" becomes "succeeded" or "failed."</li>
+<li><strong>Terminal states</strong> — success confirmations, error handling, redirects,
+completion screens.</li>
+<li><strong>Branching paths</strong> — conditionals that route users to different outcomes
+(e.g., free vs paid, first-time vs returning).</li>
+</ul>
+<h3>Produce a funnel hypothesis</h3>
+<p>Synthesize what you found into one or more funnels — ordered sequences of user
+steps from entry to outcome. Each funnel should have:</p>
+<ul>
+<li>A descriptive name (e.g., "Property extraction flow", "Onboarding wizard")</li>
+<li>The ordered steps, each with the file and function/handler where it happens</li>
+<li>Which step is the <strong>start</strong> and which is the <strong>end</strong></li>
+</ul>
+<p>Not every change has a funnel. Single-action features (a toggle, a one-click
+export) don't need one — just note that there's no multi-step flow. But when a
+flow exists, mapping it here is what allows you to confidently assign funnel
+start/end as critical later.</p>
+<p>Keep the hypothesis grounded in code you actually read. Don't invent steps you
+didn't see evidence for.</p>
+<h2>3. Determine naming conventions and fetch existing events</h2>
+<p>Invoke <code>discover-analytics-patterns</code> and use its
+<code>event_naming_convention</code> and <code>property_naming_convention</code> outputs. That skill
+owns the naming-resolution procedure and precedence order. Do not redefine it
+here.</p>
+<p>Before generating candidates, pull the project's existing event taxonomy so you can
+avoid duplicates and match the naming convention already in use.</p>
+<h3>Resolve the project</h3>
+<p>If the change_brief includes an Amplitude <code>projectId</code>, use it directly. Otherwise,
+call <code>get_amplitude_context</code> to resolve the project name or ask the user which project to
+target. You need a <code>projectId</code> for the next call.</p>
+<h3>Pull existing events</h3>
+<p>Inspect the connected catalog and use its current taxonomy event reader with
+the resolved <code>projectId</code>. Follow only its advertised schema. When it supports
+caller attribution, identify this skill with the <code>name</code> from its YAML
+frontmatter. No cursor is needed—the first page is enough for pattern
+detection. Request the event name, category, and description fields when its
+schema supports field selection, then use the returned field names.</p>
+<h3>Build naming references and an existing event index</h3>
+<ol>
+<li><strong>Existing event index</strong> — Collect all <code>eventType</code> values into a set. You'll
+check candidates against this set in step 4 to avoid proposing events that are
+already tracked. An event is a duplicate if its semantic meaning matches an
+existing <code>eventType</code>, not just its exact string — e.g., if <code>Subscription Upgraded</code>
+exists, don't propose <code>Plan Upgraded</code> for the same action.</li>
+</ol>
+<h2>4. Generate candidate events</h2>
+<p>Start from the funnel hypothesis. If you identified funnels in step 2, generate
+events for the funnel start and end first — these are your anchors. Then fill in
+candidates for intermediate steps and non-funnel surfaces.</p>
+<p>For each <code>user_facing_change</code>, ask: <em>"If a user does this — what outcomes would a PM want to know about?"</em></p>
+<p>Generate from four categories (ordered by priority):</p>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>What it captures</th>
+<th>When to include</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>business_outcome</strong></td>
+<td>Revenue, retention, growth actions (purchases, subscription changes, conversion gates)</td>
+<td>Change touches monetization or retention surface</td>
+</tr>
+<tr>
+<td><strong>user_journey</strong></td>
+<td>Meaningful state transitions (workflow completed, feature activated, onboarding finished)</td>
+<td>Change introduces or alters a user journey step</td>
+</tr>
+<tr>
+<td><strong>feature_success</strong></td>
+<td>The "it worked" moment — confirmed outcome, not button click (document created, report generated)</td>
+<td>Any new or materially changed feature</td>
+</tr>
+<tr>
+<td><strong>friction_failure</strong></td>
+<td>Where users fail, get stuck, or give up (errors, empty states, abandonment)</td>
+<td>Complex multi-step interactions or error-prone flows</td>
+</tr>
+</tbody></table>
+<h3>Deduplicate against existing events</h3>
+<p>After generating candidates, check each one against the <strong>existing event index</strong>
+you built in step 3. For each candidate:</p>
+<ul>
+<li><strong>Exact match</strong> — the <code>eventType</code> already exists verbatim. Drop the candidate.</li>
+<li><strong>Semantic match</strong> — a different name tracks the same user action or outcome
+(e.g., you proposed <code>Plan Upgraded</code> but <code>Subscription Upgraded</code> already exists
+for the same action). Drop the candidate.</li>
+<li><strong>Partial overlap</strong> — an existing event covers a broader action that subsumes
+your candidate (e.g., <code>Checkout Completed</code> already exists and your candidate
+<code>Payment Submitted</code> fires at the same moment). Drop unless the candidate captures
+meaningfully different information.</li>
+</ul>
+<p>If you drop a candidate because it already exists, note it in a
+<code>already_tracked</code> list in the output so the user can see what's covered.</p>
+<h2>5. Quality filter</h2>
+<p>Every candidate must pass all three:</p>
+<ol>
+<li><strong>Decision-useful</strong> — A PM could make a product decision from this alone, without five other events for context.</li>
+<li><strong>Outcome-focused</strong> — Captures that something <em>happened</em>, not that the user <em>attempted</em> it. <code>Property Extracted</code> &gt; <code>Extract Button Clicked</code>. Prefer confirmed outcomes; form submissions are acceptable when no server confirmation exists.</li>
+<li><strong>Stable across redesigns</strong> — Named around the business/product concept, not the UI element. If renaming a modal would make the event name stale, it's too coupled.</li>
+</ol>
+<p><strong>Cut:</strong> raw clicks/hovers without outcomes, internal technical actions (API callbacks, state updates), UI-versioned names (<code>modal_v2_submit</code>), sub-step-level granularity.</p>
+<h2>6. Name events</h2>
+<p>Use the naming conventions returned by <code>discover-analytics-patterns</code>.
+New events should look like they belong with the rest of the instrumentation:
+same casing, same word order, same delimiters, same prefix patterns, and the
+same level of specificity.</p>
+<p>If you later need to suggest property names in rationale or instrumentation
+hints, use the <code>property_naming_convention</code> returned by
+<code>discover-analytics-patterns</code>.</p>
+<p>In all cases, use product-domain subjects (Property, User, Document), not code
+names (PropertyItem, ActionStore).</p>
+<table>
+<thead>
+<tr>
+<th>Good (Title Case convention)</th>
+<th>Bad</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Property Extracted</code></td>
+<td><code>extract_property_clicked</code></td>
+</tr>
+<tr>
+<td><code>Extract Type Configured</code></td>
+<td><code>type_dropdown_changed</code></td>
+</tr>
+<tr>
+<td><code>Property Creation Failed</code></td>
+<td><code>500_error_new_property</code></td>
+</tr>
+</tbody></table>
+<h2>7. Determine file and instrumentation point</h2>
+<p>For each candidate, use <code>file_summary_map</code> and <code>surfaces.components</code> to identify:</p>
+<ul>
+<li><strong><code>file</code></strong> — the source file where the tracking call belongs. Prefer the file closest to where the outcome is confirmed (not where the user initiates the action). Usually a component file from <code>surfaces.components</code> or a hook where an async operation resolves.</li>
+<li><strong><code>instrumentation</code></strong> — 1-2 sentences: <em>when</em> it fires (after what condition/callback/state transition) and <em>how</em> it's wired (which function/handler to place it in). Reference actual function names from file summaries so an engineer can find the right line.</li>
+</ul>
+<h2>8. Deepen understanding, then prioritize</h2>
+<p>For each candidate, first work through these two fields — they force you to think concretely about the event's value before scoring it:</p>
+<ul>
+<li><strong><code>analysis_recipe</code></strong> — Describe the specific chart, funnel, or query an analyst would build with this event. Be concrete: mention the visualization type, segmentation dimensions, and any other events to combine with. e.g., <em>"Weekly funnel: Panel Opened → Extract Type Selected → Property Extracted, segmented by extractType. Alert if completion rate drops below 50%."</em></li>
+<li><strong><code>stakeholder_narrative</code></strong> — Write a sentence that a PM could drop into a quarterly review or board deck, using this event's data. Imagine the metric already exists and write the story it tells. e.g., <em>"68% of users who try extraction complete it on the first attempt, up from 45% last quarter."</em> If you can't imagine a compelling slide sentence, the event probably isn't worth instrumenting.</li>
+</ul>
+<p>Now, with that context fresh, assign a <strong>priority</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Meaning</th>
+<th>Guidance</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>3</strong> (critical)</td>
+<td>You would block a release if this event were missing. It answers a question the team <em>will</em> ask in the first week.</td>
+<td>Reserve for events that directly measure whether the feature succeeded or failed. Most changes produce only 1-2 critical events.</td>
+</tr>
+<tr>
+<td><strong>2</strong> (useful)</td>
+<td>Adds real analytical value but the feature can ship without it. Worth adding if instrumentation cost is low.</td>
+<td>Segmentation dimensions, secondary workflows, configuration choices.</td>
+</tr>
+<tr>
+<td><strong>1</strong> (optional)</td>
+<td>Nice-to-have. Only instrument if the team has bandwidth and a specific hypothesis to test.</td>
+<td>Edge-case failures, exploratory engagement signals, discoverability metrics.</td>
+</tr>
+</tbody></table>
+<p><strong>Funnel events deserve special attention.</strong> When a change introduces or modifies a multi-step process (checkout flow, onboarding wizard, data import pipeline), the PM's first question will be "where are users dropping off?" A gap between funnel start and funnel end with no visibility in between is a blind spot that can hide serious product problems — if engagement craters at step 2 of 5, the team needs to know, not guess.</p>
+<p><strong>Funnel start and funnel end events are always critical (priority 3).</strong> Without the bookends, you can't measure conversion rate — the single most important metric for any funnel. These two events are non-negotiable regardless of funnel length or complexity.</p>
+<p>To decide how many <em>intermediate</em> funnel events to mark critical, gauge the length and complexity of the funnel:</p>
+<ul>
+<li><strong>Short process (2-3 steps, single page):</strong> The start and end events are enough. Don't instrument every micro-step in a simple flow.</li>
+<li><strong>Medium process (3-5 steps, possibly spanning pages):</strong> Add one intermediate event at the most likely drop-off point — typically where the user commits effort (fills a form, makes a key selection, uploads a file).</li>
+<li><strong>Long process (5+ steps, multi-page or wizard-style):</strong> 2-3 intermediate events at natural phase boundaries. Think "started → configured → submitted → confirmed" rather than tracking every field interaction.</li>
+</ul>
+<p>Be selective with intermediate events. Every funnel event you mark critical is one more thing an engineer must implement and a PM must monitor. If you're unsure whether an intermediate step is worth tracking, it probably isn't — the start and end events will reveal whether there's a problem, and the team can always add granularity later once they see where drop-off is high.</p>
+<p>Less is more. A focused set of critical events that actually get dashboarded beats a sprawling list nobody looks at. When in doubt, downgrade — it's easier to add an event later than to remove one that's already in dashboards.</p>
+<h2>9. Emit YAML output</h2>
+<p>Output only the YAML block — no surrounding prose.</p>
+<pre><code class="language-yaml">event_candidates:
+  source_summary: "&lt;from change_brief.summary&gt;"
+  analytics_scope: "&lt;from change_brief.classification.analytics_scope&gt;"
+  event_naming_convention: "&lt;from MCP if clear, otherwise codebase instrumentation, otherwise taxonomy skill&gt;"
+  property_naming_convention: "&lt;from MCP if clear, otherwise codebase instrumentation, otherwise taxonomy skill&gt;"
+
+  already_tracked:                         # omit if no duplicates found
+    - existing_event: "Subscription Upgraded"
+      candidate_dropped: "Plan Upgraded"
+      reason: "Same action — existing event already tracks plan/subscription upgrades."
+
+  funnels:                                 # omit if no multi-step flows found
+    - name: "Descriptive funnel name"
+      steps:
+        - step: "Step description"
+          file: "src/components/Foo.tsx"
+          function: "handleOpen"
+          role: start                      # start | intermediate | end
+        - step: "Next step"
+          file: "src/components/Bar.tsx"
+          function: "onSubmit"
+          role: intermediate
+        - step: "Final step"
+          file: "src/hooks/useSave.ts"
+          function: "onSuccess"
+          role: end
+
+  candidates:
+    - name: "Event Name Here"
+      category: feature_success          # business_outcome | user_journey | feature_success | friction_failure
+      rationale: "What PM question this answers."
+      analysis_recipe: "Weekly trend of completions; funnel from Panel Opened → Extract Type Selected → Event Name, segmented by extract type."
+      stakeholder_narrative: "Feature X adoption reached 40% of active users within two weeks of launch, exceeding our 25% target."
+      priority: 3                        # 3 = critical, 2 = useful, 1 = optional
+      funnel: "Funnel name"             # which funnel this belongs to, if any
+      funnel_role: start                 # start | intermediate | end — omit if not part of a funnel
+      surface: "ComponentName"           # from surfaces.components
+      file: "src/components/Foo/Bar.tsx"
+      instrumentation: "Fire after the async save resolves, inside onSuccess of useExtract(). Pass result status."
+
+    - name: "Another Event"
+      category: user_journey
+      rationale: "..."
+      analysis_recipe: "..."
+      stakeholder_narrative: "..."
+      priority: 2
+      surface: "..."
+      file: "..."
+      instrumentation: "..."
+</code></pre>
+<p>Order: higher categories first, most impactful within each category first.</p>
+<hr />
+<h2>Example</h2>
+<p><strong>Input excerpt:</strong></p>
+<pre><code class="language-yaml">user_facing_changes:
+  - "Users can now select Extract Type (Text or Attribute) in the PropertyItem panel"
+surfaces:
+  components:
+    - name: PropertyItem
+      change: modified
+</code></pre>
+<p><strong>Good candidates:</strong></p>
+<pre><code class="language-yaml">- name: "Property Extracted"
+  category: feature_success
+  rationale: "Core adoption signal — tells PMs whether the extract workflow completes."
+  analysis_recipe: "Weekly funnel: Panel Opened → Extract Type Selected → Property Extracted, segmented by extractType. Alert if completion rate drops below 50%."
+  stakeholder_narrative: "72% of users who open a property panel complete an extraction, up from 0% before this release — validating the new extract workflow."
+  priority: 3
+  surface: "PropertyItem"
+  file: "src/components/PropertiesPanel/PropertyItem.tsx"
+  instrumentation: "Fire after extract resolves successfully in onSuccess handler. Include extractType (TEXT or ATTRIBUTE)."
+
+- name: "Extract Type Selected"
+  category: feature_success
+  rationale: "Shows which mode users prefer — informs investment in Attribute mode."
+  analysis_recipe: "Pie chart of Text vs Attribute selections over 30 days. Combine with Property Extracted to get per-mode completion rate."
+  stakeholder_narrative: "85% of extractions use Text mode vs 15% Attribute — we should double down on Text UX before expanding Attribute capabilities."
+  priority: 2
+  surface: "PropertyItem"
+  file: "src/components/PropertiesPanel/PropertyItem.tsx"
+  instrumentation: "Fire in onChange of Extract Type select, passing new value."
+
+- name: "Property Extraction Failed"
+  category: friction_failure
+  rationale: "Surfaces where the extract workflow breaks for reliability prioritization."
+  analysis_recipe: "Error rate chart: Property Extraction Failed / (Property Extracted + Property Extraction Failed), grouped by error reason. Alert on spikes."
+  stakeholder_narrative: "Extraction failure rate dropped from 12% to 3% after the v2 error-handling patch — users are hitting fewer dead ends."
+  priority: 2
+  surface: "PropertyItem"
+  file: "src/components/PropertiesPanel/PropertyItem.tsx"
+  instrumentation: "Fire in catch/onError of extract call. Include error reason if available."
+</code></pre>
+<p><strong>Do NOT include:</strong> <code>Extract Type Dropdown Opened</code> (click, no outcome), <code>PropertyItem State Updated</code> (internal), <code>Attribute Input Focused</code> (too granular).</p>

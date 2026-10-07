@@ -46,9 +46,12 @@ Signed delegation + caveat enforcers -&gt; On-chain agent budget enforcement
 </code></pre>
 <p>API auth is identity. Signature is authority. On-chain delegation state is enforcement.</p>
 <p>Haven runs <strong>one live on-chain policy rail</strong>: the <strong>delegation rail</strong> (epic #821).
-Funds move account→recipient directly — no funding leg, <strong>no approval queue</strong>, and a
-payment outside the budget, recipient pin or expiry <strong>reverts during gas estimation</strong>
-rather than queueing for a human.</p>
+Direct payments and erc7710 x402 settlement move funds account→recipient directly,
+with no funding leg (the EIP-3009 x402 fallback funds the agent's delegate first, by
+redeeming the same delegation); there is <strong>no approval queue</strong>. A payment over
+the budget is normally refused by Haven's budget pre-check (a typed <code>403</code>), and
+one outside the recipient pin or expiry — or over budget when that read fails
+open — <strong>reverts during gas estimation</strong>, rather than queueing for a human.</p>
 <p>The <strong>legacy Safe + AllowanceModule rail is RETIRED</strong> (epic #1440), not frozen: nothing can
 enter it, nothing on it can spend, and its execution machinery is deleted. The closure
 sequence is recorded once in the
@@ -128,7 +131,7 @@ declare a lower <code>engines</code> floor, <code>&gt;=22</code> — see
 or <a href="https://github.com/Schniz/fnm" target="_blank" rel="noopener noreferrer"><code>fnm</code></a>, run <code>nvm use</code> / <code>fnm use</code> in the repo
 root to match it automatically (otherwise <code>npm install</code> warns <code>EBADENGINE</code>).</li>
 <li><strong>Docker Desktop</strong> (for local hosting) — <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener noreferrer">docker.com/products/docker-desktop</a></li>
-<li><strong>A browser wallet</strong> (MetaMask, Rabby, etc.) with Gnosis Chain or Base configured — optional: signup uses a passkey, and a wallet is only needed if you want to enrol one as an account signer</li>
+<li><strong>A browser wallet</strong> (MetaMask, Rabby, etc.) with Base configured — optional: signup uses a passkey, and a wallet is only needed if you want to enrol one as an account signer</li>
 </ul>
 <h2>Getting Started</h2>
 <h3>1. Clone and install</h3>
@@ -159,11 +162,6 @@ npm install
 <td>Secret for dashboard auth tokens; use a long random string in production</td>
 </tr>
 <tr>
-<td><code>RPC_URL</code></td>
-<td>No</td>
-<td>Gnosis Chain RPC (default: <code>https://rpc.gnosischain.com</code>)</td>
-</tr>
-<tr>
 <td><code>RPC_URL_BASE</code></td>
 <td>No</td>
 <td>Base RPC (default: <code>https://mainnet.base.org</code>)</td>
@@ -176,7 +174,7 @@ npm install
 <tr>
 <td><code>GNOSISSCAN_API_KEY</code></td>
 <td>No</td>
-<td>Gnosis explorer API key for transaction display</td>
+<td>History only (decision (c), #3635): the chain-100 explorer history read; nothing runs on Gnosis</td>
 </tr>
 <tr>
 <td><code>BASESCAN_API_KEY</code></td>
@@ -199,19 +197,14 @@ npm install
 <td>Frontend backend URL override (default through local rewrite: <code>http://localhost:3001</code>)</td>
 </tr>
 <tr>
-<td><code>NEXT_PUBLIC_HAVEN_MCP_URL</code></td>
-<td>No</td>
-<td>Hosted MCP URL shown in connect-agent snippets</td>
+<td><code>HAVEN_HOSTED_MCP_URL</code></td>
+<td>Outside production (local dev can skip it with <code>--local</code>)</td>
+<td>Backend: the hosted MCP URL handed to the connector and dashboard (falls back to <code>NEXT_PUBLIC_HAVEN_MCP_URL</code>, then to the production-only default)</td>
 </tr>
 <tr>
 <td><code>NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID</code></td>
 <td>No</td>
 <td>WalletConnect project id; injected wallet connectors can still work without it</td>
-</tr>
-<tr>
-<td><code>ANTHROPIC_API_KEY</code></td>
-<td>No</td>
-<td>Only for the optional Claude agent demo script</td>
 </tr>
 </tbody></table>
 <p><strong>Setting up the relayer wallet:</strong></p>
@@ -220,8 +213,8 @@ npm install
 </code></pre>
 <p>Fund the relayer with the native token for each chain you plan to use:</p>
 <ul>
-<li><strong>Gnosis Chain:</strong> 0.01 xDAI (enough for thousands of transactions)</li>
 <li><strong>Base:</strong> 0.001 ETH</li>
+<li><strong>Base Sepolia:</strong> a little test ETH from a faucet</li>
 </ul>
 <p>Put the private key in <code>RELAYER_PRIVATE_KEY</code>.</p>
 <h3>3. Start PostgreSQL</h3>
@@ -276,13 +269,13 @@ const haven = new HavenClient({
 })
 
 const result = await haven.pay({
-  token: 'EURe',
+  token: 'USDC',
   amount: '5.00',
   to: '0xrecipient...',
 })
 
 console.log(result.txHash)      // 0x...
-console.log(result.explorerUrl) // https://gnosisscan.io/tx/0x... (or basescan.org for Base)
+console.log(result.explorerUrl) // https://basescan.org/tx/0x... (sepolia.basescan.org on Base Sepolia)
 </code></pre>
 <h3>Tool-calling integration</h3>
 <p>The SDK ships with pre-built tool definitions for Claude and OpenAI:</p>
@@ -331,34 +324,8 @@ if (toolCall.name === 'get_allowances') {
 </tr>
 </tbody></table>
 <h2>Testing the Payment Flow</h2>
-<p>After creating an agent, you can test payments several ways:</p>
-<h3>Option A: Hosted MCP connection</h3>
+<p>After creating an agent, test payments through the hosted MCP:</p>
 <p>Use the dashboard's <strong>Connect your agent</strong> Done step. It creates runtime-specific snippets and one-click deep links where supported. The hosted snippets include the API key only; they do not include the delegate signing key. The local signer or runtime secret store handles signing.</p>
-<h3>Option B: SDK simulation script</h3>
-<p>Tests the raw API flow — no AI involved:</p>
-<pre><code class="language-bash"># Add to .env:
-# AGENT_API_KEY=sk_agent_...    (from step 7 above)
-# DELEGATE_PRIVATE_KEY=0x...     (from step 7 above)
-# PAYMENT_TO=0x...               (any recipient address)
-
-cd packages/backend
-npm run test:payment
-</code></pre>
-<p>This creates a payment intent, signs it with the delegate key, submits it, and confirms on-chain. Output includes the Gnosisscan transaction link.</p>
-<h3>Option C: Claude agent demo</h3>
-<p>An optional Claude-powered demo that turns a user task into a Haven tool call:</p>
-<pre><code class="language-bash"># Add to .env:
-# ANTHROPIC_API_KEY=sk-ant-...   (from console.anthropic.com)
-# (plus the same AGENT_API_KEY, DELEGATE_PRIVATE_KEY, PAYMENT_TO as above)
-
-cd packages/backend
-npm run agent:demo
-</code></pre>
-<p>Or with a custom task:</p>
-<pre><code class="language-bash">npm run agent:demo -- "Pay 0.01 EURe to 0xABC... for API access"
-</code></pre>
-<p>Claude receives the task, calls the <code>make_payment</code> tool when appropriate, Haven validates the signed request and relays it on-chain, and Claude summarizes the result.</p>
-<p><strong>What this proves:</strong> A real AI agent requested and signed a payment from a user-controlled smart account within strict on-chain guardrails, without holding keys to the account and without understanding blockchain mechanics.</p>
 <h2>How It Works</h2>
 <h3>Architecture</h3>
 <pre><code>Agent runtime
@@ -368,7 +335,7 @@ npm run agent:demo
   -&gt; Haven wallet / Hybrid DeleGator (user funds)
 </code></pre>
 <ol>
-<li><strong>Agent</strong> sends a simple payment intent: <code>{ token: "EURe", amount: "5.00", to: "0x..." }</code></li>
+<li><strong>Agent</strong> sends a simple payment intent: <code>{ token: "USDC", amount: "5.00", to: "0x..." }</code></li>
 <li><strong>Haven</strong> authenticates the API key, loads the Haven wallet, and selects the agent's budget delegation for that token and recipient</li>
 <li><strong>Haven</strong> prepares a redeeming UserOperation and returns the account's exact EIP-712 typed data to sign</li>
 <li><strong>Agent/runtime</strong> signs locally with the delegate key; the key never goes to Haven</li>
@@ -539,7 +506,7 @@ rows.</p>
 <h3>Payment intent request</h3>
 <pre><code class="language-json">POST /payments
 {
-  "token": "EURe",
+  "token": "USDC",
   "amount": "5.00",
   "to": "0xrecipient..."
 }
@@ -576,8 +543,8 @@ rows.</p>
   "payment_id": "uuid",
   "status": "confirmed",
   "tx_hash": "0x...",
-  "chain_id": 100,
-  "explorer_url": "https://gnosisscan.io/tx/0x..."
+  "chain_id": 8453,
+  "explorer_url": "https://basescan.org/tx/0x..."
 }
 </code></pre>
 <h2>Available Scripts</h2>
@@ -625,23 +592,6 @@ rows.</p>
 <td>Tail PostgreSQL logs</td>
 </tr>
 </tbody></table>
-<p>From <code>packages/backend/</code>:</p>
-<table>
-<thead>
-<tr>
-<th>Command</th>
-<th>What it does</th>
-</tr>
-</thead>
-<tbody><tr>
-<td><code>npm run test:payment</code></td>
-<td>Run payment simulation script</td>
-</tr>
-<tr>
-<td><code>npm run agent:demo</code></td>
-<td>Run Claude agent payment demo</td>
-</tr>
-</tbody></table>
 <h2>Project Structure</h2>
 <pre><code>Haven-AI/
 |-- ABOUT_HAVEN.md             # Product and architecture mental model
@@ -660,35 +610,6 @@ rows.</p>
 `-- docker-compose.yml         # PostgreSQL for local dev
 </code></pre>
 <h2>Supported Networks &amp; Tokens</h2>
-<p><strong>Gnosis Chain</strong> (<code>chainId: 100</code>)</p>
-<table>
-<thead>
-<tr>
-<th>Token</th>
-<th>Symbol</th>
-<th>Decimals</th>
-<th>Address</th>
-</tr>
-</thead>
-<tbody><tr>
-<td>xDAI</td>
-<td>xDAI</td>
-<td>18</td>
-<td>Native</td>
-</tr>
-<tr>
-<td>EURe</td>
-<td>EURe</td>
-<td>18</td>
-<td><code>0xcB444e90D8198415266c6a2724b7900fb12FC56E</code></td>
-</tr>
-<tr>
-<td>USDC.e</td>
-<td>USDC.e</td>
-<td>6</td>
-<td><code>0x2a22f9c3b484c3629090FeED35F17Ff8F88f76F0</code></td>
-</tr>
-</tbody></table>
 <p><strong>Base</strong> (<code>chainId: 8453</code>)</p>
 <table>
 <thead>
@@ -712,6 +633,30 @@ rows.</p>
 <td><code>0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913</code></td>
 </tr>
 </tbody></table>
+<p><strong>Base Sepolia</strong> (<code>chainId: 84532</code>, dev/QA)</p>
+<table>
+<thead>
+<tr>
+<th>Token</th>
+<th>Symbol</th>
+<th>Decimals</th>
+<th>Address</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ETH</td>
+<td>ETH</td>
+<td>18</td>
+<td>Native</td>
+</tr>
+<tr>
+<td>USDC</td>
+<td>USDC</td>
+<td>6</td>
+<td><code>0x036CbD53842c5426634e7929541eC2318f3dCF7e</code></td>
+</tr>
+</tbody></table>
+<p>Agent budgets are enforced on USDC: the period enforcer is ERC-20 only. Gnosis Chain (chain 100) is not a Haven network.</p>
 <h2>Tech Stack</h2>
 <ul>
 <li><strong>TypeScript</strong> throughout (backend + frontend)</li>
@@ -724,8 +669,7 @@ rows.</p>
 <li><strong>ethers v6</strong> — backend blockchain operations</li>
 <li><strong>Model Context Protocol</strong> — local and hosted agent tool connections</li>
 <li><strong>Tailwind CSS</strong> — styling</li>
-<li><strong>Gnosis Chain + Base</strong> — supported EVM networks</li>
-<li><strong>Anthropic SDK</strong> — Claude agent demo</li>
+<li><strong>Base</strong> (primary) and <strong>Base Sepolia</strong> (dev/QA) — the supported networks</li>
 </ul>
 <h2>Contributing — Hosted Setup &amp; Dev Workflow</h2>
 <p>Haven runs in production on <strong>Vercel</strong> (frontend) and <strong>Railway</strong> (backend + Postgres). Two long-lived branches deploy: <strong><code>dev</code></strong> auto-deploys to the shared <strong>dev environment</strong>, and <strong><code>main</code></strong> auto-deploys to <strong>production</strong>. The five published npm packages (<code>@haven_ai/sdk</code>, <code>signer</code>, <code>mcp</code>, <code>connect</code>, <code>cli</code>) are also published automatically from <code>main</code> on a version bump — see <a href="#releasing-npm-packages" target="_blank" rel="noopener noreferrer">Releasing npm packages</a>. For the dev environment's setup and env vars, see <a href="https://github.com/d-hinders/Haven-AI/blob/HEAD/docs/operations/dev-environment.md" target="_blank" rel="noopener noreferrer"><code>docs/operations/dev-environment.md</code></a>.</p>

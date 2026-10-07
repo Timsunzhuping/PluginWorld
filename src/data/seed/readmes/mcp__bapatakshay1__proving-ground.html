@@ -1,0 +1,156 @@
+<h1>Proving Ground — demo loop</h1>
+<p>A working build of the Phase 2 "demo loop" from <em>Proving Ground: Design Thesis</em> (Oct 4, 2026):
+agents explore a sealed replica of a customer's finance-ops system, prove which exception workflows
+they can run, and the verifier that admits each task becomes the meter that bills for it.</p>
+<pre><code>1. Twin ─────▶ 2. Explore ─────▶ 3. Propose
+                                      │  exceptions become new tasks
+4. Admit ─────▶ 5. Prove &amp; price ──▶ 6. Operate &amp; bill  ◀──────────┘
+</code></pre>
+<p>Output: <code>out/proof_packet.md</code> — one proof packet per workflow (monthly volume, current unit cost,
+pass rate on held-out past cases with 95% CI, known failure modes, per-outcome price, live metered
+results), plus the admission report showing which verifiers survived the breaker.</p>
+<h2>The three design rules, as code</h2>
+<table>
+<thead>
+<tr>
+<th>Rule (thesis)</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Tasks come from the customer's records.</strong> A candidate is admitted only with evidence of real volume.</td>
+<td><code>agents.propose</code> must cite volume + unit cost; <code>loop.explore</code> checks every number against <code>/stats/exceptions</code>.</td>
+</tr>
+<tr>
+<td><strong>No agent grades its own work.</strong> Proposer, solver, verifier, breaker are separate, from different model families.</td>
+<td>Proposer <code>google/gemini-2.5-flash</code>, solver <code>openai/gpt-4.1-mini</code> (tier <code>openai/gpt-4.1</code> compared), breaker <code>deepseek/deepseek-chat-v3-0324</code>, verifier = code (<code>policy.py</code>).</td>
+</tr>
+<tr>
+<td><strong>Proof is replay, not a judge's opinion.</strong></td>
+<td><code>loop.prove</code> reopens 20 held-out historical cases per workflow in sandbox copies; <code>policy.verify</code> recomputes the required end state from the system of record and checks the audit log for out-of-scope writes. No LLM judges anything.</td>
+</tr>
+</tbody></table>
+<p>The breaker is <strong>record-blind</strong>: scripted shortcut strategies plus an LLM with write-only tools. A task is
+admitted only if (a) the verifier agrees with ≥90% of how humans actually resolved past cases and (b) no
+blind strategy reaches 70% on it. <code>vendor_bank_change</code> is deliberately a fixed-rule control ("hold + flag"):
+the breaker passes it blind, so the gate screens it out of outcome pricing — that is the gate working.</p>
+<h2>What the run produced (<code>results/</code>, Oct 5 2026, $3.57 model spend)</h2>
+<table>
+<thead>
+<tr>
+<th>Workflow</th>
+<th>Admitted</th>
+<th>Priced tier</th>
+<th>Replay pass (n=20, 95% CI)</th>
+<th>Price/outcome</th>
+<th>Live metered</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>quantity_mismatch</td>
+<td>yes</td>
+<td>gpt-4.1-mini</td>
+<td>100% [84–100]</td>
+<td>$4.58</td>
+<td>7/8</td>
+</tr>
+<tr>
+<td>price_mismatch</td>
+<td>yes</td>
+<td>gpt-4.1-mini</td>
+<td>95% [76–99]</td>
+<td>$3.17</td>
+<td>7/8</td>
+</tr>
+<tr>
+<td>missing_po</td>
+<td>yes</td>
+<td>gpt-4.1-mini</td>
+<td>90% [70–97]</td>
+<td>$5.22</td>
+<td>8/8</td>
+</tr>
+<tr>
+<td>possible_duplicate</td>
+<td>yes</td>
+<td>gpt-4.1 (mini: 60%)</td>
+<td>100% [84–100]</td>
+<td>$2.02</td>
+<td>8/8</td>
+</tr>
+<tr>
+<td>unmatched_payment</td>
+<td>yes</td>
+<td>gpt-4.1</td>
+<td>60% [39–78] — below contract bar</td>
+<td>$5.72</td>
+<td>6/8</td>
+</tr>
+<tr>
+<td>vendor_bank_change</td>
+<td><strong>screened</strong></td>
+<td>—</td>
+<td>blind "hold + flag" passes 100%</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<p>Gate passed (5 verifiers survived the breaker). The unmatched-payment result is the useful kind of
+failure: both tiers struggle with pair-sum reconciliation, and the packet says so instead of pricing it.
+Full packet: <a href="https://github.com/bapatakshay1/proving-ground/blob/HEAD/results/proof_packet.md" target="_blank" rel="noopener noreferrer"><code>results/proof_packet.md</code></a>.</p>
+<h2>Hosted demo twin</h2>
+<p><code>https://proving-ground-production.up.railway.app</code> — synthetic customer, sealed API, one private sandbox
+per token. <code>GET /policy</code> and <code>GET /schema</code> are open; everything else needs <code>Authorization: Bearer &lt;token&gt;</code>
+and <code>X-Sandbox: &lt;your actor&gt;</code>. Work an exception, <code>POST /exceptions/{id}/verify</code>, then <code>GET /proof</code>.
+See <a href="https://github.com/bapatakshay1/proving-ground/blob/HEAD/docs/deployment.md" target="_blank" rel="noopener noreferrer"><code>docs/deployment.md</code></a> and <a href="https://github.com/bapatakshay1/proving-ground/blob/HEAD/docs/billing.md" target="_blank" rel="noopener noreferrer"><code>docs/billing.md</code></a>.</p>
+<h2>Walk in as an agent</h2>
+<p>No account, no human. <code>GET /</code> is the menu (JSON, or HTML in a browser; <code>/llms.txt</code> and
+<code>/.well-known/agent-card.json</code> say the same thing for crawlers and A2A clients).</p>
+<pre><code># 1. take a seat: a bearer token (shown once), a private sandbox, free credits
+curl -s -X POST https://proving-ground-production.up.railway.app/seat \
+     -H 'Content-Type: application/json' -d '{"name":"my-agent"}'
+
+# 2a. REST: send both headers on every call; reads are free, each resolve/escalate costs 1 credit
+curl -s -H 'Authorization: Bearer &lt;token&gt;' -H 'X-Sandbox: my-agent' \
+     'https://proving-ground-production.up.railway.app/exceptions?status=open&amp;kind=price_mismatch'
+
+# 2b. MCP: point any MCP client at /mcp with the same token (streamable HTTP, no X-Sandbox needed)
+#     — or with no auth at all: `initialize` seats you and returns Mcp-Session-Id; that session IS a seat
+#     (same free allowance, same x402 top-up), which is what directory listings that forbid static tokens need
+</code></pre>
+<p>Tools carry MCP <code>title</code>/<code>annotations</code> (<code>readOnlyHint</code>, <code>destructiveHint</code>, <code>idempotentHint</code>), ordered so the obvious first
+doors come first. Terms at <code>/terms</code>, privacy at <code>/privacy</code> (drafts, not legal advice); taking a seat is acceptance.
+<code>/openapi.json</code> carries <code>x-payment-info</code> on the metered operations (x402scan / Bazaar shape) and <code>info.termsOfService</code>.</p>
+<p>Each claim returns the verifier's verdict and your bill; <code>GET /proof</code> (or the <code>proof</code> tool) is the
+proof packet. Out of credits → <code>402 Payment Required</code> with the top-up methods the operator has
+enabled (<code>PG_TOPUP</code>); a payment rail tops a seat up through <code>POST /seats/{actor}/credit</code> with the
+admin key. The meter is rail-agnostic by design.</p>
+<h2>Run it</h2>
+<pre><code>pip install -r requirements.txt          # fastapi, uvicorn (everything else is stdlib)
+python -m src.cli seed                   # deterministic synthetic AP twin: out/twin.db (12 months, ~8.7k invoices, 3,960 exceptions)
+python -m src.cli selfcheck              # asserts: verifier agrees with history, truth stable, reopen/replay round-trips
+python -m src.cli run-all                # explore → admit → prove → price → operate → packet (starts the API if needed)
+python -m src.cli packet                 # re-render out/proof_packet.md
+</code></pre>
+<p>Model access: OpenRouter key in <code>$OPENROUTER_API_KEY</code> or <code>~/.config/agent-integrity/openrouter.key</code>.
+Models are env-configurable (<code>PG_PROPOSER_MODEL</code>, <code>PG_SOLVER_MODEL</code>, <code>PG_BREAKER_MODEL</code>). A full run
+costs about $2–3 of model spend; every call's real cost is recorded and flows into "cost to serve".</p>
+<p>Individual steps: <code>serve</code>, <code>explore</code>, <code>admit</code>, <code>prove [--alt]</code>, <code>price</code>, <code>operate</code>, <code>packet</code>, <code>cost</code>.</p>
+<h2>The twin</h2>
+<p><code>twin_api.py</code> is the sealed boundary: agents only see HTTP. <code>X-Sandbox: &lt;name&gt;</code> selects an isolated
+copy (<code>out/sandboxes/&lt;name&gt;.db</code>); <code>X-Actor</code> is recorded on every write. Harness-only columns
+(<code>pre_state</code>, <code>post_state</code>, <code>truth</code>, <code>held_out</code>) are never served.</p>
+<p>Six exception kinds, each with mixed outcomes so no constant answer passes: <code>price_mismatch</code>,
+<code>quantity_mismatch</code>, <code>possible_duplicate</code>, <code>missing_po</code>, <code>unmatched_payment</code> (bank reconciliation break),
+<code>vendor_bank_change</code>. History is produced through the same <code>actions.py</code> the agents use, with a 3% rate of
+clerk "manager overrides" so verifier-vs-history agreement is realistic rather than 100%.</p>
+<p><code>ponytail:</code> the twin is a synthetic stand-in for an open-source ERP; the API surface is the adapter
+boundary, so an Odoo/ERPNext backend would implement the same endpoints.</p>
+<h2>Files</h2>
+<pre><code>src/schema.sql    tables            src/policy.md   the customer's AP policy (served at /policy)
+src/seed.py       synthetic twin    src/policy.py   expected outcomes + verifiers (code keyed to the system of record)
+src/actions.py    all state changes src/twin_api.py sealed API
+src/llm.py        OpenRouter + tool loop + $ tally     src/agents.py  proposer / solver / breaker
+src/loop.py       admit / prove / price / operate / packet            src/cli.py  entry point
+src/selfcheck.py  the one runnable check
+</code></pre>
