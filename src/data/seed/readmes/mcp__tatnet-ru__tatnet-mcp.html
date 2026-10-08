@@ -1,0 +1,254 @@
+<h1>tatnet-mcp</h1>
+<p>MCP-сервер TatNet: управление платформой из Claude (claude.ai, Desktop, Code),
+ChatGPT и любого клиента <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">Model Context Protocol</a>.
+«Сделай сайт и выложи на TatNet» — это вызов <code>deploy_files</code>.</p>
+<h2>Quick start / English</h2>
+<p>TatNet MCP is a remote server for deploying static and SSR websites from an AI
+conversation and managing Git/Docker apps, builds, logs, environment variables
+and domains on TatNet, a Russian cloud platform. Transport: Streamable HTTP.
+Endpoint: <code>https://mcp.tatnet.cloud/mcp</code>. Authentication: OAuth or a scoped API key.</p>
+<pre><code class="language-bash">claude mcp add --transport http tatnet https://mcp.tatnet.cloud/mcp
+</code></pre>
+<p>Connect through OAuth, choose a project and write access, then ask the assistant
+to publish your website. A deployment is ready when both <code>status=success</code> and
+<code>deploy_state=live</code> are confirmed. Backend apps require Git or a Docker image;
+VMs, databases, DNS zones and S3 use the CLI/API. App deletion and balance top-ups
+are unavailable through MCP.</p>
+<ul>
+<li><a href="https://tatnet.ru/mcp" target="_blank" rel="noopener noreferrer">MCP overview</a> and <a href="https://docs.tatnet.ru/docs/mcp" target="_blank" rel="noopener noreferrer">connection docs</a>.</li>
+<li><a href="https://docs.tatnet.ru/docs/guides/en/claude-code-deploy" target="_blank" rel="noopener noreferrer">Publish from Claude Code</a>.</li>
+<li><a href="https://docs.tatnet.ru/docs/guides/en/debug-build" target="_blank" rel="noopener noreferrer">Diagnose a failed build</a>.</li>
+<li><a href="https://docs.tatnet.ru/docs/guides/en/cli-ci-deploy" target="_blank" rel="noopener noreferrer">CLI deployment from CI</a>.</li>
+</ul>
+<h2>Устройство</h2>
+<ul>
+<li><strong>Тонкий слой над публичным <code>/v1</code>.</strong> Своей БД, своих прав и бизнес-логики нет:
+каждый инструмент зовёт <code>api.tatnet.ru/v1</code> через <code>tatnet-go</code> ключом того, кто
+подключился. Права — политика ключа ∩ живая роль создателя, как у CLI и SDK.
+Чего нет в <code>/v1</code>, того нет и здесь: сначала ручка в <code>/v1</code>, потом инструмент.</li>
+<li><strong>Streamable HTTP без состояния</strong> (<code>/mcp</code>), официальный
+<code>modelcontextprotocol/go-sdk</code>. Реплики взаимозаменяемы, выкат клиентов не рвёт.</li>
+<li><strong>Авторизация — OAuth или ключ <code>/v1</code>.</strong> Клиент без поля для заголовка
+регистрируется сам (DCR), человек входит в TatNet и на экране согласия
+выбирает аккаунт, проекты и уровень доступа; подключение появляется в панели
+рядом с API-ключами и отзывается там же. Токен выдан только для MCP и дальше
+сервера не уходит — в <code>/v1</code> сервер ходит сам от имени подключения. Клиенты,
+которые умеют передать заголовок, могут прийти и с ключом
+<code>Authorization: Bearer tn_live_…</code>. Права в обоих случаях решает api на каждом
+вызове: политика подключения или ключа пересекается с ролью человека.</li>
+</ul>
+<h2>Инструменты (приложения и баланс)</h2>
+<table>
+<thead>
+<tr>
+<th>Инструмент</th>
+<th>Тип</th>
+<th>Что делает</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>whoami</code></td>
+<td>чтение</td>
+<td>аккаунт и проекты, ограничен ли ключ</td>
+</tr>
+<tr>
+<td><code>get_balance</code></td>
+<td>чтение</td>
+<td>баланс: доступно сейчас, деньги, бонусы и открыты ли они. Только владельцу: ключу нужно <code>billing:read</code>, OAuth-подключению — выдача на весь аккаунт. Пополнения нет — оно в панели</td>
+</tr>
+<tr>
+<td><code>list_apps</code>, <code>get_app</code></td>
+<td>чтение</td>
+<td>аппы; у <code>get_app</code> — адрес, домены, последняя сборка</td>
+</tr>
+<tr>
+<td><code>create_app</code></td>
+<td>запись</td>
+<td>апп из git или Docker-образа; идемпотентен по имени</td>
+</tr>
+<tr>
+<td><code>deploy_files</code></td>
+<td>запись</td>
+<td>выкладка САЙТА (статика, SSR) из файлов разговора: пакует <code>tar.gz</code> → <code>/v1 …/deployments</code>; создаёт апп при первом вызове, повтор с тем же именем — тот же апп. ⚠ Бэкенд платформа из папки пока не собирает — отказ до загрузки</td>
+</tr>
+<tr>
+<td><code>deploy_app</code></td>
+<td>запись</td>
+<td>новая сборка git/docker-аппа; у docker-аппа с <code>image</code> — сначала переключает его на новый образ (<code>PATCH docker_image</code>), потом собирает</td>
+</tr>
+<tr>
+<td><code>get_build</code></td>
+<td>чтение</td>
+<td>статус с ожиданием до 45 с; при провале — хвост лога</td>
+</tr>
+<tr>
+<td><code>get_build_logs</code>, <code>list_builds</code></td>
+<td>чтение</td>
+<td>лог и история сборок</td>
+</tr>
+<tr>
+<td><code>list_env</code>, <code>set_env</code></td>
+<td>чтение/запись</td>
+<td>переменные; значения секретов не отдаются никогда</td>
+</tr>
+<tr>
+<td><code>delete_env</code>, <code>remove_domain</code></td>
+<td>удаление</td>
+<td>помечены <code>destructiveHint</code> — клиент спросит человека</td>
+</tr>
+<tr>
+<td><code>list_domains</code>, <code>add_domain</code></td>
+<td>чтение/запись</td>
+<td>домены и инструкция по DNS</td>
+</tr>
+</tbody></table>
+<p>Удаления аппов нет намеренно: необратимые действия появятся только с
+двухшаговым подтверждением.</p>
+<h2>Правила, на которых держится</h2>
+<ul>
+<li><strong>Секрет не попадает в контекст модели.</strong> Контекст логируется у провайдера
+модели; секрет, попавший туда, считается утёкшим. <code>.env</code> из <code>deploy_files</code> в
+архив не кладётся (как у <code>tatnet deploy</code>), значения секретов не возвращаются.</li>
+<li><strong>Пустой список ≠ «ничего нет».</strong> <code>/v1</code> отвечает 200 и пустым списком, когда
+ключу не видно ресурсов; инструменты говорят это прямо, если ключ ограничен.</li>
+<li><strong>Отказ — текст, по которому можно действовать</strong>: что случилось и что делать
+(403 → «расширьте ключ, не повторяйте», 5xx → «наша сторона, повторите»).</li>
+<li><strong>Лог сборки — недоверенные данные.</strong> Его пишет код клиента; инструкции
+сервера и схемы полей говорят модели не исполнять найденное в нём.</li>
+<li><strong>«Сборка прошла» ≠ «работает».</strong> <code>get_build</code> ждёт конца раскатки и отдаёт
+<code>deploy_state</code>; живым апп называется только при <code>live</code>.</li>
+<li><strong>Повторы не плодят ресурсы.</strong> Модели повторяют вызовы; <code>create_app</code> и
+<code>deploy_files</code> находят апп по имени вместо создания второго.</li>
+</ul>
+<h2>Подключение</h2>
+<p>Адрес сервера — <code>https://mcp.tatnet.cloud/mcp</code>.</p>
+<p><strong>Через OAuth</strong> — в клиенте с поддержкой удалённых MCP-серверов (веб-чаты,
+десктопные приложения, IDE) достаточно указать адрес и выбрать OAuth: клиент
+зарегистрируется сам и откроет вход в TatNet.</p>
+<p><strong>Ключом</strong> — для клиентов, которые передают заголовок, и для скриптов. Ключ
+создаётся в панели TatNet → «API-ключи»; можно ограничить проектами и
+действиями.</p>
+<pre><code class="language-bash">claude mcp add --transport http tatnet https://mcp.tatnet.cloud/mcp \
+  --header "Authorization: Bearer tn_live_…"
+</code></pre>
+<h2>Окружение</h2>
+<table>
+<thead>
+<tr>
+<th>Переменная</th>
+<th>По умолчанию</th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>LISTEN</code></td>
+<td><code>:8080</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>API_BASE_URL</code></td>
+<td><code>https://api.tatnet.ru/v1</code></td>
+<td>stage — <code>…stage…/v1</code></td>
+</tr>
+<tr>
+<td><code>PUBLIC_URL</code></td>
+<td><code>https://mcp.tatnet.cloud</code></td>
+<td>основной внешний адрес (метаданные OAuth)</td>
+</tr>
+<tr>
+<td><code>EXTRA_PUBLIC_URLS</code></td>
+<td>—</td>
+<td>дополнительные внешние имена через запятую (например, на время переезда); на каждом имени сервер говорит от его лица</td>
+</tr>
+<tr>
+<td><code>METRICS_TOKEN</code></td>
+<td>—</td>
+<td>без него <code>/metrics</code> отвечает 404</td>
+</tr>
+</tbody></table>
+<p>Метрики: <code>tatnet_mcp_tool_calls_total{tool,outcome}</code>,
+<code>tatnet_mcp_tool_duration_seconds{tool}</code>, <code>tatnet_mcp_auth_failures_total{reason}</code>.</p>
+<h2>Разработка</h2>
+<pre><code class="language-bash">go build ./... &amp;&amp; go test ./...
+</code></pre>
+<p>Сквозной тест (<code>cmd/tatnet-mcp/e2e_test.go</code>) поднимает настоящий MCP-клиент
+SDK против сервера, а сервер — против поддельного <code>/v1</code> с состоянием в памяти,
+и проверяет последствия вызовов: что ушло в архив, сколько аппов создано,
+что попало в ответ модели.</p>
+<h2>Каталоги</h2>
+<p>Сервер один; каталогов, из которых о нём узнают клиенты, три, и в каждый он
+подаётся отдельно.</p>
+<table>
+<thead>
+<tr>
+<th>Каталог</th>
+<th>Что нужно</th>
+<th>Статус</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">Официальный реестр MCP</a></td>
+<td><code>server.json</code> в корне + владение доменом <code>tatnet.cloud</code></td>
+<td>опубликована версия <code>1.1.1</code> (2026-10-05)</td>
+</tr>
+<tr>
+<td>Каталог коннекторов Claude (<code>claude.ai/directory/manage</code>)</td>
+<td>форма, тестовый аккаунт, документация, политика конфиденциальности</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Плагины ChatGPT (<code>platform.openai.com/plugins</code>)</td>
+<td>верификация издателя, файл <code>/.well-known/openai-apps-challenge</code>, 5+3 тестовых сценария</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<p><strong>Реестр.</strong> Пространство имён <code>cloud.tatnet/*</code> подтверждается TXT-записью на
+АПЕКСЕ <code>tatnet.cloud</code> (не под селектором вроде <code>_mcp.</code>), адрес сервера держим
+на том же домене (тест <code>TestServerJSONFitsTheRegistry</code>; реестр этого не
+требует, это наше правило). Ключ Ed25519 — только OpenSSL 3 (системный
+<code>openssl</code> macOS — LibreSSL, Ed25519 не умеет):</p>
+<pre><code>O=/opt/homebrew/opt/openssl@3/bin/openssl
+$O genpkey -algorithm Ed25519 -out key.pem          # хранить как секрет, не в репозитории
+echo "tatnet.cloud. IN TXT \"v=MCPv1; k=ed25519; p=$($O pkey -in key.pem -pubout -outform DER | tail -c 32 | base64)\""
+# ↑ эту запись — в зону tatnet.cloud, дождаться распространения
+mcp-publisher login dns --domain tatnet.cloud \
+  --private-key "$($O pkey -in key.pem -noout -text | grep -A3 priv: | tail -n +2 | tr -d ' :\n')"
+mcp-publisher publish
+</code></pre>
+<p>Ключ текущей DNS-авторизации хранится локально в конфигурации издателя,
+вне этого репозитория. При повторном входе используйте существующий ключ;
+его содержимое не должно попадать в README или Git.</p>
+<p>⚠ Каждая публикация требует НОВОЙ <code>version</code> в <code>server.json</code>: реестр
+отвергает повтор уже опубликованной версии.</p>
+<p><strong>Аннотации.</strong> Оба каталога читают <code>title</code>, <code>readOnlyHint</code>,
+<code>destructiveHint</code>, <code>openWorldHint</code> с провода, а ChatGPT отклоняет инструмент,
+у которого флаг не указан явно. Тест <code>TestToolAnnotationsAreExplicitOnTheWire</code>
+проверяет сырой <code>tools/list</code>.</p>
+<h2>Finding apps and confirming a deployment</h2>
+<p><code>list_apps</code> accepts exact <code>repo</code>, <code>branch</code>, <code>name</code>, and <code>domain</code> filters.
+Omitting <code>project_id</code> searches all projects visible to the connection.
+<code>limit</code> defaults to 100 matches (maximum 200). If <code>next_cursor</code> is present,
+continue with that cursor and the same filters; an empty page can still have
+more pages. <code>scope</code> states which projects were searched. Filtering happens
+across API pages, so later matches remain discoverable.</p>
+<p><code>get_build</code> accepts either <code>build_id</code> or an exact full <code>commit_sha</code>.
+Both searches continue through build history, rather than just the latest
+50 builds. Omitting both selects the latest build and pins its ID during
+that call's polling. When continuing across calls, pass the returned build
+ID to keep observing the same build.</p>
+<p><code>build_succeeded</code> describes artifact creation. <code>deployment_succeeded</code> and
+<code>succeeded</code> are true only for <code>status=success</code> and <code>deploy_state=live</code>.
+A missing, unknown, rolling or unverified deployment state remains pending;
+startup failures terminate with <code>succeeded=false</code> and diagnostic log lines.
+<code>finished</code> means waiting has ended, including failure. Never treat it alone
+as a successful deployment.</p>
+<h2>Каталог моделей ИИ</h2>
+<p><code>ai_models(kind="image" | "video")</code> читает публичный каталог
+<code>ai.tatnet.cloud</code>: модели, умения и клиентские цены. Инструмент не передаёт
+ключ управления облаком в шлюз инференса и не запускает генерацию.</p>
+<p>Платные MCP-операции требуют отдельного <code>tnai_live_…</code>, тогда как текущий
+OAuth/ключ MCP авторизует управление облаком. Без безопасного обмена на
+ключ инференса конкретного аккаунта генерацию через remote MCP не добавляем.
+Оставшийся шаг — такой обмен/делегирование с проверкой прав аккаунта;
+передавать секрет через аргументы модели или общий ключ сервера не следует.
+Для генерации сейчас используйте <code>tatnet ai</code> с собственным ключом инференса.</p>

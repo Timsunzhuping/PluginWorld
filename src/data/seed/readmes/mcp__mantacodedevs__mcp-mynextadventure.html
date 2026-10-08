@@ -1,0 +1,215 @@
+<h1>MyNextAdventure MCP server</h1>
+<p>A remote <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">Model Context Protocol</a> server that lets an AI
+assistant plan trips in <a href="https://mynextadventure.cloud" target="_blank" rel="noopener noreferrer">MyNextAdventure</a> — create a trip,
+lay out the itinerary, propose flights and hotels, add things to do, and share the result.</p>
+<p>It runs as a stateless Cloudflare Worker and is a thin, authenticated proxy in front of the
+MyNextAdventure public API: it holds no trip data of its own, and forwards every call to the
+API under the caller's own API key.</p>
+<ul>
+<li><strong>Production:</strong> <code>https://mcp.mynextadventure.cloud/mcp</code> (Streamable HTTP)</li>
+<li><strong>Upstream API:</strong> <code>https://api.mynextadventure.cloud</code> (v1 public API)</li>
+</ul>
+<h2>Authentication</h2>
+<p>Every request needs a MyNextAdventure API key. Create one in the app under
+<strong>Settings → API keys</strong>, then send it as either:</p>
+<ul>
+<li><code>Authorization: Bearer &lt;api-key&gt;</code> — what most MCP clients send, and what <code>mcp-remote</code> does, or</li>
+<li><code>X-API-Key: &lt;api-key&gt;</code> — for clients that only let you set custom headers.</li>
+</ul>
+<p>The worker forwards it to the API as <code>X-API-Key</code>. Requests without a key get a <code>401</code>.
+Whatever the key can do, the assistant can do: keys are per-user, so the assistant only ever
+sees that user's trips.</p>
+<p><strong>Where your key lives.</strong> The server is stateless: your key is read from the headers of each
+request, used to make that one call to the MyNextAdventure API, and never stored — there is no
+session storage and no Durable Object holding it between requests. It is never logged and is
+not shared between requests or users. Revoke a key any time in the app under Settings → API keys.</p>
+<h2>Tools</h2>
+<p>24 tools, covering the operations conversational planning actually needs. Each one is a
+curated view over a MyNextAdventure API operation — see <a href="#regenerating-the-tools" target="_blank" rel="noopener noreferrer">Regenerating the tools</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>whoami</code></td>
+<td>Which account the API key belongs to (handy for checking the connection).</td>
+</tr>
+<tr>
+<td><code>list_trips</code></td>
+<td>List the user's trips; filter by status (<code>planning</code>, <code>ready</code>, <code>finished</code>, <code>cancelled</code>).</td>
+</tr>
+<tr>
+<td><code>get_trip</code></td>
+<td>One trip in full — variants, destinations, options, events. Needed before any edit.</td>
+</tr>
+<tr>
+<td><code>create_trip</code></td>
+<td>Create a new, empty trip.</td>
+</tr>
+<tr>
+<td><code>update_trip</code></td>
+<td>Rename, set a cover photo, or move the trip through its lifecycle.</td>
+</tr>
+<tr>
+<td><code>create_trip_share_link</code></td>
+<td>Create/refresh a public read-only share link.</td>
+</tr>
+<tr>
+<td><code>create_variant</code></td>
+<td>Add an alternative plan (dates live here: exact or flexible).</td>
+</tr>
+<tr>
+<td><code>duplicate_variant</code></td>
+<td>Copy a variant with everything in it.</td>
+</tr>
+<tr>
+<td><code>update_variant</code></td>
+<td>Rename a variant, change its dates or notes.</td>
+</tr>
+<tr>
+<td><code>select_variant</code></td>
+<td>Mark a variant as the chosen plan.</td>
+</tr>
+<tr>
+<td><code>add_destination</code></td>
+<td>Add a stop to a variant, in itinerary order.</td>
+</tr>
+<tr>
+<td><code>update_destination</code></td>
+<td>Change a stop's place name, dates or notes.</td>
+</tr>
+<tr>
+<td><code>reorder_destinations</code></td>
+<td>Reorder the stops in a variant.</td>
+</tr>
+<tr>
+<td><code>add_accommodation_option</code></td>
+<td>Propose a place to stay at a destination.</td>
+</tr>
+<tr>
+<td><code>add_transport_option</code></td>
+<td>Propose a way of getting to a destination.</td>
+</tr>
+<tr>
+<td><code>add_getting_around_option</code></td>
+<td>Propose local mobility (public transport, rental car, …).</td>
+</tr>
+<tr>
+<td><code>update_destination_option</code></td>
+<td>Edit an existing option of any of the three kinds.</td>
+</tr>
+<tr>
+<td><code>select_destination_option</code></td>
+<td>Select — or, with no <code>optionId</code>, deselect — an option.</td>
+</tr>
+<tr>
+<td><code>add_event</code></td>
+<td>Add an activity (museum, concert, restaurant, tour) to a variant.</td>
+</tr>
+<tr>
+<td><code>update_event</code></td>
+<td>Edit an activity.</td>
+</tr>
+<tr>
+<td><code>toggle_event</code></td>
+<td>Flip an activity between committed and "just an idea".</td>
+</tr>
+<tr>
+<td><code>delete_trip_item</code></td>
+<td>Permanently delete a variant, destination, option or event. Deleting a whole variant additionally requires <code>confirm: true</code>.</td>
+</tr>
+<tr>
+<td><code>list_goals</code></td>
+<td>List the user's travel goals / bucket list.</td>
+</tr>
+<tr>
+<td><code>add_goal</code></td>
+<td>Add a goal from a name or a URL.</td>
+</tr>
+</tbody></table>
+<p>The server also ships MCP <code>instructions</code> describing the data model
+(<code>trip → variants → destinations → options</code>, with events on the variant) and the usual
+order of operations, so a client does not have to guess the workflow.</p>
+<p>Not exposed yet, though the API supports them: collaborator access management and invites,
+voting, collections, invite tokens, goal↔trip linking, API key management, and trip deletion.</p>
+<h2>Connecting</h2>
+<h3>Claude Desktop</h3>
+<p>Settings → Developer → Edit Config, then add:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "mynextadventure": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.mynextadventure.cloud/mcp",
+        "--header",
+        "Authorization: Bearer ${MNA_API_KEY}"
+      ],
+      "env": { "MNA_API_KEY": "your-api-key" }
+    }
+  }
+}
+</code></pre>
+<p>Restart Claude Desktop; the tools appear under the connector.</p>
+<h3>claude.ai / Claude Code</h3>
+<p>Add a custom connector pointing at <code>https://mcp.mynextadventure.cloud/mcp</code> and set the
+<code>Authorization: Bearer &lt;api-key&gt;</code> header. From Claude Code:</p>
+<pre><code class="language-bash">claude mcp add --transport http mynextadventure https://mcp.mynextadventure.cloud/mcp \
+  --header "Authorization: Bearer &lt;api-key&gt;"
+</code></pre>
+<h3>ChatGPT</h3>
+<p>Settings → Connectors → Add custom connector, MCP server URL
+<code>https://mcp.mynextadventure.cloud/mcp</code>, authentication "custom header" with
+<code>X-API-Key: &lt;api-key&gt;</code> (or <code>Authorization: Bearer &lt;api-key&gt;</code>).</p>
+<h3>Any other MCP client</h3>
+<p>Streamable HTTP at <code>/mcp</code>. <code>GET /</code> returns a small JSON health document with the endpoint
+and tool count.</p>
+<h2>Development</h2>
+<pre><code class="language-bash">npm install
+npm run dev              # wrangler dev on http://localhost:8787
+npm test                 # vitest: request building, schemas, generator freshness
+npm run type-check       # tsc --noEmit
+npm run generate:tools   # regenerate src/generated/tools.ts from the OpenAPI spec
+npx tsx scripts/smoke.ts # drive the MCP protocol against localhost:8787
+</code></pre>
+<p><code>scripts/smoke.ts</code> performs a real handshake (initialize → <code>tools/list</code> → one <code>tools/call</code>),
+reading the API key from <code>$MNA_API_KEY</code> or <code>~/.config/mna/credentials</code>. It refuses to call
+mutating tools unless <code>--force</code> is passed. To exercise write tools without touching real
+data, point the worker at a local mock:</p>
+<pre><code class="language-bash">npx wrangler dev --var MNA_API_BASE_URL:http://localhost:8899
+</code></pre>
+<h3>Regenerating the tools</h3>
+<p>Tool schemas are <strong>generated</strong>, not hand-written:</p>
+<pre><code>apps/server/openapi-v1.json   (the API's OpenAPI snapshot, kept fresh by server CI)
+        +
+scripts/tool-manifest.ts      (which operations become tools, their names and descriptions)
+        ↓  scripts/generator.ts
+src/generated/tools.ts        (committed; zod input schemas + request builders)
+</code></pre>
+<p>To add or change a tool, edit <code>scripts/tool-manifest.ts</code> and run <code>npm run generate:tools</code>.
+Never edit <code>src/generated/tools.ts</code> by hand — a test fails if it drifts from the spec.</p>
+<p>A manifest entry names one API operation, or groups several body-less operations behind a
+discriminator argument (<code>delete_trip_item</code>'s <code>target</code>, <code>select_destination_option</code>'s
+<code>action</code>) to keep the tool count down. Path params can be renamed (<code>id</code> → <code>tripId</code>), query
+params can be narrowed to enums, and descriptions can be overridden — everything else,
+including the request-body schemas, comes from the spec.</p>
+<h3>Deployment</h3>
+<p><code>npm run deploy</code> (wrangler) — production only, so it is gated on a maintainer; CI never
+deploys this worker.</p>
+<h2>Development</h2>
+<pre><code>npm ci
+npm run type-check
+npm test        # includes a drift test: src/generated/tools.ts must match the generator output
+npm run dev     # wrangler dev
+</code></pre>
+<p>Tools are generated from the vendored OpenAPI snapshot in <code>spec/openapi-v1.json</code>
+(canonical live spec: <a href="https://api.mynextadventure.cloud/api/v1/openapi.json" target="_blank" rel="noopener noreferrer">https://api.mynextadventure.cloud/api/v1/openapi.json</a>) via
+<code>scripts/generate-tools.ts</code>. Regenerate after refreshing the snapshot.</p>
+<p>This repo is the deployable source for <code>mcp.mynextadventure.cloud</code>. Development also
+happens in the My Next Adventure monorepo and is synced here on release. Issues and
+PRs welcome.</p>
+<h2>License</h2>
+<p>MIT</p>

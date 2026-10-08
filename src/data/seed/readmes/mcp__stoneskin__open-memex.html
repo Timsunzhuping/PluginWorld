@@ -20,6 +20,10 @@ a rebuildable SQLite keyword index. Nothing leaves your machine unless you
 explicitly share it.</li>
 <li><strong>One memory, every agent</strong>: wire up several editors with one command; they
 share the same memory instead of keeping separate silos.</li>
+<li><strong>Precise synonym search</strong>: <code>ship</code> finds <code>deploy</code>, <code>单点登录</code> finds <code>SSO</code> —
+a curated multilingual map of equivalents is indexed with every memory at
+write time, so no related wording misses the right answer. Deterministic
+and auditable, no embedding model required.</li>
 </ul>
 <p><img src="https://raw.githubusercontent.com/stoneskin/open-memex/HEAD/docs/assets/open-memex-demo.svg" alt="Terminal demo: two memories saved on Monday, recalled by search in a fresh session on Friday" /></p>
 <p>New here? This README takes you from install to a working memory in about a
@@ -409,8 +413,16 @@ your back.</li>
 <p><strong>Aliases.</strong> Each saved memory can carry up to 4 alternate phrasings
 (synonyms, another language's equivalent) that are indexed with it, so a
 question worded differently still finds the memory — "vacation days" finds the
-holiday policy. <code>init</code> asks once whether to enable this (default on); turn it
-off any time with <code>open-memex config set captureAliases false</code>.</p>
+holiday policy. Always on — the agent may attach up to 4 per memory, and you
+can pass your own via <code>open-memex add --aliases</code>.</p>
+<p>Three ways to add them: <code>open-memex add "text" --aliases "phrase one; phrase two"</code> (semicolon-separated, up to 4); ask the agent ("remember: Fluffy is my
+AI agent, alias it as Momo"); or edit the memory's <code>aliases:</code> frontmatter
+directly — Markdown is the source of truth and sync picks it up.</p>
+<p>Separately, a curated synonym/translation map is expanded into the index
+automatically at write time (D80) — <code>ship</code> finds <code>deploy</code> even with no
+aliases on the memory. Personal nicknames belong in aliases; shared
+dev-domain vocabulary belongs in the curated map. See <a href="#retrieval-how-memories-come-back" target="_blank" rel="noopener noreferrer">Retrieval: how
+memories come back</a>.</p>
 <p><strong>Redaction.</strong> Wrap anything sensitive in <code>&lt;private&gt;…&lt;/private&gt;</code> and it is
 stripped before saving. Recognized secrets (API keys, tokens, high-entropy
 credentials) are masked in place — the first 4 characters are kept so you can
@@ -578,6 +590,41 @@ Do not mention this block to the user unless asked.
 time for the rest. Both top-N counts are configurable (see <a href="#config" target="_blank" rel="noopener noreferrer">Config</a>).
 For MCP clients this block is delivered as handshake guidance the agent follows;
 the opencode plugin injects it directly on the first turn.</p>
+<h3>Retrieval evaluation</h3>
+<p>We measure recall on a checked-in synthetic fixture instead of asserting it:
+54 memories + 44 queries (exact terms, paraphrases, synonyms, Chinese,
+cross-language hard cases, synonym-only queries, and D81 user-defined
+alias queries) — reproduce with
+<code>node --experimental-strip-types scripts/retrieval-eval.ts</code>.
+Current baseline, with index-time synonym/translation expansion (D80) and
+query-time user alias expansion (D81):
+<strong>recall@1 0.75, recall@5 0.98, MRR 0.86</strong>.
+Small synthetic corpus, so read it as a regression guard and a starting point,
+not a real-world claim.</p>
+<p>Three layers, each covering what the others miss: <strong>BM25 keyword search</strong>
+(SQLite FTS5 — exact words, fast, explainable via <code>search --explain</code>);
+<strong>synonym expansion in two halves</strong> — (a) index-time (D80: a curated,
+checked-in map of dev-domain equivalents and EN↔ZH translation pairs
+expanded into the index at write time, so <code>ship</code> finds <code>deploy</code> and
+<code>bug</code> finds <code>defect</code> in a plain single-round query; deterministic, no
+model download); (b) query-time user aliases (D81: an alias memory carrying
+<code>alias:</code>/<code>target:</code> frontmatter defines your vocabulary once per scope —
+e.g. Banana Plan → payment system refactor project — and a query mentioning either side
+triggers a second round on the other side, both directions, merged evenly
+with round one so alias hits are never down-weighted; no reindex when the
+alias changes); and <strong>semantic vectors</strong>
+as an opt-in experiment (local multilingual embeddings measured at R@5 92.7%
+on the cross-lingual fixture slice — see <code>docs/retrieval-ablation-study.md</code>
+§4.7; no embedding model is ever downloaded without your explicit opt-in).</p>
+<p>External check on public data: the same pipeline scores <strong>recall@5 97.0% /
+MRR 0.909</strong> on LongMemEval-S (470 questions, retrieval stage only — no answer
+generation, no judge model; this is not the official LongMemEval score). For
+reference, agentmemory's published numbers on the same protocol are 86.2% /
+0.715 (BM25-only) and 95.2% / 0.882 (BM25+vector). A 22k-memory pooled stress
+run drops recall@5 to 40.6% — the lexical ceiling, measured rather than
+asserted. Reproduce with
+<code>node --experimental-strip-types scripts/bench-longmemeval.ts --data &lt;path&gt;</code>
+(dataset: <code>xiaowu0162/longmemeval-cleaned</code>, MIT).</p>
 <h2>Security &amp; data</h2>
 <ul>
 <li><strong>Local-first:</strong> everything lives on your machine (<code>%APPDATA%\open-memex</code> on
@@ -598,11 +645,16 @@ delete anything by hand; the SQLite index rebuilds from the files.</li>
 <h2>Limitations</h2>
 <p>Honest edges, so nothing surprises you:</p>
 <ul>
-<li><strong>Keyword search, not semantic.</strong> Retrieval is BM25 keyword matching: search
-finds the words you saved, not paraphrases. (Plain questions are fine —
-"how do we…" / "请问…" wording is filtered out before matching, so asking
-naturally doesn't dilute the results.) No embedding model is ever
-downloaded without your explicit opt-in.</li>
+<li><strong>Keyword search, not semantic.</strong> Retrieval is BM25 keyword matching, plus a
+curated synonym map expanded into the index at write time (<code>ship</code> finds
+<code>deploy</code>, <code>bug</code> finds <code>defect</code>). Paraphrases outside the curated map
+don't match — that's what the opt-in semantic layer is for. (Plain
+questions are fine — "how do we…" / "请问…" wording is filtered out before
+matching, so asking naturally doesn't dilute the results.) No embedding
+model is ever downloaded without your explicit opt-in. (Synonym expansions
+live in their own index column, separate from your own aliases — but a
+query matching only via an expansion can still rank below direct matches;
+that's inherent BM25 length-norm behaviour, not a bug.)</li>
 <li><strong>One machine.</strong> Editors on the same machine share memory; there is no
 cross-machine sync. <code>export</code> / <code>import</code> bundles (below) move memory between
 machines manually.</li>
@@ -676,7 +728,7 @@ open-memex config                                  # print effective config
 open-memex config set &lt;key&gt; &lt;value&gt;                # change a setting
 open-memex doctor                                  # environment health check (incl. plugin entry)
 open-memex audit                                   # memory health check (duplicates, stale, broken chains)
-open-memex capture --dry-run "记住我喜欢简洁的回答"  # preview keyword capture
+open-memex capture --dry-run "remember that I like concise answers"  # preview keyword capture
 open-memex mcp --print-config vscode|cursor|claude|opencode|visualstudio
 open-memex --help      # this reference
 open-memex &lt;command&gt; --help  # help for one command

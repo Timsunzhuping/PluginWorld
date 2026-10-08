@@ -14,19 +14,19 @@
 <a href="https://github.com/humanspeak/svelte-markdown/graphs/commit-activity" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintenance" /></a></p>
 <h2>Features</h2>
 <ul>
-<li>🔒 <strong>Secure HTML parsing</strong> via HTMLParser2 with built-in XSS defaults (protocol allowlist, <code>on*</code> handler stripping)</li>
+<li>🔒 HTMLParser2 parsing with default URL and attribute sanitizers (protocol allowlist, <code>on*</code> handler stripping)</li>
 <li>🚀 Full markdown syntax support through Marked</li>
 <li>💪 Complete TypeScript support with strict typing</li>
 <li>🔄 Svelte 5 runes compatibility</li>
 <li>✂️ Inline snippet overrides — customize renderers without separate files</li>
 <li>🎨 Customizable component rendering system</li>
-<li>♿ WCAG 2.1 accessibility compliance</li>
+<li>♿ Semantic default markup, including image alt text and task-list checkboxes</li>
 <li>🎯 GitHub-style slug generation for headers</li>
 <li>🧪 Comprehensive test coverage (vitest and playwright)</li>
 <li>🧩 First-class marked extensions support via <code>extensions</code> prop (e.g., KaTeX math, alerts)</li>
 <li>🎨 Opt-in syntax highlighting with one <code>HighlightedCode</code> renderer and your choice of engine (Shiki or TanStack Highlight) — streaming-compatible, tree-shaken out of the core bundle</li>
-<li>⚡ Intelligent token caching (50-200x faster re-renders)</li>
-<li>📡 LLM streaming mode with incremental rendering: work per frame is proportional to the open block, not the document (about 2–3 ms on mixed prose)</li>
+<li>⚡ LRU token caching avoids repeated parsing of previously seen content</li>
+<li>📡 LLM streaming with incremental parsing and token reuse (about 2–3 ms per frame on the mixed-prose benchmark below)</li>
 <li>📬 Late and out-of-order packets: <code>writeChunk({ value, offset })</code> assembles chunks in any arrival order and keeps rendering while gaps fill</li>
 <li>🖼️ Smart image lazy loading with fade-in animation</li>
 </ul>
@@ -61,6 +61,7 @@ List each place that needs a change, explain why using the guide, and propose
 the smallest fix.
 </code></pre>
 <h2>Installation</h2>
+<p>Requires <strong>Svelte 5</strong> and <strong>Node.js 22 or newer</strong> for package tooling.</p>
 <pre><code class="language-bash">npm i -S @humanspeak/svelte-markdown
 </code></pre>
 <p>Or with your preferred package manager:</p>
@@ -90,7 +91,7 @@ This is a paragraph with **bold** and &lt;em&gt;mixed HTML&lt;/em&gt;.
 <ul>
 <li><strong>Mixed markdown + HTML in a single source</strong> — agents can interleave standard markdown with rich HTML (tables, SVG, custom elements) without a second renderer</li>
 <li><strong>XSS defaults on by default</strong> — <code>javascript:</code> URLs and <code>on*</code> handlers stripped from agent output before render, no opt-in required (see <a href="#security" target="_blank" rel="noopener noreferrer">Security</a>)</li>
-<li><strong>Streaming-aware sanitization</strong> — when <code>streaming</code> is enabled, each token is sanitized as it's emitted; mid-tag partials buffer until well-formed, so progressive HTML from an LLM renders without flicker</li>
+<li><strong>Sanitization during streaming</strong> — URL and attribute sanitizers also run on progressively rendered content; partial HTML tags are buffered while they are incomplete</li>
 <li><strong>Custom HTML tag support</strong> — route semantic markup like <code>&lt;tool-call&gt;</code>, <code>&lt;thinking&gt;</code>, or your own design-system tags to your own components via <code>renderers.html</code> (see <a href="#custom-html-tags" target="_blank" rel="noopener noreferrer">Custom HTML Tags</a>)</li>
 </ul>
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
@@ -100,13 +101,15 @@ This is a paragraph with **bold** and &lt;em&gt;mixed HTML&lt;/em&gt;.
     let markdown: { writeChunk: (chunk: StreamingChunk) =&gt; void } | undefined
 
     async function streamFromAgent(response: Response) {
-        const reader = response.body!.getReader()
+        if (!response.ok || !response.body) throw new Error('Streaming response unavailable')
+        const reader = response.body.getReader()
         const decoder = new TextDecoder()
         while (true) {
             const { done, value } = await reader.read()
             if (done) break
             markdown?.writeChunk(decoder.decode(value, { stream: true }))
         }
+        markdown?.writeChunk(decoder.decode())
     }
 &lt;/script&gt;
 
@@ -120,6 +123,7 @@ This is a paragraph with **bold** and &lt;em&gt;mixed HTML&lt;/em&gt;.
     Token,
     TokensList,
     SvelteMarkdownOptions,
+    SvelteMarkdownProps,
     MarkedExtension
 } from '@humanspeak/svelte-markdown'
 </code></pre>
@@ -160,7 +164,7 @@ for (const tag of htmlRendererKeys) {
 <p>Notes</p>
 <ul>
 <li><code>rendererKeys</code> intentionally excludes <code>html</code>. Use <code>htmlRendererKeys</code> for HTML tag overrides.</li>
-<li><code>Unsupported</code> and <code>UnsupportedHTML</code> are available if you want a pass-through fallback strategy.</li>
+<li><code>Unsupported</code> and <code>UnsupportedHTML</code> display suppressed markup as escaped text. They do not remove its content; use a custom renderer if you want to hide it entirely.</li>
 </ul>
 <h2>Helper utilities for allow/deny strategies</h2>
 <p>These helpers make it easy to either allow only a subset or exclude only a subset of renderers without writing huge maps by hand.</p>
@@ -276,7 +280,7 @@ const md = buildUnsupportedRenderers()
     {@render children?.()}
 &lt;/a&gt;
 </code></pre>
-<p>If you would like to extend other renderers please take a look inside the <a href="https://github.com/humanspeak/svelte-markdown/tree/main/src/lib/renderers" target="_blank" rel="noopener noreferrer">renderers folder</a> for the default implentation of them. If you would like feature additions please feel free to open an issue!</p>
+<p>Save this as <code>CustomLink.svelte</code>, then use it with <code>renderers={{ link: CustomLink }}</code> after importing the component. Other default implementations are in the <a href="https://github.com/humanspeak/svelte-markdown/tree/main/src/lib/renderers" target="_blank" rel="noopener noreferrer">renderers folder</a>.</p>
 <h2>Snippet Overrides (Svelte 5)</h2>
 <p>For simple tweaks — adding a class, changing an attribute, wrapping in a div — you can override renderers inline with Svelte 5 snippets instead of creating separate component files:</p>
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
@@ -290,11 +294,11 @@ const md = buildUnsupportedRenderers()
         &lt;p class="prose"&gt;{@render children?.()}&lt;/p&gt;
     {/snippet}
 
-    {#snippet heading({ depth, children })}
+    {#snippet heading({ depth, id, children })}
         {#if depth === 1}
-            &lt;h1 class="title"&gt;{@render children?.()}&lt;/h1&gt;
+            &lt;h1 {id} class="title"&gt;{@render children?.()}&lt;/h1&gt;
         {:else}
-            &lt;h2&gt;{@render children?.()}&lt;/h2&gt;
+            &lt;svelte:element this={`h${depth}`} {id}&gt;{@render children?.()}&lt;/svelte:element&gt;
         {/if}
     {/snippet}
 
@@ -329,7 +333,7 @@ const md = buildUnsupportedRenderers()
     {/snippet}
 &lt;/SvelteMarkdown&gt;
 </code></pre>
-<p>All HTML snippets share a uniform props interface: <code>{ attributes?: Record&lt;string, any&gt;, children?: Snippet }</code>.</p>
+<p>All HTML snippets share the exported <code>HtmlSnippetProps</code> interface: <code>{ attributes?: Record&lt;string, string | number | boolean | undefined&gt;, children?: Snippet }</code>.</p>
 <h3>Custom HTML Tags</h3>
 <p>You can render arbitrary (non-standard) HTML tags like <code>&lt;click&gt;</code>, <code>&lt;tooltip&gt;</code>, or any custom element by providing a renderer or snippet for the tag name. The parsing pipeline accepts any tag name — you just need to tell <code>SvelteMarkdown</code> how to render it.</p>
 <p><strong>Component renderer approach:</strong></p>
@@ -361,7 +365,7 @@ const md = buildUnsupportedRenderers()
 </code></pre>
 <p>The <code>tag</code> passed to custom renderers and to the <code>sanitizeUrl</code> / <code>sanitizeAttributes</code> hooks is always lowercase, so <code>context.tag === 'iframe'</code> is reliable.</p>
 <h2>Marked Extensions</h2>
-<p>Use <a href="https://marked.js.org/using_advanced#extensions" target="_blank" rel="noopener noreferrer">marked extensions</a> via the <code>extensions</code> prop. SvelteMarkdown ships first-class extensions for KaTeX, Mermaid, GitHub-style alerts, and footnotes from the <code>@humanspeak/svelte-markdown/extensions</code> subpath — no third-party packages required. Third-party extensions still work too; the component handles registering tokenizers internally and you just provide renderers for the custom token types.</p>
+<p>Use <a href="https://marked.js.org/using_advanced#extensions" target="_blank" rel="noopener noreferrer">marked extensions</a> via the <code>extensions</code> prop. SvelteMarkdown ships tokenizers and renderers for KaTeX, Mermaid, GitHub-style alerts, and footnotes. Alerts and footnotes need no additional dependencies; math and diagrams require their optional peers. Use the <code>@humanspeak/svelte-markdown/extensions</code> subpath or a dedicated subpath such as <code>extensions/alert</code> or <code>extensions/katex</code>. Dedicated subpaths let you import only the feature you need. Third-party extensions still work too; the component handles registering tokenizers internally and you just provide renderers for the custom token types.</p>
 <h3>KaTeX Math Rendering</h3>
 <p>The package includes built-in <code>markedKatex</code> and <code>KatexRenderer</code> helpers. Install <code>katex</code> as an optional peer dependency and load its CSS:</p>
 <pre><code class="language-bash">npm install katex
@@ -401,7 +405,8 @@ const md = buildUnsupportedRenderers()
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
     import SvelteMarkdown from '@humanspeak/svelte-markdown'
     import type { RendererComponent, Renderers } from '@humanspeak/svelte-markdown'
-    import { markedKatex, KatexRenderer } from '@humanspeak/svelte-markdown/extensions'
+    import { markedKatex, KatexRenderer } from '@humanspeak/svelte-markdown/extensions/katex'
+    import 'katex/dist/katex.min.css'
 
     interface KatexRenderers extends Renderers {
         inlineKatex: RendererComponent
@@ -414,14 +419,6 @@ const md = buildUnsupportedRenderers()
     }
 &lt;/script&gt;
 
-&lt;svelte:head&gt;
-    &lt;link
-        rel="stylesheet"
-        href="https://cdn.jsdelivr.net/npm/katex@0.16.45/dist/katex.min.css"
-        crossorigin="anonymous"
-    /&gt;
-&lt;/svelte:head&gt;
-
 &lt;SvelteMarkdown
     source={`Euler's identity: \\(e^{i\\pi} + 1 = 0\\)`}
     extensions={[markedKatex()]}
@@ -432,17 +429,10 @@ const md = buildUnsupportedRenderers()
 <p><strong>Snippet override approach</strong> (no separate component file needed):</p>
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
     import SvelteMarkdown from '@humanspeak/svelte-markdown'
-    import { markedKatex } from '@humanspeak/svelte-markdown/extensions'
+    import { markedKatex } from '@humanspeak/svelte-markdown/extensions/katex'
     import katex from 'katex'
+    import 'katex/dist/katex.min.css'
 &lt;/script&gt;
-
-&lt;svelte:head&gt;
-    &lt;link
-        rel="stylesheet"
-        href="https://cdn.jsdelivr.net/npm/katex@0.16.45/dist/katex.min.css"
-        crossorigin="anonymous"
-    /&gt;
-&lt;/svelte:head&gt;
 
 &lt;SvelteMarkdown source={`Euler's identity: \\(e^{i\\pi} + 1 = 0\\)`} extensions={[markedKatex()]}&gt;
     {#snippet inlineKatex(props)}
@@ -502,7 +492,7 @@ and docs; library overrides do not propagate to consumer applications.</p>
     {/snippet}
 &lt;/SvelteMarkdown&gt;
 </code></pre>
-<p>Since Mermaid rendering is async, the snippet delegates to <code>MermaidRenderer</code> rather than calling <code>mermaid.render()</code> directly. This pattern works for any async extension — keep the async logic in a component and use the snippet for layout customization.</p>
+<p>The Mermaid tokenizer is synchronous, so parsing and streaming remain enabled. Diagram rendering happens in the browser after mount; server-rendered pages show a loading placeholder for diagrams. The snippet delegates that async rendering to <code>MermaidRenderer</code> and controls only its layout.</p>
 <h3>GitHub Alerts</h3>
 <p>Built-in support for <a href="https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#alerts" target="_blank" rel="noopener noreferrer">GitHub-style alerts/admonitions</a>. Five alert types are supported: <code>NOTE</code>, <code>TIP</code>, <code>IMPORTANT</code>, <code>WARNING</code>, and <code>CAUTION</code>.</p>
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
@@ -654,7 +644,7 @@ npm install @tanstack/highlight
 // → use renderers={{ alert: AlertComponent }}
 // → or {#snippet alert(props)}
 </code></pre>
-<p>Each snippet/component receives the token's properties as props (e.g., <code>text</code>, <code>displayMode</code> for KaTeX; <code>text</code>, <code>level</code> for alerts).</p>
+<p>Each snippet/component receives the token's properties as props (e.g., <code>text</code>, <code>displayMode</code> for KaTeX; <code>text</code>, <code>alertType</code> for alerts). Marked HTML renderer functions do not replace Svelte renderers; provide a component or snippet for each custom token type.</p>
 <h3>Dynamic Extension Objects</h3>
 <p>SvelteMarkdown includes extension identity in its internal parser cache. If you replace an extension object, tokenizer object, or tokenizer function, the parser treats that as a new parsing configuration and re-parses the source.</p>
 <p>This means extension factories can safely close over reactive state:</p>
@@ -732,9 +722,18 @@ npm install @tanstack/highlight
 
 &lt;/details&gt;
 </code></pre>
+<h3>Markdown preprocessor (alpha)</h3>
+<p>We’re developing a Markdown preprocessor for authored pages and components.
+It parses Markdown at build time while preserving <code>SvelteMarkdown</code>’s custom
+Markdown renderers, and compiles embedded Svelte components and expressions without
+requiring special delimiters. Static pages can use the same renderer
+customization as runtime Markdown, without parsing the document again in the
+browser.</p>
+<p><strong>Status: alpha.</strong> The API and supported syntax are still evolving. This alpha
+does not yet provide a published preprocessor entry point.</p>
 <h2>Performance</h2>
 <h3>Intelligent Token Caching</h3>
-<p>Parsed tokens are automatically cached using an LRU strategy, providing 50-200x faster re-renders for previously seen content (&lt; 1ms vs 50-200ms). The cache uses FNV-1a hashing keyed on source + options, with LRU eviction (default 50 documents) and TTL expiration (default 5 minutes). No configuration required.</p>
+<p>Parsed tokens are automatically cached using an LRU strategy, avoiding repeated lexing for previously seen content. The benefit depends on document size and parsing configuration. The cache uses FNV-1a hashing keyed on source + options, with LRU eviction (default 50 documents) and TTL expiration (default 5 minutes). No configuration required.</p>
 <pre><code class="language-typescript">import { tokenCache, TokenCache } from '@humanspeak/svelte-markdown'
 
 // Manual cache management
@@ -744,15 +743,18 @@ tokenCache.deleteTokens(markdown, options)
 // Custom cache instance
 const myCache = new TokenCache({ maxSize: 100, ttl: 10 * 60 * 1000 })
 </code></pre>
+<p><code>tokenCache</code> is the shared cache used by the component. Creating a separate
+<code>TokenCache</code> does not replace it; a custom instance is for your own token caching.
+Treat cache option objects as immutable and create a new object when options change.</p>
 <blockquote>
-<p><strong>Note (v1.7.12+):</strong> cache entries store the source string alongside its
+<p>Cache entries store the source string alongside its
 tokens so a hit is verified against hash collisions — <code>getTokens</code>,
 <code>setTokens</code>, and <code>hasTokens</code> are the supported token API. The raw
 <code>get()</code>/<code>set()</code> methods inherited from <code>MemoryCache</code> now operate on the
 wrapped <code>{ source, tokens }</code> entry shape, not bare token arrays.</p>
 </blockquote>
 <h3>Smart Image Lazy Loading</h3>
-<p>Images automatically lazy load using native <code>loading="lazy"</code> and IntersectionObserver prefetching, with a smooth fade-in animation and error state handling. When an image URL changes, its load/error state resets for the new request; unchanged image URLs keep their existing DOM and completed state during updates. Reusing the same failed URL does not automatically retry it. To disable lazy loading or provide custom retry behavior, provide a custom Image renderer:</p>
+<p>The default Markdown <code>image</code> renderer lazy loads using native <code>loading="lazy"</code> and IntersectionObserver prefetching, with a smooth fade-in animation and error state handling. When an image URL changes, its load/error state resets for the new request; unchanged image URLs keep their existing DOM and completed state during updates. Reusing the same failed URL does not automatically retry it. Raw HTML <code>&lt;img&gt;</code> tags use the HTML renderer and do not inherit this behavior. To disable lazy loading or provide custom retry behavior for Markdown images, provide a custom image renderer:</p>
 <pre><code class="language-svelte">&lt;!-- EagerImage.svelte --&gt;
 &lt;script lang="ts"&gt;
     let { href = '', title = undefined, text = '' } = $props()
@@ -770,7 +772,7 @@ wrapped <code>{ source, tokens }</code> entry shape, not bare token arrays.</p>
 &lt;SvelteMarkdown source={markdown} {renderers} /&gt;
 </code></pre>
 <h3>LLM Streaming</h3>
-<p>For real-time rendering of AI responses from ChatGPT, Claude, Gemini, and other LLMs, enable the <code>streaming</code> prop. This uses a smart diff algorithm that re-parses the full source for correctness but only updates changed DOM nodes, keeping render times constant regardless of document size.</p>
+<p>For real-time rendering of AI responses, enable the <code>streaming</code> prop. Append-only updates normally re-parse the open block at the end of the source and reuse unchanged tokens. Edits, reference definitions, and some extensions can require a full-document parse; work is not constant for every document or configuration.</p>
 <p>The preferred API is now imperative: bind the component instance and call <code>writeChunk()</code> as chunks arrive. This avoids prop reactivity edge cases like identical consecutive string chunks being coalesced.</p>
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
     import SvelteMarkdown from '@humanspeak/svelte-markdown'
@@ -785,6 +787,7 @@ wrapped <code>{ source, tokens }</code> entry shape, not bare token arrays.</p>
 
     async function streamResponse() {
         const response = await fetch('/api/chat', { method: 'POST', body: '...' })
+        if (!response.ok || !response.body) throw new Error('Streaming response unavailable')
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
 
@@ -793,6 +796,7 @@ wrapped <code>{ source, tokens }</code> entry shape, not bare token arrays.</p>
             if (done) break
             markdown?.writeChunk(decoder.decode(value, { stream: true }))
         }
+        markdown?.writeChunk(decoder.decode())
     }
 &lt;/script&gt;
 
@@ -802,7 +806,7 @@ wrapped <code>{ source, tokens }</code> entry shape, not bare token arrays.</p>
 <pre><code class="language-ts">markdown?.writeChunk({ value: 'world', offset: 6 })
 </code></pre>
 <p>Object chunks overwrite the internal buffer at <code>offset</code>. This is overwrite semantics, not insert semantics: the chunk replaces characters starting at that index and preserves any trailing content after the overwritten span.</p>
-<p>If <code>offset</code> skips ahead, missing positions are padded with spaces. There is no delete or truncate behavior in offset mode.</p>
+<p>Offsets count JavaScript string positions (UTF-16 code units), not bytes. If <code>offset</code> skips ahead, missing positions are padded with spaces. A chunk that opens a gap larger than 1,000,000 positions is dropped with a warning. There is no delete or truncate behavior in offset mode.</p>
 <p>Typical websocket-style usage can arrive out of order:</p>
 <pre><code class="language-ts">markdown?.writeChunk({ value: ' world', offset: 5 })
 markdown?.writeChunk({ value: 'Hello', offset: 0 })
@@ -897,9 +901,9 @@ markdown?.resetStream('# Seeded response')
 </tr>
 </tbody></table>
 <p>Milliseconds are machine-specific; reproduce with <code>pnpm perf:stream-compare</code>. Streamed output is checked against a one-shot parse at every sampled frame, and by a seeded fuzz suite that splits random documents at random chunk boundaries.</p>
-<p>When <code>streaming</code> is <code>false</code> (default), existing behavior is unchanged. With <code>streaming</code> enabled the component skips cache lookups (always a miss during streaming), coalesces updates once per animation frame, re-lexes only the open block at the end of the source, and reuses every unchanged token object so Svelte only updates components whose tokens actually changed.</p>
+<p>With <code>streaming</code> enabled, the component bypasses the document token cache, batches appended chunks around animation frames, and reuses unchanged tokens to limit DOM updates. Tail-window parsing is used when the document and parsing configuration allow it; unsupported configurations fall back to full parsing for correctness. Offset patches are applied immediately.</p>
 <p>Default heading ids are precomputed per render pass during streaming, so duplicate-heading suffixes and <code>headerPrefix</code> stay stable across reparses. Custom heading renderers should use the provided <code>id</code> prop for this behavior; calling the <code>slug</code> prop directly advances renderer-local slug state.</p>
-<p><strong>Note:</strong> <code>streaming</code> is automatically disabled when async extensions (e.g., <code>markedMermaid</code>) are used. A console warning is logged in this case.</p>
+<p><strong>Async parsing:</strong> extensions that declare <code>async: true</code> disable streaming and log a warning. <code>writeChunk()</code> and <code>resetStream()</code> are unavailable in that configuration. The built-in <code>markedMermaid()</code> tokenizer is synchronous; its browser renderer can render asynchronously without disabling streaming.</p>
 <p>See the <a href="https://markdown.svelte.page/docs/advanced/llm-streaming" target="_blank" rel="noopener noreferrer">full streaming documentation</a> and <a href="https://markdown.svelte.page/examples/llm-streaming" target="_blank" rel="noopener noreferrer">interactive demo</a>.</p>
 <h4>Advanced: <code>IncrementalParser</code></h4>
 <p><code>SvelteMarkdown</code> drives its streaming mode with the exported <code>IncrementalParser</code>. Advanced consumers can use it directly to parse a growing document and learn which tokens changed:</p>
@@ -913,7 +917,7 @@ const previous = buffer
 buffer += 'Streamed paragraph'
 const result = parser.update(buffer, previous) // `buffer` is known to start with `previous`
 </code></pre>
-<p><code>update(source, appendsTo?)</code> parses the full accumulated <code>source</code> and diffs it against the previous update. The optional <code>appendsTo</code> is a string you have already verified <code>source</code> starts with (typically your buffer before appending a chunk); when it is the previously parsed source, the parser skips its own full-length append check. Passing a string that <code>source</code> does not start with breaks parsing, so omit it when unsure.</p>
+<p><code>update(source, appendsTo?)</code> accepts the full accumulated <code>source</code>, re-lexes the appended tail when possible, and compares the result with the previous update. The optional <code>appendsTo</code> is a string you have already verified <code>source</code> starts with (typically your buffer before appending a chunk); when it is the previously parsed source, the parser skips its own full-length append check. Passing a string that <code>source</code> does not start with breaks parsing, so omit it when unsure.</p>
 <p>The returned <code>IncrementalUpdateResult</code> contains:</p>
 <ul>
 <li><code>tokens</code> — the full new token array.</li>
@@ -947,6 +951,7 @@ const result = parser.update(buffer, previous) // `buffer` is known to start wit
 <li><code>code</code> - Block of code (<code>&lt;pre&gt;&lt;code&gt;</code>)</li>
 <li><code>html</code> - HTML node</li>
 <li><code>rawtext</code> - All other text that is going to be included in an object above</li>
+<li><code>escape</code> - Backslash-escaped Markdown characters</li>
 </ul>
 <p>Child tokens rendered inside list items and table cells receive only their own token fields; they do not inherit the parent list's or table's <code>raw</code>, <code>text</code>, or other fields through props.</p>
 <h3>Optional List Renderers</h3>
@@ -1029,6 +1034,7 @@ const result = parser.update(buffer, previous) // `buffer` is known to start wit
 <td>Image</td>
 </tr>
 </tbody></table>
+<p>This table shows a selection of the built-in tags. The exported <code>htmlRendererKeys</code> lists all built-in HTML renderer keys; custom tags can be registered too.</p>
 <p>You can customize HTML rendering by providing your own components:</p>
 <pre><code class="language-typescript">import type { HtmlRenderers } from '@humanspeak/svelte-markdown'
 
@@ -1037,11 +1043,14 @@ const customHtmlRenderers: Partial&lt;HtmlRenderers&gt; = {
     span: YourCustomSpanComponent
 }
 </code></pre>
-<h2>Events</h2>
-<p>The component emits a <code>parsed</code> event when tokens are calculated:</p>
+<h2>Parsed callback</h2>
+<p>Pass a <code>parsed</code> callback to inspect the current tokens after rendering updates in the browser:</p>
 <pre><code class="language-svelte">&lt;script lang="ts"&gt;
     import SvelteMarkdown from '@humanspeak/svelte-markdown'
 
+    import type { Token, TokensList } from '@humanspeak/svelte-markdown'
+
+    const source = '# Hello'
     const handleParsed = (tokens: Token[] | TokensList) =&gt; {
         console.log('Parsed tokens:', tokens)
     }
@@ -1049,7 +1058,7 @@ const customHtmlRenderers: Partial&lt;HtmlRenderers&gt; = {
 
 &lt;SvelteMarkdown {source} parsed={handleParsed} /&gt;
 </code></pre>
-<p><code>parsed</code> is optional; when it is omitted, no token snapshot is taken per update.</p>
+<p><code>parsed</code> runs in a Svelte effect, so it does not run during server-side rendering. Treat the supplied tokens as read-only: they may share objects with the parser cache or previous streaming updates. When the callback is omitted, its effect skips token updates.</p>
 <h2>Props</h2>
 <table>
 <thead>
@@ -1081,7 +1090,7 @@ const customHtmlRenderers: Partial&lt;HtmlRenderers&gt; = {
 </tr>
 <tr>
 <td>options</td>
-<td><code>SvelteMarkdownOptions</code></td>
+<td><code>Partial&lt;SvelteMarkdownOptions&gt;</code></td>
 <td>Marked parser configuration</td>
 </tr>
 <tr>
@@ -1092,7 +1101,12 @@ const customHtmlRenderers: Partial&lt;HtmlRenderers&gt; = {
 <tr>
 <td>extensions</td>
 <td><code>MarkedExtension[]</code></td>
-<td>Third-party marked extensions (e.g., KaTeX math)</td>
+<td>Built-in or third-party Marked extensions</td>
+</tr>
+<tr>
+<td>parsed</td>
+<td><code>(tokens: Token[] | TokensList) =&gt; void</code></td>
+<td>Optional browser callback; see <a href="#parsed-callback" target="_blank" rel="noopener noreferrer">Parsed callback</a></td>
 </tr>
 <tr>
 <td>sanitizeUrl</td>
@@ -1105,11 +1119,61 @@ const customHtmlRenderers: Partial&lt;HtmlRenderers&gt; = {
 <td>Attribute sanitizer applied before render. Defaults to <code>defaultSanitizeAttributes</code></td>
 </tr>
 </tbody></table>
+<p>Defaults: <code>streaming</code> and <code>isInline</code> are <code>false</code>; <code>extensions</code> is empty;
+<code>streamId</code> and <code>parsed</code> are unset; renderer overrides are merged with the defaults.
+<code>writeChunk()</code> and <code>resetStream()</code> require a string source and <code>streaming={true}</code>.</p>
+<h3>Parser options</h3>
+<p>Pass parser options through the <code>options</code> prop:</p>
+<pre><code class="language-svelte">&lt;SvelteMarkdown {source} options={{ breaks: true, headerPrefix: 'article-' }} /&gt;
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>gfm</code></td>
+<td><code>true</code></td>
+<td>GitHub Flavored Markdown, including tables and task lists</td>
+</tr>
+<tr>
+<td><code>breaks</code></td>
+<td><code>false</code></td>
+<td>Render single newlines as line breaks when GFM is enabled</td>
+</tr>
+<tr>
+<td><code>pedantic</code></td>
+<td><code>false</code></td>
+<td>Use Marked's original Markdown parsing rules</td>
+</tr>
+<tr>
+<td><code>headerIds</code></td>
+<td><code>true</code></td>
+<td>Generate heading IDs with GitHub-style slugs</td>
+</tr>
+<tr>
+<td><code>headerPrefix</code></td>
+<td><code>''</code></td>
+<td>Prefix generated heading IDs</td>
+</tr>
+</tbody></table>
+<p>Heading renderer components and snippets receive the prepared <code>id</code> so they can
+preserve heading links and duplicate-heading suffixes when overriding markup.</p>
+<h3>Pre-parsed tokens</h3>
+<p>Pass a token array as <code>source</code> to render content you have already parsed. Token
+arrays render immediately, including during server-side rendering, even when
+async extensions are configured. The component does not apply parser extensions
+to supplied tokens; apply them when you create the array.</p>
+<p>String sources that use async extensions render after the component mounts and
+do not produce server-rendered content.</p>
 <h2>Security</h2>
-<p>This package takes a defense-in-depth approach to security. The defaults below are applied automatically in the Parser before tokens reach any renderer or snippet, so custom renderers cannot bypass them.</p>
+<p>Default URL and attribute sanitizers run before link, image, and HTML props reach renderers or snippets. They provide XSS hardening, not complete HTML sanitization. Custom renderer code and extension-generated HTML remain your responsibility.</p>
 <p><strong>On by default:</strong></p>
 <ul>
-<li><strong>Secure HTML parsing</strong> — All HTML is parsed through HTMLParser2's streaming parser rather than <code>innerHTML</code>, preventing script injection</li>
+<li><strong>HTML parsing</strong> — Raw HTML is parsed with HTMLParser2 and rendered through Svelte components rather than inserted directly with <code>innerHTML</code>. HTMLParser2 itself is not a sanitizer.</li>
 <li><strong>URL protocol allowlist</strong> (<code>defaultSanitizeUrl</code>) — Markdown link/image URLs and the HTML attributes <code>href</code>, <code>src</code>, <code>action</code>, <code>formaction</code>, <code>cite</code>, <code>data</code>, and <code>poster</code> are restricted to <code>http:</code>, <code>https:</code>, <code>mailto:</code>, <code>tel:</code>, and relative URLs. <code>javascript:</code>, <code>vbscript:</code>, <code>data:</code>, and <code>blob:</code> URIs are blocked (including mixed-case and leading-whitespace variants).</li>
 <li><strong>Event handler stripping</strong> (<code>defaultSanitizeAttributes</code>) — All <code>on*</code> attributes (e.g. <code>onclick</code>, <code>onerror</code>, <code>onload</code>) are removed. The <code>srcdoc</code> attribute is also stripped to prevent iframe HTML injection.</li>
 <li><strong>No <code>&lt;script&gt;</code> or <code>&lt;style&gt;</code> renderers</strong> — Both tags fall through to <code>UnsupportedHTML</code>, which renders them as visible escaped text (e.g. <code>&lt;script&gt;...&lt;/script&gt;</code>) rather than executing or applying them.</li>
@@ -1124,7 +1188,7 @@ const customHtmlRenderers: Partial&lt;HtmlRenderers&gt; = {
 <p><strong>Known gaps (not handled by defaults):</strong></p>
 <ul>
 <li><strong>Inline <code>style="..."</code> attributes are not sanitized.</strong> They pass through unchanged (only <code>on*</code> and <code>srcdoc</code> are stripped from attribute maps). Modern browsers don't execute JavaScript via CSS, but visual hijacking (e.g. <code>display:none</code>) and exfiltration via background-image URLs are possible.</li>
-<li><strong><code>iframe</code>, <code>form</code>, <code>embed</code> are rendered</strong> by default. With <code>on*</code>/<code>srcdoc</code> stripped and <code>src</code>/<code>action</code> protocol-restricted, the worst exploits are blocked, but an iframe to an arbitrary <code>http(s)</code> URL is still possible. Use <code>excludeHtmlOnly(['iframe', 'form', 'embed'])</code> to remove them.</li>
+<li><strong><code>iframe</code>, <code>form</code>, <code>embed</code> are rendered</strong> by default. The URL and attribute defaults still allow navigation, form submissions, and embedded content at arbitrary <code>http(s)</code> URLs. Use <code>excludeHtmlOnly(['iframe', 'form', 'embed'])</code> to remove them.</li>
 <li><strong><code>srcset</code> and other less common URL attributes are not sanitized.</strong> Only the attributes listed above pass through <code>sanitizeUrl</code>. Provide a custom <code>sanitizeAttributes</code> if you need broader coverage.</li>
 <li><strong>No built-in DOM sanitizer</strong> — By design, the package does not bundle DOMPurify or similar. For untrusted input, layer a full sanitizer on top of the defaults above.</li>
 </ul>

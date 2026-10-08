@@ -14,6 +14,7 @@
 <li><a href="#claude%E8%AE%A2%E9%98%85%E7%BA%BF%E8%B7%AF" target="_blank" rel="noopener noreferrer">Claude（订阅）线路</a></li>
 <li><a href="#%E5%AD%90%E4%BB%A3%E7%90%86%E6%A8%A1%E5%9E%8B%E6%8E%88%E6%9D%830215-%E8%B5%B7032-%E8%B5%B7%E5%BC%BA%E5%88%B6%E6%8C%87%E5%AE%9A%E6%A8%A1%E5%9E%8B" target="_blank" rel="noopener noreferrer">子代理模型授权</a></li>
 <li><a href="#%E9%9A%8F%E5%8C%85%E5%88%86%E5%8F%91%E7%9A%84-agent-preset" target="_blank" rel="noopener noreferrer">随包分发的 Agent Preset</a></li>
+<li><a href="#%E6%9C%AC%E6%9C%BA%E7%99%BB%E5%BD%95" target="_blank" rel="noopener noreferrer">本机登录</a></li>
 <li><a href="#%E5%AE%89%E5%85%A8%E8%BE%B9%E7%95%8C" target="_blank" rel="noopener noreferrer">安全边界</a></li>
 <li><a href="#%E6%8F%92%E4%BB%B6%E8%B7%AF%E7%94%B1" target="_blank" rel="noopener noreferrer">插件路由</a></li>
 <li><a href="#%E5%BC%80%E5%8F%91%E4%B8%8E%E9%AA%8C%E8%AF%81" target="_blank" rel="noopener noreferrer">开发与验证</a></li>
@@ -35,7 +36,7 @@
 <td><code>codex-chatgpt</code></td>
 <td>ChatGPT（Plus / Pro / Business…）</td>
 <td>Responses</td>
-<td>浏览器 OAuth（localhost:1455 回调）</td>
+<td>浏览器 OAuth（localhost:1455 回调），或导入本机 Codex CLI 登录</td>
 <td><strong>实时</strong> <code>/backend-api/codex/models</code></td>
 </tr>
 <tr>
@@ -93,6 +94,7 @@
 <li>支持 token 刷新、登录取消与账号注销；</li>
 <li>Windows 使用 CurrentUser DPAPI 加密存储 token；Linux 使用当前用户独占的 <code>0600</code> 文件存储；明文不发送给 Client；</li>
 <li>设置页会明确显示当前存储类型，并在 Linux 上提示文件存储未额外加密。</li>
+<li><strong>本机已经登录过 Codex CLI 的用户可以不再走一次 OAuth</strong>（详见「本机登录」）：<strong>ChatGPT 卡片</strong>的账号池里，「登录」按钮<strong>旁边</strong>还有一个「导入本机 Codex CLI 登录」按钮——两者是同一件事的两种做法，布局与 Claude 页面上那个收编按钮一致。它<strong>只看凭据文件是否存在、从不读取令牌</strong>，且要你显式点那个导入按钮之后才会读取。导入得到的是一份<strong>快照</strong>，<strong>永不由本插件刷新</strong>——ChatGPT 的 refresh token 会轮换，而 CLI 会在原地刷新自己的文件，两个进程各自刷新会互相作废，最后是你被本插件的好意踢出 Codex CLI，而进程内的单飞解决不了这个<strong>跨进程</strong>竞态。快照过期后请<strong>回 Codex CLI 重新登录后再导入</strong>；本插件<strong>绝不写入或删除 Codex CLI 的任何文件</strong>。</li>
 </ul>
 <h3>模型接入</h3>
 <ul>
@@ -122,6 +124,13 @@
 </ul>
 </li>
 <li><strong>对话报文绝不发送 <code>max_output_tokens</code></strong>：订阅版 Responses 端点在部分账号/模型上直接以 <code>400 Unsupported parameter: max_output_tokens</code> 拒收该字段（<a href="https://github.com/Aa728848/dsh-chatgpt-subscription/issues/29" target="_blank" rel="noopener noreferrer">#29</a>，实测 <code>gpt-6-sol</code> / <code>gpt-6.1-sol</code>），官方 CLI 的请求结构里也没有这个字段；输出长度由服务端默认值决定，撞上限仍以 <code>max-tokens</code> 结束原因上报（详见「模型目录」）；</li>
+<li><strong>单次请求的图片负载有上限（2 MiB，可用 <code>DSH_CODEX_MAX_IMAGE_BYTES</code> 覆盖）</strong>：历史里的每张图片每轮都会被重新内联，此前这条线路<strong>没有任何总量约束</strong>，长会话的请求体随读图数量单调增长，超过传输层能接受的体积后整轮失败，而报错只是一句没有信息量的「Codex could not be reached.」（<a href="https://github.com/Aa728848/dsh-chatgpt-subscription/issues/50" target="_blank" rel="noopener noreferrer">#50</a>）。现在按<strong>最旧优先</strong>把超出预算的图片替换为一条明确的占位文本，请求体因此有界，且模型知道那张图已经不在了；<ul>
+<li>预算是<strong>在构造好的请求体上</strong>执行的，因为图片有两种到达方式：粘贴的附件是 <code>{ type: 'image', attachment }</code> 块，而工具读取的本地图片是 <code>![](/describe-image/raw/sha256:…)</code> 链接、由映射器在构造时才取回并内联。只扫消息块的方案看不到第二种；</li>
+<li>数字取自 #50 的实测（≤3 MB 全过、≥4 MB 全挂），而不是照搬别的线路：Kimi 的 1.5 MB 是按它自己的 2 MB 请求上限定的，用在这里会静默删掉本端点能接受的图片；MiniMax 的 16 MB 是按 64 MB 请求体定的，这里没有那个上限；</li>
+<li>只约束<strong>图片</strong>这部分。纯文本本身就超出传输层体积的请求仍然会被拒绝，任何图片预算都救不了它；</li>
+</ul>
+</li>
+<li><strong>请求路径的传输层失败会带上原因链</strong>：此前 <code>request()</code> 把任何失败都报成同一句 <code>Codex could not be reached.</code>，而 DSH 只持久化 <code>{message, code}</code>，于是 <code>NGHTTP2_ENHANCE_YOUR_CALM</code>、<code>ECONNRESET</code>、<code>UND_ERR_SOCKET</code> 在界面和日志里长得一模一样——上面那条体积问题正是因此无法自助定位。现在与流中段断流（<code>streamFailure</code>）一致，把 cause 链拼进 message；</li>
 <li>Antigravity（Gemini / Claude）线路同样接受图片输入：DSH 以 <code>{ type: 'image', attachment }</code> 下发的粘贴图片会经附件服务读出字节并按 Gemini <code>inlineData</code> 发出，读不出的图片降级为一条可见的说明文本而不是被静默丢弃。单次请求的图片 base64 负载超过 12 MiB 时，最旧的图片按上游同款占位文案替换为文本，避免整条请求被体积上限拒绝；</li>
 <li>原样转发 DSH 暴露的工具 schema；命令工具兼容 <code>pwsh</code> / <code>powershell</code>、<code>bash</code>、<code>sh</code> 与 <code>shell</code>，并按 PowerShell、Bash 或 POSIX sh 注入对应说明；</li>
 <li>429/5xx 由 DSH retry policy 接管；401 只强制刷新并重试一次，支持 <code>AbortSignal</code>；</li>
@@ -490,6 +499,7 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 </ol>
 <p>DSH 模型选择器应显示 <strong>“Codex（ChatGPT 订阅）”</strong>。GPT-6 系列与 GPT-5.6 系列的有效上下文窗口在“Codex 订阅 → 增强功能”中配置。子代理的模型与思考深度由 DSH 自身的设置决定（Subagent 卡片授权的模型清单，以及 <code>agent-default-model</code> 的默认路由；该卡片 0.1.5 及以前在「设置」页，0.1.6 起在 <strong>Plugins</strong> 页）；最大嵌套深度由 DSH 侧决定（0.1.5 及以前取 preset 中 <code>tool-subagent</code> 的 <code>maxDepth</code>，默认 3；0.1.6 起取 <code>subagent</code> 服务的设置，默认 1）。</p>
 <p><strong>设置 → Codex 订阅 → 网络代理</strong> 同时控制 GPT 与 Antigravity（Gemini）的 Host 请求，可选择系统代理（自动检测）、自定义代理或直连。Gemini 模型生成、网页登录后的令牌交换、令牌刷新、账号信息、项目发现、配额与模型目录查询均使用此设置；修改后对后续请求生效，无需重启 DSH。浏览器中的 Google 授权页面使用浏览器自己的网络设置。</p>
+<p>已经用官方 Codex CLI 登录过的用户可以跳过第 3 步的 OAuth：<strong>设置 → 订阅服务 → ChatGPT</strong>，在账号池卡片里点「登录」<strong>旁边</strong>的「导入本机 Codex CLI 登录」即可（见「本机登录」）。</p>
 <h3>Command Code</h3>
 <ol>
 <li>重启 <code>dsh web</code>；</li>
@@ -972,10 +982,12 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 <code>1M</code> / <code>512K</code> / <code>200000</code> 等写法）；<strong>默认思考深度</strong>只对声明了
 档位的模型生效。<strong>档位原样透传</strong>（<code>ReasoningEffortId</code> 在 harness 里是无约束 brand，本仓库多条线路都直接使用
 <code>xhigh</code>），不做任何收敛，以免把用户选的档位静默降级。</p>
-<p><strong>模型表</strong>共 16 条：14 条转录自本机随 harness 安装的参照目录，另加 2 条<strong>本地新增</strong>：<strong>Claude Opus 5.5</strong>
-（<code>claude-opus-5-5</code>，官方 2026-09-22 发布，1M 上下文 / 128K 输出 / 支持图片，档位 <code>low</code>–<code>max</code>），以及
-<strong>Claude Sonnet 5.5</strong>（<code>claude-sonnet-5-5</code>，官方 2026-09-28 发布，规格同上；不支持 temperature、思考不可关闭；
-官方默认档位为 <code>high</code>，且思考块与会话前缀绑定，因此走 <code>mid-convo</code> 分支并带 <code>block_binding</code>）。以下说明针对 Opus 5.5。
+<p><strong>模型表</strong>共 17 条：15 条转录自本机随 harness 安装的参照目录（<strong>Claude Opus 5.5</strong> 已在参照目录中，只是
+<code>thinkingMode</code> 一项按官方文档取值，见下），另加 2 条<strong>本地新增</strong>：<strong>Claude Sonnet 5.5</strong>
+（<code>claude-sonnet-5-5</code>，官方 2026-09-28 发布，1M 上下文 / 128K 输出 / 支持图片；不支持 temperature、思考不可关闭；
+官方默认档位为 <code>high</code>，且思考块与会话前缀绑定，因此走 <code>mid-convo</code> 分支并带 <code>block_binding</code>），以及
+<strong>Claude Haiku 5.5</strong>（<code>claude-haiku-5-5</code>，官方 2026-10-07 发布，规格同上；<strong>固定 id，无日期后缀也没有别名</strong>）。
+以下说明针对 Opus 5.5。
 它有一条<strong>与其它模型不同的硬约束</strong>：<strong>思考永远开启、不能关闭</strong>——官方文档明确 <code>thinking:{type:"disabled"}</code>
 与 <code>{type:"enabled",budget_tokens:N}</code> <strong>都会返回 400</strong>，因此能力表把它标为不可关闭思考，档位表是控制思考深度的
 唯一手段。它的<strong>默认档位是 <code>medium</code></strong>（其余带 effort 的模型默认 <code>high</code>），这一点被刻意保留：本仓库有两类模型走
@@ -984,10 +996,25 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 前缀变化（压缩、工具列表变化、图片卸载）回放思考块就会<strong>每次都 400</strong>，因此能力表用 <code>bindsThinkingToPrefix</code> 标记它，
 adaptive 分支对这类模型额外发送 <code>block_binding: drop_block</code>（<strong>不</strong>强制 effort）。</p>
 <p>它还有一条<strong>版本门槛</strong>：上游要求申报的客户端版本 <strong>≥ 2.1.280</strong> 才为该模型提供服务。能力表用 <code>minCliVersion</code>
-记录这一点（<strong>只有这一行有门槛</strong>，其余 15 行缺省——缺省表示「未知」而不是「无门槛」，不臆造数字）。插件申报的
-默认版本为 <strong>2.1.285</strong>（不低于首次提供 Sonnet 5.5 的 Claude Code 2.1.284），并且<strong>在发出请求之前就本地校验</strong>「申报版本 vs 该模型门槛」，不满足时直接给出模型、当前
+记录这一点（<strong>只有这一行有门槛</strong>，其余 16 行缺省——缺省表示「未知」而不是「无门槛」，不臆造数字）。插件申报的
+默认版本为 <strong>2.1.293</strong>（不低于首次提供 Sonnet 5.5 的 Claude Code 2.1.284，也不低于首次提供 <strong>Haiku 5.5 的 2.1.293</strong>——
+加这一行时 npm 的 <code>stable</code> 标签仍停在 2.1.285，所以这里必须读 <code>latest</code> 而不是 <code>stable</code>），并且<strong>在发出请求之前就本地校验</strong>「申报版本 vs 该模型门槛」，不满足时直接给出模型、当前
 版本与要求版本，<strong>而不是白花一个往返让上游返回 400</strong>。测试另有一条不变量：<strong>申报的默认版本必须 ≥ 表中每个模型的
 门槛</strong>——这条锁让「加了高门槛模型却忘了抬版本」无法通过 CI。</p>
+<p><strong>Claude Haiku 5.5</strong> 有三条与上面两个 5.5 不同的地方，都是照抄官方文档、不是从模型名推的：</p>
+<ul>
+<li><strong>它可以关闭思考，但只在低档位</strong>。官方明确 <code>thinking:{type:"disabled"}</code> 在 <code>low</code>/<code>medium</code>/<code>high</code> 被接受，在
+<code>xhigh</code>/<code>max</code> 是 400——因此能力表把它标为<strong>可关闭</strong>（<code>canDisableThinking: true</code>），这是本表里唯一一个为真的
+本地新增行。这条线路只在调用方明确要求「关闭思考」时才发这个 form，且此时<strong>不申报任何档位</strong>，请求因此跑在
+官方默认 <code>medium</code> 上——正落在被接受的一侧；而想用 <code>xhigh</code>/<code>max</code> 的人一定开着思考，走的是 adaptive form。</li>
+<li><strong>它不能沿用 Haiku 4.5 的 <code>budget</code> 表</strong>。官方迁移指南写明手动预算形式
+<code>{type:"enabled",budget_tokens:N}</code> 在 5.5 上是 400，所以这一行改走 <code>adaptive</code>；又因为官方默认档位是
+<code>medium</code>（与 Opus 5.5 同列），它同样<strong>不进 <code>mid-convo</code> 分支</strong>——那一档会强制 <code>effort: high</code>，等于每次请求
+都替用户多花一档。它同样是官方文档列明的<strong>思考块前缀校验模型</strong>，所以 <code>bindsThinkingToPrefix</code> 为真。</li>
+<li><strong>它的思考块只在产出它的账号里有效</strong>。官方写明换账号回放会被<strong>静默丢弃</strong>（请求成功，模型看不到那段推理）。
+Claude 号池会在多个账号之间轮换，所以长会话中途换号会表现为「同一段对话里答案质量忽高忽低」而<strong>不报错</strong>——
+这是换号的行为，不是模型不稳定。另外 5.5 与 4.7 之后的模型用同一个新 tokenizer，同样的文本约多 30% token。</li>
+</ul>
 <h3>收编本机已有的 Claude Code 登录（可选，默认关闭）</h3>
 <p>如果你本机已经登录过 Claude Code，可以点「收编本机登录」把它作为一条账号导入，省去再次登录。
 两点必须清楚：</p>
@@ -1166,12 +1193,64 @@ kimi-code / workbuddy 一致），<strong>不</strong>占用 Codex 那条线路�
 access token / refresh token / 授权码 / PKCE verifier</strong>；诊断里提到某个令牌时只输出它的
 <strong>SHA-256 指纹前缀</strong>（<code>sha256:.../len:...</code>），<strong>不是</strong>令牌的任何一段原文——早前版本会打印前 6 个字符，
 那本身就是一次凭据泄露，因为同一个字符串会被渲染到设置卡片并写进 Host 日志（有测试锁定）。</p>
+<h2>本机登录</h2>
+<p><strong>每条线路只在自己的详情页里回答关于本机的问题</strong>。ChatGPT（Codex）线路的 ChatGPT 卡片里，「登录」按钮<strong>旁边</strong>就是「导入本机 Codex CLI 登录」——与 Claude 页面上那个收编按钮同样的位置、同样的次要样式；点它可以省掉再走一次 ChatGPT 授权。Claude Code 与 MiniMax Code 各自的设置页里本来就各有一个导入入口，不在这里重复。</p>
+<h3>只看文件在不在，从不读令牌</h3>
+<p>打开 ChatGPT 卡片时，宿主用一次 <code>stat</code> 回答这件事，<strong>没有任何文件被打开读取</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>线路</th>
+<th>查过的路径</th>
+<th>导入入口在哪</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Codex CLI</td>
+<td><code>$CODEX_HOME/auth.json</code>，未设置该变量时为 <code>~/.codex/auth.json</code></td>
+<td>ChatGPT 卡片账号池里「登录」旁边的那个按钮</td>
+</tr>
+<tr>
+<td>Claude Code</td>
+<td><code>~/.claude/.credentials.json</code>（目录可用 <code>CLAUDE_CONFIG_DIR</code> 改，见「Claude（订阅）线路」）</td>
+<td>Claude 线路自己的设置页</td>
+</tr>
+<tr>
+<td>MiniMax Code</td>
+<td><code>~/.minimax/auth/&lt;buildEnv&gt;/&lt;region&gt;/mcode-public/auth.json</code>，国区与国际区各一（见「MiniMax Code（编程订阅）线路」）</td>
+<td>不需要按钮：它的令牌库直接采用本机那份凭据</td>
+</tr>
+</tbody></table>
+<ul>
+<li><strong>为什么不放在总览页</strong>：总览页上一块跨线路的扫描，替别的线路回答问题，最后只能写一句「该供应商在自己的设置页里已有导入入口，请到那里导入」——而用户就在离那一页一步之遥的地方，那句话既答错了地方，本身也自相矛盾。信号归各自的线路，位置也就归各自的线路。</li>
+<li><strong>Kimi Code 不在这里</strong>：本机 Kimi Code 的凭据文件<strong>不带</strong>本插件需要的区域、<code>oauthHost</code> 与 <code>baseUrl</code>，而插件<strong>拒绝猜</strong>这三个值，因此既不扫描也不显示——那一行若是显示成「未检测到」，看起来就像装个插件就能收编。</li>
+</ul>
+<p>理由不是谨慎，而是这一块的位置：它要渲染的是一份<strong>邀请</strong>（一个可以点的按钮），而此时你还没有同意任何事。一个会读文件的扫描器会让后面那个 opt-in 变成装饰，同时为一页只需要「有 / 没有」的信息在内存里握着别家订阅的令牌。所以这一块<strong>不显示</strong>任何账号、套餐、邮箱或到期时间：这些答案要导入之后才存在，导入前显示它们等于提前读取。</p>
+<p>因此**「已检测到」只表示那个文件在**，不表示它可用——判断可用必须读取文件，而那是 opt-in 之后的事。文件在却形状不认识时（不是 JSON、<code>auth_mode</code> 不是 <code>chatgpt</code>、<code>tokens</code> 不是对象、缺 access 或 refresh token、access token 不是一个带可用 <code>exp</code> 的 JWT），导入会明确报出「格式无法识别」而不是抛错或静默成功，也不会把默认值当成事实；邮箱与套餐则来自 id token 自己的声明，没有就不填。查过的路径<strong>两种状态都写出来</strong>，包括没找到的时候——「你到底去哪儿找了」问的往往正是它，而一个只说「没找到」却不给路径的答案没法据此行动。</p>
+<h3>导入 Codex CLI 登录（可选）</h3>
+<p>在 ChatGPT 卡片账号池里点「登录」<strong>旁边</strong>的「导入本机 Codex CLI 登录」。三点与 Claude Code 的收编同源：</p>
+<ul>
+<li>导入的是<strong>快照</strong>，<strong>本插件永不再刷新它</strong>；</li>
+<li>快照过期后请<strong>回 Codex CLI 重新登录、再导入一次</strong>，本插件里没有这条登录路径；</li>
+<li>本插件<strong>绝不写入、不创建、不移动、不删除</strong> Codex CLI 的任何文件。</li>
+</ul>
+<p>前两条的理由值得写全，因为这是整个功能最容易被误解的地方：ChatGPT 的 refresh token 会轮换，而 CLI 会在<strong>原地刷新自己的文件</strong>。两个进程刷同一份授权会互相作废，输的一方握着服务端已经作废的令牌，结果是<strong>你被本插件的好意踢出 Codex CLI</strong>。进程内的单飞解决不了它——这是<strong>跨进程</strong>竞态，两个进程之间唯一共享的就是那个文件，而按上一条本插件不能写它。所以这份快照只在 CLI 自己还为它作保的期间可用，<strong>过期是收编这件事的一部分，而不是一个待修的缺陷</strong>。</p>
+<p>「绝不写入」是<strong>结构性</strong>的保证而不是承诺：<code>codex-adopt.ts</code> 只按名字从 <code>node:fs/promises</code> 导入 <code>readFile</code> 与 <code>stat</code>，加一次写操作必须先改这行 import，而 import 正是评审第一眼看的地方；测试还断言一次读取前后该凭据文件的<strong>字节、大小与 mtime 完全不变</strong>。</p>
+<h3>导入之后</h3>
+<ul>
+<li><strong>只是号池里多一行</strong>，不替换你当前的登录：已存储的登录态原样保留，两者在同一个池里参与调度；</li>
+<li><strong>同一个账号导入两次会原地更新</strong>，不会多出一个重复账号：号池的去重键是 <code>accountId ?? email</code>；</li>
+<li><strong>导入的行与插件自持的登录语义不同</strong>：它<strong>永不被刷新</strong>——<code>needsRefresh</code> 钩子对 adopted 凭据恒答否，刷新钩子本身也直接拒绝，两者都挡住是为了让将来漏掉前者的调用者大声失败而不是悄悄花掉一枚不属于本插件的授权；过期即<strong>退出调度</strong>且<strong>不产生任何写入</strong>，摘要标为<strong>不可删除</strong>，删除只能走显式的 <code>removeImportedAccount</code>（<code>POST /adopt/disable</code> 清掉插件这边记下的快照）。因此你在本插件里自己签入的账号不会被这个动作顺手清掉，而 CLI 自己的文件更不会被删除或改写；</li>
+<li><strong>过期不是失败</strong>：卡片与号池会说明这份快照已过期、该回 Codex CLI 里重新登录后再导入一次；这一行随之退出调度，而不是拿一枚作废的令牌去试一次请求。</li>
+<li><strong>导入可以撤销，但撤销是「全部」而非「某一行」</strong>：借来的凭据在账号池里被标为<strong>不可删除</strong>（这正是「过期不产生任何写入」与「插件自持的登录不会被顺手清掉」两条规则的代价），因此删除入口不在每一行上，而在 ChatGPT 标签页账号池卡片下方的一个按钮：<strong>停止导入全部本机登录</strong>。点它走 <code>POST /adopt/disable</code>，清掉插件这边记下的<strong>所有</strong>导入快照；你在本插件里自己签入的账号不在其中，<strong>Codex CLI 自己的登录文件也不会被删除或改写</strong>——这一步只是让本插件忘记它拷贝的那一份。按池级语义设计而不是行级，是因为该路由刻意不接受 <code>accountId</code>：一个摆在某一行上、却会连带清空邻居的按钮，比没有按钮更糟，所以按钮文案与提示里都写明「全部」，将来若改成逐行语义能被看见。</li>
+</ul>
 <h2>安全边界</h2>
 <p>Antigravity 的 access token / refresh token 使用独立的系统凭据存储：Windows 使用 CurrentUser DPAPI（<code>$DSH_HOME/storages/antigravity-oauth.json.dpapi</code>），macOS 使用登录钥匙串，Linux 使用 Secret Service。macOS / Linux 的服务名为 <code>dsh-antigravity</code>，账号键按旧凭据文件的绝对路径生成，隔离不同的 <code>DSH_HOME</code>。</p>
 <p><strong>WorkBuddy token 仅在 Host 内处理，从不进入浏览器</strong>（<code>/workbuddy/api</code> 响应不含 <code>accessToken</code> / <code>refreshToken</code>，有测试锁定）。桌面扫描账号仍使用 CodeBuddy 自己的登录态文件：续期只原子写回其 <code>auth</code> 块；从本插件删除时只隐藏/恢复，绝不删除原文件。通过浏览器授权添加的账号归本插件所有，保存在独立系统凭据存储中：Windows CurrentUser DPAPI（<code>$DSH_HOME/storages/workbuddy-accounts.json.dpapi</code>）、macOS 登录钥匙串、Linux Secret Service；这类账号可在设置页真正删除。</p>
 <p><strong>MiniMax Code 的 access token / refresh token 同样只在 Host 内处理，从不进入浏览器</strong>（<code>/minimax-code/api</code> 的响应只含非机密事实，有测试锁定）。号池的<strong>身份键也刻意不含机密</strong>：桌面端凭据用 <code>recordKey</code>（路径摘要）、插件凭据用 <code>loginEpoch</code>，<strong>不是</strong>刷新令牌的哈希——用令牌做键在每次轮换后都会把同一账号看成新账号。它的凭据<strong>不是本插件自持的</strong>：正常路径是<strong>只读复用</strong> MiniMax Code 桌面端自己的 <code>~/.minimax/auth/&lt;buildEnv&gt;/&lt;region&gt;/mcode-public/auth.json</code>，续期时通过「同目录临时文件 + <code>rename</code>」原子写回，<strong>不创建、不删除、不等待</strong>桌面端的 <code>auth.lock</code>，也<strong>不留任何旁路副本</strong>——不会在桌面端的目录里写出明文 <code>.dsh-bak</code> 之类的第二份凭据。只有本机没有桌面端凭据时，本插件才把设备码登录得到的凭据存到自己的 <code>$DSH_HOME/storages/minimax-code-credentials.json</code>；<strong>登出只删这一份</strong>，桌面端的登录态绝不撤销、绝不删除（撤销它等于把用户从正在运行的官方客户端踢下线）。诊断中提及令牌时只输出 SHA-256 指纹前缀，不含令牌原文。</p>
 <p><strong>Claude 订阅的 access token / refresh token 同样只在 Host 内处理，从不进入浏览器</strong>（<code>/claude/api</code> 的响应只含非机密事实，有测试锁定）。它保存在独立系统凭据存储中：Windows CurrentUser DPAPI（<code>$DSH_HOME/storages/claude-credentials.json.dpapi</code>）、macOS 登录钥匙串、Linux Secret Service；号池另用一份同样加密的文件 <code>$DSH_HOME/storages/claude-pool.json</code>。凭据文档是<strong>多账号</strong>结构，账号身份由不可变的 <code>internalId</code> 与只增不换的别名集共同表达，<strong>任何路由键都不是令牌或其摘要</strong>（令牌会轮换，用它做键会产生幽灵账号）。每次写入都<strong>先读回校验再落盘</strong>，校验失败会抛错且不破坏既有数据。</p>
 <p><strong>收编（adopt）是只读的</strong>：本插件从不创建、修改、移动或删除 Claude Code 的任何文件；它只读取。收编得到的快照<strong>永不由本插件刷新</strong>（原因见上文）。</p>
+<p><strong>Codex CLI 的导入（adopt）同样是只读的</strong>：本插件从不创建、修改、移动或删除 Codex CLI 的任何文件。存在性与内容是两个函数——<code>/status</code> 里的 <code>codexCliSignInAvailable</code> 由一次 <code>stat</code> 回答，<strong>在你点击导入之前没有任何令牌被读取</strong>，而这一个字段也不含任何凭据内容（旁边的 <code>codexCliSignInPath</code> 只是被查看的那个文件路径）。导入得到的快照<strong>永不由本插件刷新</strong>；过期后该行退出调度，且<strong>不产生任何写入</strong>（原因见「本机登录」）。</p>
 <p>macOS 钥匙串服务名为 <code>Claude Code-credentials</code>（<strong>未核实</strong>，本仓库不读取它：一份第三方指南与真实客户端对该名称说法不一致，因此它被明确列为非目标）。</p>
 <p>升级后首次访问 Antigravity 凭据时，会读取旧 <code>storages/antigravity-oauth.json</code>，加密保存并读回校验；成功后删除旧 JSON，通常无需重新登录。失败会保留旧文件并报告错误，不会回退到明文存储。注销同时清理旧文件和新凭据。Linux 需要 <code>secret-tool</code>（libsecret 工具包）及可用、已解锁的 Secret Service 钥匙环；无桌面服务的主机也需要配置该服务。系统凭据存储保护落盘数据，不防御当前用户下已获权限的进程。</p>
 <p>Antigravity 的 Gemini 用量以流结束时的上游累计计数为准，缓存输入单列、思考 token 计入输出并另行提供明细；DSH 使用该输出计数计算 tok/s。Gemini 工具往返会保留原始思考签名，并在支持的运行时请求思考摘要；若上游没有返回摘要文本，插件不会生成替代内容。</p>
@@ -1201,7 +1280,7 @@ access token / refresh token / 授权码 / PKCE verifier</strong>；诊断里提
 <tbody><tr>
 <td>GET</td>
 <td><code>/status</code></td>
-<td>查询账号、连接状态与额度</td>
+<td>查询账号、连接状态与额度；另带 <code>codexCliSignInAvailable</code>（本机是否有可导入的 Codex CLI 登录，<strong>只 <code>stat</code> 不读取</strong>）与 <code>codexCliSignInPath</code>（为此查看过的那个文件路径）</td>
 </tr>
 <tr>
 <td>POST</td>
@@ -1242,6 +1321,16 @@ access token / refresh token / 授权码 / PKCE verifier</strong>；诊断里提
 <td>POST</td>
 <td><code>/preferences/update</code></td>
 <td>更新搜索来源和 composer 快捷用量偏好</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/adopt</code></td>
+<td>导入本机登录（body <code>{source:'codex'}</code>），<strong>只读</strong>：快照作为一行加入 ChatGPT 号池，不触碰当前登录，也不触碰 Codex CLI 的文件</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/adopt/disable</code></td>
+<td>停止导入：清掉插件这边记录的导入快照；<strong>不删除也不改写 Codex CLI 的文件</strong></td>
 </tr>
 </tbody></table>
 <p>状态响应只包含脱敏 email、套餐、账号 ID 后四位、token 到期时间和额度 DTO。</p>
@@ -1398,6 +1487,10 @@ npm pack --dry-run
 <tr>
 <td>收编后提示「本机 Claude Code 登录已过期」</td>
 <td>这是设计如此：收编的是<strong>快照</strong>，插件永不刷新它（Claude Code 刷新同一枚轮换令牌，两个进程各自刷新会互相作废）。回 Claude Code 重新登录后<strong>再收编一次</strong>即可</td>
+</tr>
+<tr>
+<td>导入后提示「从 Codex CLI 导入的登录已过期」</td>
+<td>同样如此：导入的是<strong>快照</strong>，插件永不刷新它（ChatGPT 的 refresh token 会轮换，而 CLI 会原地刷新自己的文件，两个进程各自刷新会互相作废，最后是你被本插件踢出 Codex CLI）。回 <strong>Codex CLI</strong> 重新登录后<strong>再导入一次</strong>即可——本插件里没有这条登录路径</td>
 </tr>
 <tr>
 <td>账号被标为「无法识别账号身份」</td>
