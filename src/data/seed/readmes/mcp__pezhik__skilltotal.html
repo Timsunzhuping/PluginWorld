@@ -23,6 +23,10 @@ snippet). Anything that cannot be evidenced is placed in <code>needs_review</cod
 </blockquote>
 <h2>Why SkillTotal</h2>
 <ul>
+<li><strong>Checks packages before your agent installs them.</strong> The Claude Code plugin reads each <code>npx</code>,
+<code>npm install</code>, <code>pip install</code> or <code>claude mcp add</code> command the agent is about to run. It blocks
+packages with malicious indicators and asks you before installing high- or critical-risk ones.
+<a href="#claude-code-plugin" target="_blank" rel="noopener noreferrer">Set it up</a>.</li>
 <li><strong>100% local &amp; offline</strong> — the component's code <strong>never leaves your machine</strong>. No account,
 no API token, no cloud upload (unlike cloud scanners that send your components to a backend).</li>
 <li><strong>Safe to point at untrusted components</strong> — the engine analyzes without ever running them on
@@ -66,6 +70,49 @@ Debian/Ubuntu where bare <code>pip install</code> is blocked by PEP 668):</p>
 <p>From source (development):</p>
 <pre><code class="language-bash">pip install -e ".[dev]"
 </code></pre>
+<h2>Claude Code plugin</h2>
+<p>Coding agents install packages without asking you. The plugin checks each package before the
+install command runs, using the same engine on your machine. If a package has malicious
+indicators, the command is denied and the agent is told why. A high- or critical-risk package
+needs your approval, and so does a package from a custom registry or a direct archive URL,
+because SkillTotal can only scan the copy on the public registry. Clean packages install as
+usual.</p>
+<p>The repository doubles as a plugin marketplace, so inside Claude Code run:</p>
+<pre><code>/plugin marketplace add pezhik/skilltotal
+/plugin install skilltotal@skilltotal
+</code></pre>
+<p>Then run <code>/reload-plugins</code> or restart Claude Code. The hook loads along with the plugins, so
+until you do, it does not check install commands in the session where you ran <code>/plugin install</code>.</p>
+<p>The plugin calls the CLI, so you also need <code>pip install skilltotal</code> (0.56.3 or later). If the CLI
+is missing or fails to start, install commands run unchecked and nothing is blocked. Claude Code
+shows a warning on each one, so you can tell a broken setup from a clean check.</p>
+<p>Install the CLI where Claude Code can find it: <code>skilltotal --version</code> should work in the terminal
+you start Claude Code from. To see the hook work without touching a real package, ask the agent to
+run <code>npm install --registry https://registry.example.invalid left-pad</code>. Claude Code should stop and
+ask you, with SkillTotal's reason. Nothing is installed unless you approve.</p>
+<p>On Windows, Claude Code runs most commands through its PowerShell tool. Before each command the
+agent runs through the Bash or PowerShell tool, a hook looks for packages the command would install:
+<code>npx</code>, <code>bunx</code>, <code>pnpm dlx</code>, <code>npm</code>/<code>pnpm</code>/<code>yarn</code>/<code>bun</code> add or install, <code>pip</code>, <code>uv</code>, <code>uvx</code>, <code>pipx</code>,
+and <code>claude mcp add … -- &lt;command&gt;</code>. Other commands pass straight through. If a package has
+malicious indicators, the command is denied and the agent sees why. A high- or critical-risk
+package needs your approval. A clean one installs as usual, and the agent gets a one-line note
+with its score.</p>
+<p>A package from a custom registry or index (<code>--registry</code>, <code>--index-url</code>, <code>--extra-index-url</code>) or a
+direct archive URL always needs your approval, because SkillTotal can only scan the copy on the
+public registry, and that may not be the one that gets installed. Packages from GitHub
+(<code>github:owner/repo</code>, <code>git+https://github.com/...</code>) are scanned from the repository.</p>
+<p>All checks for one command share a 20-second budget (set <code>SKILLTOTAL_HOOK_BUDGET</code> to change
+it). A package that isn't checked in time, or whose check fails, never blocks the install, and
+the agent is told it wasn't checked. Verdicts are reused for 24 hours and redone when the engine
+version changes, so repeated <code>npx tsc</code> or <code>npx prettier</code> calls don't trigger a rescan. The
+plugin also adds a <code>/skilltotal:scan &lt;target&gt;</code> command and registers the MCP server described
+below.</p>
+<p>The hook reads a command the way the shell would, through <code>sudo</code>, <code>env</code>, <code>bash -c '...'</code>,
+<code>cmd /c</code>, <code>$(...)</code>, groups like <code>(npm i y)</code> and chains like <code>cd x &amp;&amp; npm i y</code>. For PowerShell it
+also follows <code>&amp; { ... }</code>, <code>iex '...'</code>, <code>Start-Process npm -ArgumentList ...</code> and
+<code>powershell -EncodedCommand</code>. It only sees what the command spells out,
+so a command that builds the package name at run time, or a script the agent downloads and runs,
+gets past it. For code you don't trust, run the agent in a container.</p>
 <h2>Usage</h2>
 <pre><code class="language-bash"># Human-readable report
 skilltotal scan ./path/to/component
@@ -217,7 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pezhik/skilltotal@v0.56.2
+      - uses: pezhik/skilltotal@v0.57.0
         with:
           source: .             # a path, a git URL, or an npm:/pypi:&lt;name&gt; spec
           fail-on: high         # fail the build on a high/critical finding (or 'none')
@@ -236,46 +283,13 @@ with the <code>version:</code> input. Prefer plain CLI? It is the same thing:
 <pre><code class="language-yaml"># .pre-commit-config.yaml
 repos:
   - repo: https://github.com/pezhik/skilltotal
-    rev: v0.56.2
+    rev: v0.57.0
     hooks:
       - id: skilltotal
         args: [".", "--fail-on-high"]   # scan the repo; block the commit on a high/critical finding
 </code></pre>
 <p>Then <code>pre-commit install</code>. The hook installs the CLI in its own environment and scans the repo
 on commit; tune the scan with the same flags as the CLI (e.g. <code>--exclude</code>, <code>--fail-on</code>).</p>
-<h3>Use as a Claude Code plugin</h3>
-<p>The plugin checks the packages your agent is about to install, before the install command runs.
-The repository doubles as a plugin marketplace, so inside Claude Code run:</p>
-<pre><code>/plugin marketplace add pezhik/skilltotal
-/plugin install skilltotal@skilltotal
-</code></pre>
-<p>The plugin calls the CLI, so you also need <code>pip install skilltotal</code> (0.56.2 or later). If the CLI
-is missing or fails to start, install commands run unchecked and nothing is blocked. Claude Code
-shows a warning on each one, so you can tell a broken setup from a clean check.</p>
-<p>Install the CLI where Claude Code can find it: <code>skilltotal --version</code> should work in the terminal
-you start Claude Code from. To see the hook work without touching a real package, ask the agent to
-run <code>npm install --registry https://registry.example.invalid left-pad</code>. Claude Code should stop and
-ask you, with SkillTotal's reason. Nothing is installed unless you approve.</p>
-<p>Before each Bash command the agent runs, a hook looks for packages the command would install:
-<code>npx</code>, <code>bunx</code>, <code>pnpm dlx</code>, <code>npm</code>/<code>pnpm</code>/<code>yarn</code>/<code>bun</code> add or install, <code>pip</code>, <code>uv</code>, <code>uvx</code>, <code>pipx</code>,
-and <code>claude mcp add … -- &lt;command&gt;</code>. Other commands pass straight through. If a package has
-malicious indicators, the command is denied and the agent sees why. A high- or critical-risk
-package needs your approval. A clean one installs as usual, and the agent gets a one-line note
-with its score.</p>
-<p>A package from a custom registry or index (<code>--registry</code>, <code>--index-url</code>, <code>--extra-index-url</code>) or a
-direct archive URL always needs your approval, because SkillTotal can only scan the copy on the
-public registry, and that may not be the one that gets installed. Packages from GitHub
-(<code>github:owner/repo</code>, <code>git+https://github.com/...</code>) are scanned from the repository.</p>
-<p>All checks for one command share a 20-second budget (set <code>SKILLTOTAL_HOOK_BUDGET</code> to change
-it). A package that isn't checked in time, or whose check fails, never blocks the install, and
-the agent is told it wasn't checked. Verdicts are reused for 24 hours and redone when the engine
-version changes, so repeated <code>npx tsc</code> or <code>npx prettier</code> calls don't trigger a rescan. The
-plugin also adds a <code>/skilltotal:scan &lt;target&gt;</code> command and registers the MCP server described
-below.</p>
-<p>The hook reads a command the way the shell would, through <code>sudo</code>, <code>env</code>, <code>bash -c '...'</code>,
-<code>cmd /c</code>, <code>$(...)</code> and chains like <code>cd x &amp;&amp; npm i y</code>. It only sees what the command spells out,
-so a command that builds the package name at run time, or a script the agent downloads and runs,
-gets past it. For code you don't trust, run the agent in a container.</p>
 <h3>Use as an MCP server</h3>
 <p>Let your agent check a component <em>before</em> installing it. <code>skilltotal mcp</code> runs the engine
 as a stdio MCP server (stdlib-only, still zero dependencies) — register it in Claude

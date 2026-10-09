@@ -1,0 +1,572 @@
+<p><strong>English</strong> | <a href="https://github.com/Sev7eEn7/dsh-sieve/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+<img src="https://raw.githubusercontent.com/Sev7eEn7/dsh-sieve/HEAD/assets/banner.webp" alt="sieve" width="100%" /><h1>sieve / dsh-sieve</h1>
+<p><strong>LLM agent context engineering and token efficiency plugins for DeepSeek Harness (DSH)</strong></p>
+<p>sieve filters tool output, prunes older context and progressively discloses skills to reduce redundant input tokens in AI coding agents, improve context window utilization and provide observable usage data for LLM inference cost optimization. Originals are archived before rewriting and can be retrieved on demand.</p>
+<p><strong>Over 30% less request payload in offline replay, measured in characters</strong>: a <strong>36.28%</strong> aggregate reduction across 100 public agent trajectories. See <a href="#offline-replay-results" target="_blank" rel="noopener noreferrer">offline replay results</a>.</p>
+<p><strong>Historical live model results: 21.2% lower main model input token usage</strong> across 80 paired runs on deepseek-flash, with cache hit rate moving from 93.4% to 92.9%. This experiment used the now-removed session-model judge path; the current Jev / Laya configuration has not been remeasured. See <a href="#live-model-results-deepseek-flash" target="_blank" rel="noopener noreferrer">live model results</a> and the <a href="#faq" target="_blank" rel="noopener noreferrer">cache FAQ</a>.</p>
+<p>Built around context engineering and token efficiency, sieve manages the context delivered to the model within the agent loop, reducing repeated input across multi-step tool use.</p>
+<p><a href="https://github.com/Sev7eEn7/dsh-sieve/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+<a href="https://github.com/Sev7eEn7/dsh-sieve/blob/HEAD/tsconfig.base.json" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript&amp;logoColor=white" alt="TypeScript" /></a>
+<a href="https://github.com/Sev7eEn7/dsh-sieve/blob/HEAD/package.json" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933?logo=nodedotjs&amp;logoColor=white" alt="Node" /></a>
+<a href="https://github.com/Sev7eEn7/dsh-sieve/blob/HEAD/packages/dsh-sieve/package.json" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/DSH-0.2.1--alpha.1-4D6BFE" alt="DeepSeek Harness" /></a>
+<a href="https://github.com/Sev7eEn7/dsh-sieve/blob/HEAD/packages/dsh-sieve/package.json" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Cordis-4.0.5--alpha.1-6E56CF" alt="Cordis" /></a>
+<br />
+<img src="https://img.shields.io/badge/tests-265%20passed-brightgreen" alt="Tests" />
+<img src="https://img.shields.io/badge/test%20suite-no%20API%20keys-brightgreen" alt="Test keys" />
+<a href="#design-constraints" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/DSH%20core-0%20patches-brightgreen" alt="DSH core" /></a>
+<a href="#design-constraints" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/cold%20restore-replay%20safe-brightgreen" alt="Cold restore" /></a></p>
+<hr />
+<blockquote>
+<p>[!IMPORTANT]
+sieve works only with a judge model configured: <strong>Jev</strong> (hosted, needs an API key) or <strong>Laya</strong> (local, macOS on Apple Silicon). sieve never uses the session's model in its place. With neither configured, the plugin loads but changes no context. See <a href="#judge-models-jev--laya" target="_blank" rel="noopener noreferrer">judge models</a>.</p>
+</blockquote>
+<h2>Why sieve</h2>
+<p>In an agent loop the main model rereads its whole context at every step. What makes requests large is rarely the user's input. It is:</p>
+<ul>
+<li><strong>Tool output</strong>: build logs, test reports and command output run to thousands or tens of thousands of characters, and the next step usually needs a small part of it;</li>
+<li><strong>Stale context</strong>: tool results that a later read superseded, or that stopped mattering long ago, are sent again at every step;</li>
+<li><strong>Skill catalogs</strong>: dozens or hundreds of skill descriptions are injected at session start, most of them unrelated to the task.</li>
+</ul>
+<p>All of this is billed as input tokens, fills the context window and dilutes the model's attention. sieve adds a <strong>judgment kernel</strong> on DSH's public extension points that admits, forgets and progressively discloses these three kinds of content, so the main model sees a shorter, more focused context at every step.</p>
+<p>The hard part is deciding what can go. Fixed rules have to keep any output format they have not seen; asking the main model to decide costs its tokens and a full round of reasoning. sieve hands this step to a dedicated judge model that answers structured yes/no and single-choice questions with probabilities, and the kernel rewrites or keeps the original by threshold. In offline replay, the median latency of one Jev judgment was about 0.3 seconds.</p>
+<h2>Core capabilities and use cases</h2>
+<p>For AI coding agents running on DeepSeek Harness, especially tasks with verbose test logs, frequent tool calls, long sessions or large skill catalogs.</p>
+<table>
+<thead>
+<tr>
+<th>Optimization area</th>
+<th>How sieve handles it</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Input token reduction</strong></td>
+<td>Filters redundant tool content before it enters the session, reducing input resent on later steps</td>
+</tr>
+<tr>
+<td><strong>Tool output filtering</strong></td>
+<td>Handles build logs, test reports and command output by category, protecting failure details and test summaries</td>
+</tr>
+<tr>
+<td><strong>Context compaction / pruning</strong></td>
+<td>Replaces irrelevant older tool results in batches, retaining archive pointers for on-demand retrieval</td>
+</tr>
+<tr>
+<td><strong>Progressive skill disclosure</strong></td>
+<td>Shows skills by task relevance, reducing context window usage from unrelated descriptions</td>
+</tr>
+<tr>
+<td><strong>Prompt cache awareness</strong></td>
+<td>Processes new results before they are recorded and batches historical pruning to control prefix rebuild frequency</td>
+</tr>
+</tbody></table>
+<h2>Quick start</h2>
+<ol>
+<li><p>Install the plugin (the web profile also gets the panel):</p>
+<pre><code class="language-bash">dsh plugin --profile web add dsh-sieve@0.2.0 dsh-sieve-web@0.2.0
+</code></pre>
+</li>
+<li><p>Configure a judge model, one of:</p>
+<ul>
+<li><strong>Jev</strong>: paste a TypeSafe or OpenRouter API key on the <strong>Sieve</strong> page of the DSH Web sidebar, or set the <code>TYPESAFE_API_KEY</code> environment variable;</li>
+<li><strong>Laya</strong>: start the Laya server on this machine and set <code>judge.type</code> to <code>laya</code> in the profile, see <a href="#using-laya" target="_blank" rel="noopener noreferrer">Using Laya</a>.</li>
+</ul>
+</li>
+<li><p>Restart <code>dsh web</code> and reload the page, then enter <code>/sieve status</code> in a session and check that the "判断模型" (judge model) line does not say "未配置" (not configured).</p>
+</li>
+</ol>
+<p>For other ways to install (GitHub Release, building from source) see <a href="#installation" target="_blank" rel="noopener noreferrer">Installation</a>.</p>
+<h2>Architecture</h2>
+<pre><code class="language-mermaid">flowchart LR
+    subgraph Loop["DSH Agent Loop"]
+        T[Tool execution] --&gt;|post-execute| A
+        P[agent/pre-step] --&gt; F
+        S[Skill catalog injection] --&gt; D
+    end
+
+    subgraph Sieve["dsh-sieve"]
+        A["tool.admission&lt;br/&gt;tool.admission.test-log"]
+        F[context.forget]
+        D[skills.disclosure]
+        K(("Judgment kernel&lt;br/&gt;Judge Engine"))
+        A &lt;--&gt; K
+        F &lt;--&gt; K
+        D &lt;--&gt; K
+    end
+
+    K &lt;--&gt;|"System One / local HTTP"| J[("Judge model&lt;br/&gt;Jev · Laya")]
+    A &amp; F --&gt;|originals| SP[(spill archive)]
+    K --&gt;|decision records| L[(ctx.storage ledger)]
+    L --&gt; W["/sieve command · Web panel"]
+
+    A &amp; F &amp; D --&gt;|reduced context| M[Main model request]
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Judgment kernel</strong></td>
+<td>One decision engine: builds the questions, calls the judge model, validates the structured answers and decides by confidence threshold whether to rewrite; a timeout or failure always keeps the original</td>
+</tr>
+<tr>
+<td><strong><code>tool.admission</code></strong></td>
+<td>Admission control for tool results before they enter the session; handles long output in tiers and rewrites only <code>content</code>, never the tool call</td>
+</tr>
+<tr>
+<td><strong><code>tool.admission.test-log</code></strong></td>
+<td>A dedicated admission path for test runs that protects failures, summaries and anything it does not recognize</td>
+</tr>
+<tr>
+<td><strong><code>context.forget</code></strong></td>
+<td>Forgets older tool results in batches through DSH's native <code>compaction/prune</code> and result replacement; a batch is committed only when it saves enough, see the <a href="#faq" target="_blank" rel="noopener noreferrer">cache FAQ</a></td>
+</tr>
+<tr>
+<td><strong><code>skills.disclosure</code></strong></td>
+<td>Filters the first skill catalog by task relevance and announces skills that become relevant in later turns; hidden skills can still be loaded directly</td>
+</tr>
+<tr>
+<td><strong>Ledger</strong></td>
+<td>One <code>ctx.storage</code> document per session with each judgment's result, usage and estimated saving</td>
+</tr>
+<tr>
+<td><strong><code>dsh-sieve-web</code></strong></td>
+<td>DSH Web sidebar panel: the session's estimated input token reduction and context reduction in characters, the judge model in use, and Jev key configuration</td>
+</tr>
+</tbody></table>
+<h2>Judge models (Jev / Laya)</h2>
+<p>What rules can handle, deterministic rules handle. What they cannot settle goes to the judge model. A decision point turns the content into structured questions (yes/no, single choice); the judge model answers each with a probability or an option, and the kernel rewrites or keeps the original by threshold.</p>
+<pre><code class="language-mermaid">flowchart LR
+    D[Decision point] --&gt; R{Judge model configured?}
+    R --&gt;|no| N[Change nothing&lt;br/&gt;rules do not run either]
+    R --&gt;|yes| Q[Structured questions&lt;br/&gt;redacted]
+    Q --&gt; JV["Jev&lt;br/&gt;System One protocol"]
+    Q --&gt; LY["Laya&lt;br/&gt;local sidecar"]
+    JV &amp; LY --&gt;|probabilities / options| P{Threshold}
+    P --&gt;|passes| AP[Rewrite context]
+    P --&gt;|fails / timeout / error| KP[Keep original]
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Judge model</th>
+<th>Description</th>
+<th>Needs</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Jev</strong></td>
+<td>TypeSafe's structured judgment model. It answers yes/no and single-choice questions natively over the System One protocol, with a probability for each answer. Reached through TypeSafe's own endpoint or OpenRouter, billed by TypeSafe (<a href="https://docs.typesafe.ai/models" target="_blank" rel="noopener noreferrer">official pricing</a>)</td>
+<td>A TypeSafe or OpenRouter API key</td>
+</tr>
+<tr>
+<td><strong>Laya</strong></td>
+<td>An open-weight typed decision model (mmBERT-base, 322M) running on Core ML on this machine: requests never leave it and cost nothing. Its window is only 1024 tokens, so long states are cut, and it is clearly weaker than Jev on complex questions</td>
+<td>macOS on Apple Silicon, with the local Laya server running</td>
+</tr>
+</tbody></table>
+<p><strong>No session model.</strong> Judgments go only to Jev or Laya. sieve never hands a judgment to the session's main model and has no setting for it; a profile from an older version with <code>judge.type: llm</code>, <code>judge.type: off</code>, <code>judge.provider</code> or <code>routes</code> fails to load.</p>
+<p><strong>No judge model, no changes.</strong> The default <code>judge.type: auto</code> looks for a Jev key before each decision. Without one, all four decisions let everything through: nothing is folded, forgotten or filtered, and nothing is recorded; <code>/sieve status</code> and the web panel say no judge model is configured. A saved key takes effect from the next decision, without a restart.</p>
+<p><strong>Judgments stay out of the conversation.</strong> A judge call is a side request: it is not written to the session log, does not enter the main model's context and does not change the main model's request prefix. What goes to the judge is redacted first: only content that is certainly a credential is replaced, namely credential-shaped tokens, assignments whose names mark them as secrets, and the values of this process's credential variables.</p>
+<p><strong>Failure keeps the original.</strong> Each judgment has a deadline (4000 ms by default); on a timeout, an error or an invalid answer the original is kept and the reason is recorded in the ledger.</p>
+<h3>Using Jev</h3>
+<p>Provide a key in any of these ways:</p>
+<ul>
+<li><strong>Web panel</strong>: the "Jev 判断服务" (Jev judge service) section of the <strong>Sieve</strong> sidebar page. Paste a TypeSafe or OpenRouter key and save it. The key is stored in <code>$DSH_HOME/.credentials.yaml</code>, sent only to the host, and never shown again. With both configured, TypeSafe is used.</li>
+<li><strong>Environment variables</strong>: <code>TYPESAFE_API_KEY</code> or <code>SIEVE_JUDGE_OPENROUTER_API_KEY</code>, in the shell that starts <code>dsh</code>, a <code>.env</code> in the start directory, or <code>$DSH_HOME/.env</code>. Process environment variables take precedence over keys saved in the panel; the panel then shows only the source and cannot change it.</li>
+<li><strong>Profile</strong>: <code>judge.type: system-one</code> with an <code>apiKey</code> (preferably <code>!!js process.env.XXX</code>) and optional <code>baseUrl</code> and <code>model</code>, see <a href="#configuration" target="_blank" rel="noopener noreferrer">Configuration</a>.</li>
+</ul>
+<blockquote>
+<p>[!NOTE]
+With the default <code>auto</code>, any <code>TYPESAFE_API_KEY</code> in the environment (an export in a shell profile, or a project <code>.env</code>) makes sieve call Jev and incur TypeSafe charges.</p>
+</blockquote>
+<p>Measured in offline replay: 326 Jev requests, all successful; HTTP latency P50 287 ms, P95 590 ms.</p>
+<h3>Using Laya</h3>
+<p>Laya runs on this machine and supports only macOS 15+ on Apple Silicon (Core ML). sieve only connects to a Laya server over local HTTP, by default at <code>127.0.0.1:47823</code>; it ships no server and does not install or start one. Setting one up takes three parts:</p>
+<ol>
+<li><p><strong>Inference library</strong>: <a href="https://github.com/mizorewww/laya-coreml" target="_blank" rel="noopener noreferrer"><code>laya-coreml</code></a> (Apache-2.0), a Core ML port of <a href="https://github.com/NandhaKishorM/laya" target="_blank" rel="noopener noreferrer">Laya</a> that needs no PyTorch. With <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener noreferrer">uv</a>:</p>
+<pre><code class="language-bash">uv venv --python 3.12 ~/.laya/.venv
+</code></pre>
+<pre><code class="language-bash">uv pip install --python ~/.laya/.venv/bin/python --index-url https://pypi.org/simple laya-coreml==0.1.0
+</code></pre>
+</li>
+<li><p><strong>Weights</strong>: the checkpoint <code>aac6fef/laya-multilingual-coreml</code> on Hugging Face (mmBERT-base, 322M, FP16, about 680 MB). Download it and check it against the bundle's own manifest:</p>
+<pre><code class="language-bash">~/.laya/.venv/bin/python - &lt;&lt;'PY'
+import json
+from pathlib import Path
+from huggingface_hub import snapshot_download
+from laya_coreml.artifacts import verify_files
+
+target = Path.home() / ".laya/models/laya-multilingual-coreml"
+snapshot_download("aac6fef/laya-multilingual-coreml", local_dir=target, allow_patterns=[
+    "coreml_config.json", "rl_agent_config.json", "encoder/config.json", "tokenizer/*",
+    "model.mlpackage/**", "host_weights.safetensors", "README.md", "LICENSE*", "NOTICE*"])
+files = json.loads((target / "coreml_config.json").read_text())["files"]
+verify_files(target, files)
+print(f"verified {len(files)} files")
+PY
+</code></pre>
+<p>In Python, <code>laya_coreml.load(model_dir, local_files_only=True)</code> returns a model whose <code>predict(state, questions)</code> answers Laya's own question types (<code>noul</code>, <code>choice</code>, <code>score</code>).</p>
+</li>
+<li><p><strong>HTTP server</strong>: a small local service around that model that implements the protocol below. sieve does not provide one; write your own or use any implementation of the same protocol.</p>
+</li>
+</ol>
+<details>
+<summary>Laya server protocol</summary><p><code>POST /evaluate</code>, <code>Content-Type: application/json</code>:</p>
+<pre><code class="language-json">{
+  "state": "string, object or array",
+  "questions": {
+    "q1": { "type": "boolean", "instructions": "…", "criteria": { "true": "…", "false": "…" } },
+    "q2": { "type": "choice", "instructions": "…", "criteria": { "keep": "…", "drop": null } },
+    "q3": { "type": "score", "instructions": "…", "criteria": ["low", "mid", "high"] }
+  }
+}
+</code></pre>
+<p><code>boolean</code> corresponds to Laya's <code>noul</code>; <code>criteria</code> of a <code>boolean</code> question is optional, and <code>null</code> descriptions should be passed to Laya as empty or left out. A successful response is HTTP 200:</p>
+<pre><code class="language-json">{
+  "answers": {
+    "q1": { "type": "boolean", "probability": 0.93 },
+    "q2": { "type": "choice", "choice": "keep", "probabilities": { "keep": 0.81, "drop": 0.19 } },
+    "q3": { "type": "score", "score": 1.4, "probabilities": { "0": 0.1, "1": 0.4, "2": 0.5 } }
+  },
+  "usage": { "inputTokens": 980, "outputTokens": 0 },
+  "warnings": [{ "type": "state_truncated", "questionId": "q1", "message": "…" }],
+  "providerMetadata": { "laya": { "model": "laya:aac6fef/laya-multilingual-coreml", "answers": { "q1": { "confidence": 0.7 } } } }
+}
+</code></pre>
+<ul>
+<li>Every question must get an answer of the same <code>type</code>, or sieve rejects the whole response. <code>probability</code> is P(true); <code>score</code> is a fractional position in <code>[0, levels - 1]</code>.</li>
+<li><code>usage</code>, <code>warnings</code> and <code>providerMetadata</code> are optional. <code>warnings</code> is where truncation should be reported (sieve records it in the ledger); <code>providerMetadata.laya.model</code> names the model in the ledger, and <code>confidence</code> must be in <code>[0, 1]</code> or it is ignored.</li>
+<li>Errors: 4xx (bad request) or 5xx (server failure) with <code>{"error": {"message": "…"}}</code>; either way sieve keeps the original.</li>
+<li>Bind to loopback only, since the protocol has no authentication. A Core ML model must not be called concurrently, so serialize requests.</li>
+</ul>
+</details><p>With the server running, set in the profile:</p>
+<pre><code class="language-yaml">- id: sieve
+  config:
+    judge:
+      type: laya
+      # baseUrl: http://127.0.0.1:47823   # the default; set it only if the sidecar uses another port
+</code></pre>
+<p>While the Laya server is not running, every judgment fails and keeps the original, recorded as <code>error:unreachable</code> in the ledger; the rules still run.</p>
+<blockquote>
+<p>[!NOTE]
+Laya's window is 1024 tokens, shared by the question, its options and the state; anything beyond is cut from the end of the state and recorded as a warning in the ledger. Earlier measurements show it usable on simple predicates and close to random on questions that need a synthesized judgment. sieve's four decisions have not been measured on Laya; use Jev when judgment quality matters.</p>
+</blockquote>
+<h2>Design constraints</h2>
+<p>sieve aims to reduce context <strong>without lowering the task success rate</strong>, so it holds itself to a few hard constraints:</p>
+<ul>
+<li><strong>Nothing is lost</strong>: before any lossy rewrite, the original goes to the spill archive, and the model can read it back on demand.</li>
+<li><strong>Cold restore is consistent</strong>: everything the model sees can be rebuilt from the session log. Requests after a resume or fork match the live ones, with no repeated judgments or rewrites.</li>
+<li><strong>No custom events</strong>: state is derived from native DSH events and the ledger lives in <code>ctx.storage</code>, so an unknown event can never make a session unresumable.</li>
+<li><strong>Zero DSH core patches</strong>: only public extension points (<code>agent/pre-step</code>, tool post-execute, the skill catalog listener, <code>ctx.storage</code>, <code>ctx.credentials</code>, <code>connection.fetch</code> routes).</li>
+<li><strong>Resources follow the plugin lifecycle</strong>: every listener and timer is registered through <code>ctx</code> and every operation honors <code>AbortSignal</code>, so unloading and hot reload clean up completely.</li>
+<li><strong>Fail open</strong>: when the judge model is unavailable, answers invalidly or times out, the original is kept.</li>
+</ul>
+<p>Each constraint has contract tests that check call order, result replacement, spill order, skill catalog filtering and cold restore against the pinned DSH source.</p>
+<h2>Offline replay results</h2>
+<p>The data are frozen public agent trajectories and raw sessions. Each trajectory was replayed with all four decisions off and with all four on, paired one to one, on the real DSH loop with sieve's listeners. The judge was the real Jev (<code>jev-1.13.0</code>); main model calls were replayed.</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th align="right">Pairs</th>
+<th align="right">Total request payload</th>
+<th align="right">Tool output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>SWE-smith + Nebius public trajectories</td>
+<td align="right">100</td>
+<td align="right">537,410,284 → 342,420,598 chars (<strong>−36.28%</strong>)</td>
+<td align="right">11,312,658 → 4,193,084 chars (<strong>−62.93%</strong>)</td>
+</tr>
+<tr>
+<td>  of which SWE-smith</td>
+<td align="right">50</td>
+<td align="right"><strong>−30.88%</strong></td>
+<td align="right"><strong>−50.47%</strong></td>
+</tr>
+<tr>
+<td>  of which Nebius</td>
+<td align="right">50</td>
+<td align="right"><strong>−37.58%</strong></td>
+<td align="right"><strong>−67.66%</strong></td>
+</tr>
+<tr>
+<td>SWE-chat raw sessions</td>
+<td align="right">7</td>
+<td align="right">33,733,731 → 18,204,646 chars (<strong>−46.03%</strong>)</td>
+<td align="right">314,263 → 128,407 chars (<strong>−59.14%</strong>)</td>
+</tr>
+</tbody></table>
+<p><strong>Information retention.</strong> On 38 hand-labeled tool output samples (29 for tuning, 9 held out), required information was kept <strong>72/72 and 19/19, with zero labeled deletions</strong>.</p>
+<p><strong>Correctness.</strong> All 222 replays passed the checks on tool return values and error states, protected log lines, the original archive, native cold restore and projection rebuild; all 1,422 archived originals can be read back byte for byte.</p>
+<p><strong>Judge overhead.</strong> 326 Jev requests, all successful, no fallbacks; 729,167 input and 30,868 output tokens. HTTP latency P50 <strong>287 ms</strong>, P95 <strong>590 ms</strong>, max 1,195 ms, none over 4 seconds (the replay waited longer; the production 4-second deadline was not rerun in this round).</p>
+<blockquote>
+<p>[!NOTE]
+Payload and tool output are counted in characters of request JSON. The two measures overlap, cannot be added, and are not actual tokens. Offline replay fixes the follow-up actions, so it cannot show that re-reads and task success are unchanged in a live run. The SWE-chat replay covers only the first skill catalog, not later re-disclosure.</p>
+</blockquote>
+<h2>Live model results (DeepSeek Flash)</h2>
+<p>On 2026-10-07 we ran a paired experiment with a live main model on deepseek-flash: the pinned DSH CLI (0.2.1-alpha.1) ran real headless sessions in a disposable <code>DSH_HOME</code>, and the model chose its own tool calls. 4 tasks (fix from a test log, fix from a build error, load a skill, 7 incremental edits plus a recall question) × 4 configurations × 5 repetitions; all 80 runs were valid, and the decision rules were written down before the runs.</p>
+<table>
+<thead>
+<tr>
+<th>Configuration</th>
+<th align="right">Main input tokens</th>
+<th align="right">Cache misses</th>
+<th align="right">Output</th>
+<th align="right">Cache hit rate</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>sieve off (baseline)</td>
+<td align="right">3.73M</td>
+<td align="right">248K</td>
+<td align="right">68K</td>
+<td align="right">93.4%</td>
+</tr>
+<tr>
+<td>Baseline, second run (noise reference)</td>
+<td align="right">+4.5%</td>
+<td align="right">−2.4%</td>
+<td align="right">−1.4%</td>
+<td align="right">93.8%</td>
+</tr>
+<tr>
+<td><strong>All four decisions on</strong></td>
+<td align="right"><strong>−21.2%</strong></td>
+<td align="right"><strong>−15.3%</strong></td>
+<td align="right"><strong>−6.7%</strong></td>
+<td align="right">92.9%</td>
+</tr>
+<tr>
+<td>All on, forgetting off</td>
+<td align="right">−11.6%</td>
+<td align="right">−11.5%</td>
+<td align="right">−3.5%</td>
+<td align="right">93.3%</td>
+</tr>
+</tbody></table>
+<ul>
+<li><strong>Tokens</strong>: all on used about 21% fewer tokens than the baseline, beyond the noise of rerunning the same configuration (about 4%). With forgetting off the saving was about 11%, so forgetting accounts for about half.</li>
+<li><strong>Cache</strong>: the hit rate did not change with sieve on; excluding each run's first request, it was 96.1% for the baseline and 96.3% with all on. Why forgetting rewrites history without lowering the hit rate is explained in the <a href="#faq" target="_blank" rel="noopener noreferrer">FAQ</a>.</li>
+<li><strong>Task results</strong>: every configuration solved the code tasks 20/20. On the recall question, all on answered wrong once, because the model itself cut the line with the answer using <code>tail -60</code>; sieve had not touched that output. Every other configuration answered correctly.</li>
+</ul>
+<blockquote>
+<p>[!NOTE]
+At the time of this run sieve still allowed the session's model to judge, and there was no Jev key in the environment, so deepseek-flash judged for itself (5 of 17 calls exceeded the 4-second deadline and kept the original). The current version has removed that path and needs Jev or Laya; the table has not been rerun with Jev or Laya. Since most of the saving comes from rules, the change of judge model mainly affects what the rules cannot settle. The experiment also covers only 4 self-built tasks on deepseek-flash, task success is near the ceiling so it discriminates little, and cold restore was not tested.</p>
+</blockquote>
+<h2>FAQ</h2>
+<h3>How does sieve improve LLM inference costs and token efficiency?</h3>
+<p>sieve reduces redundant content repeatedly sent from tool output, older results and skill catalogs, lowering main model input token usage. Context compression here means content selection, pruning and retrieval from an archive; it does not modify model weights or the tokenizer.</p>
+<p>Lower input usage does not translate directly into the same reduction in API costs. Net cost evaluation must include cached and uncached main model input, output tokens, Jev judge fees and any additional retrieval of originals; Laya also uses local compute resources. Existing experiments report request characters and main model token usage separately and do not establish an end-to-end net cost reduction for the current version.</p>
+<h3>Does sieve invalidate the main model's prompt cache?</h3>
+<p>Not persistently. Prompt caches match by prefix: the part of a request that is identical to the start of earlier requests is served from cache, and everything from the first differing byte on counts as a miss. So what matters is whether sieve changes content that <strong>has already been sent</strong>. Case by case:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Changes content already sent?</th>
+<th>Effect on the cache</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Judge model calls (Jev / Laya)</td>
+<td>No: side requests to the judge service, never written to the session log or the main model's request</td>
+<td>None</td>
+</tr>
+<tr>
+<td><code>tool.admission</code>, <code>tool.admission.test-log</code></td>
+<td>No: a tool result is rewritten <strong>before it enters the session</strong>, so only the newly appended content changes; references point back to earlier content without modifying it</td>
+<td>None: the next request's prefix is the previous request plus the reduced new result</td>
+</tr>
+<tr>
+<td><code>skills.disclosure</code></td>
+<td>No: the first catalog is filtered <strong>before it enters the session</strong>; skills that become relevant later are announced in new messages</td>
+<td>None</td>
+</tr>
+<tr>
+<td>System prompt, tool definitions</td>
+<td>No: sieve does not touch them</td>
+<td>None</td>
+</tr>
+<tr>
+<td>Session resume, fork</td>
+<td>No: rewrites are in the session log, and a resumed session is rebuilt from it byte for byte, with no new judgments</td>
+<td>None</td>
+</tr>
+<tr>
+<td><code>context.forget</code></td>
+<td><strong>Yes</strong>: replaces large older tool results with their ends and an archive pointer</td>
+<td>Once per batch: everything from the first replaced result on is written to the cache again in that one request</td>
+</tr>
+</tbody></table>
+<p><code>context.forget</code> is the only part that rewrites history, and it is designed to keep that rebuild an occasional one-time cost:</p>
+<ol>
+<li><strong>Mostly old results</strong>: rules forget only results before the 4 most recent (<code>keepRecent</code>) of at least 1,500 characters, plus earlier reads that a later read fully covers; newer results are replaced only when the judge model finds them no longer needed;</li>
+<li><strong>Commit only when it pays</strong>: a batch lands only if it saves at least 10,000 characters (<code>minBatchChars</code>); otherwise it waits for the next one, instead of changing a little at every step;</li>
+<li><strong>One rebuild per batch</strong>: all replacements in a batch land before the same request, and later requests hit the cache again on the new, shorter prefix, sending less at every following step.</li>
+</ol>
+<p>Example: at step 30 the context holds 20 tool results. Before step 31, results 3, 5 and 8 are found forgettable, saving 24,000 characters together, above the 10,000-character threshold, so all three replacements land at once. The step 31 request differs from step 30 from result 3 on, and that part counts as a miss once; from step 32 on the prefix matches step 31 again and hits, and every step sends 24,000 characters less than without forgetting.</p>
+<p>Measured (deepseek-flash, 80 runs): cache hit rate 93.4% for the baseline and 92.9% with all four decisions on; excluding each run's first request, 96.1% and 96.3%, within noise.</p>
+<p>To avoid the rebuild entirely, turn off forgetting alone:</p>
+<pre><code class="language-yaml">- id: sieve
+  config:
+    modes:
+      context.forget: off
+</code></pre>
+<p>The other three decisions then never change content already sent and leave the cache prefix alone; the cost is that the token reduction in the same experiment fell from about 21% to about 11%.</p>
+<h3>Do judge model calls use the main model's context?</h3>
+<p>No. A judge request carries only the content being judged and the task goal (redacted), goes to Jev or Laya, and its probabilities are used inside sieve only. Nothing of it is written to the session, and the main model never sees it.</p>
+<h2>Installation</h2>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Role</th>
+<th>Profiles</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>dsh-sieve</code></td>
+<td>The plugin: judgment kernel, four decisions, ledger, <code>/sieve</code> command</td>
+<td>Any (<code>web</code>, <code>headless</code>, …)</td>
+</tr>
+<tr>
+<td><code>dsh-sieve-web</code></td>
+<td>The Web sidebar panel; needs <code>dsh-sieve</code> of the same version</td>
+<td><code>web</code> only</td>
+</tr>
+</tbody></table>
+<p><strong>Version compatibility</strong>: sieve declares its DSH peers at exact versions; the host checks them at install and startup and refuses to load on a mismatch.</p>
+<table>
+<thead>
+<tr>
+<th>sieve</th>
+<th>DeepSeek Harness</th>
+<th>Node.js</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>0.2.0</code></td>
+<td><code>0.2.1-alpha.1</code></td>
+<td><code>^22.19.0 || &gt;=24.0.0</code></td>
+</tr>
+</tbody></table>
+<h3>Option 1: npm (recommended)</h3>
+<p>Prebuilt packages: nothing compiles on your machine and no build scripts need approval. Install the plugin and the Web panel together:</p>
+<pre><code class="language-bash">dsh plugin --profile web add dsh-sieve@0.2.0 dsh-sieve-web@0.2.0
+</code></pre>
+<p>Profiles without a Web UI, such as <code>headless</code>, install only the plugin:</p>
+<pre><code class="language-bash">dsh plugin --profile headless add dsh-sieve@0.2.0
+</code></pre>
+<p>You can also open <strong>Plugins → Add plugin</strong> in the DSH Web sidebar and enter <code>dsh-sieve@0.2.0</code>, then <code>dsh-sieve-web@0.2.0</code>; the result is the same.</p>
+<h3>Option 2: GitHub Release</h3>
+<p>If npm is unreachable or you want to pin the exact build, install the tarballs attached to the <a href="https://github.com/Sev7eEn7/sieve/releases" target="_blank" rel="noopener noreferrer">Release</a>. They are the same prebuilt packages. The release includes <code>SHA256SUMS</code> for verification:</p>
+<pre><code class="language-bash">dsh plugin --profile web add https://github.com/Sev7eEn7/sieve/releases/download/v0.2.0/dsh-sieve-0.2.0.tgz https://github.com/Sev7eEn7/sieve/releases/download/v0.2.0/dsh-sieve-web-0.2.0.tgz
+</code></pre>
+<h3>Option 3: Build from source</h3>
+<pre><code class="language-bash">git clone https://github.com/Sev7eEn7/sieve.git &amp;&amp; cd sieve
+</code></pre>
+<pre><code class="language-bash">pnpm install &amp;&amp; pnpm release:pack
+</code></pre>
+<pre><code class="language-bash">dsh plugin --profile web add ./release/dsh-sieve-0.2.0.tgz ./release/dsh-sieve-web-0.2.0.tgz
+</code></pre>
+<p><code>pnpm release:pack</code> builds both packages, checks that versions and peers agree and that the output contains no <code>workspace:</code> or local paths, then writes the tarballs and <code>SHA256SUMS</code> to <code>release/</code>.</p>
+<blockquote>
+<p>[!NOTE]
+Installing from git (<code>github:Sev7eEn7/sieve</code>) is not supported: the repository is a monorepo, and a git install gets only the sources, without the built <code>lib/</code>. Use one of the three options above.</p>
+</blockquote>
+<h3>Enable and verify</h3>
+<ol>
+<li><p>Configure a judge model (<a href="#using-jev" target="_blank" rel="noopener noreferrer">Jev</a> or <a href="#using-laya" target="_blank" rel="noopener noreferrer">Laya</a>).</p>
+</li>
+<li><p>Restart <code>dsh web</code> (required after upgrading an installed version), then reload the browser page so the panel's frontend loads again.</p>
+</li>
+<li><p>Check that it loaded:</p>
+<pre><code class="language-bash">dsh --profile web --dump-config
+</code></pre>
+<p>The output should contain the <code># == dsh-sieve</code> and <code># == dsh-sieve-web</code> layers.</p>
+</li>
+<li><p>Enter <code>/sieve status</code> in a session: the "判断模型" (judge model) line should name Jev or Laya; if it says "未配置" (not configured), sieve changes nothing. A <strong>Sieve</strong> page appears in the Web sidebar.</p>
+</li>
+</ol>
+<h3>Upgrade and uninstall</h3>
+<p>To upgrade, <code>add</code> again with the new version and restart:</p>
+<pre><code class="language-bash">dsh plugin --profile web add dsh-sieve@&lt;version&gt; dsh-sieve-web@&lt;version&gt;
+</code></pre>
+<p>To uninstall, remove the packages together with their configuration layers, the panel first:</p>
+<pre><code class="language-bash">dsh plugin --profile web remove dsh-sieve-web dsh-sieve
+</code></pre>
+<h2>Configuration</h2>
+<p>With Jev you need no configuration at all: the judge is <code>auto</code> and every decision is on; put a key in the credential store or the environment. To adjust anything, configure the <code>sieve</code> service in the profile's patch:</p>
+<pre><code class="language-yaml">- id: sieve
+  config:
+    judge:
+      type: auto           # auto | system-one | laya
+      timeoutMs: 4000
+    modes:
+      default: active
+      context.forget: off  # e.g. turn off forgetting alone
+</code></pre>
+<table>
+<thead>
+<tr>
+<th><code>judge.type</code></th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>auto</code> (default)</td>
+<td>The Jev key in the DSH credential store or the environment (<code>TYPESAFE_API_KEY</code> first, then <code>SIEVE_JUDGE_OPENROUTER_API_KEY</code>); with neither, nothing changes</td>
+</tr>
+<tr>
+<td><code>system-one</code></td>
+<td>The Jev endpoint named in the profile; needs <code>apiKey</code> (preferably <code>!!js process.env.XXX</code>), optional <code>baseUrl</code> and <code>model</code> (default <code>jev-latest</code>)</td>
+</tr>
+<tr>
+<td><code>laya</code></td>
+<td>The local Laya server; optional <code>baseUrl</code> (default <code>http://127.0.0.1:47823</code>), no key</td>
+</tr>
+</tbody></table>
+<p><code>modes</code> sets each decision to <code>active</code> (default) or <code>off</code>; <code>default</code> covers the decisions not listed. Decision ids: <code>tool.admission</code>, <code>tool.admission.test-log</code>, <code>context.forget</code>, <code>skills.disclosure</code>.</p>
+<p>Example with an explicit Jev endpoint:</p>
+<pre><code class="language-yaml">- id: sieve
+  config:
+    judge:
+      type: system-one
+      apiKey: !!js process.env.MY_JUDGE_KEY
+      baseUrl: https://&lt;System One endpoint&gt;
+      model: jev-latest
+</code></pre>
+<p>An invalid configuration (an unknown decision id, say, or the removed <code>llm</code> judge settings) fails at load instead of silently falling back.</p>
+<h2>Session commands</h2>
+<pre><code class="language-text">/sieve status                             Show the judge model in use and, per decision in this session, its mode, records, applied count and estimated net saving
+/sieve mode &lt;decision id&gt; &lt;off|active|reset&gt;   Override a decision's mode in this session; reset returns to the profile's setting
+</code></pre>
+<p>Commands never call a model, and overrides last only for the current session while the plugin stays loaded.</p>
+<h2>Development</h2>
+<pre><code class="language-bash">pnpm install
+</code></pre>
+<pre><code class="language-bash">pnpm build
+</code></pre>
+<pre><code class="language-bash">pnpm typecheck &amp;&amp; pnpm test
+</code></pre>
+<ul>
+<li><code>pnpm build</code> compiles both packages and bundles the Web panel's browser side into a single file DSH Web can load.</li>
+<li>The tests need no keys: the main model is a scripted adapter, and the judge model is a stub of the Laya protocol over local loopback HTTP.</li>
+<li><code>pnpm release:pack</code> builds and packs installable tarballs with <code>SHA256SUMS</code>; see <a href="#option-3-build-from-source" target="_blank" rel="noopener noreferrer">Installation</a>.</li>
+<li>Every dependency is pinned to an exact version; <code>@deepseek-ai/dsh-*</code> are declared as exact peers, which the host checks at install and startup.</li>
+</ul>
+<pre><code>packages/
+├── dsh-sieve/          # The plugin: judgment kernel, four decisions, ledger, /sieve command
+│   ├── src/judge/      # Decision engine, Jev and Laya providers, questions and policies, redaction
+│   ├── src/features/   # Wiring of each decision point to DSH extension points
+│   └── src/runtime/    # Configuration, derived session state, ledger, status snapshots
+└── dsh-sieve-web/      # The DSH Web panel (host routes + browser side)
+</code></pre>
+<h2>Acknowledgments and license</h2>
+<p>Parts of the code are derived from third-party MIT-licensed code; its copyright notice and license are in <a href="https://github.com/Sev7eEn7/dsh-sieve/blob/HEAD/packages/dsh-sieve/THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener noreferrer">THIRD_PARTY_NOTICES.md</a>.</p>
+<p>Released under the <a href="https://github.com/Sev7eEn7/dsh-sieve/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a> license.</p>
