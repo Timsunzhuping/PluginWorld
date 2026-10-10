@@ -17,12 +17,19 @@
 文件上传，全部走网页端私有接口。</p>
 <p>于是：<strong>在模型选择器里选 <code>DeepSeek 网页 · 快速模式</code>，就能用网页版免费额度跑 DSH 的 agent</strong>。</p>
 <pre><code class="language-text">DSH agent loop ──▶ ctx.llm ──▶ [deepseek-web 适配器] ──▶ chat.deepseek.com
-                                     │  ├─ PoW（SHA3 WASM 求解）
-                                     │  ├─ chat_session（每次调用临时会话，用完即删）
-                                     │  ├─ chat/completion（SSE patch 流）
+                                     │  ├─ PoW（SHA3 WASM，**在浏览器页面里**求解）
+                                     │  ├─ chat_session（**按 DSH 会话复用，跨重启续上**）
+                                     │  ├─ chat/completion（SSE patch 流，链式只发增量）
                                      │  └─ file/upload_file（图片输入）
                                      └─ 提示词工具协议 ⇄ tool-call 块
 </code></pre>
+<blockquote>
+<p><strong>⚠️ 0.7.0 起：必须能启动 Edge / Chrome。</strong>
+PoW 挑战改为<strong>在真实页面上下文里</strong>求解（原因见下方「为什么这样更不容易被限流」）。
+找不到浏览器时<strong>会明确报错，不会退回 Node 侧求解</strong> —— 这是刻意的：
+Node 侧解 PoW 是被公开列为的封号触发条件，退回去等于这个改动没做。
+已经用 <code>DSH_NO_BROWSER_TRANSPORT=1</code> 显式关掉浏览器传输的环境需要撤销该设置。</p>
+</blockquote>
 <img src="https://raw.githubusercontent.com/cv-superding/dsh-deepseek-web-login/HEAD/docs/assets/architecture.svg" alt="架构与数据流" width="1000" /><h2>它是怎么工作的（以及为什么不是「反代」）</h2>
 <p>被问得最多的两个问题：<strong>你们是操作 DOM，还是截获页面的请求？是不是个反代？</strong>
 答案都是<strong>不是</strong> —— 它自己构造请求、直接发给网页端私有接口。准确的说法是
@@ -47,7 +54,7 @@
 </tr>
 <tr>
 <td><strong>③ 发送</strong></td>
-<td>默认从 <strong>Chromium 网络栈</strong>出去（Electron <code>net.fetch</code>），TLS / HTTP2 指纹与真实浏览器一致；也可切回 Node</td>
+<td>默认<strong>交给系统 Edge / Chrome 的网络栈</strong>发出（CDP 驱动真实页面），TLS / HTTP2 指纹与真实浏览器一致；也可切回 Node</td>
 <td>见下方「传输层」</td>
 </tr>
 <tr>
@@ -100,6 +107,44 @@ Electron 品牌（UA 与 UA-CH）删掉，否则网页端会判「使用环境�
 </tbody></table>
 <p>前两条路线的共同点是「<strong>请求是浏览器发的</strong>」，只有本插件是发送方。代价是接口变了要跟着改；
 换来的是不依赖 DOM、可以后台无人值守地跑。</p>
+<h2>为什么这样更不容易被限流</h2>
+<p>网页端会拦自动化调用，而且公开的同类项目文档里已经列出了触发条件。0.7.0 按其中最可识别的那几条
+做了调整：</p>
+<table>
+<thead>
+<tr>
+<th>原本的做法</th>
+<th>问题</th>
+<th>现在</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>在 <strong>Node 里</strong> <code>WebAssembly.instantiate</code> 求PoW 挑战</td>
+<td>被明确列为「自动解挑战」的封号触发条件</td>
+<td><strong>在真实页面里</strong>用官方自己的 wasm 求</td>
+</tr>
+<tr>
+<td>每次调用<strong>临时建会话、用完即删</strong></td>
+<td>真人不会这样建删对话（实测曾一天建 182 个会话）</td>
+<td><strong>按 DSH 会话复用</strong>，跨重启续上（<code>resume-state.json</code>）</td>
+</tr>
+<tr>
+<td>每轮<strong>全量重发</strong></td>
+<td>请求体量与节奏都不像真人</td>
+<td><strong>链式投喂</strong>：只发增量，<code>parent_message_id</code> 挂在上一条回答下面</td>
+</tr>
+<tr>
+<td>固定请求间隔</td>
+<td>真人打字不是等距的</td>
+<td>见设置页的请求间隔（可配随机区间）</td>
+</tr>
+</tbody></table>
+<p><strong>代价（也是 0.7.0 的破坏性变更）</strong>：必须有可用的 Edge / Chrome。
+找不到浏览器时会明确报错—— <strong>不会静默退回 Node 侧解PoW</strong>，因为那样等于这个改动没做，
+只是给了「已经改好了」的错觉。</p>
+<p>⚠️ <strong>需要说清的边界</strong>：这些调整<strong>降低</strong>被识别为自动化的概率，<strong>不构成"不会被封"的保证</strong>。
+逆向网页端本身违反服务条款，风险是"判罚多严"而不是"会不会被抓到"。
+稳定性优先请用官方 API，或用已有的付费订阅走 OAuth。</p>
 <h2>界面预览</h2>
 <p>设置页按用途分成 <strong>6 个标签</strong>（一次只显示一页）—— <strong>账号</strong>（登录状态 / 当前账号 / <strong>账号库</strong> / 手动 Token）·
 <strong>模型</strong>（可用模型 / 连通性测试）· <strong>防风控</strong>（请求节流 / 会话清理及其三个区间 / <strong>调用台账</strong>）·
@@ -122,7 +167,7 @@ Electron 品牌（UA 与 UA-CH）删掉，否则网页端会判「使用环境�
 </tr>
 <tr>
 <td>🧩 <strong>PoW 求解</strong></td>
-<td><code>create_pow_challenge</code> + DeepSeek 自家 <code>sha3_wasm_bg.*.wasm</code> 的 <code>wasm_solve</code>；WASM 地址<strong>自动发现</strong>（哈希随部署变化），失败自动回退</td>
+<td><code>create_pow_challenge</code> + DeepSeek 自家 <code>sha3_wasm_bg.*.wasm</code> 的 <code>wasm_solve</code>，<strong>在浏览器页面上下文里执行</strong>（0.7.0 起，见下方「为什么这样更不容易被限流」）；WASM 地址<strong>自动发现</strong>（哈希随部署变化），失败自动回退</td>
 </tr>
 <tr>
 <td>🌊 <strong>流式</strong></td>
@@ -367,7 +412,7 @@ prompt 字符上限默认 400,000（可配）—— 这个数字同时是<strong
 <tr>
 <td><code>transport</code></td>
 <td><strong><code>chromium</code></strong></td>
-<td>传输层：<code>chromium</code>＝Electron 的 <code>net.fetch</code>（指纹与真实浏览器一致）/ <code>node</code>＝Node 原生 fetch</td>
+<td>传输层：<code>chromium</code>＝<strong>系统浏览器进程代理</strong>（拉起 Edge/Chrome，CDP 驱动页面发请求）/ <code>node</code>＝Node 原生 fetch</td>
 </tr>
 <tr>
 <td><code>contextMode</code></td>
@@ -552,9 +597,15 @@ prompt 字符上限默认 400,000（可配）—— 这个数字同时是<strong
 </tr>
 </tbody></table>
 <p>Node 的请求在 <strong>TLS 层</strong>就能被判定为非浏览器（不走 HTTP/2、cipher 数量差 3 倍多、不带 GREASE），
-而且这几项<strong>调参修不了</strong>。改用 Electron 的 <code>net.fetch</code> 后走 Chromium 内置网络栈，
-cipher 列表哈希与 Chrome 逐字节一致 —— 且<strong>零新依赖</strong>（不用 uTLS / curl-impersonate）。
-唯一残留差异是扩展数 16 vs 17（内置 Chromium 150 vs 本机 Chrome 152，版本差异，属正常）。</p>
+而且这几项<strong>调参修不了</strong>。</p>
+<blockquote>
+<p><strong>⚠️ 0.7.0 更新：实际走的是「系统浏览器进程代理」，不是 Electron 的 <code>net.fetch</code>。</strong>
+官方端是 <code>ELECTRON_RUN_AS_NODE=1</code> 的子进程，<strong>取不到 <code>electron.net.fetch</code></strong>，
+所以浏览器传输层改为拉起<strong>系统的 Edge / Chrome</strong>、用 CDP（<code>Runtime.addBinding</code>）把请求
+交给真实页面发出，响应分块回传。上表的 <code>net.fetch</code> 一行是<strong>当时的对比数据</strong>，
+结论仍然成立（Node 的 TLS 指纹确实区分得出来），但<strong>现在不是靠 Electron 实现的</strong>。
+代价就是上面那条：<strong>必须有可用的 Edge / Chrome</strong>。</p>
+</blockquote>
 <p>设置页「传输层（指纹）」卡可以直接切换，并带一个<strong>零额度的一键测试</strong>
 （回显指纹 / 流式 / 鉴权三项结论）。</p>
 <p>⚠️ <strong>切到 Chromium 后请求会跟随系统代理</strong>（Node 则完全无视代理）。
@@ -655,7 +706,10 @@ cipher 列表哈希与 Chrome 逐字节一致 —— 且<strong>零新依赖</st
 <li><code>temperature</code> / <code>stop</code> / <code>max_tokens</code> 网页端无对应字段，会被忽略；usage 为<strong>估算值</strong>（网页端不返回 token 计数）</li>
 <li>免费额度有频控；<code>429</code> 会带上 <code>providerRetryAfterMs</code> 交给 DSH 的重试策略</li>
 <li><code>describe_image</code> 是 DSH 侧另一个独立工具（调用外部视觉模型），与本插件无关；本插件的图片能力不依赖它</li>
-<li><strong>默认走 Chromium 网络栈</strong>（Electron 的 <code>net.fetch</code>），TLS/HTTP2 指纹与真实浏览器一致；
+<li><strong>必须能启动 Edge / Chrome</strong>（0.7.0 起）：PoW 改为在真实页面里求解，官方端是
+<code>ELECTRON_RUN_AS_NODE=1</code> 子进程拿不到 <code>electron.net.fetch</code>，只能拉起系统浏览器、用 CDP 驱动页面发请求。
+找不到浏览器会<strong>明确报错</strong>（不会静默退回 Node 侧解PoW —— 那是刻意的，见「为什么这样更不容易被限流」）</li>
+<li><strong>默认走系统浏览器的网络栈</strong>（CDP 驱动真实页面），TLS/HTTP2 指纹与真实浏览器一致；
 但它会跟随<strong>系统代理</strong>，梯子关着而系统代理仍指向它时会连不上 —— 设置页「传输层（指纹）」切回 Node 即可</li>
 </ul>
 <h2>测试与验证</h2>

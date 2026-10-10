@@ -58,6 +58,7 @@ web pages exactly like v2, just with a cleaner body by default.</p>
 <li><strong>Download button</strong> (3.9) - the PWA saves a result as a <code>.md</code> file, named by the server via <a href="#response-headers" target="_blank" rel="noopener noreferrer"><code>X-Suggested-Filename</code></a> and optionally date-prefixed.</li>
 <li><strong><a href="#monitoring" target="_blank" rel="noopener noreferrer">Sidecar health endpoint</a></strong> (3.10) - <code>GET /api/status</code> answers <code>503</code> when a configured sidecar stops responding, so a dead renderer shows up as an alert instead of quietly degrading extraction.</li>
 <li><strong>Configurable cache retention</strong> (3.11) - <a href="#configuration" target="_blank" rel="noopener noreferrer"><code>PULLMD_CACHE_RETENTION_DAYS</code></a> sets how long cache rows and share links live; default 90 days, <code>0</code> keeps them forever.</li>
+<li><strong>Reverse-proxy setting and request limits</strong> (3.13) - <a href="#behind-another-reverse-proxy" target="_blank" rel="noopener noreferrer"><code>PULLMD_TRUST_PROXY</code></a> decides when forwarding headers count, login and signup are rate-limited, the paid media tiers share an hourly budget, and outbound fetches have a size limit. Proxy users: see <a href="https://github.com/AeternaLabsHQ/pullmd/blob/HEAD/MIGRATION.md#action-required-if-you-run-behind-a-reverse-proxy" target="_blank" rel="noopener noreferrer"><code>MIGRATION.md</code></a>.</li>
 </ul>
 <hr />
 <h2>Quick start</h2>
@@ -152,6 +153,25 @@ network. Set <code>HOST_DOMAIN</code> in <code>.env</code>:</p>
 echo "HOST_DOMAIN=pullmd.example.com" &gt; .env
 docker compose -f docker-compose.traefik.yml up -d
 </code></pre>
+<p>This file sets <code>PULLMD_TRUST_PROXY=1</code>: Traefik is the only peer (no port is
+published), so PullMD takes the client address and the <code>https</code> scheme from
+Traefik's forwarding headers.</p>
+<h3>Behind another reverse proxy</h3>
+<p>PullMD ignores <code>X-Forwarded-For</code>, <code>X-Forwarded-Proto</code> and <code>X-Forwarded-Host</code>
+unless <code>PULLMD_TRUST_PROXY</code> says the connecting peer is a proxy. Behind nginx,
+Caddy, a tunnel or a load balancer, set:</p>
+<pre><code class="language-bash">PULLMD_TRUST_PROXY=1                          # one proxy hop, port not reachable directly
+# or: PULLMD_TRUST_PROXY=172.18.0.0/16       # the proxy's address/network
+PUBLIC_URL=https://pullmd.example.com
+</code></pre>
+<p>A hop count trusts whatever connects, so use it only when the container port is
+not published to anyone but the proxy; otherwise list the proxy's address.
+Without the setting, all clients share one rate-limit bucket (login, signup,
+share-link misses, OAuth, media budget) and PullMD logs a one-time warning.
+<code>PUBLIC_URL</code> keeps the session cookie <code>Secure</code> and is accepted as this site's
+host by the login form check. Do not send <code>Referrer-Policy: no-referrer</code> for
+PullMD's pages: browsers then post forms with <code>Origin: null</code>, which is refused.
+See <a href="https://github.com/AeternaLabsHQ/pullmd/blob/HEAD/MIGRATION.md#action-required-if-you-run-behind-a-reverse-proxy" target="_blank" rel="noopener noreferrer"><code>MIGRATION.md</code></a>.</p>
 <h3>Local development (no Docker)</h3>
 <pre><code class="language-bash">git clone https://github.com/AeternaLabsHQ/pullmd.git
 cd pullmd
@@ -181,7 +201,12 @@ npm test              # node --test
 <tr>
 <td><code>PUBLIC_URL</code></td>
 <td>no</td>
-<td>Full public origin embedded in <code>/help</code> and the skill zip. Defaults to <code>https://${HOST_DOMAIN}</code>.</td>
+<td>Full public origin embedded in <code>/help</code> and the skill zip. Defaults to <code>https://${HOST_DOMAIN}</code>. An <code>https://</code> value also marks the session cookie <code>Secure</code>, and its host is accepted by the same-origin check on login and other form posts.</td>
+</tr>
+<tr>
+<td><code>PULLMD_TRUST_PROXY</code></td>
+<td>behind a reverse proxy</td>
+<td>When to honour <code>X-Forwarded-*</code>. Off by default. <code>1</code>, <code>2</code>, ... = hop count; <code>true</code> = every hop (the client address is then the first <code>X-Forwarded-For</code> entry, which the client can set; prefer a hop count); or a comma-separated list of addresses, CIDRs or <code>loopback</code> / <code>linklocal</code> / <code>uniquelocal</code>. An invalid list warns and stays off. <code>docker-compose.traefik.yml</code> sets <code>1</code>. See <a href="#behind-another-reverse-proxy" target="_blank" rel="noopener noreferrer">Behind another reverse proxy</a>.</td>
 </tr>
 <tr>
 <td><code>TRAFILATURA_URL</code></td>
@@ -217,6 +242,11 @@ npm test              # node --test
 <td><code>PULLMD_PDF_OCR_API_KEY</code> / <code>…_BASE_URL</code> / <code>…_MODEL</code></td>
 <td>no</td>
 <td>Opt-in high-quality PDF→Markdown via an OCR provider that preserves tables (reference: Mistral OCR <code>mistral-ocr-latest</code>). Triggered per request with <code>?pdf=ocr</code> or a recipe <code>fetch.pdf: ocr</code>. Default PDF handling stays the free markitdown path. <code>_MODEL</code> defaults to <code>mistral-ocr-latest</code>.</td>
+</tr>
+<tr>
+<td><code>PULLMD_LLM_RATE_LIMIT</code></td>
+<td>no</td>
+<td>Hourly budget shared by image captioning, audio transcription and PDF OCR, per signed-in user or client address. Default <code>30</code>; <code>0</code> = off. Over budget the request falls back to the no-provider path, and that result is not cached.</td>
 </tr>
 <tr>
 <td><code>MARKITDOWN_YOUTUBE</code></td>
@@ -261,7 +291,7 @@ npm test              # node --test
 <tr>
 <td><code>DISABLE_PUBLIC_HISTORY</code></td>
 <td>no</td>
-<td>When <code>true</code>, hides the global recent-conversions list and archive (<code>/api/history</code> + <code>/api/archive</code> return 403, frontend hides the section). <code>/s/:id</code> share links keep working. Default: <code>false</code>.</td>
+<td>When <code>true</code>, hides the global recent-conversions list and archive (<code>/api/history</code> + <code>/api/archive</code> return 403, the MCP <code>list_recent</code> tool returns an error, <code>/api/stats</code> omits its per-domain lists, frontend hides the section). <code>/s/:id</code> share links keep working. Default: <code>false</code>.</td>
 </tr>
 <tr>
 <td><code>PULLMD_USER_AGENT</code></td>
@@ -314,6 +344,11 @@ npm test              # node --test
 <td>Comma-separated CIDRs and/or exact hostnames that may be fetched even though they resolve into a blocked range. Empty by default = every internal target is blocked. See <a href="#ssrf-protection" target="_blank" rel="noopener noreferrer">SSRF protection</a>.</td>
 </tr>
 <tr>
+<td><code>PULLMD_MAX_FETCH_BYTES</code></td>
+<td>no</td>
+<td>Size limit in bytes for fetched pages and documents and for the Playwright sidecar's response. Default <code>52428800</code> (50 MB). A larger response fails with an extraction error. A page fetch also has to deliver headers plus body within 60 s.</td>
+</tr>
+<tr>
 <td><code>PULLMD_SITE_RECIPES</code></td>
 <td>no</td>
 <td>Path to a JSON file of extra <a href="#site-recipes" target="_blank" rel="noopener noreferrer">site recipes</a>, merged on top of the built-ins. Alternative to <code>data/site-recipes.json</code>.</td>
@@ -348,11 +383,14 @@ because Reddit's API expects a stable, identifying UA.</p>
 <p><code>DISABLE_PUBLIC_HISTORY=true</code> is the privacy switch for shared
 instances (multi-tenant VPS, office deployments). Conversions still
 get cached and assigned share IDs; users just can't see what <em>other</em>
-users have fetched. Anyone with a known <code>/s/:id</code> link still gets
-their markdown back. Share ids are 128 random bits, so a link cannot
+users have fetched (the MCP <code>list_recent</code> tool follows the same rule,
+and <code>/api/stats</code> leaves out its per-domain lists). Anyone with a known
+<code>/s/:id</code> link still gets their markdown back. Share ids are 128 random bits, so a link cannot
 be guessed, and <code>/s/:id</code> throttles unknown-id lookups to 120 per
-minute and IP (valid links are never throttled). Use this as a
-stopgap until per-user scoping lands.</p>
+minute and IP (valid links are never throttled). With sign-in
+enabled (<code>PULLMD_AUTH_MODE=single-admin</code> or <code>multi-user</code>) history is
+scoped per user anyway; the switch matters for instances without
+sign-in.</p>
 <hr />
 <h2>Authentication (v2.0+)</h2>
 <blockquote>
@@ -446,6 +484,10 @@ doing nothing.</p>
 <td align="center">no</td>
 </tr>
 </tbody></table>
+<p><code>/api/stats</code> returns its per-domain lists (<code>lowQualityDomains</code>,
+<code>fallbackByDomain</code>) only to the admin, or to everyone when auth is off and
+public history is on; the aggregate counts are public. Signed-in callers of
+<code>/api/history</code> and MCP <code>list_recent</code> get their own conversions.</p>
 <p>Cache deletes are scoped to the caller. An admin (and every caller in
 <code>disabled</code> mode) removes the shared, URL-deduped cache row, which affects
 every user's history. A regular user only unlinks the entry from their own
@@ -453,7 +495,7 @@ history - the shared row and its <code>/s/:id</code> share link keep working. Th
 response says which happened via <code>"scope": "user" | "global"</code>.</p>
 <h3>Authentication paths</h3>
 <ol>
-<li><strong>Session cookies</strong> — <code>POST /login</code> sets <code>pullmd_session</code> (<code>HttpOnly</code>, <code>SameSite=Lax</code>, <code>Secure</code> over HTTPS, 90-day TTL with sliding expiry). The PWA uses this automatically.</li>
+<li><strong>Session cookies</strong> — <code>POST /login</code> sets <code>pullmd_session</code> (<code>HttpOnly</code>, <code>SameSite=Lax</code>, 90-day TTL with sliding expiry). The PWA uses this automatically. The cookie is <code>Secure</code> when the request arrived over HTTPS (directly, or through a proxy covered by <code>PULLMD_TRUST_PROXY</code>) or when <code>PUBLIC_URL</code> starts with <code>https://</code>. <code>POST /login</code> allows 10 attempts per minute and <code>POST /signup</code> 5 per hour per client address (<code>429</code> with <code>Retry-After</code> beyond that). Login, signup, logout and OAuth consent form posts are accepted only when <code>Origin</code> (or <code>Referer</code>) names this host or the host of <code>PUBLIC_URL</code>; posts without either header are accepted.</li>
 <li><strong>API keys</strong> — generate at <code>/settings</code>, send via <code>Authorization: Bearer pmd_&lt;32-char-base62&gt;</code>. Stored as SHA-256 hashes; only shown once at creation.</li>
 <li><strong>Legacy <code>PULLMD_AUTH_TOKEN</code></strong> — deprecated. <code>single-admin</code> mode only. Maps to admin user. Kept for migration compatibility; slated for removal in a future major release.</li>
 </ol>
@@ -476,7 +518,7 @@ Revocation (RFC 7009).</p>
 </ol>
 <p><strong>Tokens:</strong></p>
 <ul>
-<li>Access tokens are JWTs (HS256), TTL 1 hour, audience-bound to your <code>/mcp</code> URL.</li>
+<li>Access tokens are JWTs (HS256), TTL 1 hour, audience-bound to your <code>/mcp</code> URL, and accepted only on <code>/mcp</code>. Other routes, <code>/api/me</code> included, treat them as unknown bearers; use an API key there.</li>
 <li>Refresh tokens are opaque (<code>pmd_rt_…</code>), TTL 30 days, rotated on every refresh, with reuse-detection that invalidates the entire refresh chain on replay.</li>
 <li>Revoke a token via <code>POST /oauth/revoke</code> (RFC 7009).</li>
 </ul>
@@ -543,7 +585,8 @@ active side by side:</p>
 <h3>3. MCP server</h3>
 <p>Remote MCP server at <code>${PULLMD_URL}/mcp</code> (Streamable-HTTP transport, stateless).
 Three tools: <code>read_url</code>, <code>get_share</code>, <code>list_recent</code>. Server-side updates reach
-every client automatically — no local install needed.</p>
+every client automatically — no local install needed. With auth enabled,
+<code>list_recent</code> lists the caller's own conversions.</p>
 <p><strong>Claude Code (CLI):</strong></p>
 <pre><code class="language-bash">claude mcp add --transport http pullmd ${PULLMD_URL}/mcp
 </code></pre>
@@ -654,11 +697,11 @@ for it.</p>
 </tr>
 <tr>
 <td><code>GET /api/history</code></td>
-<td>Recent conversions (JSON).</td>
+<td>Recent conversions (JSON). <code>?limit=</code> 1-100, default 20. Signed-in callers see their own.</td>
 </tr>
 <tr>
 <td><code>GET /api/archive</code></td>
-<td>Paginated full archive.</td>
+<td>Paginated full archive. <code>?limit=</code> 1-200, default 50; <code>?offset=</code>.</td>
 </tr>
 <tr>
 <td><code>GET /api/storage</code></td>
@@ -666,7 +709,7 @@ for it.</p>
 </tr>
 <tr>
 <td><code>GET /api/stats</code></td>
-<td>Extraction telemetry (sources, quality, latency). <code>?window=-7 days</code>.</td>
+<td>Extraction telemetry (sources, quality, latency). <code>?window=-7 days</code>. Per-domain lists only for global-history viewers (see <a href="#auth-boundary" target="_blank" rel="noopener noreferrer">Auth boundary</a>).</td>
 </tr>
 <tr>
 <td><code>GET /api/config</code></td>
@@ -940,6 +983,7 @@ X-Filename: report.pdf               # URI-encoded; or use ?filename=
 <blockquote>
 <p><strong>Note:</strong> cloud endpoints send image and audio content to a third-party API. Use a local model server if data-residency matters.</p>
 </blockquote>
+<p>Provider calls are budgeted: image captioning, audio transcription and PDF OCR share <code>PULLMD_LLM_RATE_LIMIT</code> requests per hour (default <code>30</code>, <code>0</code> = off), counted per signed-in user or, without sign-in, per client address. Over budget the request gets what an instance without the provider returns (metadata only, or the markitdown PDF conversion), and that result is not cached. A tier without a configured provider never consumes budget.</p>
 <h3>YouTube transcripts</h3>
 <p>When <code>MARKITDOWN_YOUTUBE=true</code> is set on the <strong>pullmd</strong> service, YouTube video URLs are routed through the markitdown sidecar instead of the regular web-extraction pipeline. The sidecar fetches the video's title, description, and auto-generated or community transcript, and returns them as clean Markdown. No API key is required.</p>
 <pre><code>GET /api?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ
@@ -982,7 +1026,7 @@ X-Filename: report.pdf               # URI-encoded; or use ?filename=
 <p><code>PULLMD_PDF_OCR_API_KEY</code> (and optionally <code>PULLMD_PDF_OCR_BASE_URL</code>) must be set explicitly - unlike vision and STT, PDF-OCR does NOT fall back to the shared <code>PULLMD_LLM_*</code> key, because the OCR endpoint is typically a different provider (Mistral OCR vs. a chat LLM).</p>
 <p>On success, <code>source</code> becomes <code>pdf-ocr</code> and the frontmatter gains a <code>pdf_pages</code> field with the page count. If the OCR call fails or no key is configured, pullmd falls back to the standard markitdown conversion automatically - no error is returned to the caller.</p>
 <blockquote>
-<p><strong>Note:</strong> the OCR provider charges per page. Check your provider's pricing before enabling this on high-volume instances.</p>
+<p><strong>Note:</strong> the OCR provider charges per page. Check your provider's pricing before enabling this on high-volume instances. OCR requests count against the hourly <code>PULLMD_LLM_RATE_LIMIT</code> budget described under <a href="#media-tier-image-captions--audio-transcription" target="_blank" rel="noopener noreferrer">Media tier</a>.</p>
 </blockquote>
 <p><strong>Self-hosted / heavy local engines (advanced)</strong></p>
 <p><code>PULLMD_PDF_OCR_BASE_URL</code> can point at any compatible endpoint. Operators who want fully local OCR can run an engine such as <a href="https://github.com/DS4SD/docling" target="_blank" rel="noopener noreferrer">Docling</a> themselves and set <code>_BASE_URL</code> to its address. Be aware that such engines are heavy - a multi-GB container image, and model cold-start times of tens of seconds on first request are typical. This is deliberate: pullmd does not bundle any heavy OCR engine. The reference Mistral OCR path uses a lightweight cloud API call; self-hosting a heavy local engine is an advanced operator choice.</p>

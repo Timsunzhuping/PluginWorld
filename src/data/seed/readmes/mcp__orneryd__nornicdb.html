@@ -77,7 +77,7 @@ docker run -d --name nornicdb -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data t
 </ul>
 <p>See <a href="https://github.com/orneryd/NornicDB/blob/HEAD/docs/user-guides/transactions.md" target="_blank" rel="noopener noreferrer">transaction implementation details</a>, <a href="https://github.com/orneryd/NornicDB/blob/HEAD/docs/user-guides/historical-reads-mvcc-retention.md" target="_blank" rel="noopener noreferrer">historical reads and MVCC retention</a>, and the <a href="https://github.com/orneryd/NornicDB/blob/HEAD/docs/user-guides/canonical-graph-ledger.md" target="_blank" rel="noopener noreferrer">canonical graph ledger guide</a>.</p>
 <h2>Performance Snapshot</h2>
-<p><strong>Northwind benchmark</strong> (M3 Max, 64 GB; 48,000 products and 48,000 orders; 10 measured iterations after 2 warmups):</p>
+<p><strong>Northwind benchmark</strong> (48,000 products and 48,000 orders; 30 measured iterations per query after 5 warmups):</p>
 <table>
 <thead>
 <tr>
@@ -89,27 +89,45 @@ docker run -d --name nornicdb -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data t
 </thead>
 <tbody><tr>
 <td>Overall mean query latency</td>
-<td align="right">0.23 ms</td>
-<td align="right">98.64 ms</td>
-<td align="right"><strong>-99.8% (432.38x ratio)</strong></td>
+<td align="right">0.13 ms</td>
+<td align="right">54.69 ms</td>
+<td align="right"><strong>-99.8% (413.40x ratio)</strong></td>
 </tr>
 <tr>
-<td>Overall throughput</td>
-<td align="right">17.70 ops/s</td>
-<td align="right">7.76 ops/s</td>
-<td align="right"><strong>+128.1% (2.28x)</strong></td>
+<td>Query-latency-only aggregate throughput</td>
+<td align="right">7,559.12 ops/s</td>
+<td align="right">18.29 ops/s</td>
+<td align="right"><strong>+41240.3% (413.40x)</strong></td>
+</tr>
+<tr>
+<td>End-to-end query-loop throughput</td>
+<td align="right">16.58 ops/s</td>
+<td align="right">15.14 ops/s</td>
+<td align="right"><strong>+9.6% (1.10x)</strong></td>
+</tr>
+<tr>
+<td>Query-loop duration</td>
+<td align="right">25.327 s</td>
+<td align="right">27.746 s</td>
+<td align="right"><strong>-8.7% (1.10x)</strong></td>
 </tr>
 <tr>
 <td>Benchmark wall-clock</td>
-<td align="right">14.00 s</td>
-<td align="right">31.63 s</td>
-<td align="right"><strong>-55.7% (2.26x ratio)</strong></td>
+<td align="right">35.12 s</td>
+<td align="right">55.06 s</td>
+<td align="right"><strong>-36.2% (1.57x ratio)</strong></td>
 </tr>
 <tr>
 <td>Energy during benchmark</td>
-<td align="right">118.00 J</td>
-<td align="right">264.87 J</td>
-<td align="right"><strong>-55.5% (2.24x ratio)</strong></td>
+<td align="right">325.30 J</td>
+<td align="right">383.86 J</td>
+<td align="right"><strong>-15.3% (1.18x ratio)</strong></td>
+</tr>
+<tr>
+<td>Peak memory used</td>
+<td align="right">17.4 GiB</td>
+<td align="right">17.7 GiB</td>
+<td align="right"><strong>-1.6% (1.02x ratio)</strong></td>
 </tr>
 </tbody></table>
 <p>All seed counts and per-query result fingerprints matched between NornicDB and Neo4j. See the <a href="https://github.com/orneryd/NornicDB/blob/HEAD/docs/performance/1.1.0-northwind-results/comparison.md" target="_blank" rel="noopener noreferrer">full Northwind benchmark report</a> for per-query latency, correctness, power, memory, and storage results.</p>
@@ -231,8 +249,8 @@ docker run -d --name nornicdb -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data t
 <h3>What Recent Deep-Dives Show</h3>
 <ul>
 <li><strong>Hybrid execution model (streaming fast paths + general engine)</strong>: NornicDB uses shape-specialized streaming executors for common traversal/aggregation patterns while retaining a general Cypher path for coverage and correctness.</li>
-<li><strong>Runtime parser mode switching</strong>: the default <code>nornic</code> parser is optimized for low-overhead hot-path routing, while <code>antlr</code> mode prioritizes strict parsing and diagnostics when debugging and validation matter more than throughput.</li>
-<li><strong>Measured parser-path deltas on benchmark suites</strong>: internal Northwind comparisons show large overhead differences on certain query shapes when full parse-tree paths are used, which is why the production default remains the custom parser path.</li>
+<li><strong>Scannerless recursive-descent (SRD) parser by default</strong>: the <code>nornic</code> parser scans the raw query text with no lexer and no parse tree — clause boundaries and precedence are found by scanning for top-level keywords and operators — so hot-path routing is allocation-free. The <code>antlr</code> parser remains for strict parsing and diagnostics.</li>
+<li><strong>Shared Cypher 5 / 25 grammar</strong>: <code>LET</code>, <code>FILTER</code>, and <code>FOR</code> reading clauses execute in the existing pipeline with an optional <code>CYPHER 5</code> / <code>CYPHER 25</code> header. The SRD parser accepts them without a header; the ANTLR parser requires <code>CYPHER 25</code> for them and parses the header itself.</li>
 <li><strong>HNSW build acceleration from insertion-order optimization</strong>: BM25-seeded insertion order reduced a 1M embedding build from ~27 minutes to ~10 minutes (~2.7x) in published tests by reducing traversal waste during construction, without changing core quality knobs.</li>
 <li><strong>Shared seed strategy across indexing stages</strong>: the same lexical seed extraction supports HNSW insertion ordering and improves k-means centroid initialization spread for vector pipeline efficiency.</li>
 </ul>
@@ -273,7 +291,7 @@ with driver.session() as session:
 </code></pre>
 <h2>Why Switch from Neo4j?</h2>
 <ul>
-<li><strong>99.8% lower overall mean query latency</strong> on the current 48k-product / 48k-order Northwind comparison (432.38x ratio), with matching result fingerprints.</li>
+<li><strong>99.8% lower overall mean query latency</strong> on the current 48k-product / 48k-order Northwind comparison (413.40x ratio), with matching result fingerprints.</li>
 <li><strong>Measured retrieval quality</strong> on the official 300-query BEIR SciFact test set, including 0.72292 nDCG@10 with native BGE-M3 reranking.</li>
 <li><strong>Native graph + vector</strong> in one engine (no separate vector sidecar required).</li>
 <li><strong>GPU acceleration paths</strong> (Metal/CUDA/Vulkan) for semantic + graph workloads.</li>
@@ -303,7 +321,8 @@ with driver.session() as session:
 <ul>
 <li><strong>Bolt Protocol</strong> — Use official Neo4j drivers</li>
 <li><strong>Cypher Queries</strong> — Full query language support</li>
-<li><strong>Schema Management</strong> — Constraints, indexes, vector indexes</li>
+<li><strong>Cypher 25</strong> — <code>LET</code>, <code>FILTER</code> and <code>FOR</code> reading clauses with the optional <code>CYPHER 5</code> / <code>CYPHER 25</code> header</li>
+<li><strong>Schema Management</strong> — Constraints, indexes (single- and multi-property), vector indexes</li>
 <li><strong>Qdrant gRPC API Compatible</strong> — Works with Qdrant-style gRPC vector workflows</li>
 </ul>
 <blockquote>
@@ -750,25 +769,34 @@ make cross-all             # All platforms
 <li> Neo4j Bolt protocol</li>
 <li> Configurable RBAC and oAuth support</li>
 <li> Cypher query engine (52 functions)</li>
+<li> Cypher 25 shared grammar foundation — <code>LET</code>, <code>FILTER</code>, <code>FOR</code> reading clauses and the <code>CYPHER 5</code> / <code>CYPHER 25</code> header</li>
+<li> Correctly-rounded math — musl <code>libm</code> ports for <code>exp</code>/<code>log</code>/<code>pow</code> and trigonometry</li>
+<li> MCP database pinning — <code>/mcp/{database}</code> targets one database for every tool call</li>
 <li> Memory decay system</li>
 <li> GPU acceleration (Metal, CUDA)</li>
 <li> Vector &amp; full-text search</li>
 <li> Auto-relationship engine</li>
 <li> HNSW vector index</li>
-<li> Metadata/Property Indexing</li>
+<li> Metadata/Property Indexing (single- and multi-property)</li>
 <li> SIMD Implementation</li>
 <li> Clustering support</li>
 <li> Sharding (Composite DB + Remote Constituents)</li>
 <li> Data Explorer UI (Browser query editor, semantic search, node details)</li>
 <li> GDPR Compliance</li>
-<li> per-DB Search Index Overrides for BM2 and HNSW as independently levers for deferred or skipped construction (<code>docs/plans/nornicdb-admin-import-plan.md</code>)</li>
+<li> per-DB Search Index Overrides for BM2 and HNSW as independently levers for deferred or skipped construction (<code>docs/plans/okf-admin-import-export-plan.md</code>)</li>
 <li> Bulk Import Tool</li>
-<li> Cross-platform GPU-assisted HNSW construction with CPU-serving persistence parity (<code>docs/plans/gpu-hnsw-construction-plan.md</code>)</li>
+<li> Cross-platform GPU-assisted HNSW construction with CPU-serving persistence parity (<code>docs/plans/archive/gpu-hnsw-construction-plan.md</code>)</li>
+<li> Production message localization (message catalog, all core phases complete) (<code>docs/plans/archive/localization-consolidation-plan.md</code>)</li>
 </ul>
 <h3>Planned (from <code>docs/plans</code>)</h3>
 <ul>
 <li> Neo4j-compatible end-to-end streaming execution + wrapper driver/ORM (<code>docs/plans/neo4j-compatible-streaming-driver-and-server-plan.md</code>)</li>
 <li> UI enhancement backlog (search/config/admin UX improvements) (<code>docs/plans/ui-enhancements.md</code>)</li>
+<li> Fine-grained RBAC: security administration commands and graph privileges, including property-based rules (<a href="https://github.com/orneryd/NornicDB/issues/935" target="_blank" rel="noopener noreferrer">#935</a>)</li>
+<li> User impersonation: <code>IMPERSONATE</code> privilege and Bolt <code>imp_user</code> (<a href="https://github.com/orneryd/NornicDB/issues/936" target="_blank" rel="noopener noreferrer">#936</a>)</li>
+<li> Change Data Capture: <code>txLogEnrichment</code>, <code>db.cdc.*</code> procedures and change events (<a href="https://github.com/orneryd/NornicDB/issues/937" target="_blank" rel="noopener noreferrer">#937</a>)</li>
+<li> Query API v2 (typed JSON transactions, bookmarks, impersonated user)</li>
+<li> Full Cypher 25 conformance beyond the shared grammar foundation (<code>docs/plans/cypher-convergence-plan.md</code>)</li>
 </ul>
 <h2>Contributors</h2>
 <p>Special thanks to everyone who helps make NornicDB better. See <a href="https://github.com/orneryd/NornicDB/blob/HEAD/CONTRIBUTORS.md" target="_blank" rel="noopener noreferrer">CONTRIBUTORS.md</a> for a list of community contributors.</p>

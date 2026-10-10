@@ -471,6 +471,77 @@ what enforces; adding the server alone just gives the model tools it can ignore.
 cost equivalent only after you configure your own effective rate. Each line
 names how to fix it. Not a dashboard, not six reports — a queue.</p>
 <hr />
+<h2>Subagents and workflows</h2>
+<p>Agents are where token spend concentrates. A long-running subagent re-sends its
+whole context on every turn, so every byte a tool adds is paid for again on each
+later turn. In one measured session, 42 workflow subagents made 4,483 model
+calls. The six longest made 218–348 calls each and peaked at 336K–609K tokens of
+context. Together they spent 4.0M output tokens and 1.0B cache-read tokens. The bill is the re-reading, not the writing.</p>
+<h3>What works with no setup</h3>
+<p>The plugin's hooks run for subagents exactly as they do for the main session.
+Nothing needs to be configured per agent.</p>
+<ul>
+<li><strong>Whole-file reads are outlined, through <code>Read</code> and through the shell.</strong>
+Agents mostly read files with <code>cat</code>, <code>type</code> or <code>Get-Content</code>, rarely with
+<code>Read</code>. In the measured session that was 2,071 shell reads against 9 <code>Read</code>
+calls. On the first whole read of a large source file, either kind returns a
+line-numbered outline of its symbols instead of the file. A second whole read
+of the same file returns the file itself. A line range is never outlined:
+<code>sed -n 'A,Bp'</code>, <code>head</code>, <code>Get-Content -TotalCount</code> and a paged <code>Read</code> all pass
+through untouched.</li>
+<li><strong>Each subagent is briefed once.</strong> A subagent never sees the SessionStart
+guidance, so its first tool call carries a four-line briefing instead: load
+the optimizer tools if they are listed, read ranges rather than whole files,
+and keep the final report short. The tools are named only conditionally, so a
+hooks-only install is never told to call something it does not have.</li>
+<li><strong>Advisories are said once.</strong> A routing hint such as "use smart_grep" appears
+at most once per agent for each kind of call, not on every matching command.</li>
+<li><strong>Past findings arrive only when they name what you are running.</strong> A finding
+with no explicit trigger is delivered with a command only when its claim names
+that command's program and subcommand, such as <code>npx jest</code> or <code>dotnet build</code>,
+not when the two merely share a word.</li>
+<li><strong>Repeated build and test output is bounded</strong>, as it is in the main session.</li>
+<li><strong>Through the proxy, a range you asked for comes back whole.</strong> A paged <code>Read</code>
+or a shell slice is never folded, and a fold inside a whole-file read points at
+the file's own line numbers.</li>
+</ul>
+<h3>What to add when you brief an agent</h3>
+<p>Claude Code gives subagents MCP tools as <em>deferred</em> tools: the schemas are not
+loaded until the agent asks for them. An agent that never loads them falls back
+to shell commands. Put this in the agent's prompt:</p>
+<pre><code class="language-text">Before your first file read or search, load the token-optimizer tools:
+ToolSearch("smart_read smart_grep smart_glob").
+Use smart_read for files (it returns a diff on re-reads), smart_grep for
+searching, and smart_glob for finding files. Do not print whole files or search
+the tree through the shell. When you need part of a file, read a line range.
+</code></pre>
+<p>The server's own instructions now say the same thing to every client, deferred
+or not.</p>
+<h3>Keep agents short</h3>
+<p>The plugin can only shrink what enters an agent's context. The number of turns
+and the size of the context it carries are set by how the work is split up:</p>
+<ul>
+<li><strong>One bounded task per agent.</strong> Several short agents cost less than one agent
+that runs for hundreds of turns, because each starts from a small context.</li>
+<li><strong>Give the agent the facts it needs</strong> (paths, line numbers, the exact
+question) instead of asking it to rediscover them.</li>
+<li><strong>Ask for a structured result</strong> so the agent stops when it has the answer.</li>
+</ul>
+<h3>Measuring an agent</h3>
+<p>Each subagent writes its own transcript next to the session's, under
+<code>~/.claude/projects/&lt;project&gt;/&lt;session&gt;/subagents/</code>. The <code>usage</code> block on every
+assistant row records <code>input_tokens</code>, <code>output_tokens</code>,
+<code>cache_read_input_tokens</code> and <code>cache_creation_input_tokens</code>.</p>
+<p><strong>Count each response once.</strong> One model response is written as several
+assistant rows that share a <code>message.id</code>, and each row repeats the usage
+recorded so far. Keep the LAST row per <code>message.id</code>, which holds the final
+usage, and sum those. Summing every row overstates the cost: on the session
+above it reported 1.8B cache-read tokens instead of 1.0B. Keeping the first row
+instead understates output, at 0.5M instead of 4.0M.</p>
+<p>The number of distinct <code>message.id</code>s is the number of model calls the agent
+made. Read against its peak context, it shows whether the agent should have
+been split.</p>
+<hr />
 <h2>The knowledge graph — the part nothing else has</h2>
 <p>Every agent session ends the same way: the reasoning evaporates. The next
 session re-derives it, at full price, forever.</p>
@@ -1921,13 +1992,16 @@ copilot mcp list
 <p>Inside an interactive Copilot session, <code>/mcp show token-optimizer</code> displays the connection status and available tools.</p>
 <h4>3. Add optimization guidance and hooks</h4>
 <p>Keep <a href="https://github.com/ooples/token-optimizer-mcp/blob/HEAD/integrations/AGENTS.md" target="_blank" rel="noopener noreferrer"><code>integrations/AGENTS.md</code></a> as the repository's <code>AGENTS.md</code>, or adapt the same guidance into <code>.github/copilot-instructions.md</code>.</p>
-<p>For native lifecycle integration, copy the ready-made repository hooks into your project:</p>
-<pre><code class="language-bash">mkdir -p .github/hooks
-cp integrations/copilot/.github/hooks/token-optimizer* .github/hooks/
+<p>For native lifecycle integration, install the hooks with the bundled command. It
+copies the entry points AND composes the shared core beside them, which a plain
+<code>cp -r</code> cannot do: the package ships the core once, not ten vendored copies.</p>
+<pre><code class="language-bash">npx -y @ooples/token-optimizer-mcp@latest token-optimizer-install-client --client copilot
 </code></pre>
-<pre><code class="language-powershell">New-Item -ItemType Directory -Force .github/hooks | Out-Null
-Copy-Item integrations/copilot/.github/hooks/token-optimizer* .github/hooks/
-</code></pre>
+<p>It writes <code>.github/hooks/</code> by default, and <code>--check</code> reports what it would
+write without writing it. <code>--dest &lt;dir&gt;</code> writes to another directory but
+changes no client configuration, so it has to be the directory the client's own
+config already reads -- which is why the clients that resolve that directory at
+runtime (Gemini, Qwen, the Codex plugin) require it.</p>
 <p>The hooks inject optimization guidance at <code>sessionStart</code>. Under <code>TOKEN_OPTIMIZER_MODE=enforce</code> they deny a large built-in <code>view</code> so Copilot retries with <code>smart_read</code>; the default <code>assist</code> leaves the call alone. Partial reads and files below 25 KB always pass through unchanged, and <code>TOKEN_OPTIMIZER_MODE=advise</code> gives recommendations without vetoes. Repository hooks work without overwriting user-level files; global hooks can instead be placed in <code>~/.copilot/hooks/</code> with their script paths adjusted for that directory.</p>
 <p>Restart Copilot CLI after changing hook files. See GitHub's official <a href="https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers" target="_blank" rel="noopener noreferrer">MCP setup guide</a> and <a href="https://docs.github.com/en/copilot/reference/hooks-reference" target="_blank" rel="noopener noreferrer">hooks reference</a>.</p>
 <h3>Gemini CLI</h3>
@@ -2209,108 +2283,7 @@ smart_read({ path: '/path/to/file.ts' });
 <summary>Click to expand</summary><p>Intelligent caching and optimization for external data sources:</p>
 <ul>
 <li><strong>smart_api_fetch</strong> - HTTP requests with caching and retry logic (83% reduction on cache hits)</li>
-<li><strong>smart-cache-api</strong> - API response caching with TTL/ETag/event-based strategies</li>
-<li><strong>smart_database</strong> - Database queries with connection pooling and caching (83% reduction)</li>
-<li><strong>smart_sql</strong> - SQL query analysis with optimization suggestions (83% reduction)</li>
-<li><strong>smart_schema</strong> - Database schema analysis with intelligent caching</li>
-<li><strong>smart_graphql</strong> - GraphQL query optimization with complexity analysis (83% reduction)</li>
-<li><strong>smart_rest</strong> - REST API analysis with endpoint discovery (83% reduction)</li>
-<li><strong>smart_orm</strong> - ORM query optimization with N+1 detection (83% reduction)</li>
-<li><strong>smart_migration</strong> - Database migration tracking (83% reduction)</li>
-<li><strong>smart_websocket</strong> - WebSocket connection management with message tracking</li>
+<li><strong>smart-cache-api</strong> - API response caching with TTL/ETag/event-based</li>
 </ul>
-<p><strong>Usage Example</strong>:</p>
-<pre><code class="language-typescript">// Fetch API with automatic caching
-smart_api_fetch({
-  method: 'GET',
-  url: 'https://api.example.com/data',
-  ttl: 300,
-});
-// Cached responses: 95% token reduction
-</code></pre>
-</details><h4>Build &amp; Test Operations (10 tools)</h4>
-<details>
-<summary>Click to expand</summary><p>Development workflow optimization with intelligent caching:</p>
-<ul>
-<li><strong>smart_build</strong> - TypeScript builds with diff-based change detection</li>
-<li><strong>smart_test</strong> - Test execution with incremental test selection</li>
-<li><strong>smart_lint</strong> - ESLint with incremental analysis and auto-fix</li>
-<li><strong>smart_typecheck</strong> - TypeScript type checking with caching</li>
-<li><strong>smart_install</strong> - Package installation with dependency analysis</li>
-<li><strong>smart_docker</strong> - Docker operations with layer analysis</li>
-<li><strong>smart_logs</strong> - Log aggregation with pattern filtering</li>
-<li><strong>smart_network</strong> - Network diagnostics with anomaly detection</li>
-<li><strong>smart_processes</strong> - Process monitoring with resource tracking</li>
-<li><strong>smart_system_metrics</strong> - System resource monitoring with performance recommendations</li>
-</ul>
-<p><strong>Usage Example</strong>:</p>
-<pre><code class="language-typescript">// Run tests with caching
-smart_test({
-  onlyChanged: true, // Only test changed files
-  coverage: true,
-});
-</code></pre>
-</details><h4>Advanced Caching (10 tools)</h4>
-<details>
-<summary>Click to expand</summary><p>Enterprise-grade caching strategies with 87-92% token reduction:</p>
-<ul>
-<li><strong>smart_cache</strong> - Multi-tier cache (L1/L2/L3) with 6 eviction strategies (90% reduction)</li>
-<li><strong>cache_warmup</strong> - Intelligent cache pre-warming with schedule support (87% reduction)</li>
-<li><strong>cache_analytics</strong> - Real-time dashboards and trend analysis (88% reduction)</li>
-<li><strong>cache-benchmark</strong> - Performance testing and strategy comparison (89% reduction)</li>
-<li><strong>cache_compression</strong> - 6 compression algorithms with adaptive selection (89% reduction)</li>
-<li><strong>cache_invalidation</strong> - Dependency tracking and pattern-based invalidation (88% reduction)</li>
-<li><strong>cache_optimizer</strong> - ML-based recommendations and bottleneck detection (89% reduction)</li>
-<li><strong>cache_partition</strong> - Sharding and consistent hashing (87% reduction)</li>
-<li><strong>cache_replication</strong> - Distributed replication with conflict resolution (88% reduction)</li>
-<li><strong>predictive_cache</strong> - ML-based predictive caching with ARIMA/LSTM (91% reduction)</li>
-</ul>
-<p><strong>Usage Example</strong>:</p>
-<pre><code class="language-typescript">// Configure multi-tier cache
-smart_cache({
-  operation: 'configure',
-  evictionStrategy: 'LRU',
-  l1MaxSize: 1000,
-  l2MaxSize: 10000,
-});
-</code></pre>
-</details><h4>Monitoring &amp; Dashboards (7 tools)</h4>
-<details>
-<summary>Click to expand</summary><p>Comprehensive monitoring with 88-92% token reduction through intelligent caching:</p>
-<ul>
-<li><strong>alert_manager</strong> - Multi-channel alerting (email, Slack, webhook) with routing (89% reduction)</li>
-<li><strong>metric_collector</strong> - Time-series metrics with multi-source support (88% reduction)</li>
-<li><strong>monitoring_integration</strong> - External platform integration (Prometheus, Grafana, Datadog) (87% reduction)</li>
-<li><strong>custom_widget</strong> - Dashboard widgets with template caching (88% reduction)</li>
-<li><strong>data_visualizer</strong> - Interactive visualizations with SVG optimization (92% reduction)</li>
-<li><strong>health_monitor</strong> - System health checks with state compression (91% reduction)</li>
-<li><strong>log_dashboard</strong> - Log analysis with pattern detection (90% reduction)</li>
-</ul>
-<p><strong>Usage Example</strong>:</p>
-<pre><code class="language-typescript">// Create an alert
-alert_manager({
-  operation: 'create-alert',
-  alertName: 'high-cpu-usage',
-  channels: ['slack', 'email'],
-  threshold: { type: 'above', value: 80 },
-});
-</code></pre>
-</details><h4>System Operations (6 tools)</h4>
-<details>
-<summary>Click to expand</summary><p>System-level operations with smart caching:</p>
-<ul>
-<li><strong>smart_cron</strong> - Scheduled task management (cron/Windows Task Scheduler) (85% reduction)</li>
-<li><strong>smart_user</strong> - User and permission management across platforms (86% reduction)</li>
-<li><strong>smart_ast_grep</strong> - Structural code search with AST indexing (83% reduction)</li>
-<li><strong>get_session_stats</strong> - Session-level token usage statistics</li>
-<li><strong>analyze_project_tokens</strong> - Project-wide token analysis and cost estimation</li>
-<li><strong>optimize_session</strong> - Compress large file operations from current session</li>
-</ul>
-<p><strong>Usage Example</strong>:</p>
-<pre><code class="language-typescript">// View session token usage
-get_session_stats({});
-// Result: Deta
-
-…
-</code></pre>
+<p>…</p>
 </details>

@@ -83,7 +83,7 @@
 <p>📋 <strong>Graphical plan viewer</strong> with native ShowPlan rendering, 30-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening <code>.sqlplan</code> files without a server connection</p>
 <p>💡 <strong>Recommendations engine (advise-and-act)</strong> — a dedicated Recommendations tab surfaces prioritized findings from your own monitoring data with the reasoning behind each one, and can apply selected fixes directly. Destructive changes (like enabling Read Committed Snapshot Isolation) are gated behind an informed-consent dialog that spells out both the risk of acting and the risk of doing nothing.</p>
 <p>🤖 <strong>Built-in MCP server</strong> with read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data</p>
-<p>🔒 <strong>Your data never leaves</strong> — no telemetry, no cloud dependency, no phoning home. Credentials stored in Windows Credential Manager with OS-level encryption.</p>
+<p>🔒 <strong>Your data never leaves</strong> — no telemetry, no cloud dependency, no phoning home. Credentials stored in Windows Credential Manager with OS-level encryption. Statement text that can carry a credential, such as <code>CREATE LOGIN</code> or a <code>PASSWORD =</code> literal, reads <code>-- statement text withheld (#4348)</code> in alerts and plan analysis. Darling also withholds it from collected data, MCP answers and web pages.</p>
 <hr />
 <h2>More Screenshots</h2>
 <h3>Custom dashboards — compose any metric into a chart</h3>
@@ -341,12 +341,73 @@
 </tr>
 </tbody></table>
 <p>Darling runs this same shared collector set across a fleet of servers (latch stats, spinlock stats, CPU scheduler, plan cache, and system_health parsing are now part of the shared catalog above, collected by Lite too) — see the <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md" target="_blank" rel="noopener noreferrer">Darling collector reference</a>.</p>
+<h3>The Extended Events Sessions Lite Creates</h3>
+<p>Each Lite install has an eight-character id. Lite makes it at the first start and keeps it in <code>install-id.json</code>, in the data folder <code>%LOCALAPPDATA%\PerformanceMonitorLite-Data\</code>. The id appears in the name of each session that belongs to this install alone. Two installs that monitor one server never share such a session, so one install cannot drop or stop the other's.</p>
+<p>If Lite cannot read <code>install-id.json</code> (another program holds it open, or the read fails), it leaves the file as it is and uses no id until it can read it. If it cannot save a new id, it does not use that id either. With no id, Lite creates, starts and drops no session of its own, and the long-query trace records why as a fault. The next collection cycle tries again, at most once a minute. The log says it once as a Warning with the error, then at Debug until the id is read. A file that holds something other than an id record still gets a new id.</p>
+<h4>The sessions</h4>
+<ul>
+<li><code>PerformanceMonitor_Lite_&lt;id&gt;_LongQueryCompletions</code> is this install's long-query trace. Lite creates it while the opt-in <code>long_query_completions</code> collector is on. It is created with <code>STARTUP_STATE = OFF</code>, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.</li>
+<li><code>PerformanceMonitor_Deadlock</code> and <code>PerformanceMonitor_BlockedProcess</code> keep their shared names, because Darling and other installs read them too. Lite never drops them. It checks each one whenever its collector runs. It creates a missing one and starts a stopped one, so a deliberate stop does not last.</li>
+<li>On Azure SQL Database, a shared session can stay unusable after a start. Lite then creates <code>PerformanceMonitor_Lite_&lt;id&gt;_Deadlock</code> or <code>PerformanceMonitor_Lite_&lt;id&gt;_BlockedProcess</code> in that database, with <code>STARTUP_STATE = OFF</code>, and reads that one. When the shared session works again, Lite switches back and drops its own fallback.</li>
+</ul>
+<h4>The old shared session</h4>
+<p>Earlier versions shared one session, <code>PerformanceMonitor_LongQueryCompletions</code>, between all installs. An upgraded install drops it once for each registration and database. It then records that drop and never touches the session again. If an older install creates it again later, Lite logs one Information line per start and leaves the session alone. To remove it, run the statements under "Cleaning up by hand" below.</p>
+<h4>Removing a server</h4>
+<p>Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock and blocked-process fallbacks. Lite makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.</p>
+<p>Lite leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. Lite logs the reason. The two shared sessions stay on the server.</p>
+<h4>Registrations that share an instance</h4>
+<p>On premises, a registration with the trace off leaves the long-query session in place when another registration of this install has the trace on. Both registrations must point at the same instance. Lite compares the last known <code>@@SERVERNAME</code> of each one.</p>
+<h4>Read-only intent on Azure SQL Database</h4>
+<p>A session cannot be created over a read-only connection. For a registration with read-only intent, Lite creates the session definition over a connection without the intent. The definition replicates to the read-only replica. Lite then starts the session over the registration's own connection. A drop stops the session on the replica first, then drops it on the primary. Microsoft describes the method in <a href="https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out" target="_blank" rel="noopener noreferrer">Monitor read-only replicas with Extended Events</a>. On Hyperscale with several high-availability replicas, a read-only connection lands on one replica that the app cannot choose, so the stop reaches only that one. Microsoft Learn describes no way to address a single high-availability replica; it says the read-intent workload is distributed arbitrarily across them (<a href="https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica" target="_blank" rel="noopener noreferrer">Connect to an HA replica</a>).</p>
+<p>A Managed Instance registration with read-only intent needs the trace started on the primary first. Lite does not do that, so the registration gets the read-only message (error 3906). A registration without the intent can land on a read-only database, such as a geo-secondary. It gets one clear message, and Lite retries the create every hour.</p>
+<h4>Azure SQL Database limits</h4>
+<p>Microsoft Learn lists these caps under "Resource governance" on <a href="https://learn.microsoft.com/en-us/azure/azure-sql/database/xevent-db-diff-from-svr" target="_blank" rel="noopener noreferrer">Extended Events in Azure SQL</a>. A database holds at most 100 started sessions. An elastic pool holds at most 100 database-scoped sessions. Session memory is capped at 128 MB per database and 512 MB per pool. In a dense pool, a start can fail below 100 sessions.</p>
+<p>Each install uses one long-query session per database while the trace is on. It adds up to two fallbacks while a shared session is unusable. A failed create or start on Azure SQL Database carries a sentence that names these caps.</p>
+<h4>Known limits</h4>
+<ul>
+<li>An older Darling with the trace on loses capture once for each upgraded install, until it reconnects.</li>
+<li>An older Lite creates the old session again within one collection cycle.</li>
+<li>Two registrations of one instance in one install drop the old session twice.</li>
+<li>A lost record costs one more drop. This happens when you recreate the Lite data folder.</li>
+<li>On RDS Multi-AZ, the drop reaches the primary only. The copy on the standby stays stopped after a failover, unless an older install starts it.</li>
+<li>On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: <a href="https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica" target="_blank" rel="noopener noreferrer">Connect to an HA replica</a>.</li>
+<li>On Azure SQL Database, two registrations of one database with different logins share one session name, as before.</li>
+</ul>
+<h4>Clones</h4>
+<p>A clone of the whole machine, such as a VM snapshot, keeps the machine name and the Windows user. It also keeps the install id. The clone and the original then use the same session names on every server both monitor.</p>
+<p>To give the clone its own id, delete <code>install-id.json</code> and restart Lite. Lite makes a new id at start. A data folder that you copy to another machine gets a new id on its own. So does a data folder that another Windows user opens. Import Settings does not carry the file.</p>
+<h4>Cleaning up by hand</h4>
+<p>Lite has no command that drops sessions, so run the statements below yourself. Replace <code>&lt;id&gt;</code> with the <code>id</code> value in <code>install-id.json</code>. Each statement checks that the session exists first, so a run that finds nothing changes nothing.</p>
+<p>The login needs the permission that <a href="https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-event-session-transact-sql" target="_blank" rel="noopener noreferrer">Microsoft Learn's <code>DROP EVENT SESSION</code> page</a> requires. On SQL Server and Azure SQL Managed Instance that is <code>DROP ANY EVENT SESSION</code> (SQL Server 2022 and later) or <code>ALTER ANY EVENT SESSION</code>. On Azure SQL Database it is <code>DROP ANY DATABASE EVENT SESSION</code>, in each database.</p>
+<p>Server scope (SQL Server, Azure SQL Managed Instance and AWS RDS). The first statement drops the old shared session. The second drops this install's own session. Lite makes the deadlock and blocked-process fallbacks in Azure SQL Database only, so a server has none to drop.</p>
+<pre><code class="language-sql">IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_LongQueryCompletions')
+    DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;
+
+IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_Lite_&lt;id&gt;_LongQueryCompletions')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_&lt;id&gt;_LongQueryCompletions] ON SERVER;
+</code></pre>
+<p>Database scope (Azure SQL Database). Run these four statements in each monitored database.</p>
+<pre><code class="language-sql">IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_LongQueryCompletions')
+    DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON DATABASE;
+
+IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_Lite_&lt;id&gt;_LongQueryCompletions')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_&lt;id&gt;_LongQueryCompletions] ON DATABASE;
+
+IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_Lite_&lt;id&gt;_Deadlock')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_&lt;id&gt;_Deadlock] ON DATABASE;
+
+IF EXISTS (SELECT 1/0 FROM sys.database_event_sessions AS des WHERE des.name = N'PerformanceMonitor_Lite_&lt;id&gt;_BlockedProcess')
+    DROP EVENT SESSION [PerformanceMonitor_Lite_&lt;id&gt;_BlockedProcess] ON DATABASE;
+</code></pre>
+<p>If the registration used read-only intent, first stop the session over a read-only connection with <code>ALTER EVENT SESSION [name] ON DATABASE STATE = STOP;</code>. Then run the drop over a connection without the intent, which reaches the primary. On Hyperscale with several high-availability replicas, the stop reaches only the replica that a read-only connection lands on. A copy of the session that runs on another replica is not stopped. Microsoft Learn describes no way to address one high-availability replica: <a href="https://learn.microsoft.com/en-us/azure/azure-sql/database/service-tier-hyperscale-replicas#connect-to-an-ha-replica" target="_blank" rel="noopener noreferrer">Connect to an HA replica</a>.</p>
+<p>The shared <code>PerformanceMonitor_Deadlock</code> and <code>PerformanceMonitor_BlockedProcess</code> sessions need the same statements with those names. Run them only when no other install monitors the server, because every install that monitors it uses them.</p>
 <h3>Lite Data Storage</h3>
 <p>All data is stored in <code>%LOCALAPPDATA%\PerformanceMonitorLite-Data\</code> — a different folder from the install directory (<code>%LOCALAPPDATA%\PerformanceMonitorLite\</code>), so neither an in-app update nor re-running <code>Setup.exe</code> can disturb it. Data from an older install is moved into the new folder automatically the first time this version starts.</p>
 <ul>
 <li><strong>Hot data</strong> in DuckDB 1.5.2 — non-blocking checkpoints, free block reuse, stable file size without periodic resets</li>
 <li><strong>Archive</strong> to Parquet with ZSTD compression (~10x reduction) — automatic monthly compaction keeps file count low (~75 files vs thousands)</li>
 <li><strong>Retention</strong>: 3-month calendar-month rolling window</li>
+<li><strong>Memory limit</strong>: DuckDB's memory limit is a setting (Settings, Dashboard Defaults, "DuckDB memory limit"). The default is 2 GB, and it can go from 1 GB up to 80% of memory. A change applies after a restart.</li>
 <li>Typical size: ~50–200 MB per server per week</li>
 </ul>
 <h3>Lite Configuration</h3>
@@ -371,7 +432,7 @@
 <tr>
 <td><code>collection_schedule.json</code></td>
 <td><code>%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\</code> (per-user)</td>
-<td>Per-collector enable/disable and frequency</td>
+<td>Per-collector enable/disable and frequency. A collector that runs once a day or less often can also have a <code>run_at</code> time, so it runs in a quiet hour. That time is 24-hour <code>HH:MM</code> on the monitored server's clock, and you set it in the schedule editor. Each server starts at that time plus its own spread of under 60 minutes, and a run can start up to 60 minutes after that slot, so a run can start nearly 2 hours after <code>run_at</code>. It runs only while Lite is open. A day is skipped only when Lite was closed from the slot until 60 minutes after it.</td>
 </tr>
 <tr>
 <td><code>ignored_wait_types.json</code></td>
@@ -382,17 +443,26 @@
 <p>When a second Windows user on the same machine launches Lite, they see the shared <code>servers.json</code> immediately. SQL Auth and Entra MFA passwords are scoped to each user's own Credential Manager, so they'll be prompted once per server; Windows Auth works without any prompt.</p>
 <hr />
 <h2>Quick Start — Darling (headless)</h2>
-<p><strong>Darling</strong> is the always-on edition for teams that want 24/7 collection without a desktop app driving it: a service on Windows or Linux collects from your SQL Server and PostgreSQL servers around the clock into a central PostgreSQL store (TimescaleDB is detected and adopted automatically for compression and chunk-based retention), and a detached WPF viewer reads that store from any Windows seat. It runs the same monitoring brain as Lite — collectors, alert engine, and analysis pipeline shared at the library level — with alerts over email and webhooks (Teams, Slack, PagerDuty, and generic HTTP POST) and the same MCP tool surface available on request. An optional built-in <strong>web dashboard</strong> (off by default, its own port 5153) serves the fleet overview, per-server drill-down, the scheduled fleet sweep reports, and alert history to any browser — read-only over the collected data, plus seat-gated config writes (saved views, custom alert rules, and the mute-rule API) — so operators can watch the fleet without installing the viewer.</p>
+<p><strong>Darling</strong> is the always-on edition for teams that want 24/7 collection without a desktop app driving it: a service on Windows or Linux collects from your SQL Server and PostgreSQL servers around the clock into a central PostgreSQL store (TimescaleDB is detected and adopted automatically for compression and chunk-based retention), and a detached WPF viewer reads that store from any Windows seat. It runs the same monitoring brain as Lite — collectors, alert engine, and analysis pipeline shared at the library level — with alerts over email and webhooks (Teams, Slack, PagerDuty, and generic HTTP POST) and the same MCP tool surface available on request.</p>
+<p>The optional built-in web dashboard is off by default and uses its own port, 5153. It serves the fleet overview, per-server drill-down, FinOps, the scheduled fleet sweep reports, alert history, job history, and an Admin page to any browser. It reads the collected data. A seat that is allowed to make changes can also do these things:</p>
+<ul>
+<li>save views, and edit alert rules and mute rules</li>
+<li>dismiss alerts</li>
+<li>manage server tags</li>
+<li>add or edit a monitored server</li>
+</ul>
+<p>Operators can watch the fleet without installing the viewer. See <a href="#tabs" target="_blank" rel="noopener noreferrer">Tabs</a> for the pages.</p>
 <ol>
-<li>Download <strong><code>PerformanceMonitorDarling-&lt;version&gt;.zip</code></strong> from the <a href="https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest" target="_blank" rel="noopener noreferrer">latest release</a> — the signed service and viewer with the bundled PostgreSQL + TimescaleDB runtime beside the service exe, so a from-zero install needs no database provisioning.</li>
+<li>Download <strong><code>PerformanceMonitorDarling-&lt;version&gt;.zip</code></strong> from the <a href="https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest" target="_blank" rel="noopener noreferrer">latest release</a> — the signed service and viewer with the bundled PostgreSQL + TimescaleDB runtime beside the service exe, so a from-zero install needs no database provisioning. Both are framework-dependent, so the machine needs the .NET Runtime 10 and the ASP.NET Core Runtime 10. The ASP.NET Core Hosting Bundle 10 installs both. <code>install-darling.ps1</code> refuses to install when either one is missing. It warns when the .NET Desktop Runtime 10, which the viewer needs, is missing.</li>
 <li>Copy <code>darling.sample.json</code> to <code>darling.json</code> and add your servers (and optional SMTP / webhook delivery). In managed mode the service unpacks and runs its own PostgreSQL — no external database to set up. For a PostgreSQL server, set <code>"engine": "postgres"</code> on its entry (see <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md#postgresql-targets" target="_blank" rel="noopener noreferrer">PostgreSQL Targets</a>).</li>
 <li>Run the service (console for a trial, or install it as a Windows service). It seeds the store and begins collecting on the same default cadences and retention horizons as a fresh Lite install.</li>
 <li>Start the <strong>Darling Viewer</strong>. It is in the same zip, under <code>viewer\</code>, and <code>install-darling.ps1</code> leaves a Desktop shortcut. On the service host there is nothing to point at anything: it finds the same <code>darling.json</code>, derives the store connection, and opens on the fleet. For a seat on another machine, run <code>--export-viewer-config</code> on the service host and copy the folder it writes.</li>
 <li>Optionally turn on the two off-by-default surfaces: <code>--enable-web</code> serves the browser dashboard on port 5153, <code>--enable-mcp</code> serves the MCP endpoint on 5152. Both take effect live, no restart.</li>
 </ol>
-<p>These steps are for Windows. On Linux, run the service under Docker Compose with the official TimescaleDB image. You can also run it under systemd with a PostgreSQL server that you already run. The bundled store is Windows-only. See <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md#run-on-linux-docker-compose-or-systemd-1804" target="_blank" rel="noopener noreferrer">Run on Linux</a> in the operator guide.</p>
+<p>These steps are for Windows. On Linux, run the service under Docker Compose with the official TimescaleDB image. You can also run it under systemd with a PostgreSQL server that you already run, version 16 or later. The bundled store is Windows-only.</p>
+<p>On Linux, the service keeps a key pair and seals secrets to it, so it can save and use them. The secrets are a SQL login password, the SMTP password, webhook URLs, the PagerDuty key, and generic webhook headers. <code>--reset-password-key</code> makes a new key. See <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md#run-on-linux-docker-compose-or-systemd-1804" target="_blank" rel="noopener noreferrer">Run on Linux</a> in the operator guide.</p>
 <p><strong>Never done this before?</strong> <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/docs/uat-onboarding.md" target="_blank" rel="noopener noreferrer"><strong>docs/uat-onboarding.md</strong></a> is the ordered path from a downloaded zip to all three surfaces — the WPF viewer, the web dashboard, and MCP — with the log line, HTTP response, or screen that proves each step worked, and the handful of things that reliably catch people out.</p>
-<p>Configuration is a single JSON file with no schedule knobs. See the <strong><a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md" target="_blank" rel="noopener noreferrer">Darling operator guide</a></strong> for the configuration reference, permissions, and operations.</p>
+<p>Configuration is a single JSON file with no schedule knobs. One exception: a collector that runs once a day or less often can have a run time. That is a time of day on the monitored server's own clock. Set it in the viewer's Collector Schedules window (the <strong>Run at</strong> column) or with <code>--set-collector-run-at</code>. See the <strong><a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md" target="_blank" rel="noopener noreferrer">Darling operator guide</a></strong> for the configuration reference, permissions, and operations.</p>
 <hr />
 <h2>Edition Comparison</h2>
 <table>
@@ -471,6 +541,12 @@
 <td>Dark and light</td>
 </tr>
 <tr>
+<td>Web dashboard</td>
+<td>Not available</td>
+<td>Optional, off by default (port 5153)</td>
+<td>Not available</td>
+</tr>
+<tr>
 <td>Portability</td>
 <td>Single executable</td>
 <td>Portable service + viewer zip (Windows), service tarball (Linux)</td>
@@ -479,7 +555,7 @@
 <tr>
 <td>MCP server (LLM integration)</td>
 <td>Built-in (89 tools)</td>
-<td>On request (161 tools)</td>
+<td>On request (181 tools)</td>
 <td>Built into Dashboard (66 tools)</td>
 </tr>
 </tbody></table>
@@ -539,14 +615,47 @@
 </tr>
 <tr>
 <td><strong>FinOps</strong></td>
-<td>Utilization &amp; provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, per-object table/index size, growth, usage, and locking/contention analysis, application connections, server inventory, cost optimization recommendations, column-level filtering on all grids</td>
+<td>Twelve sub-tabs. Utilization, Database Resources, Storage Growth, Locking &amp; Contention, Database Sizes, and Version Store (PVS). Optimization, High Impact, Application Connections, and Server Inventory. Index Analysis (runs sp_IndexCleanup) and Recommendations. Column-level filtering on most grids</td>
 </tr>
 <tr>
 <td><strong>Recommendations</strong></td>
 <td>Prioritized findings drawn from collected metrics, grouped into incidents, each card showing the affected database, the recommendation, the reasoning behind it, and a copyable MCP investigation prompt</td>
 </tr>
+<tr>
+<td><strong>Alert History</strong></td>
+<td>Logged alerts with a time range, details, dismiss, and mute actions</td>
+</tr>
+<tr>
+<td><strong>Job History</strong></td>
+<td>SQL Agent job runs retained from <code>msdb</code></td>
+</tr>
+<tr>
+<td><strong>Availability Groups</strong></td>
+<td>Replica and per-database health from the Availability Group collectors</td>
+</tr>
 </tbody></table>
-<p>Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes with user-adjustable palette colors (see <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Lite/README.md#themes-and-colors" target="_blank" rel="noopener noreferrer">Themes and colors</a>), and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs, and it shows a PostgreSQL target on its own set of tabs. See <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md" target="_blank" rel="noopener noreferrer">Darling/README.md</a>. The deprecated Dashboard's six-tab-group layout is documented in <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/deprecated/Dashboard/README.md" target="_blank" rel="noopener noreferrer">deprecated/Dashboard/README.md</a>.</p>
+<p>Both feature auto-refresh, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes with user-adjustable palette colors (see <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Lite/README.md#themes-and-colors" target="_blank" rel="noopener noreferrer">Themes and colors</a>), and timezone display options (server time, local time, or UTC).</p>
+<p>Both also share one time range picker with the web pages. It has presets, calendar periods, and typed ranges such as <code>last 3 days</code> or <code>since 9am</code>. A text column's filter lists its values to tick, like Excel, and stays set across refreshes and restarts.</p>
+<p>The Darling viewer adds a fleet sidebar and per-server tabs, and it shows a PostgreSQL target on its own set of tabs. See <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md" target="_blank" rel="noopener noreferrer">Darling/README.md</a>. The deprecated Dashboard's six-tab-group layout is documented in <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/deprecated/Dashboard/README.md" target="_blank" rel="noopener noreferrer">deprecated/Dashboard/README.md</a>.</p>
+<p>The Darling web dashboard has these pages in its sidebar:</p>
+<ul>
+<li>Fleet Overview</li>
+<li>Availability Groups (shown once the store holds Availability Group data)</li>
+<li>FinOps, with the same twelve sub-tabs as the table above</li>
+<li>Fleet Sweeps</li>
+<li>Alert History and Alert Rules</li>
+<li>Admin, with the tabs Servers, Notification Routes, and Alert Settings</li>
+<li>Custom Views, Mute Rules, and Manage Tags</li>
+<li>Job History</li>
+</ul>
+<p>The page for one SQL Server has these tabs:</p>
+<ul>
+<li>Overview, Wait Stats, CPU, Memory, and Blocking</li>
+<li>File I/O, Queries, and Configuration</li>
+<li>Config Changes, Activity, and System Events</li>
+<li>Collection Health and Recommendations</li>
+</ul>
+<p>The page for one PostgreSQL server has these tabs: Overview, Activity, Vacuum, Waits, I/O, Replication, Storage, and Configuration.</p>
 <hr />
 <h2>Alerts &amp; Notifications</h2>
 <p>Every edition includes a real-time alert engine that monitors for performance issues and sends notifications via system tray balloons (Lite/Dashboard), email, and webhooks.</p>
@@ -637,6 +746,7 @@
 <li>Click <strong>Send Test Notification</strong> to verify the integration</li>
 </ol>
 <p>PagerDuty alerts include the metric name, server, current value, threshold, and severity. Repeated alerts for the same incident automatically correlate into a single PagerDuty incident via the dedup_key, preventing alert fatigue.</p>
+<p>The setting <strong>Auto-resolve the incident when the alert's condition clears</strong> is off by default. When it is on, a recovery sends a resolve event, which closes the incident that the outage alert opened. A recovery is a server coming back or an Availability Group replica reconnecting. When it is off, the recovery is sent as an info-level alert and the incident stays open. Both Lite and the Darling viewer have this setting.</p>
 <h3>Email Alerts</h3>
 <p>Alert emails include:</p>
 <ul>
@@ -647,10 +757,14 @@
 <h3>Alert Behavior</h3>
 <ul>
 <li><strong>Resolved notifications</strong> — when a condition clears (e.g., blocking ends), a "Cleared" notification fires</li>
+<li><strong>Lasting problems alert once</strong> — a problem that lasts, such as an unreachable server, an Availability Group secondary that fell behind, or (Darling) Collection Stopped, sends one alert when it starts and one when it ends. It sends another only if the setting <strong>Re-alert while a problem lasts every</strong> (<code>connection_refire_minutes</code>) is above 0 minutes. The default is 0, which means never.</li>
 <li><strong>Server silencing</strong> — right-click a server to acknowledge alerts, silence all alerts, or unsilence</li>
 <li><strong>Always-on</strong> — the alert engine runs independently of which tab is active, including when minimized to the system tray</li>
 <li><strong>Alert history</strong> — Lite logs alerts to DuckDB (<code>config_alert_log</code>); Darling logs to its Postgres store; both are accessible via MCP</li>
 <li><strong>Alert muting</strong> — create rules to suppress specific recurring alerts while still logging them. Rules match on server name, metric type, database, query text, wait type, or job name (AND logic across fields). Access via Settings → Manage Mute Rules, or right-click an alert in the Alert History tab. The context menu offers <strong>Mute This Alert</strong> (pre-fills server + metric) and <strong>Mute Similar Alerts</strong> (pre-fills metric only, matching across all servers). Muted alerts appear grayed out and are still recorded for auditability. Rules support optional expiration (1h, 24h, 7 days, or permanent).</li>
+<li><strong>Collection watch (Darling):</strong> at start, the service raises a "Collection Gap At Start" warning when the newest earlier collection is 15 minutes or more older than the start.</li>
+<li><strong>History audit (Darling):</strong> the service runs this audit once a day, after 03:00 UTC. It compares each hour of the previous UTC day with the median of the 7 days before. It raises one "Collection Gaps In History" warning that names the hours under half of usual.</li>
+<li><strong>Heartbeat (Darling):</strong> an optional <code>heartbeat</code> block in <code>darling.json</code> is off by default. It sends an HTTP GET to a URL you give it, every 60 to 3600 seconds, while collection is healthy. An outside check can then alert when the service stops or stops collecting.</li>
 <li><strong>Alert details</strong> — right-click any alert in the Alert History tab and choose <strong>View Details</strong> for core fields (time, server, metric, value, threshold, notification type, status) plus context-sensitive details that vary by metric.</li>
 <li><strong>A slow store no longer blinds a check</strong> (#3848, Darling) — the alert pass reads its evidence out of the Postgres store under a deliberately short 10-second per-read deadline, because a long read holds a fleet-sweep permit and delays collection for every server queued behind it. On a busy store that deadline is crossed by the store's own write bands — compression, aggregate materialization, checkpoint fsync tails — and every such read used to skip its condition for one 30-second cycle. Each read is now retried <strong>once, two seconds later</strong>, on a command-timeout and nothing else: never on an error the store returned (which would answer the same way twice), and never during shutdown. <code>get_collection_health</code>'s <code>alert_read_health</code> block reports <code>retried_reads</code> beside <code>server_read_failures</code>, so the write bands' cost stays a visible count instead of a blind alert — retries rising while failures stay at zero is a store under write pressure whose alerting is intact; both rising means a second attempt twelve seconds later still found the band on, which points at the store's write schedule rather than the reader.</li>
 <li><strong>Confidence chooses the channel</strong> (#3712) — a scheduled-analysis finding earns a delivery by <em>corroboration</em>, never by severity alone: two or more facts in its story chain, a matched co-fire check on its root fact, or one of the two by-construction stories. A lone uncorroborated fact at or above the notify floor is recorded (Alert History status <strong>Digest</strong>, with the reason on the row and on <code>get_alert_history</code> as <code>routing_reason</code>) and shown in Recommendations with a <em>Not paged</em> marker, but it is not e-mailed, posted or toasted. It pages the moment it gains corroboration, as a new firing. Settings → Alerts → <em>Only notify on corroborated findings</em> (default on; <code>analysis_uncorroborated_route</code> in the settings file) restores delivery of every notify-worthy finding when unchecked. Darling delivers the same singles once a day as the Analysis Singles Digest.</li>
@@ -710,7 +824,7 @@
 </li>
 </ol>
 <h3>Available Tools</h3>
-<p><strong>Lite</strong> exposes 89 tools; <strong>Darling</strong> exposes 161 (the analysis + data-read surface plus its write tools) on request; the deprecated <strong>Dashboard</strong> exposes 66 (see <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/deprecated/Dashboard/README.md" target="_blank" rel="noopener noreferrer">deprecated/Dashboard/README.md</a>). Core tools are shared.</p>
+<p><strong>Lite</strong> exposes 89 tools; <strong>Darling</strong> exposes 181 (the analysis + data-read surface plus its write tools) on request; the deprecated <strong>Dashboard</strong> exposes 66 (see <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/deprecated/Dashboard/README.md" target="_blank" rel="noopener noreferrer">deprecated/Dashboard/README.md</a>). Core tools are shared.</p>
 <table>
 <thead>
 <tr>
@@ -740,7 +854,7 @@
 </tr>
 <tr>
 <td>Queries</td>
-<td><code>get_top_queries_by_cpu</code>, <code>get_top_procedures_by_cpu</code>, <code>get_query_store_top</code>, <code>get_query_duration_trend</code>, <code>get_query_trend</code></td>
+<td><code>get_top_queries_by_cpu</code>, <code>get_top_procedures_by_cpu</code>, <code>get_query_store_top</code>, <code>get_query_store_query_history</code>, <code>get_query_duration_trend</code>, <code>get_query_trend</code></td>
 </tr>
 <tr>
 <td>Active Queries</td>
@@ -820,14 +934,33 @@
 </tr>
 <tr>
 <td>Plan Analysis</td>
-<td><code>analyze_query_plan</code>, <code>analyze_procedure_plan</code>, <code>analyze_query_store_plan</code>, <code>analyze_plan_xml</code>, <code>get_plan_xml</code></td>
+<td><code>analyze_query_plan</code>, <code>analyze_procedure_plan</code>, <code>analyze_query_store_plan</code>, <code>analyze_plan_xml</code>, <code>get_plan_xml</code>, <code>get_query_store_plan_xml</code>, <code>get_procedure_plan_xml</code>, <code>get_active_query_plan_xml</code>, <code>get_blocking_plan_xml</code>, <code>get_deadlock_plan_xml</code></td>
 </tr>
 <tr>
 <td>Diagnostic Analysis</td>
 <td><code>analyze_server</code>, <code>get_analysis_facts</code>, <code>compare_analysis</code>, <code>audit_config</code>, <code>get_analysis_findings</code>, <code>mute_analysis_finding</code></td>
 </tr>
+<tr>
+<td>FinOps (Darling)</td>
+<td><code>get_finops</code> (picks a view for one server), <code>get_finops_inventory</code> (the Server Inventory for the whole fleet), <code>get_finops_recommendations</code></td>
+</tr>
+<tr>
+<td>Jobs history (Darling)</td>
+<td><code>get_job_history</code> (retained SQL Agent job runs for a server or the fleet)</td>
+</tr>
+<tr>
+<td>Trends and store history (Darling)</td>
+<td><code>get_server_trend</code> (one trend per <code>metric</code>, such as total waits, latch, spinlock, or tempdb size), <code>get_store_query_history</code> (the Darling store's own statements, hour by hour), <code>get_query_repro_script</code></td>
+</tr>
+<tr>
+<td>Server management (Darling)</td>
+<td><code>add_servers</code>, <code>edit_server</code>, <code>remove_server</code>, and the server tag tools such as <code>create_server_tag</code> and <code>assign_server_tag</code></td>
+</tr>
 </tbody></table>
 <p>Most tools accept optional <code>server_name</code> and <code>hours_back</code> parameters. If only one server is configured, <code>server_name</code> is auto-resolved. Every tool that takes <code>hours_back</code> also takes an optional <code>as_of</code> — an ISO-8601 UTC instant that moves the END of the window off "now", so a past incident is one call (<code>as_of</code> its end, <code>hours_back</code> its length) rather than a very wide window filtered by hand. The MCP server binds to <code>localhost</code> only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md" target="_blank" rel="noopener noreferrer">Darling/README.md</a>.)</p>
+<h3>MCP network access (Darling)</h3>
+<p>Darling's MCP server listens on loopback, port 5152, by default. A <code>network</code> block under <code>mcp</code> in <code>darling.json</code> exposes it to other machines. That needs a <code>listen</code> address that is not loopback, managed mode, a bearer token, and <code>allowFrom</code>, a list of allowed address ranges in CIDR form. If any of these is missing or invalid, the listener stays loopback-only and the service logs a Critical line.</p>
+<p>Without a <code>tls</code> block, the network listener is plain HTTP. A <code>tls</code> block under <code>mcp.network</code> (a PKCS#12 file, or a PEM certificate and key) makes it serve HTTPS, with TLS 1.2 or 1.3 only. If the certificate cannot be loaded, the listener stays loopback-only. The service raises a self-alert when that happens, and an "MCP TLS Certificate Expiring" alert 30 days before the certificate expires.</p>
 <hr />
 <h2>Performance Impact</h2>
 <h3>On Monitored Servers</h3>
@@ -854,10 +987,12 @@
 <li><strong>No data after connecting</strong> — Wait for the first collection cycle (1–5 minutes). Check logs for connection errors.</li>
 <li><strong>Query Store tab empty</strong> — Query Store must be enabled on the target database (<code>ALTER DATABASE [YourDB] SET QUERY_STORE = ON</code>).</li>
 <li><strong>Blocked process reports empty</strong> — Lite attempts to auto-configure the blocked process threshold to 5 seconds via <code>sp_configure</code>. On <strong>AWS RDS</strong>, <code>sp_configure</code> is not available — set <code>blocked process threshold (s)</code> through an RDS Parameter Group (see <a href="#platform-notes" target="_blank" rel="noopener noreferrer">Platform Notes</a> below). On <strong>Azure SQL Database</strong>, the threshold is fixed at 20 seconds and cannot be changed. If you still see no data on other platforms, verify the login has <code>ALTER SETTINGS</code> permission.</li>
-<li><strong>Connection failures</strong> — Verify network connectivity, firewall rules, and that the login has the required <a href="#permissions" target="_blank" rel="noopener noreferrer">permissions</a>. For Azure SQL Database, use a contained database user with <code>VIEW DATABASE STATE</code>.</li>
+<li><strong>Connection failures</strong> — Verify network connectivity, firewall rules, and that the login has the required <a href="#permissions" target="_blank" rel="noopener noreferrer">permissions</a>. For Azure SQL Database, use a contained database user with <code>VIEW DATABASE STATE</code>. Error 40615 means the server firewall did not allow the client's IP address. Add a server-level rule, or a database-level rule in master.</li>
 <li><strong>FinOps Index Analysis hangs, times out, or returns <code>Msg 229</code> on <code>sql_expression_dependencies</code></strong> — see <a href="#finops-index-analysis-per-database-grants" target="_blank" rel="noopener noreferrer">FinOps Index Analysis</a> below for the full per-database grant set that fixes both failure modes.</li>
 </ol>
-<p><strong>Darling</strong> troubleshooting (service logs, store connectivity, permissions) is in the <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md" target="_blank" rel="noopener noreferrer">Darling operator guide</a>. <strong>Dashboard</strong> (Full edition) troubleshooting is in <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/deprecated/Dashboard/README.md" target="_blank" rel="noopener noreferrer">deprecated/Dashboard/README.md</a>.</p>
+<h3>Darling</h3>
+<p>For a bug report, run the service with <code>--diagnostics-bundle &lt;path&gt;</code>. It writes one JSON file with the store's state, collection health, slow reads, statement history and the recent service log. It replaces server, host, database and login names and IP addresses with aliases and leaves credentials out. It checks the finished file for every name it knows and writes nothing if one remains.</p>
+<p>Darling troubleshooting (service logs, store connectivity, permissions) is in the <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/Darling/README.md" target="_blank" rel="noopener noreferrer">Darling operator guide</a>. <strong>Dashboard</strong> (Full edition) troubleshooting is in <a href="https://github.com/erikdarlingdata/PerformanceMonitor/blob/HEAD/deprecated/Dashboard/README.md" target="_blank" rel="noopener noreferrer">deprecated/Dashboard/README.md</a>.</p>
 <hr />
 <h2>Authentication</h2>
 <p><code>PerformanceMonitor.Common.AuthenticationTypes</code> supports seven authentication types, defined once there and named the same way in every edition. <strong>Not every edition connects with all seven</strong>, so the table says which does what: Lite offers all of them, while the Darling service builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.</p>
@@ -974,7 +1109,8 @@ GRANT CONNECT ANY DATABASE TO [YourLogin];
    catalog views return zero rows that look exactly like "no data" (see the AG note below). */
 GRANT VIEW ANY DEFINITION TO [YourLogin];
 
-/* The deadlock / blocked-process Extended Events sessions. */
+/* The deadlock / blocked-process Extended Events sessions, and the opt-in long-query trace session.
+   A login without this shows PERMISSIONS for the collector instead of an error. */
 GRANT ALTER ANY EVENT SESSION TO [YourLogin];
 
 /* Optional: the default-trace collector reads sys.traces, which requires ALTER TRACE -
@@ -1069,6 +1205,10 @@ GRANT VIEW DEFINITION     TO [your-managed-identity-or-app-registration-name];
 </ol>
 <p><strong>Deadlocks</strong> — No parameter group configuration is required. The SQL Server deadlock monitor runs automatically on all platforms, and the <code>xml_deadlock_report</code> Extended Event fires without any threshold setting.</p>
 <p><strong>Azure SQL Database</strong> — The blocked process threshold is fixed at 20 seconds and cannot be changed. The <code>blocked_process_report</code> event fires automatically when blocking exceeds this duration.</p>
+<h3>AWS RDS and Aurora for PostgreSQL (Darling)</h3>
+<p>A PostgreSQL server entry in <code>darling.json</code> can set <code>awsRoleArn</code>, and <code>awsExternalId</code> when the role's trust policy asks for one. Darling then assumes that role for its AWS calls for that server. These are the host check, CPU and host memory from Performance Insights, and the log reads. A server with no role uses the AWS credentials of the Darling process. Those can come from an <code>AWS_PROFILE</code> profile that has a <code>role_arn</code>.</p>
+<p>The file seeds a new server only. To change the role of a stored server, use the web Admin page, the <code>edit_server</code> MCP tool, or the viewer. Those surfaces can set only roles that the <code>allowedAwsRoles</code> list in <code>darling.json</code> allows.</p>
+<p>Darling reads the logs and Performance Insights data of an RDS or Aurora target only after it checks the host. The host must match the endpoint that AWS reports. If the host does not match, Darling reads nothing for that server and records a PERMISSIONS outcome that names the host and the id.</p>
 <hr />
 <h2>Folder Structure</h2>
 <pre><code>PerformanceMonitor/
