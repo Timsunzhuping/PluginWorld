@@ -1,0 +1,146 @@
+<h1>Security Audit</h1>
+<p>Find vulnerabilities that violate a real trust boundary, then give owners the source evidence, safe reproduction, priority, and smallest effective fix. This is a defensive, source-first workflow. A candidate without a concrete affected principal, resource, or security outcome is not a confirmed finding.</p>
+<h2>Operating modes</h2>
+<p>This skill is guidance by default. Loading it does not authorize the complete audit workflow or file creation.</p>
+<ul>
+<li><strong>Guidance mode</strong>: For security questions, focused reviews, methodology, triage, or investigation of specific findings, use only the relevant parts of this skill. Do not automatically run all six phases, create an output directory, or write audit artifacts. You may launch focused agents when useful; they return results to the current task.</li>
+<li><strong>Full audit mode</strong>: Use the complete workflow when the user explicitly asks to audit or pen-test a codebase, asks for a full, comprehensive, or end-to-end security review, or requests report artifacts. Run all six phases and write the files defined below.</li>
+</ul>
+<p>If the request could mean either mode, ask one focused question before creating files or starting the complete workflow.</p>
+<h2>Platform terminology</h2>
+<p>This skill is agent-neutral:</p>
+<ul>
+<li><strong>Parent</strong> is the agent that coordinates the run and owns shared state.</li>
+<li><strong>Task tool</strong> is the platform's delegation or sub-agent mechanism.</li>
+<li><strong><code>research</code> agent</strong> is a delegated agent for focused source exploration and factual verification.</li>
+<li><strong><code>general</code> agent</strong> is a delegated agent for broad investigation and bounded local execution.</li>
+<li><strong><code>subagent_type:</code></strong> in a heading names which of these two delegated agent roles runs that work.</li>
+</ul>
+<p>Use equivalent platform capabilities while preserving role, write-isolation, prompt, and independence boundaries.</p>
+<h2>Universal execution safety</h2>
+<p>These rules apply in both operating modes. Source inspection is read-only. Run target-controlled builds, tests, processes, browsers, emulators, fuzzers, and fixture processing only inside an OS-enforced sandbox that provides all of these controls:</p>
+<ul>
+<li>no external network; use only an isolated loopback namespace when the check needs local client/server traffic;</li>
+<li>an empty environment populated from an explicit allowlist with safe values, with scratch-local <code>HOME</code>, temporary directories, and caches;</li>
+<li>a read-only target and toolchain, with the target-controlled process able to write only inside its assigned <code>scratch/</code> directory; and</li>
+<li>explicit low CPU, memory, process, file-size, disk, and wall-clock limits.</li>
+</ul>
+<p>The agent, outside the target-controlled process, may make a disposable source copy in an assigned <code>scratch/</code> directory when a build must write beside source. In guidance mode, do not retain target-controlled files. In full audit mode, only trusted parent-side code may promote the minimum non-secret result to retained <code>artifacts/</code> using the procedure under Write isolation. Never expose a retained output directory (other than the agent's own assigned <code>scratch/</code>), another agent's directory, the host home directory, credentials, sockets, or shared services to target code. Do not install dependencies or let builds fetch them. Use only tools and dependencies already available locally. If every control cannot be enforced, do not execute target code: report the missing sandbox capability as a needs-validation blocker and give a safe validation plan.</p>
+<p>Use dummy principals, fixtures, and secrets. Do not probe deployed endpoints, external services, shared infrastructure, production identities, other users' data, or live control planes. Do not test availability against a live or shared process, publish artifacts, alter releases, spend paid API quota, or continue beyond the minimum local effect needed to establish a defect. If the decisive fact is outside source or the sandboxed fixture, report it as needing validation.</p>
+<h2>Full audit setup</h2>
+<p>In full audit mode, resolve these values before reconnaissance:</p>
+<ul>
+<li><strong>Skill directory</strong>: the absolute directory containing this <code>SKILL.md</code>.</li>
+<li><strong>Target</strong>: the absolute repository root under review.</li>
+<li><strong>Repo name</strong>: a stable repository identifier from the directory or local Git remote.</li>
+<li><strong>Output directory</strong>: a new writable directory outside the target, defaulting to <code>~/security-audit-skill/&lt;repo-name&gt;/run-&lt;N&gt;</code>, where <code>&lt;N&gt;</code> is the next unused integer. Use a directory inside the target only when the user explicitly selects it and the parent verifies that version control ignores the whole directory. Otherwise stop and request an external path.</li>
+<li><strong>Source ref</strong>: the reviewed commit and whether the worktree is dirty. Do not treat unreviewed generated or modified files as another revision.</li>
+</ul>
+<h3>Write isolation</h3>
+<p>The parent creates and is the only writer of shared run files:</p>
+<ul>
+<li><code>run-metadata.json</code></li>
+<li><code>architecture.md</code></li>
+<li><code>coverage-ledger.json</code></li>
+<li><code>findings.json</code></li>
+<li><code>REPORT.md</code></li>
+<li><code>FINDINGS-DETAIL.md</code></li>
+<li><code>NEEDS-VALIDATION.md</code></li>
+</ul>
+<p>Each hunter or verifier receives a unique root under <code>&lt;output-dir&gt;/agents/&lt;agent-id&gt;/</code>, with separate <code>scratch/</code> and <code>artifacts/</code> directories. Canonical agent IDs match <code>^[a-z0-9][a-z0-9_-]{0,63}$</code> and must not equal a Windows device name such as <code>con</code>, <code>prn</code>, <code>aux</code>, <code>nul</code>, <code>com1</code> through <code>com9</code>, or <code>lpt1</code> through <code>lpt9</code>. Lowercase IDs prevent case-fold collisions. The agent and every target-controlled process may write only to <code>scratch/</code>; retained <code>artifacts/</code> is parent-owned, is never exposed to the sandbox, and is writable only by trusted parent-side promotion code. Agents may not change shared files, target source, retained artifacts, or another agent's directory. Do not use <code>/tmp</code> or the host home directory as a writable fallback.</p>
+<p>Before execution, the parent opens and retains trusted, non-inheritable directory descriptors for the agent's <code>scratch/</code> and <code>artifacts/</code> roots, and records an allowlist of expected scratch-relative artifact files plus explicit per-file and cumulative byte limits. Never pass those descriptors to the agent or sandbox. After the sandbox and all its processes terminate, trusted parent-side code promotes each allowlisted file separately:</p>
+<ol>
+<li>Validate the declared relative path: reject absolute, empty, <code>.</code>, <code>..</code>, or symlinked components.</li>
+<li>Walk each parent component from the retained scratch-root descriptor with no-follow directory-relative operations; never reopen by path.</li>
+<li>Open the leaf no-follow and nonblocking.</li>
+<li>Verify with <code>fstat</code> that it is a regular file with link count exactly one and within the recorded per-file and cumulative byte limits.</li>
+<li>Enforce those limits again while reading from that descriptor.</li>
+<li>Copy exactly the verified size, repeat <code>fstat</code>, and reject a changed identity, type, link count, or size.</li>
+<li>For the destination, walk every parent component from the retained artifacts-root descriptor with no-follow directory-relative operations; require each existing component to be a real directory, and create any missing directory exclusively before reopening and verifying it no-follow.</li>
+<li>Create the leaf exclusively without following links, verify that the opened destination is a regular file with link count exactly one, and copy from the verified source descriptor without reopening either path.</li>
+<li>Use equivalent race-safe APIs on non-POSIX systems.</li>
+<li>Never recursively copy or glob scratch, extract an archive into artifacts, or open or promote a symlink, FIFO, socket, device, directory, hard-linked file, changing file, or file that exceeds its bound.</li>
+<li>If any check is unavailable, cannot be enforced, or fails, discard the scratch entry; if it is decisive evidence, retain <code>needs_validation</code> with the exact promotion blocker.</li>
+</ol>
+<p><a href="https://github.com/cloudflare/security-audit-skill/blob/HEAD/skills/security-audit/HUNTING.md" target="_blank" rel="noopener noreferrer">HUNTING.md</a> and <a href="https://github.com/cloudflare/security-audit-skill/blob/HEAD/skills/security-audit/VALIDATION-AND-REPORTING.md" target="_blank" rel="noopener noreferrer">VALIDATION-AND-REPORTING.md</a> carry this procedure as one identical fenced block for hunter and verifier prompts; it states the same rules in the same order as this list.</p>
+<p>For a reproduced check, record the command, exact test input, sandbox limits, and only the allowlisted environment variable names plus safe non-secret values needed to reproduce it. Never capture or copy the ambient environment, inherited variables, credential values, authentication state, or unrelated host paths. Launch from an empty environment rather than trying to redact one after execution.</p>
+<p>Before delegation, the parent writes <code>run-metadata.json</code> with at least <code>run_id</code>, <code>repo</code>, <code>target</code>, <code>source_ref</code>, <code>profile</code>, <code>scope_paths</code>, <code>budget</code> (null if unset), <code>execution_policy: "sandboxed-source-and-local-only"</code>, selected companion files, prior-run paths, shared-file owners, and <code>run_status: "in_progress"</code>. Update metadata only when those facts change; candidate state belongs in the coverage ledger and <code>findings.json</code>.</p>
+<h2>Full audit planning</h2>
+<p>The coverage, prior-run, profile, and budget requirements in this section apply only in full audit mode.</p>
+<h3>Coverage and prior runs</h3>
+<p>No one pass is complete. Build a deterministic coverage plan before hunting and update it after every agent result. <a href="https://github.com/cloudflare/security-audit-skill/blob/HEAD/skills/security-audit/RECONNAISSANCE.md" target="_blank" rel="noopener noreferrer">RECONNAISSANCE.md</a> defines the stable coverage units and <a href="https://github.com/cloudflare/security-audit-skill/blob/HEAD/skills/security-audit/HUNTING.md" target="_blank" rel="noopener noreferrer">HUNTING.md</a> defines coverage-critic waves. The parent alone updates the ledger.</p>
+<p>If prior runs exist, read every compatible <code>coverage-ledger.json</code> and <code>findings.json</code> before planning the current run:</p>
+<ol>
+<li>Compare the relevant current source with each prior record and unit. A prior source ref alone is not evidence that a path is unchanged.</li>
+<li>Carry a prior <code>confirmed</code> record into the current candidate set only when its relevant source and conditions are unchanged and its evidence still meets the current contract. Link it to a current ledger unit seeded <code>planned</code>, preserve its fingerprint, exclude only that carried root cause from hunters, and send the carried record through the current final verification path; the Phase 3 verifier that re-checks it becomes that unit's assignment owner and moves it to <code>candidate</code>.</li>
+<li>When relevant source for a prior <code>confirmed</code> record changed, create a current planned revalidation unit. Do not put that record on the hunter exclusion list. It remains confirmed only if current independent validation establishes the current path and result.</li>
+<li>Make prior <code>needs_validation</code>, <code>deferred</code>, <code>blocked</code>, <code>out_of_scope</code>, and any changed-source unit current work. A still-external <code>needs_validation</code> record may be carried only after the current source trace is checked and linked by fingerprint to a current <code>planned</code> unit whose verifier re-check supplies its owner and evidence; the record keeps the unresolved blocker. These prior states never suppress a current unit.</li>
+<li>A prior same-source covered unit may inform priority, but it remains visible in the current ledger. A prior <code>rejected</code> record suppresses only the unchanged failed claim, not coverage of its unit; changed evidence creates current work.</li>
+<li>Read the prior profile and scope. A prior <code>quick</code> or scoped ledger contributes only its recorded evidence and gaps, never an implied "rest is fine."</li>
+</ol>
+<p>If no prior ledger exists, say so in the final coverage statement. Never imply that one run exhausts the target.</p>
+<h3>Run profiles and scope</h3>
+<p>During full audit setup, pick a profile from the user's request or propose one from the target's size and stakes. Record it in <code>run-metadata.json</code> (<code>profile</code>, <code>scope_paths</code>) and state it in the report. The default is <code>standard</code>.</p>
+<ul>
+<li><strong><code>quick</code></strong> — a bounded pass for small targets, re-runs, or a fast first look. Coarsen ledger units to surface × boundary × attack class (subsystem uses the fixed canonical <code>profile/quick/all-in-scope-subsystems</code> identifier), run exactly one hunter wave followed by exactly one final coverage-critic pass, and use one fresh verifier per candidate for both candidate validation and final record verification. Do not launch a follow-up hunter wave: record the critic's accepted discoveries and reassignments as <code>deferred</code>.</li>
+<li><strong><code>standard</code></strong> — the workflow as written.</li>
+<li><strong><code>deep</code></strong> — for high-stakes or large targets. Split ledger units per subsystem and lifecycle mode, run critic waves to a clean pass, keep candidate validation and final record verification as separate fresh agents, and give <code>prior_covered_same_source</code> units an independent second pass.</li>
+</ul>
+<p>A <strong>scoped run</strong> audits a subset: named paths, one subsystem, one companion domain, or the diff between two source refs. Seed ledger units only for in-scope surfaces and record everything else as <code>out_of_scope</code> — never as <code>covered</code>. A scoped or <code>quick</code> run must present itself as partial coverage.</p>
+<p>Profiles change breadth and redundancy, never the evidence bar. Do not scale away the candidate gate, the source/local execution boundary, <code>needs_validation</code> discipline, schema validation, or independent verification of <code>confirmed</code> records.</p>
+<h4>Cost budget</h4>
+<p>The ledger makes spend countable: one unit is roughly one hunter assignment, and one surviving candidate is one or two verifier assignments depending on profile. When the user sets a budget — or the parent proposes one for a large target — record <code>budget</code> in <code>run-metadata.json</code> as a maximum number of agent invocations across all phases.</p>
+<p>Apply the strict budget gate before launching any reconnaissance agent. Reserve the four baseline reconnaissance calls, one final post-wave critic for <code>quick</code> or one post-wave plus one distinct final-clean critic for <code>standard</code>/<code>deep</code>, and at least one verifier call. Add focused reconnaissance only after repeating this gate for each extra call. If the requested budget cannot fund that minimum, launch no agent: ask for a larger budget, narrower scope, or different profile. If the request remains unchanged, set <code>run_status: "incomplete"</code> with <code>incomplete_reason: "budget_cannot_fund_reconnaissance_and_reserves"</code> and report that no audit pass ran.</p>
+<p>Spend it in this order:</p>
+<ol>
+<li>Count reconnaissance, every post-wave critic, and the separate final-clean critic as agent invocations.</li>
+<li><strong>Reserve critics and validation before hunting.</strong> For <code>quick</code>, reserve its one post-wave final critic. Before every <code>standard</code> or <code>deep</code> hunter wave, reserve one immediate post-wave critic plus one distinct final-clean critic. Also reserve verifier cost from the profile (about 1 or 2 agents per expected candidate; when in doubt reserve 30% of the balance after critic reservation). Never assign hunters into either reserve.</li>
+<li>Assign hunters to units in priority order until the hunting allowance is spent. Spend the reserved post-wave critic immediately after that wave; keep the final-clean and validation reserves intact.</li>
+<li>Before a later wave, reserve its new post-wave critic again. If the remaining budget cannot cover the required critic calls and validation reserve, launch no hunters from that wave, mark its planned units <code>deferred</code> with reason <code>budget_cannot_reserve_critics_and_validation</code>, and use the retained final-clean critic to record the resulting gap.</li>
+</ol>
+<p>Before wave 1, update the pre-recon estimate with seeded units, implied hunter count, mandatory critic calls, validation reserve, and whether the remaining budget covers the plan. If it clearly cannot, say so and propose either a tighter scope or a coarser profile instead of silently thinning evidence. If later facts consume the required final-critic reserve, launch no hunters, mark all planned work deferred, set the run incomplete with reason <code>critic_budget_exhausted</code>, and make no complete-coverage claim.</p>
+<p>A strict total-agent budget can still be exceeded by an unexpectedly large candidate set or by a material Phase 5 replacement that needs another independent verifier. If the remaining budget cannot validate every candidate, stop hunting, validate candidates in fingerprint order while the budget permits, and set <code>run_status: "incomplete"</code> plus <code>incomplete_reason: "validation_budget_exhausted"</code>. Keep each unvalidated fingerprint linked to a <code>candidate</code> ledger unit with that unresolved reason. Do not put an unvalidated candidate in <code>findings.json</code>, relabel it <code>needs_validation</code>, or report the run as complete. Phase 6 may produce a partial report only if its first section states that candidate validation is incomplete and lists the affected fingerprints and units. Never exceed a user-set strict budget silently.</p>
+<h2>Core principles</h2>
+<h3>Require a boundary and result</h3>
+<p>For every candidate, name the lower-trust principal, accepted input or action, intended control, crossed boundary, affected principal or resource, and concrete observed or owner-observable result. Do not elevate a missing best practice, guessed deployment behavior, generic parser crash, or self-impact into a security finding.</p>
+<h3>Use bounded local evidence</h3>
+<p>Static analysis establishes the source path. Sandboxed local tests resolve behavior when all execution controls are available: a minimal function harness, existing unit test, small parser fixture, dummy-tenant integration test, locally rendered configuration, or bounded isolated-loopback client. Stop at a wrong return value, unauthorized dummy record, sanitizer finding, policy difference, or other minimum effect. Do not extend the local check beyond the minimum boundary result or produce persistence, post-fault, or concealment material.</p>
+<h3>Respect source visibility</h3>
+<p>Deployment controls, proxy behavior, provider settings, browser headers, identity policy, broker ACLs, packaging, and topology are real controls. If they are required and absent from the repository, do not assume either presence or absence. Use <code>needs_validation</code> with the exact missing fact and a safe owner-observed or local plan.</p>
+<h3>Separate priority from certainty</h3>
+<p>Only <code>confirmed</code> records receive severity. Likelihood and impact must reflect the demonstrated conditions and result; overall severity cannot exceed demonstrated impact. <code>needs_validation</code> means a specific source-grounded boundary hypothesis is blocked, not a low-confidence confirmed vulnerability, and it has no severity.</p>
+<p>Calibrate overall severity with these anchors:</p>
+<ul>
+<li><strong>critical</strong> — an unauthenticated actor gains code execution, full data-store access, or takeover of arbitrary accounts.</li>
+<li><strong>high</strong> — an actor fully defeats an explicit security control with real consequences: authentication bypass, cross-tenant read or write, stored script execution affecting other users, authenticated code execution, or an unauthenticated remote stop of a shared service.</li>
+<li><strong>medium</strong> — a real boundary violation with limited blast radius, uncommon preconditions, or consequences confined to a narrow resource set.</li>
+<li><strong>low</strong> — disclosure of non-secret internals, or an effect requiring sustained effort for minimal gain.</li>
+<li><strong>informational</strong> — a confirmed but minimal-impact observation, useful mainly as a prerequisite inside a larger finding.</li>
+</ul>
+<p>The high/medium discriminator: does the demonstrated result fully defeat an explicit control for an action with real consequences, or only weaken it? If you cannot state the concrete damage, the severity is lower than it feels.</p>
+<h3>Recommend the smallest effective source fix</h3>
+<p>For each confirmed finding, identify the invariant the code must enforce and the narrowest source change that enforces it at the last trusted decision point. Prefer specific repository-relative changes and regression tests over generic hardening advice. The audit describes fixes; it does not modify target source.</p>
+<h2>Full audit workflow</h2>
+<p>In full audit mode, follow all six phases in order:</p>
+<ol>
+<li><strong>Reconnaissance</strong> — map the source, trust boundaries, local build paths, companion selections, prior evidence, and initial deterministic coverage ledger with <a href="https://github.com/cloudflare/security-audit-skill/blob/HEAD/skills/security-audit/RECONNAISSANCE.md" target="_blank" rel="noopener noreferrer">RECONNAISSANCE.md</a>.</li>
+<li><strong>Coverage-led hunting waves</strong> — assign isolated hunters from the ledger and collect structured candidate results with <a href="https://github.com/cloudflare/security-audit-skill/blob/HEAD/skills/security-audit/HUNTING.md" target="_blank" rel="noopener noreferrer">HUNTING.md</a>, <a href="https://github.com/cloudflare/security-audit-skill/blob/HEAD/skills/security-audit/ATTACK-CLASSES.md" target="_blank" rel="noopener noreferrer">ATTACK-CLASSES.md</a>, and the selected domain companions.</li>
+<li><strong>Candidate validation</strong> — consolidate fingerprints and give every candidate to a fresh source verifier as defined in <a href="https://github.com/cloudflare/security-audit-skill/blob/HEAD/skills/security-audit/VALIDATION-AND-REPORTING.md" target="_blank" rel="noopener noreferrer">VALIDATION-AND-REPORTING.md</a>.</li>
+<li><strong>Structured output</strong> — write all final <code>confirmed</code>, <code>needs_validation</code>, and <code>rejected</code> records to <code>findings.json</code>; validate it with <code>report-schema.json</code> and <code>validate-findings.cjs</code>, and validate the coverage claim with <code>validate-coverage-ledger.cjs</code>.</li>
+<li><strong>Independent record verification</strong> — use fresh agents to verify final source claims and reconcile corrections or state changes.</li>
+<li><strong>Target-neutral report</strong> — derive <code>REPORT.md</code>, <code>FINDINGS-DETAIL.md</code>, and <code>NEEDS-VALIDATION.md</code> from the final records, with no live-probe instructions.</li>
+</ol>
+<p>Do not end the run before one of exactly two terminal states: (a) all Phase 6 artifacts are written and both validators pass, or (b) <code>run_status: "incomplete"</code> is recorded with its exact reason and the gap is disclosed in the report. Never stop mid-phase.</p>
+<h2>Anti-patterns</h2>
+<ol>
+<li>Checklist deviations presented as vulnerabilities.</li>
+<li>Defense-in-depth advice with no reachable boundary violation.</li>
+<li>Live or shared-environment testing where bounded local evidence is insufficient.</li>
+<li>Guessing provider, proxy, browser, identity, or deployment behavior not present in source.</li>
+<li>Treating intended same-principal authority or self-impact as a cross-boundary result.</li>
+<li>Reporting a parser or runtime effect stronger than the observed effect.</li>
+<li>Emitting prose-only hunter results that cannot be deduplicated or verified.</li>
+<li>Re-reporting carried same-source prior confirmed records or using them as exemplars that anchor the hunt.</li>
+<li>Assigning severity to <code>needs_validation</code> records.</li>
+<li>Writing the report before independent verification or letting prose and JSON disagree.</li>
+</ol>

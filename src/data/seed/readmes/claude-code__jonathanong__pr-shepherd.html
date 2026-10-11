@@ -10,7 +10,7 @@
 </ol>
 <p>Highlights:</p>
 <ul>
-<li>Batched GraphQL reads and writes (plus REST where GraphQL cannot) so one poll replaces a tool-call fan-out. MCP <code>iterate</code> is one tick and the client owns recurrence; <code>--debounce</code> is a poll-dispatcher settle window, not an MCP tool.</li>
+<li>GraphQL by default, with a supported REST transport for Claude Code cloud sessions and narrowly defined automatic fallback. REST may expose less context; missing fields remain unknown. MCP <code>iterate</code> is one tick and the client owns recurrence; <code>--debounce</code> is a poll-dispatcher settle window, not an MCP tool.</li>
 <li>CI summaries include failed checks, and the failed job/step plus a log excerpt when triage can fetch them. Job and log details are omitted for <code>STARTUP_FAILURE</code> and <code>CANCELLED</code>; agents may still inspect logs.</li>
 <li>Handles GitHub comment types (comments, threads, replies) and their states, including first-look, outdated, resolved, minimized, and edited.</li>
 <li><code>apply</code> batches resolve / reply / minimize / dismiss. <code>build_suggestion_patches</code> validates and returns ordered diffs without mutating git.</li>
@@ -25,8 +25,8 @@
 <li><code>WAIT</code> — no immediate action; continue with the next poll.</li>
 <li><code>MARK_READY</code> — the CLI converted an eligible draft PR to ready; continue polling.</li>
 <li><code>FIX_CODE</code> — agent work is required; complete it, push when needed, then continue polling. Push access to the PR head branch is a usage precondition.</li>
-<li><code>MERGE</code> — run the emitted head-pinned auto-merge or queue command. Ordinary merges include a plain-merge fallback; queue merges include a GraphQL enqueue fallback. GitHub is authoritative for the result and reports any authorization failure.</li>
-<li><code>CANCEL</code> — stop polling this pull request because it merged, closed, or completed its ready-delay. Continue any remaining pull requests or issues from the original request.</li>
+<li><code>MERGE</code> — run the emitted head-pinned merge or queue command for the selected transport. GitHub is authoritative for the result and reports any authorization failure. Queue operations can use REST.</li>
+<li><code>CANCEL</code> — stop polling this pull request because it merged, closed, or completed its ready-delay. It prints no instructions; continue any remaining pull requests or issues from the original request.</li>
 <li><code>ESCALATE</code> — stop polling until a human provides direction. Native stacks reach this only after their autonomous one-PR sessions are exhausted.</li>
 </ul>
 <p>Native-stack summaries additionally use stack-level <code>SHEPHERD</code>: run the listed one-PR sessions,
@@ -36,14 +36,12 @@ then recheck the stack. It is not a per-PR <code>FIX_CODE</code> action.</p>
 
 # PR #123 [FIX_CODE]
 
-**status** `UNRESOLVED_COMMENTS` · **merge** `CLEAN` · **state** `OPEN` · **repo** `owner/repo`
+**status** `UNRESOLVED_COMMENTS` · **repo** `owner/repo`
 **summary** 3 passing
-Approvals: None [Not Required]
-Conversations Resolved: No [Not Required]
 
 ## Review threads
 
-### `threadId=PRRT_kwDOSGizTs58XB1L` — `src/commands/iterate/index.mts:42` (@alice · User · MEMBER)
+### `threadId=PRRT_kwDOSGizTs58XB1L` — `src/commands/iterate/index.mts:42` (@alice · MEMBER)
 
 &gt; The variable name is misleading.
 
@@ -52,21 +50,14 @@ Conversations Resolved: No [Not Required]
 - `24697658766` — `CI › lint / typecheck / test (22.x)` [conclusion: FAILURE]
   &gt; oxfmt
 
-## Post-fix actions
-
-- base: `main`
-- apply review: `pr-shepherd apply review 123 --reply-thread-ids PRRT_kwDOSGizTs58XB1L --message "$DISMISS_MESSAGE" --require-sha "$HEAD_SHA"`
-
 ## Instructions
 
-1. Review each item under `## Review threads` and `## Failing checks` and decide whether it needs a code change.
-2. Apply every warranted review fix in each file referenced above.
-3. Triage `## Failing checks`. Playbook: "CI failure triage".
-4. If you changed code, commit any remaining changes and push to the PR head branch. If you did not, do not commit.
-5. If you did not change code, replace `$HEAD_SHA` with `$(git rev-parse HEAD)` (it must equal the remote PR head). If you did, use the pushed SHA.
-6. Replace `$DISMISS_MESSAGE` with one sentence describing what changed.
-7. Run the `apply review:` command above. Playbook: "Review-mutation mechanics".
-8. `[FIX_CODE]` is non-terminal. Iterate immediately with the same options.
+1. Fix each warranted item.
+2. Triage `## Failing checks`. Playbook: "CI failure triage".
+3. Commit and push any changes.
+4. Journal key decisions or rejections with URLs or IDs: `pr-shepherd apply journal 123 '- &lt;decision&gt;'`
+5. `$DISMISS_MESSAGE`: one sentence on what changed. Run even if no code changed: `pr-shepherd apply review 123 --reply-thread-ids PRRT_kwDOSGizTs58XB1L --message "$DISMISS_MESSAGE" --require-sha HEAD`
+6. Rerun Shepherd now.
 </code></pre>
 <p>See <a href="https://github.com/jonathanong/pr-shepherd/blob/HEAD/docs/actions.md" target="_blank" rel="noopener noreferrer">docs/actions.md</a> for the complete output contract and <a href="https://github.com/jonathanong/pr-shepherd/blob/HEAD/docs/escalations.md" target="_blank" rel="noopener noreferrer">docs/escalations.md</a> for the exact finite human-handoff boundary. Iterate/poll PR outcomes use exit codes <code>0</code> and <code>10</code>–<code>16</code>; command and GitHub failures use <code>sysexits.h</code> codes — <a href="https://github.com/jonathanong/pr-shepherd/blob/HEAD/docs/exit-codes.md" target="_blank" rel="noopener noreferrer">docs/exit-codes.md</a>.</p>
 <h2>Workflow Assumptions</h2>
@@ -79,7 +70,7 @@ Conversations Resolved: No [Not Required]
 <li>Draft PRs can be marked ready automatically when clean; disable with <code>actions.autoMarkReady: false</code> or <code>--no-auto-mark-ready</code>.</li>
 <li>With <code>--merge</code>, actionable review threads/comments/reviews/summaries are held back (<code>WAIT</code>, with raw deferred-work counts) while a PR sits in the merge queue, since a Shepherd-initiated push would eject it; set <code>actions.workWhileQueued: true</code> to act on them immediately instead. Failing checks and merge conflicts are never deferred.</li>
 <li>The CLI never performs git mutations itself — it only emits commit/push instructions for the agent to run. Push access to the PR head is a usage precondition; GitHub viewer fields do not create a separate push-authorization handoff.</li>
-<li>Generated iterate mutations and automatic actions are capability-aware and omit unauthorized commands. Explicit <code>apply</code> operations forward the caller's requested IDs without iterate's author or capability policy and surface GitHub's result.</li>
+<li>Generated iterate mutations use capability fields when the transport supplies them. With REST, capability is unknown and otherwise eligible mutations are attempted; GitHub's response is authoritative. Explicit <code>apply</code> operations forward the caller's requested IDs and surface GitHub's result.</li>
 <li><code>build_suggestion_patches</code> turns one or more ordered GitHub suggestion threads into checked patches and commit metadata, but never edits the working tree or git history. Local HEAD may be ahead when the live PR head is its ancestor.</li>
 </ul>
 <h2>Usage</h2>
@@ -106,6 +97,9 @@ pr-shepherd 42 --debounce 5m           # wait 5m after first FIX_CODE or stack S
 pr-shepherd 42 --ready-delay 15m
 pr-shepherd 42 --merge                  # request head-pinned auto-merge/queue; GitHub reports the result
 pr-shepherd iterate 42                 # single tick
+pr-shepherd 42 --instructions playbook # fold invariant fix_code steps into a playbook pointer (default: inline)
+pr-shepherd 42 --poll-mode event       # one tick, no sleeping; prints nextCheck (default under CLAUDE_CODE_REMOTE=true)
+pr-shepherd playbook "Fix-code loop"   # print a bundled skill playbook (no name lists them)
 pr-shepherd owner/repo#42              # poll a PR in an explicit repository
 pr-shepherd https://github.com/owner/repo/pull/42
 pr-shepherd 42 43 44                   # summarize an explicit same-repository set
@@ -113,12 +107,15 @@ pr-shepherd --stack 43                 # summarize every PR in a native GitHub s
 </code></pre>
 <p>A user-supplied <code>--merge</code> authorizes the agent to run the emitted merge/enqueue commands for the
 selected PRs or stack without another conversational confirmation. Host permission checks still apply.</p>
-<p>Multi-PR and <code>--stack</code> polling use compact, read-only GraphQL summaries. They return when work is
+<p>Multi-PR and <code>--stack</code> polling use compact, read-only summaries from the selected transport.
+GraphQL mode uses GraphQL summaries; REST mode preserves unavailable fields as unknown. They return when work is
 needed, every selected PR is complete, the bounded timeout expires, or <code>--until-terminal</code> crosses a
 configured GraphQL quota-warning band. Explicit PR sets give each actionable row an exact single-PR
 <code>pollCommand</code>, so independent rows can proceed before the next aggregate poll.</p>
 <p>Native-stack rows are ordered bottom-to-top. <code>--stack</code> never performs a mutation itself. Every
-layer that still has work gets its own one-PR session on the same tick, including a clean draft
+row marks ownership by comparing its author with the authenticated viewer; REST reads <code>/user</code>
+for that identity without inferring viewer permissions. Sessions act only on rows marked <code>owned</code>. Every
+owned layer that still has work gets its own one-PR session on the same tick, including a clean draft
 whose session marks it ready. Layers do not wait for a lower layer's READY receipt, so their
 ready-delays overlap. With automatic mark-ready disabled, the instructions ask the agent to mark
 a clean draft ready after its probe. A queued stack, or one whose remaining layers can only wait,
@@ -128,13 +125,19 @@ topology returns <code>ESCALATE</code> for human direction after any other sheph
 until then, <code>SHEPHERD</code> remains the immediate action and lists the human blockers too.</p>
 <p>With <code>--stack --merge</code>, the highest open layer whose open lower layers all have current READY
 receipts, and whose bottom open layer GitHub has retargeted onto the stack base, returns <code>MERGE</code>
-with <code>gh stack merge &lt;that PR number&gt; --yes</code> and the allowed method flag (<code>--squash</code> unless config or the repository selects another). That lands the named layer and every
+with the transport-specific stack merge command and allowed method. GraphQL mode uses
+<code>gh stack merge &lt;that PR number&gt; --yes</code>; REST mode uses the SHA-pinned
+<code>pr-shepherd apply merge</code> command, using the trunk's known queue policy even when the named layer
+targets its parent branch. The command binds the observed stack, trunk, and ordered prefix with
+<code>--expected-stack</code> and rejects a changed stack before submission. Unknown REST queue policy uses
+<code>default</code> without a merge method. Known queue requests omit the configured direct merge method.
+That lands the named layer and every
 unmerged layer below it. When the base uses a merge queue, the same command queues the prefix
 together and GitHub evaluates each layer from the bottom; a failure ejects that layer and those
 above it. For a <code>failed_checks</code> removal on the layer's first ejection, the one-PR session emits a head-, queue-commit-, and timestamp-pinned local acknowledgment command; run it only when the failure does not reproduce after updating from the latest base, the head did not change, and no source changes or other blockers remain. Fresh source checks and a new READY receipt then let the aggregate selector recover the eligible prefix. Manual or stale removals cannot use this path. Layers above the prefix keep their one-PR sessions. After the merge, GitHub retargets
 the next layer, so the rerun continues until the stack returns <code>CANCEL</code>. API and MCP aggregate
 calls perform one summary tick and leave recurrence to the caller.</p>
-<p>Polling defaults can be set under <code>poll</code> in <code>.pr-shepherdrc.yml</code>: <code>intervalSeconds</code> (built-in 60 for one PR), <code>stackIntervalFactor</code> (built-in 2, so <code>--stack</code> and multi-PR polls wait 120s), <code>timeoutSeconds</code>, <code>debounceSeconds</code>, and <code>quietStatus</code>. Explicit <code>--interval</code> overrides either period for that invocation and is not multiplied. Other explicit flags override configuration, including <code>--no-quiet-status</code> when a shared config enables quiet output. Quiet status remains off by default. Quota-warning bands stay multiples of <code>intervalSeconds</code>; the dispatcher sleeps the slower of the effective interval and the active band, so a default stack waits 120s until a tighter band is slower than that.</p>
+<p>Polling defaults can be set under <code>poll</code> in <code>.pr-shepherdrc.yml</code>: <code>intervalSeconds</code> (built-in 60 for one PR), <code>stackIntervalFactor</code> (built-in 2, so <code>--stack</code> and multi-PR polls wait 120s), <code>timeoutSeconds</code>, <code>debounceSeconds</code>, <code>quietStatus</code>, and <code>reconcileSeconds</code> (built-in 900; the longest an idle GraphQL wait replays its last snapshot while REST change detectors are unchanged). Explicit <code>--interval</code> overrides either period for that invocation and is not multiplied. Other explicit flags override configuration, including <code>--no-quiet-status</code> when a shared config enables quiet output. Quiet status remains off by default. Quota-warning bands stay multiples of <code>intervalSeconds</code>; the dispatcher sleeps the slower of the effective interval and the active band, so a default stack waits 120s until a tighter band is slower than that.</p>
 <h3>Apply Review And Journal Changes, Or Select Files</h3>
 <p>Use <code>apply</code> with ordered operations to reply/resolve/minimize/dismiss review items, mark selected changed files as viewed, append an idempotent Shepherd Journal item, or record a validated native-stack CI queue-removal acknowledgment. Explicit operations are attempted and surface GitHub's per-operation results; generated iterate guidance remains capability-filtered. Use <code>build_suggestion_patches</code> to turn ordered review suggestions into checked patches and commit metadata; it never changes the worktree or git history.</p>
 <h3>Extract Shepherd Journal Entries</h3>
@@ -151,7 +154,8 @@ complete Markdown list item with LF line endings. It fails closed for malformed 
 containers and ignores journal-shaped examples hidden in Markdown constructs. The full journal API,
 including append and reconciliation helpers, is documented in <a href="https://github.com/jonathanong/pr-shepherd/blob/HEAD/docs/api.md" target="_blank" rel="noopener noreferrer">docs/api.md</a>.</p>
 <p>MCP clients can call <code>extract_journal({ body: prBody })</code> for the same pure result without writing a
-file, or <code>get_journal({ pr: "owner/repo#123" })</code> to fetch a PR body through GraphQL and extract it.
+file, or <code>get_journal({ pr: "owner/repo#123" })</code> to fetch a PR body through the selected
+transport and extract it.
 Both return the typed extraction JSON in <code>structuredContent</code> and <code>content</code>; neither mutates the PR.</p>
 <p>For shell automation that already has a PR body, use the equivalent local-only command:</p>
 <pre><code class="language-sh">pr-shepherd journal extract --body-file pr-body.md
@@ -161,6 +165,7 @@ configuration, or Shepherd logs. On POSIX, its final body-file path entry must b
 file in a trusted parent directory; symlinks, FIFOs, and devices are rejected with exit code 66.
 Unsupported platforms fail closed with that same exit code.</p>
 <h3>Clean Local State</h3>
+<p>In Claude Code cloud sessions, <a href="https://github.com/jonathanong/pr-shepherd/blob/HEAD/docs/cloud.md" target="_blank" rel="noopener noreferrer">event mode</a> runs one tick per event or wake-up instead of sleeping, and the default state directory moves into the repository's common directory.</p>
 <p><code>pr-shepherd</code> stores seen markers, fix-attempt counters, stall fingerprints, ready-delay markers, and logs under <code>$PR_SHEPHERD_STATE_DIR</code> (default: <code>pr-shepherd-state</code> in the per-user temp dir; see <a href="https://github.com/jonathanong/pr-shepherd/blob/HEAD/docs/configuration.md#environment-variables" target="_blank" rel="noopener noreferrer">configuration</a>).</p>
 <pre><code class="language-sh">pr-shepherd admin clean current
 pr-shepherd admin clean repo
@@ -242,7 +247,7 @@ const rule: ClassifyRule = (item) =&gt; {
 };
 export default rule;
 </code></pre>
-<p><code>suppress: true</code> hides the item from agent output. <code>autoResolve: true</code> queues it for the minimize/resolve mutation. <code>reason</code> is an optional note. When both flags apply together and <code>actions.autoMinimizeSuppressed</code> is <code>true</code> (the default), Shepherd resolves the thread or minimizes the comment or review summary during <code>iterate</code> only when GitHub reports the exact per-object capability. Confirmed successes are recorded on <code>threads.autoResolved</code> and <code>comments.autoMinimized</code>, printed once as <code>## Classification auto-resolve</code> before <code>## Instructions</code> (the same <code>ruleAutoResolve</code> object in JSON), and appended as one Shepherd Journal list item attributed to the token login. Distinct rule reasons are included. Failed IDs stay on the generated <code>apply review</code> command, and each failure is an extra bullet in that section. A journal write failure is reported the same way and does not undo the GitHub resolve or minimize. <code>actions.autoMinimizeSuppressed: false</code> leaves the IDs on that command and does not mutate, journal, or print the line. Denied or unverifiable items return to the normal first-look/edit visibility gate and produce no mutation recommendation.</p>
+<p><code>suppress: true</code> hides the item from agent output. <code>autoResolve: true</code> queues it for the minimize/resolve mutation. <code>reason</code> is an optional note. When both flags apply together and <code>actions.autoMinimizeSuppressed</code> is <code>true</code> (the default), Shepherd attempts supported operations and relies on GitHub's response when capability is unknown. Confirmed successes are recorded on <code>threads.autoResolved</code> and <code>comments.autoMinimized</code>, printed once as <code>## Classification auto-resolve</code> before <code>## Instructions</code> (the same <code>ruleAutoResolve</code> object in JSON), and appended as one Shepherd Journal list item attributed to the token login. Distinct rule reasons are included. Failed IDs stay on the generated <code>apply review</code> command, and each failure is an extra bullet in that section. A journal write failure is reported the same way and does not undo the GitHub resolve or minimize. <code>actions.autoMinimizeSuppressed: false</code> leaves the IDs on that command and does not mutate, journal, or print the line. Denied review mutations are surfaced once then skipped; REST comment minimization is unsupported and is surfaced as a one-look skip. See <a href="https://github.com/jonathanong/pr-shepherd/blob/HEAD/docs/rest.md" target="_blank" rel="noopener noreferrer">transport behavior</a>.</p>
 <p>TypeScript rules are loaded by the runtime's native TypeScript support; keep them to erasable syntax such as type annotations and <code>import type</code>. Runtime TypeScript features that need transpilation, such as enums, namespaces, parameter properties, and decorators, are not supported. Use <code>.mts</code> for portable ESM rules across Node, Bun, and Deno.</p>
 <p>Ready-to-use examples for common patterns are in <a href="https://github.com/jonathanong/pr-shepherd/blob/HEAD/examples/classification/" target="_blank" rel="noopener noreferrer"><code>examples/classification/</code></a>.</p>
 <h2>CLI aliases</h2>
