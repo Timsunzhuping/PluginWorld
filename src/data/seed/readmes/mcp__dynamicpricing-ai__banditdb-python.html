@@ -1,0 +1,500 @@
+<h1>BanditDB Python SDK</h1>
+<p>The official Python client and Model Context Protocol (MCP) server for <strong>BanditDB</strong> — the ultra-fast, lock-free Contextual Bandit database written in Rust.</p>
+<p>BanditDB abstracts away the complex linear algebra of Reinforcement Learning (LinUCB, Thompson Sampling) behind a dead-simple API. Build real-time personalizers, dynamic A/B tests, and give LLM agents mathematically rigorous persistent memory.</p>
+
+<p>mcp-name: com.banditdb/mcp</p>
+<h2>Installation</h2>
+<pre><code class="language-bash">pip install banditdb-python
+</code></pre>
+<p>Requires the BanditDB Rust server running (default: <code>http://localhost:8080</code>).</p>
+<hr />
+<h2>1. Standard SDK Usage</h2>
+<p>The client features automatic connection pooling, exponential backoff retries, and strict timeouts.</p>
+<pre><code class="language-python">from banditdb import Client, BanditDBError
+
+# Connect to the BanditDB server.
+# Pass api_key if BANDITDB_API_KEY is set on the server.
+db = Client(
+    url="http://localhost:8080",
+    timeout=2.0,
+    api_key="your-secret-key",   # omit if server runs without auth
+)
+
+try:
+    # 1. Create a campaign (run once at startup)
+    # algorithm defaults to "linucb"; use "thompson_sampling" for Bayesian exploration
+    db.create_campaign(
+        campaign_id="checkout_upsell",
+        arms=["offer_discount", "offer_free_shipping"],
+        feature_dim=3,
+    )
+    # or: db.create_campaign(..., algorithm="thompson_sampling")
+
+    # 2. A user arrives — ask the database what to show them
+    # Context: [is_mobile, cart_value_normalized, is_returning_user]
+    arm_id, interaction_id = db.predict("checkout_upsell", [1.0, 0.8, 0.0])
+    print(f"Showing: {arm_id}")  # e.g., "offer_free_shipping"
+
+    # 3. The user clicked — send the reward
+    db.reward(interaction_id, reward=1.0)
+
+except BanditDBError as e:
+    print(f"Database error: {e}")
+</code></pre>
+<h3>All Client methods</h3>
+<p><strong>Health</strong></p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>health()</code></td>
+<td>Returns <code>True</code> if the server is reachable and the WAL writer is healthy.</td>
+</tr>
+<tr>
+<td><code>health_detail()</code></td>
+<td>Returns the full health dict including per-campaign <code>entropy</code> and <code>status</code> (<code>"ok"</code> / <code>"warning"</code> / <code>"critical"</code>).</td>
+</tr>
+</tbody></table>
+<p><strong>Campaigns</strong></p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>create_campaign(campaign_id, arms, feature_dim, alpha=1.0, algorithm="linucb", metadata=None, decay_half_life_hours=None, pacing=None)</code></td>
+<td>Register a new campaign. <code>algorithm</code> accepts <code>"linucb"</code>, <code>"thompson_sampling"</code>, <code>NeuralLinUCBConfig</code>, <code>NeuralTSConfig</code>, or <code>ProgressiveConfig</code>. <code>metadata</code> is an arbitrary JSON dict (≤ 64 KB). <code>pacing</code> takes a <code>PacingConfig</code> — see <a href="#budget-constraints" target="_blank" rel="noopener noreferrer">Budget constraints</a>.</td>
+</tr>
+<tr>
+<td><code>list_campaigns()</code></td>
+<td>Returns a list of all campaigns (active and archived) with <code>alpha</code>, <code>arm_count</code>, and <code>algorithm</code>.</td>
+</tr>
+<tr>
+<td><code>campaign_info(campaign_id)</code></td>
+<td>Returns full per-arm state: <code>theta</code>, <code>theta_norm</code>, prediction and reward counters. Raises <code>APIError</code> (404) if not found.</td>
+</tr>
+<tr>
+<td><code>report(campaign_id)</code></td>
+<td>Business-level convergence report. <code>converged=True</code> means one arm has a statistically significant lead at 95% CI — safe to stop. <code>converged=False</code> means leading but CIs still overlap. <code>converged=None</code> means not enough data yet (&lt; 30 rewards per arm).</td>
+</tr>
+<tr>
+<td><code>diagnostics(campaign_id)</code></td>
+<td>Operator diagnostics: per-arm theta norms, A_inv uncertainty bounds, entropy health (<code>selection_entropy</code>, <code>entropy_status</code>, <code>entropy_trend</code>, <code>likely_cause</code>, <code>suggested_action</code>), tournament traffic, and neural buffer size.</td>
+</tr>
+<tr>
+<td><code>archive_campaign(campaign_id)</code></td>
+<td>Soft-delete: pauses predictions/rewards but preserves all learned weights. Recoverable with <code>restore_campaign()</code>.</td>
+</tr>
+<tr>
+<td><code>restore_campaign(campaign_id)</code></td>
+<td>Restore an archived campaign to active status with all weights intact.</td>
+</tr>
+<tr>
+<td><code>delete_campaign(campaign_id)</code></td>
+<td>Permanently delete a campaign. Returns <code>False</code> if not found.</td>
+</tr>
+<tr>
+<td><code>pacing(campaign_id)</code></td>
+<td>Budget state of a pacing campaign: per-resource <code>budget</code>, <code>consumed</code>, <code>remaining</code>, <code>utilization</code>, <code>lambda</code> (shadow price), <code>is_exhausted</code>. <code>None</code> if the campaign has no pacing. Server 2.3.0+.</td>
+</tr>
+<tr>
+<td><code>add_arm(campaign_id, arm_id, group=None, warm_start=None, costs=None)</code></td>
+<td>Add an arm to a live campaign (admin key). <code>costs</code> maps resource name → units consumed per prediction, for pacing campaigns.</td>
+</tr>
+<tr>
+<td><code>set_arm_status(campaign_id, arm_id, status)</code></td>
+<td><code>"active"</code>, <code>"paused"</code> (not selectable, reversible) or <code>"retired"</code>. The arm keeps what it learned. Admin key.</td>
+</tr>
+</tbody></table>
+<p><strong>Predict &amp; Reward</strong></p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>predict(campaign_id, context, eligible_arms=None, exclude_arms=None)</code></td>
+<td>Returns <code>(arm_id, interaction_id)</code>. Pass <code>interaction_id</code> to <code>reward()</code> to close the loop. The optional filters narrow candidates for this call only.</td>
+</tr>
+<tr>
+<td><code>batch_predict(predictions)</code></td>
+<td>Predict for up to 100 campaign/context pairs in a single round-trip. Each item: <code>{"campaign_id": str, "context": List[float]}</code>. Returns list of <code>{arm_id, interaction_id}</code> or <code>{error}</code> per item.</td>
+</tr>
+<tr>
+<td><code>reward(interaction_id, reward)</code></td>
+<td>Record outcome. <code>reward</code> must be in <code>[0.0, 1.0]</code>. Raises <code>APIError</code> if the interaction has already been rewarded or has expired (default TTL: 24 h).</td>
+</tr>
+</tbody></table>
+<p><strong>Data &amp; Export</strong></p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>checkpoint()</code></td>
+<td>Flush WAL, snapshot models, write Parquet shards, run neural retrain + tournament eval, rotate WAL. Returns a summary string.</td>
+</tr>
+<tr>
+<td><code>export()</code></td>
+<td>List Parquet export shards grouped by campaign. Returns <code>{export_dir, shards}</code>.</td>
+</tr>
+</tbody></table>
+<h3>Budget constraints</h3>
+<p>Server 2.3.0+. Give a campaign one or more budgeted resources and per-arm costs; the
+server learns a shadow price per resource and steers spend to last the horizon,
+choosing costly arms only where their uplift is worth it.</p>
+<pre><code class="language-python">from banditdb import Client, PacingConfig, ResourceConstraint
+
+db.create_campaign(
+    "promos", ["none", "discount_10", "discount_20"], feature_dim=4,
+    pacing=PacingConfig(resources=[
+        ResourceConstraint(
+            name="promo_budget",
+            budget=5_000.0,      # units available over the horizon
+            horizon=100_000,     # decisions the budget should last
+            arm_costs={"discount_10": 1.0, "discount_20": 2.0},  # "none" costs 0
+        ),
+    ]),
+)
+
+# Arms added later declare their own costs
+db.add_arm("promos", "discount_30", costs={"promo_budget": 3.0})
+
+for r in db.pacing("promos")["resources"]:
+    print(f"{r['name']}: {r['utilization']:.0%} spent, lambda={r['lambda']:.3f}")
+</code></pre>
+<p>Worth knowing:</p>
+<ul>
+<li><strong>Budget is spent at <code>predict</code>, not <code>reward</code>.</strong> A recommendation you never act on still consumes budget.</li>
+<li><strong>Budget never resets and pacing is immutable.</strong> Once spent, costly arms stay unselectable until the campaign is recreated.</li>
+<li><code>arm_costs</code> keys must be campaign arms. The server would silently treat a misspelt arm as free; the SDK raises <code>ValueError</code> instead.</li>
+<li>Predicts on a pacing campaign can return 503 if the server's WAL is saturated.</li>
+<li>Downgrading the server below 2.3.0 silently drops pacing.</li>
+</ul>
+<hr />
+<h2>2. The AI "Hive Mind" (Model Context Protocol)</h2>
+<p>Standard LLM agents are stateless — if they route a task to the wrong model and fail, they repeat the same mistake tomorrow. BanditDB's built-in MCP server gives the entire agent swarm shared persistent memory.</p>
+<h3>Starting the MCP server</h3>
+<pre><code class="language-bash"># Set environment variables before starting
+export BANDITDB_URL=http://localhost:8080
+export BANDITDB_API_KEY=your-secret-key   # omit if server runs without auth
+
+banditdb-mcp
+</code></pre>
+<h3>Connecting to Claude Desktop</h3>
+<p>Add to your Claude configuration file:</p>
+<ul>
+<li>Mac: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code></li>
+<li>Windows: <code>%APPDATA%\Claude\claude_desktop_config.json</code></li>
+</ul>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "banditdb": {
+      "command": "banditdb-mcp",
+      "args": [],
+      "env": {
+        "BANDITDB_URL": "http://localhost:8080",
+        "BANDITDB_API_KEY": "your-secret-key"
+      }
+    }
+  }
+}
+</code></pre>
+<p>The agent swarm now has twelve tools:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>create_campaign</code></td>
+<td>Create a new decision campaign. Accepts <code>algorithm</code> (<code>"linucb"</code> or <code>"thompson_sampling"</code>), <code>alpha</code>, and optional <code>budgets</code> for actions that cost something limited. Use Thompson Sampling for natural Bayesian exploration with no tuning needed.</td>
+</tr>
+<tr>
+<td><code>list_campaigns</code></td>
+<td>List all active campaigns (shows <code>algorithm</code> and <code>alpha</code>) — useful to check what exists before calling <code>get_intuition</code>.</td>
+</tr>
+<tr>
+<td><code>campaign_diagnostics</code></td>
+<td>Inspect per-arm learning state: <code>theta_norm</code>, prediction counts, reward rates, and entropy health. Use when a campaign doesn't seem to be learning or one arm is dominating.</td>
+</tr>
+<tr>
+<td><code>campaign_report</code></td>
+<td>Business-level convergence report. Tells you whether the campaign has statistically converged and which arm is winning with confidence intervals.</td>
+</tr>
+<tr>
+<td><code>get_intuition</code></td>
+<td>Ask BanditDB which arm to pick for a given context. Optional <code>exclude_arms</code> / <code>eligible_arms</code> narrow the choice for this request only. Returns the arm and an <code>interaction_id</code> to save.</td>
+</tr>
+<tr>
+<td><code>batch_get_intuition</code></td>
+<td>Get decisions for multiple campaigns in a single round-trip. Pass a list of <code>{campaign_id, context}</code> dicts.</td>
+</tr>
+<tr>
+<td><code>record_outcome</code></td>
+<td>Report whether the chosen action succeeded (1.0) or failed (0.0). Updates the shared model.</td>
+</tr>
+<tr>
+<td><code>archive_campaign</code></td>
+<td>Soft-delete a campaign. Pauses predictions/rewards but preserves all learned weights.</td>
+</tr>
+<tr>
+<td><code>restore_campaign</code></td>
+<td>Restore an archived campaign to active status with all weights intact.</td>
+</tr>
+<tr>
+<td><code>campaign_budget</code></td>
+<td>Budget spend per resource: consumed, remaining, utilization, shadow price, exhaustion.</td>
+</tr>
+<tr>
+<td><code>add_arm</code></td>
+<td>Add an action to a live campaign, optionally warm-started from existing arms and with budget costs.</td>
+</tr>
+<tr>
+<td><code>set_arm_status</code></td>
+<td>Pause, retire, or reactivate an action. It keeps everything it learned.</td>
+</tr>
+</tbody></table>
+<p>Every decision made by any agent in the network improves the routing for all future agents.</p>
+<hr />
+<h2>3. Data Science &amp; Offline Evaluation</h2>
+<p>BanditDB event-sources every prediction and reward to a Write-Ahead Log (WAL). Calling <code>checkpoint()</code> compiles completed prediction→reward pairs into Snappy-compressed Parquet files — one per campaign — for offline analysis with Polars or Pandas.</p>
+<p>Every prediction is guaranteed to appear in the Parquet file even if its reward arrives hours later: BanditDB re-emits in-flight interactions at each checkpoint so delayed rewards are always captured in a future cycle.</p>
+<pre><code class="language-python"># Checkpoint: snapshot models, write Parquet, rotate the WAL.
+# Call this on a schedule or after significant traffic.
+summary = db.checkpoint()
+print(summary)
+# "Checkpoint written and WAL rotated: 2 campaigns, offset 4821 bytes,
+#  150 interactions exported, 3 in-flight re-emitted"
+
+# List which Parquet files are available
+print(db.export())
+# 'Parquet files in /data/exports: ["llm_routing.parquet"]'
+
+# Load directly from the mounted volume into Polars.
+# Flat schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | propensity | feature_0 | ...
+import polars as pl
+df = pl.read_parquet("/data/exports/llm_routing.parquet")
+print(df.head())
+print(df.columns)
+</code></pre>
+<h3>Offline Policy Evaluation (OPE)</h3>
+<p>The SDK ships three OPE estimators in <code>banditdb.eval</code>. They answer the question: <em>"what would my average reward have been under a different policy — without running a live experiment?"</em></p>
+<p>Install the eval dependencies:</p>
+<pre><code class="language-bash">pip install "banditdb-python[eval]"
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Estimator</th>
+<th>Function</th>
+<th>How it works</th>
+<th>When to use</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Replay</strong></td>
+<td><code>replay(df)</code></td>
+<td>Accepts each interaction with probability <code>(1/K) / propensity</code> (Li et al. 2010). Unbiased sample of the uniform random policy.</td>
+<td>Sanity check baseline. Low coverage is expected — ~1/K of interactions are used.</td>
+</tr>
+<tr>
+<td><strong>IPS / SNIPS</strong></td>
+<td><code>ips(df, clip=10.0)</code></td>
+<td>Uses every interaction with importance weight <code>(1/K) / propensity</code>. Self-normalised to reduce variance. Weight clipping (default 10×) controls the bias-variance tradeoff.</td>
+<td>Primary estimator. Use when you have enough data but want full coverage.</td>
+</tr>
+<tr>
+<td><strong>Doubly Robust</strong></td>
+<td><code>doubly_robust(df, clip=10.0)</code></td>
+<td>Fits a linear reward model, then applies an IPS correction on residuals. Consistent if either the reward model or the propensities are correct.</td>
+<td>Best statistical efficiency. Use when comparing multiple policies or sweeping <code>alpha</code>.</td>
+</tr>
+</tbody></table>
+<p>All three estimators:</p>
+<ul>
+<li>Accept a Polars or pandas DataFrame loaded from a BanditDB Parquet export</li>
+<li>Evaluate the <strong>uniform random policy</strong> as the target (the unbiased baseline to beat)</li>
+<li>Raise <code>ValueError</code> for Thompson Sampling campaigns (propensity column is null — TS does not log propensities)</li>
+<li>Return an <code>OPEResult</code> with <code>estimate</code>, <code>std_error</code>, <code>n_used</code>, <code>n_total</code>, and <code>method</code></li>
+</ul>
+<pre><code class="language-python">import polars as pl
+from banditdb.eval import replay, ips, doubly_robust
+
+df = pl.read_parquet("/data/exports/llm_routing.parquet")
+
+# How much reward would a uniform random policy have earned?
+print(replay(df))
+# OPEResult(method='replay', estimate=0.4821, std_error=0.0312, coverage=22.1% [33/149])
+
+print(ips(df))
+# OPEResult(method='ips', estimate=0.5103, std_error=0.0187, coverage=100.0% [149/149])
+
+print(doubly_robust(df))
+# OPEResult(method='doubly_robust', estimate=0.5219, std_error=0.0141, coverage=100.0% [149/149])
+
+# Compare against the observed reward of the logging policy:
+print("Observed (logging policy):", df["reward"].mean())
+# If observed &gt;&gt; estimate, the campaign has learned something real — it outperforms random.
+</code></pre>
+<p><strong>Practical use: sweep <code>alpha</code> offline before deploying.</strong> Train a campaign on real traffic, checkpoint to Parquet, then replay different alpha values through <code>doubly_robust()</code> to find the best exploration level — no live experiment needed.</p>
+<blockquote>
+<p><strong>Note:</strong> OPE requires the <code>propensity</code> column, which is only written for <strong>LinUCB</strong> campaigns. Thompson Sampling campaigns log <code>null</code> propensities because TS arm selection is stochastic and propensity scoring requires a deterministic logging policy.</p>
+</blockquote>
+<hr />
+<h2>Choosing an Algorithm</h2>
+<p>BanditDB supports five algorithms, selected at campaign creation time.</p>
+<table>
+<thead>
+<tr>
+<th>Algorithm</th>
+<th><code>algorithm</code> value</th>
+<th>Exploration style</th>
+<th>When to use</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>LinUCB</strong></td>
+<td><code>"linucb"</code> (default)</td>
+<td>Deterministic UCB bonus: <code>θ·x + α√(x·A⁻¹·x)</code></td>
+<td>Predictable, tunable. Sweep <code>alpha</code> offline to calibrate.</td>
+</tr>
+<tr>
+<td><strong>Linear Thompson Sampling</strong></td>
+<td><code>"thompson_sampling"</code></td>
+<td>Samples θ̃ ~ N(θ, α²·A⁻¹), scores by θ̃·x</td>
+<td>Bayesian posterior — no alpha-sweep needed. Concurrent users automatically diversify choices.</td>
+</tr>
+<tr>
+<td><strong>NeuralLinUCB</strong></td>
+<td><code>NeuralLinUCBConfig(...)</code></td>
+<td>Deep MLP embedding + LinUCB in embedding space</td>
+<td>Non-linear reward functions. Retrains the MLP every N rewards.</td>
+</tr>
+<tr>
+<td><strong>NeuralTS</strong></td>
+<td><code>NeuralTSConfig(...)</code></td>
+<td>Same MLP embedding as NeuralLinUCB; scores by a posterior draw in embedding space instead of a UCB bound</td>
+<td>Non-linear rewards where long-run performance matters more than early regret. Converges further at 20K+ interactions.</td>
+</tr>
+<tr>
+<td><strong>Progressive</strong></td>
+<td><code>ProgressiveConfig(...)</code></td>
+<td>Self-tuning tournament: runs base + challenger in parallel, shifts traffic to the winner</td>
+<td>Zero-configuration model selection. Picks the best algorithm automatically.</td>
+</tr>
+</tbody></table>
+<pre><code class="language-python">from banditdb import Client, NeuralLinUCBConfig, NeuralTSConfig, ProgressiveConfig
+
+db = Client("http://localhost:8080")
+
+# LinUCB (default)
+db.create_campaign("routing", ["fast", "cheap"], feature_dim=4, alpha=1.5)
+
+# Thompson Sampling — natural Bayesian exploration, alpha=1.0 is ideal
+db.create_campaign("routing_ts", ["fast", "cheap"], feature_dim=4,
+                   algorithm="thompson_sampling")
+
+# NeuralLinUCB — learns a deep embedding of the context, then applies LinUCB
+cfg = NeuralLinUCBConfig(
+    context_dim=4,     # must match feature_dim
+    embed_dim=32,      # arm matrix dimension (default 32)
+    hidden_dim=128,    # MLP hidden layer width (default 128)
+    retrain_every=200, # retrain the MLP every N cumulative rewards
+)
+db.create_campaign("routing_neural", ["fast", "cheap"], feature_dim=4, algorithm=cfg)
+
+# NeuralTS — same parameters as NeuralLinUCB, posterior-sampling exploration
+cfg = NeuralTSConfig(context_dim=4, embed_dim=32)
+db.create_campaign("routing_nts", ["fast", "cheap"], feature_dim=4, algorithm=cfg)
+
+# Progressive — runs LinUCB vs NeuralLinUCB, shifts traffic to whoever wins SNIPS checkpoints
+cfg = ProgressiveConfig(
+    base="linucb",
+    challenger=NeuralLinUCBConfig(context_dim=4, embed_dim=32),
+    min_obs=100,       # minimum buffer entries per arm before any traffic shift
+    required_wins=3,   # consecutive checkpoint wins to earn one traffic step
+    step_bps=1000,     # traffic delta per win run, in basis points (1000 = 10%)
+)
+db.create_campaign("routing_prog", ["fast", "cheap"], feature_dim=4, algorithm=cfg)
+</code></pre>
+<p>All five algorithms share the same <code>predict</code> → <code>reward</code> loop. Either neural config also works as a Progressive <code>base</code> or <code>challenger</code>.</p>
+<p><strong>NeuralLinUCB vs NeuralTS</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>NeuralLinUCB</th>
+<th>NeuralTS</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Exploration</td>
+<td>UCB upper bound (deterministic)</td>
+<td>Posterior sample (stochastic), spread scaled by <code>alpha</code></td>
+</tr>
+<tr>
+<td>Early regret</td>
+<td>Lower</td>
+<td>Higher</td>
+</tr>
+<tr>
+<td>Convergence at 20K+ interactions</td>
+<td>Slower</td>
+<td>Faster</td>
+</tr>
+<tr>
+<td>Best for</td>
+<td>Production safety, costly early mistakes</td>
+<td>Maximum long-run performance</td>
+</tr>
+<tr>
+<td>Paper</td>
+<td>Xu, Wen, Zhao &amp; Gu, ICLR 2022 (<a href="https://arxiv.org/abs/2012.01780" target="_blank" rel="noopener noreferrer">arXiv:2012.01780</a>)</td>
+<td>Zhang, Zhou, Li &amp; Gu, ICLR 2021 (<a href="https://arxiv.org/abs/2010.00827" target="_blank" rel="noopener noreferrer">arXiv:2010.00827</a>)</td>
+</tr>
+</tbody></table>
+<p>Both neural algorithms need a server built with the <code>neural</code> feature: check <code>"neural" in db.server_info()["features"]</code>.</p>
+<hr />
+<h2>Error Handling</h2>
+<table>
+<thead>
+<tr>
+<th>Exception</th>
+<th>When raised</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>BanditDBError</code></td>
+<td>Base exception — catch this to handle all SDK errors.</td>
+</tr>
+<tr>
+<td><code>ConnectionError</code></td>
+<td>Server is offline or unreachable.</td>
+</tr>
+<tr>
+<td><code>TimeoutError</code></td>
+<td>Request exceeded the configured timeout.</td>
+</tr>
+<tr>
+<td><code>APIError</code></td>
+<td>Server returned an error (e.g., campaign not found, unauthorized).</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>License</h2>
+<p>Apache-2.0 — Copyright (C) 2026 Simeon Lukov and Dynamic Pricing Ltd.
+See the <a href="https://github.com/dynamicpricing-ai/banditdb" target="_blank" rel="noopener noreferrer">main repository</a> for details.</p>

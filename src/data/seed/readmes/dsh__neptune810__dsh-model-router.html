@@ -1,0 +1,573 @@
+<h1>dsh-model-router</h1>
+<p>English | <a href="https://github.com/Neptune810/dsh-model-router/blob/HEAD/README.zh.md" target="_blank" rel="noopener noreferrer">中文</a></p>
+<p>A <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a> plugin that keeps a pool of
+models and routes every step to one of them with its reasoning effort set. Thinking stays on —
+DeepSeek rejects a thinking-enabled request whose history contains a tool call made with thinking
+off.</p>
+<h2>Routing table</h2>
+<table>
+<thead>
+<tr>
+<th>Step class</th>
+<th>Decided by</th>
+<th>Reasoning effort</th>
+<th>Internal point</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>trivial</code></td>
+<td>a clearly cheap intent (translate, rename, reformat) in a short step</td>
+<td><code>low</code></td>
+<td>~50</td>
+</tr>
+<tr>
+<td><code>standard</code></td>
+<td>a plain short request with no engineering cue</td>
+<td><code>low</code></td>
+<td>~50</td>
+</tr>
+<tr>
+<td><code>engineering</code></td>
+<td>engineering cues, code/diff/XML structure, or an agent tool loop</td>
+<td><code>high</code></td>
+<td>~75</td>
+</tr>
+<tr>
+<td><code>hard</code></td>
+<td>a dense engineering brief, or failures earned inside the task</td>
+<td><code>high</code> (<code>max</code> when <code>allowMax</code>)</td>
+<td>~75 / 100</td>
+</tr>
+</tbody></table>
+<p><code>high</code> is the default ceiling. V4.1-Flash drives effort from an internal 1–100 scalar and exposes
+three preset names; <code>high</code> corresponds to roughly 75, which is where the published effort curve is
+still steep. Pushing past it costs about 1.6–1.8x the output tokens for a marginal gain.</p>
+<h2>Authorization scopes, the model pool and task presets (v0.5)</h2>
+<p><code>control</code> decides what the router owns, and a manual pick only counts in the scope that owns it: an
+effort change stands down <code>full</code>/<code>effort</code> but not <code>model</code>, and a model switch stands down
+<code>full</code>/<code>model</code> but not <code>effort</code>. While the router is down it stays out until the next command or the
+composer control's <strong>resume</strong> action.</p>
+<table>
+<thead>
+<tr>
+<th>Scope</th>
+<th>Owns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>full</code> — 模型+思考 / Model+Effort</td>
+<td>model + reasoning effort</td>
+</tr>
+<tr>
+<td><code>effort</code> — 思考 / Effort</td>
+<td>one model you pick in the panel: the router only sets that model's thinking level</td>
+</tr>
+<tr>
+<td><code>model</code> — 模型 / Model</td>
+<td>model only; the session keeps its thinking level</td>
+</tr>
+</tbody></table>
+<p>In <code>effort</code> scope the panel first asks you to pick exactly one model
+(<code>POST /model-router/effort-model</code>, reported by <code>/state</code> as <code>effortModel</code> / <code>effectiveEffortModel</code>).
+Until you do, the router stays out entirely — it changes neither the model nor the effort. Once one is
+bound, a manual model switch does not stand it down; changing the thinking level by hand does.</p>
+<p>The client half registers its control into the shipped <code>conversation.input.model</code> seat at priority -1,
+taking over the composer model cell; it carries the official model + effort sections plus the scope
+switch, the resume action, the task-type picker, the model pool and the task presets, and talks to the
+host over same-origin <code>/model-router/*</code> routes.</p>
+<p><strong>Model pool.</strong> Only pooled models are ever selected.</p>
+<pre><code class="language-yaml">pool:
+  - { id: deepseek-official/deepseek-flash, cost: 1, tier: cheap }
+  - { id: deepseek-official/deepseek-v4-pro, cost: 8, tier: strong, maxPerTask: 3 }
+  - { id: deepseek-official/deepseek-v4-flash-vision-exp, cost: 1, tags: [vision] }
+  - { id: vendor-x/writer-pro, cost: 20, weights: { 小说续写: 95 } }
+</code></pre>
+<p><code>tier: strong</code> is what hard steps and evidence escalation prefer; <code>cost</code> feeds
+<code>scoring.costPenalty</code>; <code>maxPerTask</code> caps how many steps of one task may spend that entry; a
+<code>vision</code> tag is required for image steps once any pooled model carries one.</p>
+<p><strong>Task presets.</strong> A user-defined task type with rules and per-model weights:</p>
+<pre><code class="language-yaml">presets:
+  小说续写:
+    match: ["续写", "小说", "文风", "/chapter\\s+\\d+/i"]
+    weights: { "vendor-x/writer-pro": 95, "deepseek-official/deepseek-v4-pro": 60 }
+  代码重构:
+    match: ["重构", "refactor", "架构"]
+    weights: { "deepseek-official/deepseek-v4-pro": 90 }
+</code></pre>
+<p>A type pinned in the composer always wins; with nothing pinned the keyword rules run
+(<code>classifier: rules</code>). Third-party models keep their own effort vocabulary: the router asks the
+provider what it supports, picks the nearest level, and sends no effort field when the model
+advertises none.</p>
+<p><img src="https://raw.githubusercontent.com/Neptune810/dsh-model-router/HEAD/docs/preview-dark.png" alt="The composer panel in dark mode" /></p>
+<p>Opaque by default (the theme menu colour is translucent, which let the conversation
+show through): <img src="https://raw.githubusercontent.com/Neptune810/dsh-model-router/HEAD/docs/preview-background.png" alt="translucent vs opaque" /></p>
+<h2>The router control is the composer model cell (v0.11.0)</h2>
+<p>The router's control registers into the shipped <code>conversation.input.model</code> seat at priority <strong>-1</strong>,
+below the shipped <code>ModelSelect</code> (priority 0, from <code>@deepseek-ai/dsh-client-ui-model-selection</code>). The
+slots engine renders the lowest priority, so the router's merged control takes over the composer model
+cell and the composer shows a single control instead of a second chip beside the official picker.</p>
+<p>That one control keeps both halves. The official half is 本会话模型 / Session model and 推理等级 /
+Reasoning effort, driven by the real ModelDirectory through <code>props.directory.store</code> subscribe,
+<code>props.load()</code> and <code>props.select({ provider, model, reasoningEffort })</code>: provider/model groups, the
+current row's check, the pending spinner, the provider-default row, catalog loading / error / retry, and
+the official "model · effort" trigger label. Below it sit the router's own groups: the 接管 status,
+控制范围 (模型+思考 / 思考 / 模型) and 任务类型, then the model list itself — <strong>the pool is folded into the
+model rows</strong>: every session-model row carries a 模型池 / Model pool chip on its right, tapping it pools or
+unpools that model, a pooled row expands its 定位 / 价格 / 视觉 controls underneath, and pool entries
+whose provider group is not in the directory gather under 其他模型 / Other models with the manual
+"type a model id" row. <strong>Rows are grouped by provider</strong>, each group header carrying 全加入 / Add all and
+全移除 / Remove all, and the panel head carries 自动定价 / Auto price and 联网定价 / Fetch prices to fill
+the 便宜 / 中 / 贵 cost level of entries you have not labelled by hand. Then 任务预设 and 更多. Every mutation goes to the host over same-origin
+<code>/model-router/*</code> routes, and the per-call route row in the conversation is unchanged.</p>
+<p>The old <code>conversation.input.right</code> chip (<code>model-router:composer-control</code>, order 20) is still registered,
+but it <strong>self-retracts</strong> — it disposes itself as soon as the seat registration lands — so a normal host
+renders an empty <code>.right</code> column and only ever sees the merged cell. A host that rejects or renames the
+seat keeps the chip as its fallback.</p>
+<p>0.10.0 tried this first and was rolled back in 0.10.1: the seat rendered blank and a restart failed to
+boot. The root cause: cordis resolves nested services such as <code>remote.session</code> by walking fibers
+<strong>upward from the calling fiber</strong>, so the client plugin itself must declare <code>sessions</code>, <code>remote</code> and
+<code>remote.session</code> before a method may touch <code>ModelDirectory.directoryFor()</code>. The plugin-level inject is
+now <code>["slots", "uiConversation", "sessions", "remote", "remote.session"]</code>.</p>
+<p><strong>Limits.</strong> This is a registration into the shipped seat, not a patch of the official component: the
+official popup's internals (portal menu, search box, keyboard navigation, module CSS) are not
+replicated, only its selection semantics. A DSH that stops declaring <code>conversation.input.model</code> makes
+the seat registration fail silently and the small fallback chip takes over. Plugin source changes still
+need a full <code>dsh web</code>/desktop restart.</p>
+<h2>New conversations inherit the last plan and confirm it (v0.13.0)</h2>
+<p>Every DSH start used to reset the panel to its defaults, and each new conversation decided its routing
+plan on its own. The host now keeps the plan you last set — the scope, the bound effort model and the
+pinned task type — under <code>last</code> in <code>&lt;profile&gt;/.model-router/state.json</code>, and a conversation with no
+choice of its own inherits it. Choices stay per conversation: once you configure a conversation, its own
+<code>sessions</code> entry wins and the other conversations are unaffected.</p>
+<p>An inherited plan is not a decision you made in <em>this</em> conversation, so the panel opens with a
+warn-tinted bar at the top: 已沿用上一次的选择 / carried over from your last choice, or
+新对话：先确认这次的路由方案 / new conversation — confirm this routing plan when there was nothing to
+inherit yet. It lists the effective 范围 / 思考模型 / 任务类型 / 模型池 with a 确认 / Confirm button
+(<code>POST /model-router/confirm { sessionId, plan }</code>), and the composer trigger carries a pulsing amber dot
+until you answer. Confirming records the plan key for that session — <code>/state</code> reports <code>plan</code>, <code>planKey</code>
+and <code>planConfirmed</code> — and neither the bar nor the dot comes back in that conversation; changing the scope,
+the bound model, the task type or the pool produces a different key and asks once more.</p>
+<h2>Multiple brands: grouping, automatic pricing and the cross-brand guard (v0.14.0)</h2>
+<p>The pool used to be a flat list, so a second brand took one click per model. The model list is now <strong>grouped
+by provider</strong> — every official directory group and every brand under 其他模型 / Other models — and each
+group header carries 全加入 / Add all and 全移除 / Remove all, so a whole brand enters or leaves the pool
+in one click.</p>
+<p>Costs no longer have to be labelled by hand. A built-in <strong>relative-price classifier</strong> (<code>lib/pricing.js</code>,
+pure and dependency-free) maps a model name onto 便宜 / 中 / 贵 (cost 1 / 4 / 8) for the common DeepSeek,
+OpenAI, Anthropic, Google, Qwen and Llama families; 自动定价 / Auto price uses it plus any stored
+OpenRouter snapshot, and 联网定价 / Fetch prices pulls a fresh snapshot first (20 s timeout). Each pool
+entry records where its level came from in <code>costSource</code> (<code>builtin</code> | <code>openrouter</code> | <code>manual</code>), and an entry
+you labelled by hand is never overwritten.</p>
+<p>Crossing brands is its own decision. 跨品牌 / Cross-brand has three values — 允许 / 先问 / 禁止 (allow /
+ask / off, default ask). Under <code>ask</code>, when the next step wants a model from another brand the host <strong>stays
+on the current brand</strong>, exposes the candidate as <code>state.cross.proposal</code>, and the panel shows a propose bar
+with 只切一次 / Switch once, 本会话允许 / Allow in this chat and 不再跨品牌 / Never cross brands. A pool
+holding only another brand still routes (the guard needs a same-brand alternative), and the hysteresis
+memory can no longer resurrect a model the guard excluded.</p>
+<p>Routes: <code>POST /model-router/cross { sessionId, action }</code> (<code>allow</code> / <code>once</code> / <code>never</code>),
+<code>POST /model-router/pool/auto-price { fetch }</code> and <code>POST /model-router/prices</code>; <code>/state</code> gains <code>cross</code> and
+<code>prices</code>.</p>
+<h2>The panel matches the host (v0.6.4)</h2>
+<p>The composer control is styled with the harness's own tokens — the same 34px rows,
+hover wash, glyph checks, segmented controls and popover elevation the built-in
+menus use. Open <a href="https://github.com/Neptune810/dsh-model-router/blob/HEAD/docs/ui-preview.html" target="_blank" rel="noopener noreferrer"><code>docs/ui-preview.html</code></a> in a browser (or see
+<a href="https://github.com/Neptune810/dsh-model-router/blob/HEAD/docs/preview-dark.png" target="_blank" rel="noopener noreferrer"><code>docs/preview-dark.png</code></a> / <a href="https://github.com/Neptune810/dsh-model-router/blob/HEAD/docs/preview-light.png" target="_blank" rel="noopener noreferrer"><code>docs/preview-light.png</code></a>)
+to look at it without installing anything.</p>
+<h2>Everything is a click (v0.6.2)</h2>
+<p>The composer control is the whole configuration surface — no JSON or YAML:</p>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>What you do</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>mode</td>
+<td>click 模型+思考 / 思考 / 模型; in 思考, pick the one model the router may tune; a manual pick adds a <strong>resume</strong> button</td>
+</tr>
+<tr>
+<td>task type</td>
+<td>pick <em>auto</em> (keyword rules) or one of your presets</td>
+</tr>
+<tr>
+<td>model pool</td>
+<td><strong>tick models from the live catalog</strong>, then set tier / cost / vision with dropdowns</td>
+</tr>
+<tr>
+<td>task presets</td>
+<td><strong>+ 新建预设</strong> → click a keyword pack (写作 / 代码 / 翻译 / 分析) or add a word → choose each pooled model's weight</td>
+</tr>
+<tr>
+<td>more</td>
+<td>image steps, task detection (rules / semantic), context pressure</td>
+</tr>
+</tbody></table>
+<p>Everything persists in <code>&lt;profile&gt;/.model-router/state.json</code> through the same-origin
+<code>/model-router/*</code> routes, so the profile row config stays optional.</p>
+<h2>Every call shows its route (v0.8.0)</h2>
+<p>Every tool call in the conversation now carries one compact line with the model and thinking level
+that actually ran that segment:</p>
+<pre><code>deepseek-official/deepseek-v4-pro · high
+</code></pre>
+<p>The host folds the session's own events into the <code>modelRouterRoute</code> session projection
+(<code>stateVersion</code> 1): <code>request/header</code> gives the provider, model and effort in force, <code>step/start</code>
+gives the turn and step, and <code>tool/call</code> records that pair under the call id. The effort is <code>null</code>
+when the adapter owns the default, and those rows show the localized <strong>默认</strong> / <strong>default</strong> label.
+The projection keeps the last 200 calls per session and drops the oldest.</p>
+<p>The client half registers a <code>model-router-route</code> conversation Definition on every <code>tool/call</code> and
+renders the row through the <code>conversation.chat.node</code> slot, anchored right after the call (<code>+0.1</code>).
+It reads the projection defensively: a call id the host has not folded yet renders nothing rather
+than borrowing another call's route. The line is a <strong>separate</strong> compact row next to the tool call —
+see <a href="#limitations" target="_blank" rel="noopener noreferrer">Limitations</a> for why it is not a badge inside the tool row.</p>
+<h2>Images, session signals, subagents and the classifier (v0.6.0)</h2>
+<p><strong>Images.</strong> <code>imagePolicy: vision</code> sends a task that carries an image to a vision model: the pool
+entry tagged <code>vision</code>, or <code>visionModel</code> when set explicitly. The image is task-scoped — the next
+command without one goes back to the normal tier.</p>
+<p><strong>Session signals.</strong> The router reads core session projections and lets them sharpen the choice:</p>
+<table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>active todo (<code>todos</code>)</td>
+<td>feeds task-type matching — a todo list states the work better than the prompt</td>
+</tr>
+<tr>
+<td>context pressure</td>
+<td>above <code>signals.contextPressure</code> (0–1) the cheap tier is preferred</td>
+</tr>
+<tr>
+<td>token total</td>
+<td>above <code>signals.sessionTokens</code> (0 = off) the cheap tier is preferred</td>
+</tr>
+<tr>
+<td><code>delegationDepth</code></td>
+<td>subagents prefer the cheap tier (<code>subagent.preferCheap</code>)</td>
+</tr>
+</tbody></table>
+<p>Every decision records the signals it saw, so <code>/router</code> and the composer control can explain it.</p>
+<p><strong><code>/router</code></strong> prints the scope, engagement, pool, task type, the recent decisions and the task's
+strong-tier spend.</p>
+<p><strong>Classifier.</strong> <code>classifier: llm</code> makes one small call per turn to pick a preset
+(<code>classifierModel</code>, effort off, <code>classifierTimeoutMs</code>), caches it for the turn and falls back to the
+keyword rules on any failure. The default stays <code>rules</code>.</p>
+<h2>The five rules</h2>
+<ol>
+<li><strong>No ratchet.</strong> Turn depth contributes no score by default (<code>scoring.turnPerPoint: 0</code>) and tool
+calls are counted per task, so a long agent run does not drift toward the most expensive effort.
+A long run is not a harder task. Since 0.9.0 a tool loop is a score signal only — it no longer
+pins the class at <code>engineering</code> (<code>scoring.toolCallClass</code>).</li>
+<li><strong>Escalation needs evidence.</strong> Inside the current task, <code>escalateOnErrors</code> failing tool results,
+or the same tool call retried with identical arguments <code>escalateOnRepeats</code> times, step the class
+up — at most <code>maxEscalations</code> times. Nothing else moves it.</li>
+<li><strong><code>max</code> is opt-in.</strong> Automatic routing never emits <code>max</code> unless <code>allowMax</code> is set. The ceiling is
+enforced at the effort level, so even a hand-written route table asking for <code>max</code> is clamped.</li>
+<li><strong>A manually selected <code>max</code> is demoted too</strong> (<code>demoteManualMax</code>), but only for models this plugin
+manages. Other models are left alone. Enabling <code>allowMax</code> turns both clamps off.</li>
+<li><strong>Thinking stays on.</strong> <code>off</code> is not an automatic route. DeepSeek's Messages API rejects a
+thinking-enabled request whose history contains an assistant tool call produced while thinking was
+disabled (<code>The content[].thinking in the thinking mode must be passed back to the API</code>). A cheap
+step can still call a tool, and the next step of the same task is an engineering tool loop, so one
+<code>off</code> step followed by a <code>high</code> step failed the turn. <code>trivial</code> now routes to <code>low</code>, and any
+configured or manually selected <code>off</code> is raised to <code>low</code> unless <code>allowThinkingOff</code> is set.
+<strong>Recovery:</strong> if a conversation already contains such a turn (from an earlier version, or from a
+hand-selected <code>off</code>), the router detects it and keeps that session at <code>off</code> instead of failing
+every step, and logs one warning. Compact the session or start a new one to get thinking back.</li>
+</ol>
+<p>Task boundaries come from <code>agent/inbox/claimed</code>, which is what actually opens a new piece of work.
+When a task ends on an unresolved failure, the next one inherits a single hesitant step up — and only
+if it is engineering or hard work. A one-line "translate this" never inherits a crash.</p>
+<h2>Tool loops no longer pin the effort at high (v0.9.0)</h2>
+<p>Before 0.9.0, <code>classifyStep</code> classified a step as <code>engineering</code> whenever its task had already seen one
+tool call (cue <code>agent tool loop</code>), and <code>engineering</code> routes to <code>high</code>. Because the per-task tool
+counter only resets when a new command is claimed, every step from the first tool call to the end of the
+Agent run stayed at <code>high</code>. There was no way back down mid-loop: <code>trivial</code> needs a cheap cue and at
+most 60 tokens, and <code>standard</code> required zero tool calls. And with <code>allowMax: false</code> (the default),
+<code>max</code> is demoted to <code>high</code>, so <code>hard</code> and <code>engineering</code> applied the same effort — evidence
+escalation changed nothing for a task that was already engineering.</p>
+<p>Measured before: <code>帮我把这个文件里的日志改成中文</code> ran <code>standard</code>/<code>low</code> at 0 tools, then
+<code>engineering</code>/<code>high</code> at 1, 3, 6, 12 and 25 tools for the rest of the task; <code>翻译一下这句话</code> with one
+tool also went to <code>high</code>.</p>
+<p><code>scoring.toolCallClass</code> (default <code>standard</code>) decides whether a tool loop can earn the engineering class
+on its own. With <code>standard</code>, tool activity still adds score (<code>toolCallBase</code> = 5, <code>toolCallAt</code> = 3,
+<code>toolCallBig</code> = 8) but the brief — strong cues or structural text — decides the class, and
+<code>escalateOnErrors</code> / <code>escalateOnRepeats</code> still escalate on evidence. Set it to <code>engineering</code> to
+restore the old rule; any other value falls back to <code>standard</code>. Measured after: a casual brief with
+tools stays <code>standard</code>/<code>low</code> throughout, an engineering brief stays <code>engineering</code>/<code>high</code> throughout.
+<code>hard</code> still collapses to <code>high</code> unless <code>allowMax: true</code>, and <code>routes.&lt;class&gt;.effort</code> (for example
+<code>routes.engineering.effort: low</code>) is the direct way to say how expensive a class may get.</p>
+<h2>Configuration</h2>
+<p>The plugin reads its config from its row in the profile's <code>cordis.patch.yml</code>:</p>
+<pre><code class="language-yaml">- id: model-router
+  config:
+    mode: auto            # auto | off
+    model: deepseek-flash
+    allowMax: false       # true enables max for auto routing and manual selection alike
+    maxFallback: high     # where max collapses when allowMax is false
+    allowThinkingOff: false # true re-enables effort "off" (see rule 5: it breaks tool loops)
+    control: full         # full | effort | model — what the router may choose
+    manualOverride:
+      yieldOnManual: true        # a manual pick stands; routing stands down
+      resumeOnNextCommand: true  # …and re-engages on your next command
+    pool: []              # whitelist; empty keeps the single `model` above
+    presets: {}           # task type -&gt; { match: [...], weights: { modelId: 0-100 } }
+    scoring:
+      costPenalty: 0.4    # how strongly relative cost subtracts from a pool score
+      turnPerPoint: 0     # raise this to let long sessions weigh more (not recommended)
+      toolCallClass: standard  # class a tool loop earns: standard (0.9.0) | engineering (pre-0.9.0)
+    hysteresis:
+      downAfter: 2        # quiet steps required before the effort steps down
+    imagePolicy: keep     # keep | vision — route image tasks to a vision model
+    visionModel: null     # explicit vision model; the pool's `vision` tag is used otherwise
+    signals:
+      todos: true         # let the active todo feed task-type matching
+      contextPressure: 0.75  # above this occupancy, prefer the cheap tier (0 disables)
+      sessionTokens: 0    # above this token total, prefer the cheap tier (0 disables)
+    subagent:
+      preferCheap: true   # delegated work stays cheap unless a preset says otherwise
+    classifier: rules     # rules | llm — llm makes one small call per turn
+    classifierModel: null # model used by the llm classifier (defaults to the first pool entry)
+    escalateOnErrors: 2   # failed tool results needed to step up
+    escalateOnRepeats: 3  # identical retries needed to step up
+    routes:
+      trivial:     { effort: low }   # "off" here is raised to low unless allowThinkingOff
+      standard:    { effort: low }
+      engineering: { effort: high }
+      hard:        { effort: max }
+</code></pre>
+<p><code>DSH_MODEL_ROUTER=off|auto</code> overrides <code>mode</code> at boot.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>mode</code></td>
+<td><code>auto</code></td>
+<td><code>off</code> passes every request through, except the manual-<code>max</code> clamp</td>
+</tr>
+<tr>
+<td><code>provider</code></td>
+<td><code>deepseek-official</code></td>
+<td>only this provider is ever touched</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td><code>deepseek-flash</code></td>
+<td>the one model this plugin drives</td>
+</tr>
+<tr>
+<td><code>familyPattern</code></td>
+<td><code>^deepseek-(flash|v4)</code></td>
+<td>conversation models it may take over; a pro session is pulled back to flash</td>
+</tr>
+<tr>
+<td><code>allowMax</code></td>
+<td><code>false</code></td>
+<td>whether <code>max</code> is reachable at all</td>
+</tr>
+<tr>
+<td><code>maxFallback</code></td>
+<td><code>high</code></td>
+<td>what <code>max</code> collapses to</td>
+</tr>
+<tr>
+<td><code>demoteManualMax</code></td>
+<td><code>true</code></td>
+<td>also demote a manually selected <code>max</code></td>
+</tr>
+<tr>
+<td><code>allowThinkingOff</code></td>
+<td><code>false</code></td>
+<td>allow effort <code>off</code> again; only for sessions that stay non-thinking</td>
+</tr>
+<tr>
+<td><code>control</code></td>
+<td><code>full</code></td>
+<td>what the router owns: <code>full</code>, <code>effort</code> or <code>model</code></td>
+</tr>
+<tr>
+<td><code>manualOverride.yieldOnManual</code></td>
+<td><code>true</code></td>
+<td>a manual pick in the scope that owns it makes the router stand down</td>
+</tr>
+<tr>
+<td><code>manualOverride.resumeOnNextCommand</code></td>
+<td><code>true</code></td>
+<td>the next command re-engages it</td>
+</tr>
+<tr>
+<td><code>pool</code></td>
+<td><code>[]</code></td>
+<td><code>provider/model</code> whitelist with <code>cost</code>/<code>tier</code>/<code>tags</code>/<code>weights</code>/<code>maxPerTask</code></td>
+</tr>
+<tr>
+<td><code>presets</code></td>
+<td><code>{}</code></td>
+<td>task types with <code>match</code> rules and per-model <code>weights</code></td>
+</tr>
+<tr>
+<td><code>scoring.costPenalty</code></td>
+<td><code>0.4</code></td>
+<td>relative-cost weight in the pool score</td>
+</tr>
+<tr>
+<td><code>scoring.toolCallClass</code></td>
+<td><code>standard</code></td>
+<td>class a tool loop earns on its own: <code>standard</code> (0.9.0) or <code>engineering</code> (pre-0.9.0 rule); any other value falls back to <code>standard</code></td>
+</tr>
+<tr>
+<td><code>hysteresis.downAfter</code></td>
+<td><code>2</code></td>
+<td>quiet steps before a downgrade applies</td>
+</tr>
+<tr>
+<td><code>classifier</code></td>
+<td><code>rules</code></td>
+<td><code>rules</code> or <code>llm</code> (one small call per turn, rules as fallback)</td>
+</tr>
+<tr>
+<td><code>classifierModel</code></td>
+<td>first pool entry</td>
+<td>model the LLM classifier uses</td>
+</tr>
+<tr>
+<td><code>imagePolicy</code></td>
+<td><code>keep</code></td>
+<td><code>vision</code> routes a task carrying an image to a vision model</td>
+</tr>
+<tr>
+<td><code>visionModel</code></td>
+<td><code>null</code></td>
+<td>explicit vision model id</td>
+</tr>
+<tr>
+<td><code>signals.todos</code></td>
+<td><code>true</code></td>
+<td>let the active todo feed task-type matching</td>
+</tr>
+<tr>
+<td><code>signals.contextPressure</code></td>
+<td><code>0.75</code></td>
+<td>occupancy above which the cheap tier is preferred</td>
+</tr>
+<tr>
+<td><code>signals.sessionTokens</code></td>
+<td><code>0</code></td>
+<td>token total above which the cheap tier is preferred</td>
+</tr>
+<tr>
+<td><code>subagent.preferCheap</code></td>
+<td><code>true</code></td>
+<td>delegated work prefers the cheap tier</td>
+</tr>
+<tr>
+<td><code>leaveImageSteps</code></td>
+<td><code>true</code></td>
+<td>steps carrying images keep the caller's model</td>
+</tr>
+<tr>
+<td><code>imagePolicy</code></td>
+<td><code>keep</code></td>
+<td>set to <code>flash</code> to route image steps too (the flash model has native vision)</td>
+</tr>
+<tr>
+<td><code>escalateOnErrors</code></td>
+<td><code>2</code></td>
+<td>failure-evidence threshold</td>
+</tr>
+<tr>
+<td><code>escalateOnRepeats</code></td>
+<td><code>3</code></td>
+<td>repeated-call threshold</td>
+</tr>
+<tr>
+<td><code>maxEscalations</code></td>
+<td><code>2</code></td>
+<td>most classes a single task may climb</td>
+</tr>
+<tr>
+<td><code>carryUnresolved</code></td>
+<td><code>true</code></td>
+<td>carry one step up from an unresolved failure</td>
+</tr>
+</tbody></table>
+<h2>Install</h2>
+<p><code>dsh plugin</code> is a pnpm forwarder, so any pnpm specifier works. From the npm registry:</p>
+<pre><code class="language-sh">dsh plugin --profile web add @neptune810/dsh-model-router
+</code></pre>
+<p>or straight from the repository:</p>
+<pre><code class="language-sh">dsh plugin --profile web add github:Neptune810/dsh-model-router
+</code></pre>
+<p>Restart <code>dsh web</code> afterwards. Because the router registers listeners at boot, a reload is not
+enough.</p>
+<h2>Requirements</h2>
+<ul>
+<li>Node 20 or newer.</li>
+<li>Verified against <code>@deepseek-ai/dsh</code> 0.1.7-rc.2. The plugin uses <code>agent/request</code>,
+<code>agent/inbox/claimed</code>, and <code>session.deriveMessages()</code>. No <code>engines.dsh</code> range is declared, so the
+plugin market keeps this entry visible rather than guessing it incompatible.</li>
+</ul>
+<h2>Limitations</h2>
+<ul>
+<li><strong>No config schema.</strong> Settings are read from the profile patch layer shown above and do not render
+as a form in the settings UI. This is deliberate: a schema would require importing
+<code>@deepseek-ai/*</code> packages, which a plugin installed beside the profile cannot resolve.</li>
+<li>The router only touches the <code>deepseek-official</code> provider and models matching <code>familyPattern</code>.</li>
+<li><strong>The router control takes over the official model cell by registration, not by patching the
+component.</strong> It registers into <code>conversation.input.model</code> at priority -1 (below the shipped
+<code>ModelSelect</code> at 0), keeping the official model + effort sections inside its own panel. The old
+<code>conversation.input.right</code> chip (<code>model-router:composer-control</code>, order 20) self-retracts and is only
+a fallback for a host that rejects the seat. 0.10.0's first attempt shipped a blank cell and was
+rolled back in 0.10.1 because it had not declared <code>sessions</code> / <code>remote</code> / <code>remote.session</code> on the
+plugin root.</li>
+<li><strong>The per-call route line is a separate small row</strong> anchored after the tool call, not a badge inside
+the harness's own tool row or inside the thinking chain: a keyed slot replaces whatever it targets,
+and the thinking chain exposes no child slot. A call the host has not folded yet shows nothing
+rather than guessing. Plugin source changes only appear after you restart <code>dsh web</code>.</li>
+</ul>
+<h2>Tests</h2>
+<pre><code class="language-sh">node --test
+</code></pre>
+<p>161 tests. <code>test/policy.test.js</code> (34) covers classification, the absence of a ratchet, the
+unreachable <code>max</code>, the refusal of <code>off</code>, evidence escalation, effort clamping, the poisoned-history
+detector, tool-result error parsing, and the <code>toolCallClass</code> knob (default <code>standard</code>, <code>engineering</code>
+restores the pre-0.9.0 rule, any other value coerces to <code>standard</code>); <code>test/routing.test.js</code> (12) covers the pool, preset
+weights, vision filtering, <code>maxPerTask</code>, effort-vocabulary mapping and hysteresis;
+<code>test/plugin.test.js</code> (16) drives the host wiring with ctx/agent doubles, including a quiet tool loop
+that stays at its brief's class instead of climbing to <code>high</code>; <code>test/modes.test.js</code> (33)
+covers the three scopes, manual yield + resume, same-origin route guards (including a request whose Origin the
+Desktop proxy stripped, and one carrying <code>Origin: null</code>), pool/preset editing, a
+pinned task type, a third-party effort vocabulary, vision routing, subagent frugality, todo-driven
+task types, context pressure, the <code>/router</code> command, the LLM classifier, the cross-brand guard (ask holds
+and exposes a proposal, allow / once / never, a pool holding only the other brand still routes) and the
+pricing routes; <code>test/pricing.test.js</code> (11) covers the price table, the USD band boundaries, OpenRouter
+parsing and lookup, manual entries being left alone, and a snapshot beating the built-in rules;
+<code>test/effort-model.test.js</code> (10) covers effort scope bound to one model (unbound stands off, binding
+clears the pending flag, only the bound model's effort moves, the vocabulary comes from its own pool
+entry, a session-less binding becomes the default) and the scope-aware manual yield (a model switch in
+effort scope is not an override, an effort change is, model scope ignores effort, full scope reacts to
+both) plus the route's clearing and validation; <code>test/route-projection.test.js</code> (12) covers the
+projection contract (key/stateVersion, plain-JSON state, header folding with absent vs explicit null
+effort, turn/step tracking, the header in force at a call, the fallback to the call's own values,
+repeated call ids, the 200-entry cap in insertion order, integer-like call-id ordering, purity and a
+JSON round-trip) plus the host registration and a host without the service; <code>test/client.test.js</code> (33)
+loads the shipped browser bundle in a VM and asserts the registration (the route row, the composer chip
+as a self-retracting fallback, and the merged seat on <code>conversation.input.model</code> at priority -1), the
+closed trigger, the documented host routes, the route
+Definition's match/anchor and its defensive read of the folded projection, the localized default label,
+the seat face delegating to the session directory, the official selection semantics (model rows without
+<code>reasoningEffort</code>, effort rows with it, the provider default, the current-row no-op, a locked session, an
+unavailable subagent cell, a failed pick keeping its message, catalog errors offering a retry, and group
+order), the router half's control/pool/settings payloads and the <code>/effort-model</code> binding, the pool
+control that collapses the list and reopens it, and the declared <code>ui-chat</code> seat and <code>uiConversation</code>
+service.</p>
+<h2>License</h2>
+<p>MIT</p>

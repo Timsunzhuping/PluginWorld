@@ -27,10 +27,18 @@
 <h2>Why MCPProxy?</h2>
 <ul>
 <li><strong>Scale beyond API limits</strong> – Federate hundreds of MCP servers while bypassing Cursor's 40-tool limit and OpenAI's 128-function cap.</li>
-<li><strong>Save tokens &amp; accelerate responses</strong> – Agents load just one <code>retrieve_tools</code> function instead of hundreds of schemas. Research shows ~99 % token reduction with <strong>43 % accuracy improvement</strong>.</li>
-<li><strong>Advanced security protection</strong> – Automatic quarantine blocks Tool Poisoning Attacks until you manually approve new servers.</li>
+<li><strong>Spend less context on tool definitions</strong> – Agents see a small set of MCPProxy discovery and execution tools (<code>retrieve_tools</code>, <code>describe_tool</code>, the <code>call_tool_*</code> variants and a few management tools) instead of the full upstream tool catalog, and fetch schemas on demand (in <code>retrieve_tools</code> and <code>code_execution</code> routing; <code>direct</code> routing exposes upstream tools individually, see <a href="https://docs.mcpproxy.app/features/routing-modes/" target="_blank" rel="noopener noreferrer">Routing modes</a>). How much context this saves depends on the number of tools, the routing mode, the client and the task; see <a href="#token-savings-what-is-and-is-not-measured" target="_blank" rel="noopener noreferrer">Token savings: what is and is not measured</a>.</li>
+<li><strong>Review before use</strong> – New servers are quarantined and their tools are withheld from agents until you review and approve them, and, under the default <code>manual</code> trust mode, most later changes to an approved tool's definition are held for review again. Known exceptions: input-schema-only edits outside <code>scan</code> mode, a newly added output schema, and a description added to a tool that was approved with an empty description are admitted without a hold; <code>scan</code> mode admits clean changes and misses what its detectors miss; <code>auto</code> mode does not hold changes. This reduces exposure to malicious tool definitions (Tool Poisoning Attacks); it is not a guarantee of safety. See <a href="https://docs.mcpproxy.app/features/security-quarantine/#what-quarantine-does-and-does-not-cover" target="_blank" rel="noopener noreferrer">What quarantine does and does not cover</a>.</li>
 <li><strong>Pluggable security scanners</strong> – Run Snyk, Semgrep, Trivy, Cisco, and other Docker-based scanners against quarantined servers before you approve them; findings are normalized to SARIF with a composite risk score. See <a href="https://docs.mcpproxy.app/features/security-scanner-plugins/" target="_blank" rel="noopener noreferrer">Security scanner plugins</a>.</li>
 <li><strong>Works offline &amp; cross-platform</strong> – A single core binary for macOS (Intel &amp; Apple Silicon), Windows (x64 &amp; ARM64), and Linux (x64 &amp; ARM64), with the <strong>web UI embedded</strong>. macOS additionally ships an optional menu-bar app.</li>
+</ul>
+<h2>Token savings: what is and is not measured</h2>
+<p>On-demand discovery reduces how many upstream tool definitions an agent loads into context up front. The saving is not a fixed percentage: it grows with the number of connected tools and depends on the routing mode, the client and the task. MCPProxy does not publish a headline token-reduction or accuracy-improvement figure, and it makes no latency claim.</p>
+<p>What the repository does measure, as a first-party, deterministic estimate (see <a href="https://github.com/smart-mcp-proxy/mcpproxy-go/blob/HEAD/bench/README.md" target="_blank" rel="noopener noreferrer"><code>bench/README.md</code></a> for the method and to reproduce it with <code>go run ./bench/cmd/bench</code>):</p>
+<ul>
+<li>Corpus: the frozen 45-tool reference corpus; counting tool <strong>name and description only</strong> (input schemas excluded), <code>cl100k_base</code>.</li>
+<li>Metric: size of the initial tool menu in tokens, including the proxy's own discovery, call and management tools. Not total workflow tokens, not latency, and not task success.</li>
+<li>Result: on that 45-tool corpus the proxy's initial menu is <strong>larger</strong> than listing every upstream tool (2625 tokens in <code>retrieve_tools</code> mode and 1874 in <code>code_execution</code> mode, against 1730 for the baseline), because the proxy's own tools have a fixed cost. A saving appears only above a break-even number of upstream tools, so quote the tool count with any percentage.</li>
 </ul>
 <hr />
 <h2>Quick Start</h2>
@@ -112,8 +120,25 @@ git clone https://aur.archlinux.org/mcpproxy-bin.git &amp;&amp; cd mcpproxy-bin 
 <h3>2. Run</h3>
 <pre><code class="language-bash">mcpproxy serve          # starts HTTP server on :8080 and shows tray
 </code></pre>
-<h3>3. Add your first server</h3>
-<p>Create or edit <code>~/.mcpproxy/mcp_config.json</code>:</p>
+<h3>3. Add your first server and approve it</h3>
+<p>New servers are held in quarantine until you review them, so adding a server is a two-step journey: add, then review and approve. The full walkthrough, with a real remote server (Context7), is the published <a href="https://docs.mcpproxy.app/getting-started/quick-start/" target="_blank" rel="noopener noreferrer">Quick Start</a>. In short (Context7 is a public, read-only documentation server; substitute any server you trust):</p>
+<pre><code class="language-bash"># 1. add (held in quarantine until approved)
+mcpproxy upstream add context7 https://mcp.context7.com/mcp
+
+# 2. review: capture the tool definitions, run the offline scan, read the verdict
+mcpproxy review fetch context7
+mcpproxy security rescan context7
+mcpproxy review show context7
+
+# 3. approve (with no --tools/--all, only read-only tools with a clean scan are allowed)
+mcpproxy review approve context7 --yes
+
+# 4. one harmless read, then see it in the activity log
+mcpproxy call tool-read -t context7:resolve-library-id -j '{"libraryName":"vue-router","query":"routing"}'
+mcpproxy activity list --limit 3
+</code></pre>
+<p>A clean scan is not proof that a server is safe; it only means the offline checks found nothing in the tool definitions. Review what you approve.</p>
+<p>You can also edit <code>~/.mcpproxy/mcp_config.json</code> by hand; a first-seen entry is held for review in the same way:</p>
 <pre><code class="language-jsonc">{
   "listen": "127.0.0.1:8080",
   "mcpServers": [
@@ -122,7 +147,7 @@ git clone https://aur.archlinux.org/mcpproxy-bin.git &amp;&amp; cd mcpproxy-bin 
   ]
 }
 </code></pre>
-<p>See <a href="https://docs.mcpproxy.app/configuration/config-file/" target="_blank" rel="noopener noreferrer">Configuration</a> and <a href="https://docs.mcpproxy.app/configuration/upstream-servers/" target="_blank" rel="noopener noreferrer">Upstream Servers</a> for the full reference.</p>
+<p>See <a href="https://docs.mcpproxy.app/configuration/config-file/" target="_blank" rel="noopener noreferrer">Configuration</a> and <a href="https://docs.mcpproxy.app/configuration/upstream-servers/" target="_blank" rel="noopener noreferrer">Upstream Servers</a> for the full reference, and <a href="https://docs.mcpproxy.app/features/security-quarantine/" target="_blank" rel="noopener noreferrer">Security Quarantine</a> for what the review gate does and does not cover.</p>
 <h3>4. Connect to your IDE/AI tool</h3>
 <p>📖 <strong><a href="https://github.com/smart-mcp-proxy/mcpproxy-go/blob/HEAD/docs/setup.md" target="_blank" rel="noopener noreferrer">Complete Setup Guide</a></strong> - Detailed instructions for Cursor, VS Code, Claude Desktop, and Goose</p>
 <h2>Add proxy to Cursor</h2>
@@ -163,9 +188,9 @@ git clone https://aur.archlinux.org/mcpproxy-bin.git &amp;&amp; cd mcpproxy-bin 
   "intent_reason": "Filing bug per user request"
 }
 </code></pre>
-<p>MCPProxy validates the intent against the tool's annotations (a "read" call can't reach a destructive tool), checks quarantine and approval state, and scans arguments and responses for sensitive data before anything leaves the machine.</p>
+<p>MCPProxy validates the intent against the tool's annotations (a "read" call can't reach a destructive tool) and checks quarantine and approval state before the call is forwarded. Sensitive-data detection flags potential secrets in arguments and responses in the activity log; it does not block the call by default. Optional <a href="https://docs.mcpproxy.app/features/output-sanitisation/" target="_blank" rel="noopener noreferrer">output sanitisation</a> can redact detected secrets or block critical detections in supported text responses before they are forwarded. It does not cover tool arguments, non-text content, direct routing mode, or upstream error responses.</p>
 <h3>3. Audit — every call is on the record</h3>
-<p>Every call lands in the local <a href="https://docs.mcpproxy.app/features/activity-log/" target="_blank" rel="noopener noreferrer">Activity Log</a> with a request ID, so you can reconstruct exactly what an agent did:</p>
+<p>Calls are recorded in the local <a href="https://docs.mcpproxy.app/features/activity-log/" target="_blank" rel="noopener noreferrer">Activity Log</a> with a request ID, so you can inspect what an agent did. The log is bounded by configurable retention (age, record count and size) and a per-record response size cap, so it is an inspection and debugging aid, not a compliance guarantee:</p>
 <pre><code class="language-bash">mcpproxy activity list                          # everything, newest first
 mcpproxy activity list --request-id &lt;id&gt;        # one workflow, correlated
 </code></pre>

@@ -606,21 +606,24 @@ Rewrite every flagged string. If unsure whether a string makes sense, replace it
 </ul>
 <h3>5.A Sticky-Stack - Canonical Skeleton</h3>
 <pre><code class="language-tsx code-highlight">"use client";
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useId, type ReactNode } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { useReducedMotion } from "motion/react";
 
 gsap.registerPlugin(ScrollTrigger);
 
-export function StickyStack({ cards }: { cards: React.ReactNode[] }) {
+export function StickyStack({ cards }: { cards: ReactNode[] }) {
   const ref = useRef&lt;HTMLDivElement&gt;(null);
   const reduce = useReducedMotion();
+  const instanceId = useId().replace(/:/g, "");
+  const cardClass = `stack-card-${instanceId}`;
+  const innerClass = `stack-card-inner-${instanceId}`;
 
   useEffect(() =&gt; {
-    if (reduce || !ref.current) return;
+    if (reduce || !ref.current || cards.length &lt;= 1) return;
     const ctx = gsap.context(() =&gt; {
-      const cardEls = gsap.utils.toArray&lt;HTMLElement&gt;(".stack-card");
+      const cardEls = gsap.utils.toArray&lt;HTMLElement&gt;(`.${cardClass}`);
       cardEls.forEach((card, i) =&gt; {
         if (i === cardEls.length - 1) return;
         ScrollTrigger.create({
@@ -630,8 +633,12 @@ export function StickyStack({ cards }: { cards: React.ReactNode[] }) {
           end: "top top",
           pin: true,
           pinSpacing: false,
+          anticipatePin: 1,
+          invalidateOnRefresh: true,
         });
-        gsap.to(card, {
+        const inner = card.querySelector(`.${innerClass}`);
+        if (!inner) return;
+        gsap.to(inner, {
           scale: 0.92,
           opacity: 0.55,
           ease: "none",
@@ -640,55 +647,61 @@ export function StickyStack({ cards }: { cards: React.ReactNode[] }) {
             start: "top bottom",
             end: "top top",
             scrub: true,
+            invalidateOnRefresh: true,
           },
         });
       });
     }, ref);
     return () =&gt; ctx.revert();
-  }, [reduce]);
+  }, [reduce, cards.length, cardClass, innerClass]);
 
   return (
     &lt;div ref={ref} className="relative"&gt;
       {cards.map((card, i) =&gt; (
         &lt;div
           key={i}
-          className="stack-card sticky top-0 min-h-[100dvh] flex items-center justify-center"
+          style={{ zIndex: i + 1 }}
+          className={`${cardClass} relative min-h-[100dvh] flex items-center justify-center`}
         &gt;
-          {card}
+          &lt;div className={`${innerClass} w-full flex items-center justify-center will-change-transform`}&gt;
+            {card}
+          &lt;/div&gt;
         &lt;/div&gt;
       ))}
     &lt;/div&gt;
   );
 }
 </code></pre>
-<p>Critical points: <code>start: "top top"</code>, <code>pin: true</code>, every card except the last is pinned, the scale/opacity transform is driven by the NEXT card's scroll trigger (so previous card shrinks as next one arrives).</p>
+<p>Critical points: <code>start: "top top"</code>, <code>pin: true</code>, every card except the last is pinned, the scale/opacity transform is driven by the NEXT card's scroll trigger (so previous card shrinks as next one arrives). Never combine CSS <code>position: sticky</code> with <code>pin: true</code> on the same element: the native sticky engine and ScrollTrigger's <code>position: fixed</code> fight at the hand-off (judder, snapping, coordinate drift). The pinned element must also not be the element being transformed - pin the outer card and animate an inner wrapper, or the scale tween throws off the pin measurements. Scope the card class per instance (<code>useId</code>) so two stacks on one page do not cross-select; stack with ascending <code>zIndex</code>. Under <code>prefers-reduced-motion</code> the component renders a plain list: no pin, no transforms, all content reachable.</p>
 <h3>5.B Horizontal-Pan - Canonical Skeleton</h3>
 <pre><code class="language-tsx code-highlight">"use client";
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, type ReactNode } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { useReducedMotion } from "motion/react";
 
 gsap.registerPlugin(ScrollTrigger);
 
-export function HorizontalPan({ children }: { children: React.ReactNode }) {
-  const wrap = useRef&lt;HTMLDivElement&gt;(null);
+export function HorizontalPan({ children }: { children: ReactNode }) {
+  const wrap = useRef&lt;HTMLElement&gt;(null);
   const track = useRef&lt;HTMLDivElement&gt;(null);
   const reduce = useReducedMotion();
 
   useEffect(() =&gt; {
     if (reduce || !wrap.current || !track.current) return;
     const ctx = gsap.context(() =&gt; {
-      const distance = track.current!.scrollWidth - window.innerWidth;
+      const getDistance = () =&gt;
+        Math.max(0, track.current!.scrollWidth - wrap.current!.clientWidth);
       gsap.to(track.current, {
-        x: -distance,
+        x: () =&gt; -getDistance(),
         ease: "none",
         scrollTrigger: {
           trigger: wrap.current,
           start: "top top",                              // pin starts when section top hits viewport top
-          end: () =&gt; `+=${distance}`,                    // scroll distance = track width minus viewport
+          end: () =&gt; `+=${getDistance()}`,               // scroll distance = track width minus viewport, recomputed on refresh
           pin: true,
           scrub: 1,
+          anticipatePin: 1,
           invalidateOnRefresh: true,
         },
       });
@@ -697,15 +710,24 @@ export function HorizontalPan({ children }: { children: React.ReactNode }) {
   }, [reduce]);
 
   return (
-    &lt;section ref={wrap} className="relative overflow-hidden"&gt;
-      &lt;div ref={track} className="flex h-[100dvh] items-center"&gt;
+    &lt;section
+      ref={wrap}
+      role="region"
+      aria-label="Horizontal content track"
+      tabIndex={reduce ? 0 : undefined}
+      className={`relative w-full ${reduce ? "overflow-x-auto scroll-smooth" : "overflow-hidden"}`}
+    &gt;
+      &lt;div
+        ref={track}
+        className={`flex h-[100dvh] w-max items-center ${reduce ? "snap-x snap-mandatory" : ""}`}
+      &gt;
         {children}
       &lt;/div&gt;
     &lt;/section&gt;
   );
 }
 </code></pre>
-<p>Critical points: <code>start: "top top"</code>, <code>pin: true</code>, <code>end: "+=${distance}"</code> (scroll length = horizontal travel needed), <code>scrub: 1</code>. The wrapper is pinned, the inner track slides horizontally as the user scrolls vertically.</p>
+<p>Critical points: <code>start: "top top"</code>, <code>pin: true</code>, <code>end: "+=${getDistance()}"</code> (scroll length = horizontal travel needed), <code>scrub: 1</code>. The wrapper is pinned, the inner track slides horizontally as the user scrolls vertically. <code>x</code> and <code>end</code> must be function-based and paired with <code>invalidateOnRefresh: true</code>; a <code>distance</code> captured once never recomputes - after a resize it overshoots into blank space (or pans to nothing when the track fits). Keep <code>w-max</code> on the track and make each panel non-shrinking (<code>shrink-0</code> or an explicit width): without it, overflow compression collapses <code>scrollWidth</code> and the section pins without panning. Under <code>prefers-reduced-motion</code> keep every panel reachable: swap the wrapper to <code>overflow-x-auto</code> with snap points instead of leaving <code>overflow-hidden</code>.</p>
 <h3>5.C Scroll-Reveal Stagger - Canonical Skeleton (lighter alternative)</h3>
 <p>For simple "items appear as they enter viewport" (no pinning), prefer Motion's <code>whileInView</code> over GSAP - lighter, no ScrollTrigger needed:</p>
 <pre><code class="language-tsx code-highlight">"use client";
@@ -790,7 +812,7 @@ export function RevealStagger({ items }: { items: string[] }) {
 <h3>MOTION_INTENSITY (Level 1-10)</h3>
 <ul>
 <li><strong>1-3 (Static):</strong> No automatic animations. CSS <code>:hover</code> and <code>:active</code> states only. <code>prefers-reduced-motion</code> is the default mode anyway.</li>
-<li><strong>4-7 (Fluid CSS):</strong> <code>transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1)</code>. <code>animation-delay</code> cascades for load-ins. Focus on <code>transform</code> and <code>opacity</code>.</li>
+<li><strong>4-7 (Fluid CSS):</strong> <code>transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1)</code> (name the properties; never <code>transition: all</code>, which also animates layout properties off the GPU, see 6.A). <code>animation-delay</code> cascades for load-ins.</li>
 <li><strong>8-10 (Advanced Choreography):</strong> Complex scroll-triggered reveals, parallax, scroll-driven animation (CSS <code>animation-timeline</code> or GSAP ScrollTrigger). Use Motion hooks. <strong>NEVER use <code>window.addEventListener('scroll')</code></strong> - it is a hard ban, not a "prefer-not." See Section 5.D for the allowed alternatives.</li>
 </ul>
 <h3>VISUAL_DENSITY (Level 1-10)</h3>
@@ -1005,147 +1027,5 @@ export function RevealStagger({ items }: { items: string[] }) {
 </ul>
 <h3>Micro-Interactions &amp; Effects</h3>
 <ul>
-<li><strong>Particle Explosion Button</strong> - CTA shatters into particles on success.</li>
-<li><strong>Liquid Pull-to-Refresh</strong> - Reload indicator like detaching droplets.</li>
-<li><strong>Skeleton Shimmer</strong> - Shifting light reflection across placeholders.</li>
-<li><strong>Directional Hover-Aware Button</strong> - Fill enters from cursor's exact side.</li>
-<li><strong>Ripple Click Effect</strong> - Wave from click coordinates.</li>
-<li><strong>Animated SVG Line Drawing</strong> - Vectors drawing themselves in real time.</li>
-<li><strong>Mesh Gradient Background</strong> - Organic lava-lamp blobs.</li>
-<li><strong>Lens Blur Depth</strong> - Background UI blurred to focus foreground action.</li>
-</ul>
-<h3>Animation Library Choice</h3>
-<ul>
-<li><strong>Motion (<code>motion/react</code>)</strong> - default for UI / Bento / state-change motion.</li>
-<li><strong>GSAP + ScrollTrigger</strong> - for full-page scrolltelling and scroll hijacks. Isolate in dedicated leaf components with <code>useEffect</code> cleanup.</li>
-<li><strong>Three.js / WebGL</strong> - for canvas backgrounds and 3D scenes. Same isolation rule.</li>
-<li><strong>NEVER mix GSAP / Three.js with Motion in the same component tree.</strong> They fight over the same frames.</li>
-</ul>
-<hr />
-<h2>11. REDESIGN PROTOCOL</h2>
-<p>This skill handles <strong>greenfield builds AND redesigns</strong>. Misclassifying the mode is the single biggest source of bad redesign output.</p>
-<h3>11.A Detect the Mode (first action)</h3>
-<ul>
-<li><strong>Greenfield</strong> - no existing site, or full overhaul approved. Dial baseline from Section 1.</li>
-<li><strong>Redesign - Preserve</strong> - modernise without breaking the brand. Audit first, extract brand tokens, evolve gradually.</li>
-<li><strong>Redesign - Overhaul</strong> - new visual language on top of existing content. Treat as greenfield for visuals; preserve content and IA.</li>
-</ul>
-<p>If ambiguous, ask <strong>once</strong>: <em>"Should this redesign preserve the existing brand, or are we starting visually from scratch?"</em></p>
-<h3>11.B Audit Before Touching</h3>
-<p>Document the current state before proposing changes:</p>
-<ul>
-<li><strong>Brand tokens</strong> - primary / accent colors, type stack, logo treatment, radii.</li>
-<li><strong>Information architecture</strong> - page tree, primary nav, key conversion paths.</li>
-<li><strong>Content blocks</strong> - what exists, what's doing work, what's filler.</li>
-<li><strong>Patterns to preserve</strong> - signature interactions, recognisable hero, copy voice.</li>
-<li><strong>Patterns to retire</strong> - AI-slop tells, broken layouts, dead links, generic stock imagery, perf traps.</li>
-<li><strong>Dial reading of the existing site</strong> - infer current <code>DESIGN_VARIANCE</code> / <code>MOTION_INTENSITY</code> / <code>VISUAL_DENSITY</code>. That's your starting point, not the baseline.</li>
-<li><strong>SEO baseline</strong> - current ranking pages, meta titles, structured data, OG cards. <strong>SEO migration is the #1 redesign risk.</strong></li>
-</ul>
-<h3>11.C Preservation Rules</h3>
-<ul>
-<li><strong>Do not change information architecture</strong> unless asked. Keep page slugs, anchor IDs, primary nav labels stable for SEO and muscle memory.</li>
-<li><strong>Extract brand colors before applying Section 4.2.</strong> A brand that is already purple stays purple - apply the LILA RULE's override.</li>
-<li><strong>Preserve copy voice</strong> unless asked for a rewrite. Visual modernisation ≠ content rewrite.</li>
-<li><strong>Honor existing accessibility wins.</strong> Do not regress focus states, alt text, keyboard nav, contrast.</li>
-<li><strong>Respect existing analytics events.</strong> Do not rename buttons, form fields, section IDs that downstream tracking depends on.</li>
-</ul>
-<h3>11.D Modernisation Levers (priority order)</h3>
-<p>Apply in order - stop when the brief is satisfied:</p>
-<ol>
-<li><strong>Typography refresh</strong> - biggest visual lift per unit of risk.</li>
-<li><strong>Spacing &amp; rhythm</strong> - increase section padding, fix vertical rhythm.</li>
-<li><strong>Color recalibration</strong> - desaturate, unify neutrals, keep brand accent.</li>
-<li><strong>Motion layer</strong> - add <code>MOTION_INTENSITY</code>-appropriate micro-interactions to existing components.</li>
-<li><strong>Hero &amp; key-section recomposition</strong> - restructure top-of-funnel using Section 10 vocabulary.</li>
-<li><strong>Full block replacement</strong> - only when the existing block is unsalvageable.</li>
-</ol>
-<h3>11.E Decision Tree: Targeted Evolution vs Full Redesign</h3>
-<ul>
-<li>IA, content, and SEO sound → <strong>targeted evolution</strong> (Levers 1-4). ~70% of value at ~40% of risk.</li>
-<li>Visual debt is structural (broken IA, no design system, broken mobile) → <strong>full redesign</strong> with strict content preservation.</li>
-<li>Brand itself is changing → <strong>greenfield</strong>.</li>
-</ul>
-<h3>11.F What Never Changes Silently</h3>
-<p>Never modify without explicit user approval:</p>
-<ul>
-<li>URL structure / route slugs.</li>
-<li>Primary nav labels.</li>
-<li>Form field names or order (breaks analytics + autofill).</li>
-<li>Brand logo or wordmark.</li>
-<li>Existing legal / consent / cookie copy.</li>
-</ul>
-<hr />
-<h2>12. THE BLOCK LIBRARY (Contract - Implementations Land Here Iteratively)</h2>
-<p>The Reference Vocabulary (Section 10) names patterns. The Block Library implements them with real props, real motion specs, and real code sketches.</p>
-<p><strong>Status:</strong> schema defined here. Blocks will be added iteratively. Do not freelance new blocks without following this schema.</p>
-<h3>12.A File Location</h3>
-<pre><code class="language-text code-highlight">skills/taste-skill/blocks/
-  hero/
-    asymmetric-split.md
-    editorial-manifesto.md
-    kinetic-type.md
-    ...
-  feature/
-    bento-grid.md
-    sticky-scroll-stack.md
-    zig-zag.md
-    ...
-  social-proof/
-  pricing/
-  cta/
-  footer/
-  navigation/
-  portfolio/
-  transition/
-</code></pre>
-<h3>12.B Required Frontmatter</h3>
-<pre><code class="language-yaml code-highlight">---
-name: asymmetric-split-hero
-category: hero
-dial_compatibility:
-  variance: [6, 10]
-  motion: [3, 10]
-  density: [2, 5]
-when_to_use: "Landing pages with one strong asset and one strong message. Default hero for SaaS, agency, premium consumer."
-not_for: "Editorial / manifesto launches where the message IS the design."
-stack: ["react", "next", "tailwind", "motion"]
----
-</code></pre>
-<h3>12.C Required Body Sections</h3>
-<ol>
-<li><strong>Visual sketch</strong> - short ASCII or description of the layout.</li>
-<li><strong>Props API</strong> - the component's interface.</li>
-<li><strong>Code sketch</strong> - minimal working implementation (Server Component default, Client island for motion).</li>
-<li><strong>Mobile fallback</strong> - explicit collapse rules for <code>&lt; 768px</code>.</li>
-<li><strong>Motion variants</strong> - one variant per <code>MOTION_INTENSITY</code> band (1-3, 4-7, 8-10). Reduced-motion fallback explicit.</li>
-<li><strong>Dark-mode notes</strong> - token strategy specific to this block.</li>
-<li><strong>Anti-patterns</strong> - common ways this block goes wrong.</li>
-<li><strong>References</strong> - links to real examples in production.</li>
-</ol>
-<h3>12.D Block-Library Discipline</h3>
-<ul>
-<li>One block per file. No multi-block files.</li>
-<li>Every block must work standalone (drop it into a page, it renders).</li>
-<li>Every block must pass the Pre-Flight Check (Section 14).</li>
-<li>Blocks that depend on a design system from Section 2.A live under <code>blocks/&lt;category&gt;/&lt;name&gt;--&lt;system&gt;.md</code> (e.g. <code>feature/bento-grid--material.md</code>).</li>
-</ul>
-<hr />
-<h2>13. OUT OF SCOPE</h2>
-<p>This skill is NOT for:</p>
-<ul>
-<li>Dashboards / dense product UI / admin panels (use Fluent, Carbon, Atlassian, or Polaris from Section 2.A).</li>
-<li>Data tables (use TanStack Table or AG Grid).</li>
-<li>Multi-step forms / wizards (use Form-specific patterns; this skill won't make them better).</li>
-<li>Code editors (use Monaco / CodeMirror with their official skinning).</li>
-<li>Native mobile (use Apple HIG / Material directly).</li>
-<li>Realtime collab UIs (presence, cursors, OT-aware - different problem class).</li>
-</ul>
-<p>If the brief is one of the above, <strong>say so explicitly</strong>, point to the right tool, and only apply this skill's marketing-page / about-page / landing-page parts to the surfaces where they apply.</p>
-<hr />
-<h2>14. FINAL PRE-FLIGHT CHECK</h2>
-<p>Run this matrix before outputting code. This is the last filter.</p>
-<p><strong>THIS IS NOT OPTIONAL. Run every box. If any box fails, the output is not done.</strong></p>
-<ul>
-<li> <strong>Brief inference…<p></p>
-</strong></li></ul>
+<li><strong>Particle Explosion Button</strong> - CTA shatters into partic<p>…</p>
+</li></ul>

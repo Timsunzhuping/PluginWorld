@@ -522,6 +522,31 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 </tr>
 </thead>
 <tbody><tr>
+<td><strong>v0.10.19</strong></td>
+<td>2026-10-12</td>
+<td><strong><code>UNSUPPORTED_REASONING_EFFORT</code> 不再让整条蒸馏熔断（issue #34）</strong>。现场（zafir-zhong 等）：很多<strong>网关</strong>在能力自述里说支持 reasoning effort，真把 <code>reasoningEffort: 'off'</code> 发出去才回 <code>UNSUPPORTED_REASONING_EFFORT</code>（实测：workbuddy/hy3、FallbacksChain/Auto、new-api-resp/gpt-6-luna），于是整个候选被判失败、换下一个 provider —— 用户的自动沉淀直接停摆（#37 / #38 / #40 的诊断信息里都能看到这条 FAIL）。既有设计只覆盖「provider <strong>自述</strong>不支持 → 不传该字段」（#15），缺了运行时这一半。修法：新增进程内记忆 <code>markEffortUnsupported()\/isEffortUnsupported()</code> —— 首次被拒时<strong>不带该字段重试一次</strong>（同一候选、同一 provider），并记住这个 <code>provider/model</code>，此后同一进程内它第一次请求就不再带 effort；记忆<strong>按 provider/model 分开</strong>，不误伤别的 provider。回归守卫加在 <code>tests/capture-route.test.mjs</code>（第一次带 → 被拒 → 第二次不带并拿到卡 → 后续只发一次 → 别的 provider 不受影响）。<code>npm test</code> 共 <strong>313 项</strong></td>
+</tr>
+<tr>
+<td><strong>v0.10.18</strong></td>
+<td>2026-10-12</td>
+<td><strong>「保存配置」被无条件拒绝的修复（issue #35）</strong>。现场（Dzifxazy）：全新安装、什么都不动、直接点保存 → <strong>HTTP 400「字段不能为空：secretHint」</strong>，整单被拒，用户改的数字与开关<strong>一个都存不进去</strong>；文案还会把排查方向误导到「某个数字格子没填」。根因：宿主侧的前置校验把<strong>任何空字符串</strong>都当成「数字没填」，只豁免一份硬编码名单（vaultDir / captureProvider / captureModel / recallEmbedding / activeVault）—— 而 <code>secretHint</code> 的默认值<strong>就是</strong>空串（<code>z.string().default('')</code>）又不在名单里；面板提交的是整张表单，于是每次保存必然命中。修法：新增 <code>emptyNumericFields(patch, Config.dict)</code>，<strong>按 schema 的 <code>type === 'number'</code> 判定</strong>「哪些键被清空」，彻底删掉硬编码名单（以后新增可空字符串字段不需要谁记得去补）。新增 <code>tests/config-validate.test.mjs</code>（2 项：空串只对 number 字段报「没填」——里面放了一个「不在任何名单里」的新字符串字段做回归钉子；源码守卫不许退回名单）。<code>npm test</code> 共 <strong>312 项</strong></td>
+</tr>
+</tbody></table>
+<details>
+<summary>更早的更新日志（v0.10.17 及以前 · 共 44 版，点开查看）</summary><table>
+<thead>
+<tr>
+<th>版本</th>
+<th>日期</th>
+<th>关键改动</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>v0.10.17</strong></td>
+<td>2026-10-12</td>
+<td><strong>「常驻实例在服务、却没人托管」这类状态自相矛盾的根治（issue #28）</strong>。现场：用户升级到 0.10.16 后常驻实例没起来，面板<strong>既没有重启按钮也没有任何提示</strong>（横幅只在 <code>vc.stale</code> 时渲染，而宿主与端口版本号一致时 <code>stale</code> 为假），只看到一条「自动沉淀异常」；本机复现出另一半：<code>stop</code> 之后端口上<strong>还活着</strong>、锁里却空了、<code>status</code> 说「没有登记的看门狗」—— 因为端口上那个 web 是宿主 <code>ensureWeb()</code> 直接拉起的（锁里没有 <code>webPid</code>），<code>stop</code> 只杀了看门狗。五处一起修：① <strong><code>/version-check</code> 报出 <code>resident.managed</code></strong>（锁里有活着的看门狗才算被托管）—— 「在服务」≠「被托管」；② <strong>面板</strong>：常驻实例<strong>没在跑</strong>或<strong>没被托管</strong>时都显示重启按钮与专门文案（「未运行」/「未托管」），不再只认「版本落后」这一种；③ <strong><code>/restart-self</code></strong>：<code>alreadyCurrent</code> 必须同时满足「版本一致 <strong>且</strong> 被托管」，否则照常替换（孤儿 web 版本再新也得重新托管）；④ <strong>显式 <code>dsh-memory stop</code> 把端口腾出来</strong>（<code>forcePortOccupant: true</code>，闸门不变：只终止 <code>looksLikeOurWeb</code> 认得出是自家的进程）；⑤ <strong>自检改为「新实例接管」</strong>：<code>restartResident</code> 不再只看「端口服着期望版本」（升级前后版本号常常相同、旧实例本就是这个版本 → 自检会被<strong>旧实例</strong>骗过，实测打印「自检通过（等待 0s）」后紧接着 <code>status</code> 说没有登记的看门狗），新增 <code>waitForTakeover()</code>：必须「版本一致 <strong>且</strong> 锁里出现一个不在替换前 pid 集合里的活看门狗」才算成功，失败原因也据此分离成「版本不对」与「没人接管」。本机同一现场实测：替换前 <code>41672/17432</code> → 替换后 <code>28136/31976</code>，<code>restart</code> 等待 13s 后自检通过，<strong>紧接着的 <code>status</code> 立刻显示新看门狗已登记</strong>（不再矛盾）。<code>npm test</code> 共 <strong>310 项</strong></td>
+</tr>
+<tr>
 <td><strong>v0.10.16</strong></td>
 <td>2026-10-09</td>
 <td><strong><code>--reap</code> 的输出不再「明明收了却说没收」</strong>（alario-tang 反馈，macOS + 0.10.13 实测）。现场：<code>kill -9</code> 掉 watchdog 造出 <code>PPID=1</code> 的孤儿 web 后跑 <code>dsh-memory watchdog --reap --port 7999</code>，端口确实被释放、web 确实被收掉，屏幕上却写着「<strong>扫描到 1 个 watchdog 进程，清理孤儿 0 个</strong>」—— 因为 0.10.13 让 <code>scanned</code> 含了 web、而 <code>webKilled</code> 一个字都没打印。修法：新增纯函数 <code>formatReapSummary()</code> 统一口径（扫描数拆成 <code>watchdog A / web B</code>、清理项按类分别列出 pid），<code>reapStaleWatchdogs</code> 返回值补 <code>scannedWatchdogs</code> / <code>scannedWebs</code>（<code>scanned</code> 仍是两者之和，兼容旧调用方），CLI 改用它。测试补 2 项（收了 web 时不许再说「清理孤儿 0 个」/ 扫描计数必须拆开），并在 <code>tests/watchdog-orphan-web.test.mjs</code> 头部记下复现要点：<strong>这类孤儿只能用 <code>kill -9</code> 造 —— SIGTERM 会走 watchdog 的优雅退出、把它拉起的 web 一起停掉</strong>（与 #19 里「Windows 上 SIGTERM 即无条件终止」是同一枚硬币的两面）。<code>npm test</code> 共 <strong>308 项</strong></td>
@@ -531,17 +556,7 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 <td>2026-10-09</td>
 <td><strong>三处「升级留下的尾巴」</strong>。① <strong>推荐方案 A 不再把刚省掉的调用装回来</strong>：v0.10.12 把「蒸馏输出上限」默认提到 4000（省掉「先撞 2000、再以 4000 重跑同一候选」那次白烧），但面板里「一键推荐配置 A（轻量）」仍写死 <code>captureMaxTokens: 2000</code> —— 用户点一下就又把重试装回来；现已与默认对齐，并加源码守卫（<code>tests/csrf-origin.test.mjs</code> 断言 planA 的上限 === 默认值）。② <strong>README 的「停滞兜底」描述与新判据对齐</strong>（中英两份）：旧文案写「15 分钟收不到收尾事件就报」，现在是「<strong>本次运行至今 0 收尾</strong> + 最近 20 分钟内持续有轮次开始 → 记一条 <code>warn</code>」，并写明正在进行的<strong>长回合不会被误判</strong>。③ 顺带核实日志里另一种措辞 <code>轮次收尾事件未触发（agent/turn-stopping 没到）</code> 最后出现于 <strong>2026-09-24</strong>，属于旧判据的历史残留，现行代码里已无这条路径（无需修复）。<code>npm test</code> 共 <strong>306 项</strong></td>
 </tr>
-</tbody></table>
-<details>
-<summary>更早的更新日志（v0.10.14 及以前 · 共 41 版，点开查看）</summary><table>
-<thead>
 <tr>
-<th>版本</th>
-<th>日期</th>
-<th>关键改动</th>
-</tr>
-</thead>
-<tbody><tr>
 <td><strong>v0.10.14</strong></td>
 <td>2026-10-09</td>
 <td><strong>「自动沉淀异常：轮次收尾事件疑似失效」误报根治</strong>。现场：几十分钟的长回合里，<code>agent/inbox/claimed</code> 在<strong>一轮对话中途</strong>也会多次触发，而 <code>turn-stopping</code> 要等回合真的结束才来 —— 于是 20 分钟窗口必然「开始 ≥3、收尾 0」，判据把<strong>还在进行中</strong>的轮次当成「事件被改名」，直接把红警报推给用户（本会话实测那条「累计 39/18」就是这么来的）。修法：加一条硬前提 —— 「事件被改名/移除」是<strong>进程生命周期</strong>属性，不是窗口属性：本次运行里只要收到过哪怕一次收尾，通路就是好的，窗口内 0 收尾只说明当前轮次还没结束（<code>evaluateStall</code> 新增 <code>everStopped</code>，并在返回值里给出 `reason: wiring-proven</td>

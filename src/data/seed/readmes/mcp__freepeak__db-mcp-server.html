@@ -14,6 +14,8 @@
   <a href="#examples" target="_blank" rel="noopener noreferrer">Examples</a> •
   <a href="#troubleshooting" target="_blank" rel="noopener noreferrer">Troubleshooting</a> •
   <a href="#contributing" target="_blank" rel="noopener noreferrer">Contributing</a>
+
+  <a href="https://github.com/FreePeak/db-mcp-server/blob/HEAD/docs/PRD.md" target="_blank" rel="noopener noreferrer">📄 Product Requirements — current capabilities, roadmap &amp; decisions</a>
 <h2>Overview</h2>
 <p>The DB MCP Server provides a standardized way for AI models to interact with multiple databases simultaneously. Built on the <a href="https://github.com/FreePeak/cortex" target="_blank" rel="noopener noreferrer">FreePeak/cortex</a> framework, it enables AI assistants to execute SQL queries, manage transactions, explore schemas, and analyze performance across different database systems through a unified interface.</p>
 <h2>Core Concepts</h2>
@@ -151,56 +153,73 @@ performance_mysql1 // Analyze query performance
 <td>Time-Series Queries, Hypertable Discovery (write policies via SQL)</td>
 </tr>
 </tbody></table>
-<h2>Deployment Options</h2>
-<p>The DB MCP Server can be deployed in multiple ways to suit different environments and integration needs:</p>
-<h3>Docker Deployment</h3>
-<pre><code class="language-bash"># Pull the latest image
-docker pull freepeak/db-mcp-server:latest
+<h2>Deployment and transport status</h2>
+<p>The safest local integration is <strong>STDIO</strong>. HTTP transports are still under hardening; do not expose the current server directly to a shared network.</p>
+<h3>Personal/local STDIO (recommended)</h3>
+<pre><code class="language-bash"># Build from the audited source revision
+make build
 
-# Run with mounted config file
-docker run -p 9092:9092 \
-  -v $(pwd)/config.json:/app/my-config.json \
-  -e TRANSPORT_MODE=sse \
-  -e CONFIG_PATH=/app/my-config.json \
-  -e DB_MCP_API_KEY=replace-me-with-a-long-random-string \
-  freepeak/db-mcp-server
+# Use a private, single-connection config
+./bin/server -t stdio -c /absolute/path/to/config.local.json
 </code></pre>
-<blockquote>
-<p><strong>Note</strong>: Mount to <code>/app/my-config.json</code> as the container has a default file at <code>/app/config.json</code>.</p>
-</blockquote>
-<h4>API-Key Authentication</h4>
-<p>The SSE and streamable-HTTP transports accept an <code>Authorization: Bearer &lt;key&gt;</code>
-header. Set <code>DB_MCP_API_KEY</code> (or pass <code>-api-key</code>) when launching the Docker
-container; clients must then send the matching bearer token on every request:</p>
-<pre><code class="language-bash">curl -H "Authorization: Bearer replace-me-with-a-long-random-string" \
-     http://localhost:9092/sse
-</code></pre>
-<p>When no API key is configured the transport remains open (single-user /
-development use). The middleware lives in <code>internal/delivery/mcp.APIKeyAuth</code>
-and is exported so you can compose it with your own reverse proxy if you
-front the container with nginx, Caddy, or Traefik.</p>
-<h3>STDIO Mode (IDE Integration)</h3>
-<pre><code class="language-bash"># Run the server in STDIO mode
-./bin/server -t stdio -c config.json
-</code></pre>
-<p>For Cursor IDE integration, add to <code>.cursor/mcp.json</code>:</p>
+<p>For Cursor, point the client at the actual build output and use absolute paths:</p>
 <pre><code class="language-json">{
   "mcpServers": {
-    "stdio-db-mcp-server": {
-      "command": "/path/to/db-mcp-server/server",
-      "args": ["-t", "stdio", "-c", "/path/to/config.json"]
+    "local-db": {
+      "command": "/absolute/path/to/db-mcp-server/bin/server",
+      "args": ["-t", "stdio", "-c", "/absolute/path/to/config.local.json"]
     }
   }
 }
 </code></pre>
-<h3>SSE Mode (Server-Sent Events)</h3>
-<pre><code class="language-bash"># Default configuration (localhost:9092)
-./bin/server -t sse -c config.json
-
-# Custom host and port
-./bin/server -t sse -host 0.0.0.0 -port 8080 -c config.json
+<p>Use a read-only database account and a bounded <code>query_timeout</code> for a personal
+PostgreSQL/MySQL connection. For SQLite, use an absolute <code>database_path</code> and
+<code>"read_only": true</code> when the agent only needs to inspect data.</p>
+<h3>Legacy SSE (compatibility only)</h3>
+<p>The historical Cortex SSE transport has no built-in authentication. It is
+<strong>disabled by default</strong> and must only be enabled explicitly behind a trusted
+private reverse proxy:</p>
+<pre><code class="language-bash">./bin/server -t sse -h 127.0.0.1 -p 9092 \
+  -allow-insecure-sse -c /absolute/path/to/config.local.json
 </code></pre>
-<p>Client connection endpoint: <code>http://localhost:9092/sse</code></p>
+<p>Do not use this mode for a shared deployment. The legacy endpoint does not
+apply <code>DB_MCP_API_KEY</code>; terminate TLS, authentication, and network policy at the
+proxy. A future release will replace it with a maintained Streamable HTTP
+implementation.</p>
+<h3>Streamable HTTP (experimental)</h3>
+<p>The <code>streamable</code> endpoint is backed by the maintained Go MCP SDK and supports
+stateful sessions, JSON or SSE responses, notifications, GET/DELETE session
+lifecycle, and JSON-RPC dispatch. The process refuses to start it without
+<code>DB_MCP_API_KEY</code>; keep it behind a private TLS gateway until the identity and
+conformance rollout is complete.</p>
+<p>For browser-origin requests, set an explicit comma-separated allowlist:</p>
+<pre><code class="language-bash">MCP_ALLOWED_ORIGINS=https://agent.example.com
+</code></pre>
+<p>The built-in static bearer key is a bounded pilot mechanism. It grants
+<code>db:read</code> by default; set <code>DB_MCP_API_SCOPES=db:read,db:write</code> only for a
+trusted write client. <code>db:admin</code> is reserved for controlled administration.
+Set <code>DB_MCP_OIDC_ISSUER</code> and <code>DB_MCP_OIDC_AUDIENCE</code> to use OIDC discovery,
+JWKS signature validation, issuer/audience checks, and subject identity for
+shared deployments; database-specific scopes are still intentionally not
+enabled until that policy is defined.</p>
+<h3>Docker development image</h3>
+<p>The published image is a development/demo artifact, not an enterprise
+hardening recommendation. The current Dockerfile runs as an unprivileged
+user, omits an embedded config, and includes the legacy
+<code>-allow-insecure-sse</code> behavior for local Compose compatibility. It exposes a
+separate health port (<code>9093</code>) and is not suitable for public publication.</p>
+<pre><code class="language-bash"># Build a local image from this source revision
+docker build -t db-mcp-server:local .
+
+# Keep it private; the image's default SSE mode is compatibility-only
+docker run --rm -p 127.0.0.1:9092:9092 \
+  -p 127.0.0.1:9093:9093 \
+  -v "$(pwd)/config.local.json:/app/config.json:ro" \
+  db-mcp-server:local
+</code></pre>
+<p>For a team deployment, wait for the authenticated Streamable transport and use
+a non-root, read-only-filesystem image with a private network, external secret
+store, and a TLS/OIDC gateway.</p>
 <h3>Source Code Installation</h3>
 <pre><code class="language-bash"># Clone the repository
 git clone https://github.com/FreePeak/db-mcp-server.git
@@ -210,12 +229,14 @@ cd db-mcp-server
 make build
 
 # Run the server
-./bin/server -t sse -c config.json
+./bin/server -t stdio -c config.json
 </code></pre>
 <h2>Configuration</h2>
 <h3>Database Configuration File</h3>
-<p>Create a <code>config.json</code> file with your database connections:</p>
+<p>Create a <code>config.json</code> file with your database connections. <code>schema_version: 1</code>
+enables strict unknown-field validation:</p>
 <pre><code class="language-json">{
+  "schema_version": 1,
   "connections": [
     {
       "id": "mysql1",
@@ -224,7 +245,7 @@ make build
       "port": 3306,
       "name": "db1",
       "user": "user1",
-      "password": "password1",
+      "password_env": "DB_MCP_MYSQL_PASSWORD",
       "query_timeout": 60,
       "max_open_conns": 20,
       "max_idle_conns": 5,
@@ -244,7 +265,7 @@ make build
       "port": 5432,
       "name": "db1",
       "user": "user1",
-      "password": "password1"
+      "password_env": "DB_MCP_POSTGRES_PASSWORD"
     },
     {
       "id": "sqlite_app",
@@ -276,12 +297,29 @@ make build
   ]
 }
 </code></pre>
+<h4>Secret references</h4>
+<p>Do not put production credentials directly in JSON. Use either an
+environment variable name or a mounted secret file per connection:</p>
+<pre><code class="language-json">{
+  "id": "prod",
+  "type": "postgres",
+  "host": "db.internal",
+  "port": 5432,
+  "name": "app",
+  "user": "mcp_reader",
+  "password_env": "DB_MCP_PROD_PASSWORD"
+}
+</code></pre>
+<p><code>password_file</code> and <code>encryption_key_env</code>/<code>encryption_key_file</code> are also
+supported. Relative file paths resolve from the config file directory; an
+inline value cannot be combined with a reference. The resolved value stays in
+process memory and is not printed by the config loader.</p>
 <h3>Command-Line Options</h3>
 <pre><code class="language-bash"># Basic syntax
 ./bin/server -t &lt;transport&gt; -c &lt;config-file&gt;
 
-# SSE transport options
-./bin/server -t sse -host &lt;hostname&gt; -port &lt;port&gt; -c &lt;config-file&gt;
+# HTTP transport options (legacy SSE requires an explicit opt-in)
+./bin/server -t sse -h &lt;hostname&gt; -p &lt;port&gt; -allow-insecure-sse -c &lt;config-file&gt;
 
 # Lazy loading mode (recommended for 10+ databases)
 ./bin/server -t stdio -c &lt;config-file&gt; --lazy-loading
@@ -298,16 +336,21 @@ export DB_CONFIG='{"connections":[...]}'
 </code></pre>
 <p><strong>Available Flags:</strong></p>
 <ul>
-<li><code>-t, -transport</code>: Transport mode (<code>stdio</code> or <code>sse</code>)</li>
+<li><code>-t, -transport</code>: Transport mode (<code>stdio</code>, legacy <code>sse</code>, or experimental <code>streamable</code>)</li>
 <li><code>-c, -config</code>: Path to database configuration file</li>
-<li><code>-p, -port</code>: Server port for SSE mode (default: 9092)</li>
-<li><code>-h, -host</code>: Server host for SSE mode (default: localhost)</li>
+<li><code>-p, -port</code>: HTTP port (default: 9092)</li>
+<li><code>-h, -host</code>: HTTP bind host (default: <code>127.0.0.1</code>)</li>
+<li><code>-allow-insecure-sse</code>: Explicitly allow legacy SSE for a private development proxy</li>
+<li><code>-api-key</code>: Bearer key for the experimental Streamable HTTP entrypoint (or use <code>DB_MCP_API_KEY</code>)</li>
+<li><code>-health-port</code>: HTTP health port (default: 9093; <code>0</code> disables it)</li>
 <li><code>-log-level</code>: Log level (<code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>)</li>
 <li><code>-log-dir</code>: Directory for log files (default: <code>./logs</code> in current directory)</li>
 <li><code>-db-config</code>: Inline JSON database configuration</li>
+<li><code>-lazy-loading</code>: Establish connections on first use</li>
+<li><code>-unified-tools</code>: Register one tool set with a <code>database</code> parameter</li>
 </ul>
 <h3>Environment Variables</h3>
-<p>Values in a <code>.env</code> file are loaded first; real environment variables take precedence. A JSON config file (<code>CONFIG_PATH</code>/<code>DB_CONFIG_FILE</code>) overrides per-database env vars.</p>
+<p>Values in a <code>.env</code> file are loaded first; real environment variables take precedence. A JSON config file (<code>CONFIG_PATH</code>/<code>DB_CONFIG_FILE</code>) takes precedence over inline and legacy database variables.</p>
 <table>
 <thead>
 <tr>
@@ -324,17 +367,42 @@ export DB_CONFIG='{"connections":[...]}'
 <tr>
 <td><code>DB_CONFIG</code></td>
 <td>—</td>
-<td>Inline JSON database configuration (alternative to a file)</td>
+<td>Inline JSON database configuration (used when no file is present)</td>
 </tr>
 <tr>
 <td><code>TRANSPORT_MODE</code></td>
-<td><code>sse</code></td>
+<td><code>stdio</code></td>
 <td>Transport mode when <code>-t</code> is not passed</td>
 </tr>
 <tr>
 <td><code>SERVER_PORT</code></td>
-<td><code>9090</code></td>
-<td>HTTP port for SSE mode</td>
+<td><code>9092</code></td>
+<td>HTTP port</td>
+</tr>
+<tr>
+<td><code>MCP_ALLOWED_ORIGINS</code></td>
+<td>empty</td>
+<td>Comma-separated browser origins allowed by experimental Streamable HTTP</td>
+</tr>
+<tr>
+<td><code>DB_MCP_API_KEY</code></td>
+<td>empty</td>
+<td>Bearer key for experimental Streamable HTTP; keep it in a secret manager</td>
+</tr>
+<tr>
+<td><code>DB_MCP_API_SCOPES</code></td>
+<td><code>db:read</code></td>
+<td>Required/granted scopes: <code>db:read</code>, <code>db:write</code>, and/or <code>db:admin</code></td>
+</tr>
+<tr>
+<td><code>DB_MCP_OIDC_ISSUER</code></td>
+<td>empty</td>
+<td>OIDC issuer URL; when set, OIDC/JWT verification replaces the static pilot key</td>
+</tr>
+<tr>
+<td><code>DB_MCP_OIDC_AUDIENCE</code></td>
+<td>empty</td>
+<td>Required OIDC audience/client ID</td>
 </tr>
 <tr>
 <td><code>LOG_LEVEL</code></td>
@@ -355,6 +423,21 @@ export DB_CONFIG='{"connections":[...]}'
 <td><code>QUERY_TIMEOUT_SECONDS</code></td>
 <td>unset</td>
 <td>Fills connections that don't set their own <code>query_timeout</code>; negative disables the cap. JSON configs keep precedence.</td>
+</tr>
+<tr>
+<td><code>DB_MCP_AUDIT_LOG</code></td>
+<td>unset</td>
+<td>Optional append-only JSONL audit path</td>
+</tr>
+<tr>
+<td><code>VERBOSE</code></td>
+<td>unset</td>
+<td><code>true</code>/<code>1</code> sets the startup log level to <code>debug</code> (the default is <code>error</code>, i.e. silent unless <code>LOG_LEVEL</code> is set)</td>
+</tr>
+<tr>
+<td><code>MCP_DISABLE_LOGGING</code></td>
+<td>unset</td>
+<td><code>true</code>/<code>1</code> discards MCP protocol logs (writer-level switch, independent of <code>LOG_LEVEL</code>/<code>DISABLE_LOGGING</code>)</td>
 </tr>
 </tbody></table>
 <h2>SQLite Configuration Options</h2>
