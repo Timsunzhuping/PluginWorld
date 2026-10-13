@@ -1,0 +1,778 @@
+<h1>Filelayer</h1>
+<p><a href="https://github.com/filelayer/filelayer/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/filelayer/filelayer/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://www.npmjs.com/package/@filelayer/core" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/@filelayer/core.svg" alt="npm" /></a>
+<a href="https://nodejs.org" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/node/v/@filelayer/core.svg" alt="node" /></a>
+<a href="https://github.com/filelayer/filelayer/blob/main/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license" /></a></p>
+<blockquote>
+<p><strong>Alpha — developer preview, not production software.</strong> Nobody is running it
+in production, including us. <a href="https://github.com/filelayer/filelayer/blob/main/TRUST.md" target="_blank" rel="noopener noreferrer"><strong>Should you depend on this?</strong></a>
+has the real numbers, including the ones that are zero, and exactly what would
+change them. <a href="https://github.com/filelayer/filelayer/blob/main/LIMITATIONS.md" target="_blank" rel="noopener noreferrer">Limitations</a> is the complete list of what it
+does not do.</p>
+<p><strong>We are looking for three to five design partners.</strong> If you are building
+something with private user files, we will help you integrate this and stay on
+hand while you do, in exchange for telling us where it breaks. That is the only
+thing on our <a href="https://github.com/filelayer/filelayer/blob/main/ROADMAP.md" target="_blank" rel="noopener noreferrer">roadmap to 1.0</a> we cannot build ourselves.
+<a href="https://github.com/filelayer/filelayer/issues" target="_blank" rel="noopener noreferrer">Open an issue</a> or say hello.</p>
+</blockquote>
+<p><strong>The file layer for SaaS applications.</strong> Public files and private files, with
+one authorization model behind both.</p>
+<p>You tell Filelayer who the caller is. Filelayer decides what they may do with a
+file, serves the bytes with the right headers, and writes the audit event. For
+file access that goes through Filelayer, that decision is made in one place,
+<code>packages/core/src/authz.ts</code>, so you write no ownership checks in route
+handlers, no presigned-URL expiry logic, and no per-route access rules of your
+own.</p>
+<p><strong>Filelayer is authorization middleware, not row-level security.</strong> It runs in
+your application process, in front of Postgres and your bucket. Code that
+queries these tables directly does not go through it. The schema does enforce a
+set of invariants against <em>every</em> writer: cross-tenant grants, cross-project
+identities, and delegation that amplifies authority or subject breadth are
+refused by constraints and triggers, so a migration or a <code>psql</code> session cannot
+write them. But there is no RLS policy in <code>schema.sql</code>, and a direct <code>SELECT</code> is
+not filtered by anything. If you need enforcement that survives arbitrary
+database clients, use database-level enforcement; Filelayer is the layer above
+it, and the two compose.</p>
+<pre><code class="language-ts">// Public avatar
+const { url } = await fl.files.put(bytes, { public: true });
+
+// Private, user-owned
+const { id } = await fl.files.put(bytes, { owner: 'user_123' });
+const file  = await fl.files.get(id, { as: 'user_123' });
+
+// Multi-tenant, role-controlled
+await fl.files.put(bytes, { org: 'acme', owner: 'user_123' });
+
+// Shared with an expiry, a password and a download cap, and revocable
+const share = await fl.shares.create(id, {
+  as: 'user_123', expiresIn: 3600, maxDownloads: 3, password: 'hunter2',
+});
+await fl.shares.revoke(share.grantId, { as: 'user_123' });   // this link, now
+
+// Shared with a named user, and taken back. `unshare` is the one you want for
+// a person: `create()` is not idempotent, so revoking a single grant id you
+// happen to be holding can leave an earlier one live.
+await fl.shares.create(id, { as: 'user_123', withUser: 'user_456' });
+await fl.shares.unshare(id, { as: 'user_123', user: 'user_456' });   // all of it
+</code></pre>
+<p><strong>Start at whichever line matches your problem.</strong> Complexity is incremental:
+each tier adds one concept, and no tier makes you pay for a concept you are not
+using. → <a href="https://github.com/filelayer/filelayer/blob/main/docs/QUICKSTART.md" target="_blank" rel="noopener noreferrer"><code>docs/QUICKSTART.md</code></a></p>
+<hr />
+<h2>The three layers</h2>
+<pre><code>your application          fl.files.put / get / list, fl.shares, fl.orgs
+                          you pass YOUR user id; nothing here knows a uuid
+   ───────────────────────────────────────────────────────────────────────
+Filelayer                 ONE authorization function answers every request
+                          grants, roles, expiry, download caps, revocation
+                          the audit event, written in the decision's own
+                          transaction so the log cannot disagree with it
+   ───────────────────────────────────────────────────────────────────────
+your Postgres             9 tables. Filelayer owns the schema, you own the
+your bucket               database. Bytes go to S3, R2, B2 or a directory
+                          behind one adapter; storage is replaceable
+</code></pre>
+<p>Filelayer sits between the two things you already run. It brings no database and
+no storage of its own, and <strong>zero runtime dependencies</strong>.</p>
+<p><strong>It is authorization middleware, not row-level security.</strong> It decides for calls
+made through it, in your process. The schema additionally refuses cross-tenant
+grants, cross-project identities and delegation that amplifies authority from
+<em>every</em> writer, including a <code>psql</code> session — those are constraints and triggers.
+But there is no RLS policy in <code>schema.sql</code>, and a direct <code>SELECT</code> against these
+tables is filtered by nothing. Filelayer composes with database-level
+enforcement; it does not replace it.</p>
+<hr />
+<h2>What it is for, and what it is not for</h2>
+<p><strong>Worth the overhead when:</strong> files are private, belong to specific people or
+tenants, and their permissions change over time. Documents, contracts,
+attachments, exports, anything with a share link you might later want back.</p>
+<p><strong>Not worth the overhead when:</strong></p>
+<table>
+<thead>
+<tr>
+<th>You need</th>
+<th>Use instead</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Public images at CDN volume</td>
+<td>a CDN-backed bucket</td>
+<td>Default delivery proxies every byte. Redirect delivery (below) removes the proxy but is opt-in and narrow.</td>
+</tr>
+<tr>
+<td>Video or audio at scale</td>
+<td>a CDN / media service</td>
+<td>Seeking works — the shipped routes answer <code>Range</code> with <code>206</code>. But default delivery proxies every byte through your server, and there is no CDN on that path.</td>
+</tr>
+<tr>
+<td>Browser → storage upload with your server out of the data path, in development</td>
+<td>a real bucket</td>
+<td><code>FsStorage</code> mints the credential so the client code is identical, but it receives the bytes itself and says so: <code>via: 'server'</code>. Only S3 and R2 keep your process out of the path.</td>
+</tr>
+<tr>
+<td>Resumable or multipart direct upload</td>
+<td>presigned S3 directly / tus</td>
+<td>One signed PUT, one object. There is no resume.</td>
+</tr>
+<tr>
+<td>Thumbnails, transforms, format negotiation</td>
+<td>Cloudinary / imgix</td>
+<td>We have none.</td>
+</tr>
+</tbody></table>
+<h3>Against the two things you would otherwise do</h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Hand-rolled presigned URLs</th>
+<th>Supabase Storage</th>
+<th>Filelayer</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Revoke a link somebody already holds</td>
+<td><strong>No.</strong> A signature is valid until its clock runs out; your options are a short TTL or proxying the bytes yourself</td>
+<td><strong>No.</strong> Signed URLs are signed with an internal key and cannot be revoked</td>
+<td><strong>Yes</strong>, on the next request, transitively through the delegation chain</td>
+</tr>
+<tr>
+<td>"Everyone in this org may read"</td>
+<td>your own join, recomputed on every join and leave</td>
+<td>expressible as an RLS policy</td>
+<td>one grant row; membership resolves at request time</td>
+</tr>
+<tr>
+<td>Who accessed this, including refusals</td>
+<td>whatever you wrote</td>
+<td>not a product feature; Postgres logging is not an access log</td>
+<td>hash-chained per tenant, written in the decision's transaction</td>
+</tr>
+<tr>
+<td>Download cap</td>
+<td>your own counter, and the race in it</td>
+<td>none</td>
+<td>atomic, reserved before the bytes move</td>
+</tr>
+<tr>
+<td>CDN on the private path</td>
+<td>yes, and that is why you cannot revoke</td>
+<td>yes, same trade</td>
+<td><strong>no</strong> — the two facts are the same fact</td>
+</tr>
+<tr>
+<td>Public images at volume</td>
+<td><strong>yes</strong></td>
+<td><strong>yes</strong></td>
+<td>no. Use a bucket behind a CDN</td>
+</tr>
+<tr>
+<td>Lines for a public avatar</td>
+<td>~10</td>
+<td><strong>10</strong></td>
+<td>16</td>
+</tr>
+</tbody></table>
+<p>The last two rows are losses and they are not close. We publish the full
+comparison, including every case we lose, in
+<a href="https://github.com/filelayer/filelayer/blob/main/ARCHITECTURE-PROGRESSIVE.md" target="_blank" rel="noopener noreferrer"><code>ARCHITECTURE-PROGRESSIVE.md</code></a>
+§5. Short version: <strong>for a public avatar, Supabase is 10 lines and Filelayer is
+16.</strong> If avatars are your whole problem, use Supabase.</p>
+<hr />
+<h2>The five security properties</h2>
+<p>These are the product. Each is enforced in the schema or the authorization
+engine, not by convention, and each has tests named after it.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Property</th>
+<th>What it means in practice</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>P1</strong></td>
+<td>Deny by default</td>
+<td>There is no <code>public</code> boolean anywhere in the schema. Public delivery is an explicit, revocable, auditable grant row — there is no flag to leave on by accident. <strong>This is a property of the schema, not of your object store: Filelayer cannot make your bucket private, and a public bucket bypasses everything on this page.</strong> That is the one configuration step it cannot do for you — <a href="https://github.com/filelayer/filelayer/blob/main/docs/QUICKSTART.md" target="_blank" rel="noopener noreferrer">QUICKSTART §7</a>.</td>
+</tr>
+<tr>
+<td><strong>P2</strong></td>
+<td>No ambient authority</td>
+<td>Knowing an object key, a URL or a file id grants nothing. Storage location is never an input to a decision.</td>
+</tr>
+<tr>
+<td><strong>P3</strong></td>
+<td>Cross-tenant grants are structurally impossible to write</td>
+<td>A grant's <code>org_id</code> must equal its file's <code>org_id</code>, enforced by the composite foreign key <code>FOREIGN KEY (file_id, org_id) REFERENCES file (id, org_id)</code>. No writer — including a migration or a <code>psql</code> session — can create a grant pointing at another tenant's file. This is a write-side integrity constraint, not a read filter: it makes the <em>row</em> unrepresentable. Reads are scoped by the engine, not by the database.</td>
+</tr>
+<tr>
+<td><strong>P4</strong></td>
+<td>A URL never outlives its permission</td>
+<td>Every signed URL embeds a grant id and is re-validated on <strong>every</strong> request, transitively through the whole delegation chain. Revocation beats a live URL.</td>
+</tr>
+<tr>
+<td><strong>P5</strong></td>
+<td>Every decision is audited, including denials</td>
+<td>Hash-chained per tenant. Probes that cannot be attributed to a tenant go to a system chain rather than being dropped. The log answers in <em>your</em> identifiers — <code>marco</code>, <code>contract.pdf</code>, <code>acme</code> — alongside the internal ones, so "who accessed this?" needs no SQL of yours.</td>
+</tr>
+</tbody></table>
+<p>Three more properties are enforced in the schema and documented in
+<a href="https://github.com/filelayer/filelayer/blob/main/packages/core/SEMANTICS.md" target="_blank" rel="noopener noreferrer"><code>packages/core/SEMANTICS.md</code></a>: atomic download
+counters (<strong>P6</strong>), deletion as a liveness predicate rather than a cascade
+(<strong>P7</strong>), and per-project identifier namespaces (<strong>P8</strong>).</p>
+<p>Two consequences worth knowing before you adopt:</p>
+<ul>
+<li><strong>Revocation actually works.</strong> <code>fl.files.unpublish(id)</code> makes a URL that has
+been printed, indexed and pasted into a support ticket stop working on the
+next request. No deletion, no key rotation, no cache purge. Supabase's
+<code>getPublicUrl()</code> is offline string concatenation, so it has no request at
+which to make that decision; deleting the object is the only withdrawal.</li>
+<li><strong>This costs you a byte path.</strong> P4 is why the default is to serve bytes rather
+than hand out a presigned URL, and it is why the default path has no CDN in
+front of it. The two facts are the same fact. Redirect delivery trades a
+bounded revocation window for that CDN and is opt-in; see
+<a href="https://github.com/filelayer/filelayer/blob/main/packages/core/SEMANTICS.md" target="_blank" rel="noopener noreferrer"><code>packages/core/SEMANTICS.md</code></a>.</li>
+</ul>
+<hr />
+<h2>What backs that up</h2>
+<p>Said once, here, because every number in it is checked by a gate that fails the
+build when a public surface and the run disagree:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>The suite</td>
+<td><strong>657 tests</strong>, every commit, all of them against a real PostgreSQL</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td><strong>8 tests</strong> on a real PostgreSQL with two backends — races staged, not reasoned about. Three carry a control that removes the protection and asserts the bad outcome <em>does</em> happen</td>
+</tr>
+<tr>
+<td>Adversarial</td>
+<td><strong>27 attacks, 0 breaches.</strong> Also run against an earlier revision of this library known to be vulnerable, which scores 3. A suite that only ever passes proves nothing about itself</td>
+</tr>
+<tr>
+<td>Live object storage</td>
+<td><strong>12 tests against live Cloudflare R2 and 12 against live AWS S3, every commit</strong>, plus a thirteenth each on the nightly run: an 11 MB multipart upload reassembled byte-exactly. R2 is S3-compatible, not S3, which is why both run</td>
+</tr>
+<tr>
+<td>Schema migrations</td>
+<td>every migration file applied to the <strong>previous release's</strong> <code>schema.sql</code> and the result compared against the next one, on real PostgreSQL</td>
+</tr>
+<tr>
+<td>The published artifact</td>
+<td>the tarball installed into an empty directory and driven through the whole lifecycle; the starter booted over HTTP and driven through 25 checks; every relative path inside the tarball resolved from inside the tarball</td>
+</tr>
+</tbody></table>
+<p><strong>What none of that measures is load, or anyone's production.</strong> The complete
+table, including the rows that are zero, is on
+<a href="https://github.com/filelayer/filelayer/blob/main/TRUST.md" target="_blank" rel="noopener noreferrer">the trust page</a>.</p>
+<hr />
+<h2>The five that make people decline</h2>
+<p>The complete list is <a href="https://github.com/filelayer/filelayer/blob/main/LIMITATIONS.md" target="_blank" rel="noopener noreferrer"><code>LIMITATIONS.md</code></a> -- fourteen
+entries, each with its reasoning, shipped in the npm tarball so an install has
+it on disk. These five are the ones that should make you close the tab if they
+apply to you:</p>
+<ol>
+<li><strong>No CDN on the private delivery path.</strong> Bytes proxy through your
+application, and authenticated responses carry <code>Cache-Control: no-store</code>.
+That is not an oversight, it is P4: a URL that can be revoked is a URL that
+has to be asked about. An opt-in redirect mode trades a bounded revocation
+window of up to 300 seconds for cacheability. <strong>If your workload is public
+images at volume, use a bucket behind a CDN and come back when you need to
+take a URL back.</strong></li>
+<li><strong>Read cost is linear in grants per subject, and nothing caps them.</strong>
+Measured: 4.3 ms at five grants on one file, 5.9 seconds at a hundred
+thousand. <code>shares.create()</code> is not idempotent, so a share endpoint that
+inserts on every click gets there. Use <code>shares.unshare()</code> and watch the
+count.</li>
+<li><strong>No resumable or multipart upload.</strong> One signed PUT, one object. A large
+upload that fails starts over, and <code>fl.files.put()</code> holds the whole body in
+memory -- only the core <code>fl.upload()</code> takes a stream, and neither imposes a
+size ceiling, so that is yours to enforce.</li>
+<li><strong>Org admins and owners can read <code>private</code> files.</strong> Deliberate: retention
+and legal hold are useless if the people accountable for them cannot see
+what they are holding. But it is a policy decision, and if you need to
+exclude the operator you need envelope encryption, which we do not have.</li>
+<li><strong>Alpha, and the schema has changed six times.</strong> Any <code>0.x</code> → <code>0.(x+1)</code> may
+break the API, the schema or both. Every break has a numbered entry in
+<a href="https://github.com/filelayer/filelayer/blob/main/packages/core/MIGRATIONS.md" target="_blank" rel="noopener noreferrer"><code>MIGRATIONS.md</code></a> and a runnable file
+under <code>migrations/</code> that CI applies to the previous release's schema and
+checks produces the next one -- but there is no LTS branch, no backporting,
+and <strong>no independent security review</strong>.</li>
+</ol>
+<hr />
+<h2>Install</h2>
+<pre><code class="language-bash">npm install @filelayer/core
+</code></pre>
+<p>Requires <strong>Node ≥ 22.18</strong>. The package ships compiled JavaScript and type
+declarations in <code>dist/</code>; the TypeScript source and the full test suite are in
+the tarball as well, so every claim on this page is inspectable from what you
+installed.</p>
+<p><strong>That install has zero runtime dependencies.</strong> Filelayer talks to <em>your</em>
+Postgres and <em>your</em> bucket, so it ships neither. The throwaway instance below is
+the one exception: <code>quickstart()</code> runs on an embedded WebAssembly Postgres,
+declared as an <em>optional peer dependency</em> so that it never lands in a production
+<code>node_modules</code>. Add it if you want the throwaway instance, and skip it
+otherwise. <code>createTestDb()</code> will tell you, by name, if you need it:</p>
+<pre><code class="language-bash">npm install --save-dev "@electric-sql/pglite@^0.3.11"
+</code></pre>
+<p><strong>Install PGlite with that version constraint.</strong> Filelayer supports the
+<strong>0.3.x</strong> line, which is what <code>peerDependencies</code> declares and what the suite runs
+against. <strong>0.5.x is not supported</strong>: we ran the full suite against 0.5.8 and it
+does not pass, so the range has not been widened. PGlite's <code>latest</code> on npm is a
+0.5.x release, so omitting the constraint can install a version outside the
+supported range, and npm then refuses the whole tree with <code>ERESOLVE</code>. The quotes
+are for your shell, not for npm: <code>^</code> is a glob operator under <code>zsh</code> with
+<code>extendedglob</code> and an escape character in <code>cmd.exe</code>.</p>
+<pre><code class="language-ts">import { Filelayer } from '@filelayer/core';
+
+const fl2 = await Filelayer.quickstart();          // PGlite + in-memory bytes
+const { url: avatarUrl } = await fl2.files.put(bytes, { public: true });
+</code></pre>
+<p><code>quickstart()</code> is <strong>ephemeral</strong>: everything is lost when the process exits.</p>
+<h3>Where the bytes go</h3>
+<p>Three adapters, and the one you want depends on whether you have a bucket:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>new MemoryStorage()</code></td>
+<td>A Map. Dies with the process. For tests.</td>
+</tr>
+<tr>
+<td><code>new FsStorage('./data')</code></td>
+<td>A real directory. Survives a restart, needs no bucket and no IAM user. One process on one disk: no locking between writers, and no <code>presignGet</code>, so redirect delivery is unavailable and <code>canPresign()</code> says so before a request rather than during one.</td>
+</tr>
+<tr>
+<td><code>new S3Storage({ endpoint, bucket, region, accessKeyId, secretAccessKey })</code></td>
+<td>S3 or R2. The one to use the moment you run two application servers.</td>
+</tr>
+</tbody></table>
+<p><code>FsStorage</code> exists because we measured the gap: an agent integrating the
+published package, reading only the published documentation, wanted bytes that
+survive a restart without creating a bucket, found nothing between a Map and
+IAM credentials, and wrote the adapter itself from the type definitions.</p>
+<p>Production is three configuration steps and is not hidden: your Postgres,
+somewhere for the bytes, and — if you chose a bucket — confirming it is private.
+<a href="https://github.com/filelayer/filelayer/tree/main/examples/starter" target="_blank" rel="noopener noreferrer"><code>examples/starter/</code></a>
+is all three in one file you can copy, and
+<a href="https://github.com/filelayer/filelayer/blob/main/docs/QUICKSTART.md" target="_blank" rel="noopener noreferrer"><code>docs/QUICKSTART.md</code></a>
+§7 is the prose version.</p>
+<h3>Checking a deployment from a terminal</h3>
+<pre><code class="language-bash">npx filelayer doctor          # Node, DATABASE_URL, and what state the schema is in
+npx filelayer schema status   # just the schema, with --json for a script
+</code></pre>
+<p>Both are read-only. Every problem comes with a line saying what to do about it,
+and <code>--json</code> gives an agent the same findings in a shape it can branch on.</p>
+<p>Two things it will not do, both on purpose. <strong>It takes no credential as an
+argument</strong> — there is no <code>--database-url</code>, and passing one is an error rather
+than being ignored, because a credential on a command line is written to shell
+history, visible in <code>ps</code>, and echoed by most CI systems. And <strong>it has no
+<code>share</code>, <code>download</code> or <code>delete</code></strong>: reading <code>DATABASE_URL</code> is complete authority
+over every file and grant, so the CLI cannot enforce permissions and does not
+pretend to. A convincing permission check layered on root access is worse than
+none, because it reports that something was authorized when nothing was.</p>
+<p>With <code>S3_ENDPOINT</code> and <code>S3_BUCKET</code> set, <code>doctor</code> also reports whether the bucket
+serves an <strong>unauthenticated</strong> read, which is the most common way everything here
+gets undone: Filelayer decides who may be <em>given</em> a URL and has no say in who
+the object store will answer. The probe writes nothing and uses no credential —
+an unsigned GET of a key that does not exist is refused by a private bucket and
+answered honestly by a public one — so a check that cannot read a credential
+cannot leak one. With those variables unset it says the bucket was not checked
+rather than saying nothing.</p>
+<p>A refusal is evidence about the bucket root only: a policy that opens one prefix
+answers identically and is still public where it matters. And none of this says
+whether your credentials work, which needs a signed request and is not here
+yet.</p>
+<p><code>pg</code> is an optional peer dependency: the CLI is the only part of this package
+that needs a driver, and it asks for it by name at runtime.</p>
+<h3>An Agent Skill, which ships in the package</h3>
+<p>If a coding agent is going to do the integration, there is a skill for it:</p>
+<pre><code class="language-bash">mkdir -p .claude/skills
+cp -r node_modules/@filelayer/core/skills/filelayer-integration .claude/skills/
+</code></pre>
+<p>Committed under <code>.claude/skills/</code> it applies to every session in that
+repository, so a colleague's agent gets it too. <code>~/.claude/skills/</code> instead
+makes it personal to one machine.</p>
+<p><strong>Copy it out of your own <code>node_modules</code>, not out of a repository.</strong> The copy
+in the package carries the version it describes and cannot drift from what you
+installed; a copy taken from the default branch describes whatever is newest,
+which may be API your version does not have. A build gate keeps the shipped
+copy byte-identical to the one here and keeps its version stamp current.</p>
+<p>What it does: decides out loud whether a library is the right answer at all,
+finds out what the project already has, picks the API tier, mounts the handler
+that matches the runtime, and then proves the result with <code>auditIntegration()</code>
+rather than declaring success. Graded blind against the same scenarios with and
+without it, it scored 23/24 against 13/24; the numbers, what they do not
+establish, and the mistakes found while measuring are in
+<a href="https://github.com/filelayer/filelayer/blob/main/skills/filelayer-integration/evals/MEASUREMENT.md" target="_blank" rel="noopener noreferrer"><code>skills/filelayer-integration/evals/MEASUREMENT.md</code></a>.</p>
+<h3>Serving the bytes</h3>
+<p>Authorizing a read is not the same as answering the request, and this page used
+to stop at the first one. Two handlers do the second, and which one you want is
+decided by your runtime, not by preference:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>deliveryHandler(fl, opts?)</code></td>
+<td>Returns <code>(req: IncomingMessage, res: ServerResponse) =&gt; Promise&lt;void&gt;</code>. Node's own HTTP server, and Express, Fastify and Koa, which hand you those objects.</td>
+</tr>
+<tr>
+<td><code>deliveryFetch(fl, opts?)</code></td>
+<td>Returns <code>(req: Request) =&gt; Promise&lt;Response | null&gt;</code>. Next.js App Router, Hono, Cloudflare Workers, Deno and Bun, which hand you a <code>Request</code> and want a <code>Response</code> back.</td>
+</tr>
+</tbody></table>
+<p>They are the same two routes with the same behaviour. <code>deliveryFetch</code> returns
+<code>null</code> for a request it does not own, so a catch-all route can fall through to
+the rest of your application instead of swallowing it.</p>
+<p><strong>Mounting the wrong one is the most common integration failure we see.</strong> A
+<code>node:http</code> handler in an App Router route exports a function with the wrong
+shape; the symptom is not a type error at the mount point but a request that
+never answers.</p>
+
+<pre><code class="language-ts">import { deliveryFetch } from '@filelayer/core';
+
+const serve = deliveryFetch(fl, {
+  principal: async () =&gt; ({ as: await currentUserId() }),
+});
+
+export async function GET(req: Request) {
+  return (await serve(req)) ?? new Response('Not found', { status: 404 });
+}
+</code></pre>
+<p>Both parse <code>Range</code>, which matters more than it sounds: a <code>&lt;video&gt;</code> element will
+not let the user scrub until a range request is answered, and a PDF reader asks
+for the end of the file first. An <strong>invalid</strong> range is answered <code>200</code> with the
+whole representation, as RFC 9110 requires, and only a range that parsed
+cleanly and cannot be satisfied gets <code>416</code> with <code>Content-Range: bytes */&lt;size&gt;</code>.
+<code>Accept-Ranges: bytes</code> goes on the plain <code>200</code> as well, because that is how a
+client learns it may seek at all.</p>
+<p>Two defaults to know before you mount either one. <strong><code>disposition</code> defaults to
+<code>attachment</code></strong>, which downloads rather than plays, so a media route needs
+<code>disposition: 'inline'</code>. And redirecting to a presigned URL instead of proxying
+is opt-in, because it moves revocation out of your process for the life of the
+URL; it requires a storage adapter that can sign, and it refuses with
+<code>redirect_not_acknowledged</code> until the configuration says so out loud.
+<a href="https://github.com/filelayer/filelayer/blob/main/docs/guides/serving-private-files.md" target="_blank" rel="noopener noreferrer"><code>docs/guides/serving-private-files.md</code></a>
+is the measured comparison of the two.</p>
+<h3>Uploading straight to the bucket</h3>
+<p>For files measured in hundreds of megabytes, <code>createUpload()</code> mints a presigned
+PUT so the bytes never travel through your process:</p>
+
+<pre><code class="language-ts">const { file, upload } = await fl.createUpload(principal, orgId, {
+  name: 'recording.mp4',
+  contentType: 'video/mp4',
+  size: declaredSize,            // required and exact
+});
+// the client PUTs to upload.url with upload.headers, then:
+const ready = await fl.completeUpload(principal, file.id);
+</code></pre>
+<p>A presigned PUT signs the method, the key and the expiry, and <strong>does not
+constrain the body</strong>: a URL minted for a 200 KB avatar accepts three gigabytes.
+<code>createUpload()</code> signs <code>content-length</code> and <code>content-type</code> into the credential
+so the object store rejects the wrong size or type before accepting it, which on
+Cloudflare R2 is the only way to bound the body at all. Until
+<code>completeUpload()</code> succeeds the row is <code>pending</code> and refuses <code>read</code>, and
+<code>completeUpload()</code> asks the store what arrived rather than believing the client.</p>
+<p>It is off until the configuration carries the verbatim
+<code>DIRECT_UPLOAD_ACKNOWLEDGEMENT</code> string, and <code>maxUploadBytes</code> has no default.
+Below a few tens of megabytes <code>fl.files.put()</code> is simpler and strictly safer,
+because you see the bytes.</p>
+<h3>Letting an agent operate it</h3>
+<p><code>@filelayer/core/mcp</code> builds an MCP server over an instance, so an agent can
+answer "which contracts can Alice see", "share this one with the external
+accountant for two weeks", "take that back" — through the same authorization
+code path as your HTTP routes, with no second set of rules to keep in agreement.
+You construct it and you run it; there is nothing hosted and nothing to sign up
+for.</p>
+
+<pre><code class="language-ts">import { filelayerMcpServer } from '@filelayer/core/mcp';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+
+const server = await filelayerMcpServer(fl, {
+  as: 'user_partner_alice',          // fixed here, not a tool argument
+  org: 'org_acme',
+  agentLabel: 'acme-assistant/1.0',  // how the audit trail names the agent
+});
+await server.connect(new StdioServerTransport());
+</code></pre>
+<p><strong>The subject is fixed at construction.</strong> It is not a tool parameter and no
+tool changes it, because the obvious design — a <code>user</code> argument on every call —
+lets the agent choose who it is, which makes every permission check advisory. An
+MCP server that can act as anyone is an admin backdoor with a schema. One server
+speaks for one subject in one organisation; serving several people means
+constructing several servers, and that cost is the property.</p>
+<p>Seven tools by default: list files, describe one, list its grants, share with a
+person, create a link, revoke one grant, remove a person entirely. Expiry is
+required on both sharing tools, because a permanent grant is a decision a person
+should make. Each tool declares <code>readOnlyHint</code> and <code>destructiveHint</code> so a client
+can gate the ones that write. Failures come back as the stable error <code>code</code> with
+the <code>meaning</code> and <code>fix</code> from the catalogue, and never with <code>reason</code>.</p>
+<p>Three things are off by default, each for its own reason: <code>allowDestructive</code>
+(deleting is not recoverable), <code>returnFileBytes</code> (a document returned by a tool
+is a document copied into a model's context), and <code>exposeAuditTrail</code> — because
+the trail is an organisation's whole history, and a tool that returns it copies
+every file name, actor and denial into that context too. Reading the trail is
+itself audited since 0.27.0, which was the previous reason this was off; the
+default did not move, because the context argument never depended on it.</p>
+<p>This module is the only part of the package with dependencies, and they are
+optional peers, so the install above stays at zero:</p>
+<pre><code class="language-bash">npm install @modelcontextprotocol/sdk zod
+</code></pre>
+<p><code>zod</code> is not a preference: the SDK accepts Zod schemas for a tool's inputs and
+nothing else. Calling the factory without either one throws and names what is
+missing and the command.</p>
+<p>Every call made through these tools records <code>agentLabel</code> as the audit event's
+user agent, which is what lets the chain separate "the partner opened this" from
+"the partner's assistant opened this". Those are different facts and until
+<code>0.21.0</code> the library had nowhere to put the difference.</p>
+<p>If you want a server a client can simply start, there is a second binary that
+builds the instance from the environment:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "filelayer": {
+      "command": "npx",
+      "args": ["-y", "-p", "@filelayer/core", "filelayer-mcp"],
+      "env": {
+        "DATABASE_URL": "postgres://...",
+        "FILELAYER_AS": "user_alice",
+        "FILELAYER_ORG": "org_acme",
+        "FILELAYER_DATA_DIR": "/srv/filelayer-data"
+      }
+    }
+  }
+}
+</code></pre>
+<p><code>FILELAYER_AS</code> comes from whoever configures the client, never from a
+conversation — one process speaks for one subject, and many users means a server
+per user. With neither <code>FILELAYER_DATA_DIR</code> nor <code>S3_ENDPOINT</code> set it refuses to
+start rather than falling back to memory, which would work in a demo and lose
+the first real file. The three tools above stay off unless the matching
+<code>FILELAYER_MCP_*</code> variable is exactly <code>true</code>.</p>
+<p><a href="https://github.com/filelayer/filelayer/tree/main/examples/mcp" target="_blank" rel="noopener noreferrer"><code>examples/mcp/</code></a>
+is a server you can launch and a script that drives it the way a client does:
+it spawns the server as a subprocess and exchanges protocol frames over its
+real stdin and stdout, in 27 checks that CI runs against a freshly packed
+tarball on every commit.</p>
+<h3>Errors, and proving the integration</h3>
+<p>Everything throws <code>FilelayerError</code>, carrying <code>status</code>, a typed <code>code</code>, an
+internal <code>reason</code> that must never be serialized, and <code>headers</code> where a status is
+defined in terms of one. <strong>The status is a function of the code</strong>, so branching
+on <code>code</code> never means also branching on <code>status</code>.</p>
+<pre><code class="language-ts">import { FilelayerError } from '@filelayer/core';
+
+async function readOrRespond(id: string, as: string): Promise&lt;Response&gt; {
+  try {
+    const file = await fl.files.get(id, { as });
+    return new Response(JSON.stringify({ id: file.id }), { status: 200 });
+  } catch (e) {
+    if (!(e instanceof FilelayerError)) throw e;
+    return new Response(JSON.stringify({ error: e.code }), {
+      status: e.status,
+      headers: { 'content-type': 'application/json', ...(e.headers ?? {}) },
+    });
+  }
+}
+
+// A file that is not there, and a caller who may not know that:
+const denied = await readOrRespond('00000000-0000-0000-0000-000000000000', 'user_123');
+console.assert(denied.status === 404, 'a stranger gets 404, never 403');
+</code></pre>
+<p>There are 29 codes. The full table ships in the package as <code>ERRORS.md</code> and
+machine-readably as <code>errors.json</code>, both resolvable from an install
+(<code>@filelayer/core/errors.json</code>), both generated from the source, and a build
+gate fails if they drift. <code>ERROR_CODES</code> and <code>isErrorCode()</code> are exported for
+narrowing a code that arrived as a string.</p>
+<p><code>auditIntegration()</code> then checks <strong>your</strong> routes rather than ours. You give it
+an owner, a stranger and four callbacks onto your own endpoints, and it drives
+them over HTTP:</p>
+
+<pre><code class="language-ts">import { auditIntegration, formatAuditReport } from '@filelayer/core';
+
+const report = await auditIntegration({ owner, stranger, app });
+console.log(formatAuditReport(report));
+</code></pre>
+<p>It is there because the library being correct and the integration being correct
+are different claims, and the second one is the one your users depend on. It
+checks, among other things, that a stranger gets <code>404</code> and not <code>403</code> — a <code>403</code>
+confirms the file exists and turns your ids into an enumeration oracle, and an
+application error handler that helpfully maps <code>not_found</code> back to a <code>403</code> undoes
+the property the library was providing.</p>
+<h3>Running the suite</h3>
+<p>The tests are in the tarball but they cannot be executed from inside
+<code>node_modules</code>: Node refuses to strip types from files under <code>node_modules</code>, and
+the tests import the TypeScript source directly. To run them, clone the
+repository. Tests run against PGlite, PostgreSQL 17 compiled to WebAssembly and
+running in-process, so there is no daemon and no Docker:</p>
+<pre><code class="language-bash">git clone https://github.com/filelayer/filelayer &amp;&amp; cd filelayer
+npm run bootstrap        # npm ci in packages/core
+npm test                 # the security property suite, 657 tests
+npm run typecheck
+npm run verify           # typecheck + tests + build + doc and language checks
+npm run example:tier1    # a public avatar, on :3000
+npm run example:vault    # the full Vault app, on :8787
+npm run example:starter  # a deployable server against your own Postgres
+</code></pre>
+<hr />
+<h2>Versioning</h2>
+<p>Pre-1.0. The version is <code>0.MINOR.PATCH</code> and the promise is deliberately narrow:</p>
+<ul>
+<li><strong><code>0.x</code> → <code>0.(x+1)</code></strong> may break the API, the schema, or both. Every break is
+in <a href="https://github.com/filelayer/filelayer/blob/main/packages/core/CHANGELOG.md" target="_blank" rel="noopener noreferrer"><code>packages/core/CHANGELOG.md</code></a>, and every
+schema break has a migration in
+<a href="https://github.com/filelayer/filelayer/blob/main/packages/core/MIGRATIONS.md" target="_blank" rel="noopener noreferrer"><code>packages/core/MIGRATIONS.md</code></a>.</li>
+<li><strong><code>0.x.y</code> → <code>0.x.(y+1)</code></strong> is additive or a fix. No schema change that requires
+action, no signature change.</li>
+<li>There is no long-term support branch and no backporting before 1.0.</li>
+</ul>
+<p><strong>The schema has changed six times</strong>, not once. This section said "one breaking
+change (per-project identifier namespaces)" until <code>0.15.0</code>, counting the first
+and largest; <code>MIGRATIONS.md</code> has ten numbered entries of which six carry
+forward SQL. Budget an upgrade against that file, not against this paragraph —
+the discrepancy was found by an outside analyst reading only the published
+package, and it was understating the cost of adopting us.</p>
+<p><strong>Which version a database is at is now readable off the database.</strong> Since
+<code>0.15.0</code> <code>schema.sql</code> creates <code>filelayer_schema_version</code> and stamps it, and
+<code>schemaStatus(db)</code> reports where a database is, what this build expects, and
+which files under <code>migrations/</code> are outstanding. It issues no DDL: your
+application owns the migration runner, which is the position
+<a href="https://github.com/filelayer/filelayer/blob/main/packages/core/MIGRATIONS.md" target="_blank" rel="noopener noreferrer"><code>MIGRATIONS.md</code></a>
+§2 has always taken and is keeping.</p>
+<pre><code class="language-ts">import { schemaStatus } from '@filelayer/core';
+const s = await schemaStatus(pool);   // { state: 'current', at: 10, expects: 10, ... }
+</code></pre>
+<hr />
+<h2>Layout</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>packages/core/schema.sql</code></td>
+<td>The data model. Every security property is commented at the constraint that enforces it. Read this first if you are reviewing us.</td>
+</tr>
+<tr>
+<td><code>packages/core/src/authz.ts</code></td>
+<td>The authorization engine. Two functions, one decision core.</td>
+</tr>
+<tr>
+<td><code>packages/core/src/simple.ts</code></td>
+<td>The tiered API (<code>files</code>, <code>orgs</code>, <code>shares</code>). No authorization logic — a facade.</td>
+</tr>
+<tr>
+<td><code>packages/core/src/delivery.ts</code></td>
+<td>Byte delivery. Owns the response headers so you cannot get them wrong.</td>
+</tr>
+<tr>
+<td><code>packages/core/test/</code></td>
+<td>The property suite. Ships in the tarball.</td>
+</tr>
+<tr>
+<td><code>packages/core/dev/</code></td>
+<td>Diagnostic scripts. Not published.</td>
+</tr>
+<tr>
+<td><code>examples/tier1-avatar</code> … <code>tier3-org-roles</code></td>
+<td>One runnable example per tier</td>
+</tr>
+<tr>
+<td><code>examples/vault</code></td>
+<td>A full B2B document workspace over HTTP</td>
+</tr>
+<tr>
+<td><code>examples/starter</code></td>
+<td>A deployable server: your Postgres, <code>FsStorage</code>, route helpers mounted</td>
+</tr>
+<tr>
+<td><code>examples/nextjs</code></td>
+<td>App Router: <code>deliveryFetch</code> at a catch-all route, upload, share, revoke</td>
+</tr>
+<tr>
+<td><code>examples/mcp</code></td>
+<td>A launchable MCP server, driven over real stdio by its own <code>verify.mjs</code></td>
+</tr>
+</tbody></table>
+<h2>Documents</h2>
+<ul>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/docs/QUICKSTART.md" target="_blank" rel="noopener noreferrer"><code>docs/QUICKSTART.md</code></a> — install → first file → the advanced capabilities</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/LIMITATIONS.md" target="_blank" rel="noopener noreferrer"><code>LIMITATIONS.md</code></a> — the complete list of what this does not do, fourteen entries with their reasoning</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/ROADMAP.md" target="_blank" rel="noopener noreferrer"><code>ROADMAP.md</code></a> — the nine things an outside evaluator said would change its answer, eight of them done, and what is deliberately not coming</li>
+<li><a href="https://github.com/filelayer/filelayer/tree/main/docs/guides" target="_blank" rel="noopener noreferrer"><code>docs/guides/</code></a> — answers to
+questions people actually ask, written to be useful whether or not you use this
+library. The code in them is executed in CI.
+Four so far: why a presigned URL cannot be taken back, why a presigned PUT
+does not limit what gets uploaded, why Row-Level Security does not stop a
+cross-tenant grant from being written, and why the job that reclaims orphaned
+objects is the most dangerous one in the system.</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/packages/core/SEMANTICS.md" target="_blank" rel="noopener noreferrer"><code>packages/core/SEMANTICS.md</code></a> — the exact behaviour of every edge: liveness, delegation, deletion, the audit chain</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/packages/core/MIGRATIONS.md" target="_blank" rel="noopener noreferrer"><code>packages/core/MIGRATIONS.md</code></a> — how schema changes are delivered and what the pre-1.0 compatibility promise is</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/packages/core/CHANGELOG.md" target="_blank" rel="noopener noreferrer"><code>packages/core/CHANGELOG.md</code></a> — the real history, including the security defects we found in ourselves</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/ARCHITECTURE-PROGRESSIVE.md" target="_blank" rel="noopener noreferrer"><code>ARCHITECTURE-PROGRESSIVE.md</code></a> — the tier model, lines of code versus the alternatives, and where we lose</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/architecture/TIER5-DESIGN-NOTE.md" target="_blank" rel="noopener noreferrer"><code>architecture/TIER5-DESIGN-NOTE.md</code></a> — large files, streaming, range requests, CDN</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/llms.txt" target="_blank" rel="noopener noreferrer"><code>llms.txt</code></a> — the same map, written for an agent implementing an integration</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/openapi.yaml" target="_blank" rel="noopener noreferrer"><code>openapi.yaml</code></a> — the two HTTP routes the library serves, as OpenAPI 3.1</li>
+</ul>
+<p>Every link above points at GitHub, and an installed consumer may have no network
+and no browser. The npm package therefore carries the same files on disk, under
+<code>node_modules/@filelayer/core/</code>: this README, <code>docs/QUICKSTART.md</code>, <code>llms.txt</code>,
+<code>openapi.json</code>, <code>schema.sql</code>, <code>SEMANTICS.md</code>, <code>MIGRATIONS.md</code>, <code>CHANGELOG.md</code>,
+<code>LICENSE</code> and <code>NOTICE</code>, alongside <code>src/</code>, <code>test/</code> and <code>examples/</code>. Three of them also resolve as subpath
+imports: <code>@filelayer/core/llms.txt</code>, <code>@filelayer/core/openapi.json</code> and
+<code>@filelayer/core/schema.sql</code>, so a reader does not have to guess at the layout
+of <code>node_modules</code>.</p>
+<h2>License</h2>
+<p><strong><a href="https://github.com/filelayer/filelayer/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>.</strong>
+Commercial use, modification, distribution and private use are permitted, with
+an express patent grant and a patent-retaliation termination clause. You must
+preserve the copyright and licence notices and state significant changes; there
+is no copyleft obligation on your own code.</p>
+<pre><code>SPDX-License-Identifier: Apache-2.0
+Copyright 2026 Technology Pro Bono S.L.
+</code></pre>
+<p><code>LICENSE</code> is the unmodified licence text from apache.org.
+<a href="https://github.com/filelayer/filelayer/blob/main/NOTICE" target="_blank" rel="noopener noreferrer"><code>NOTICE</code></a> carries the
+attribution notice required by section 4(d); both are inside the published npm
+tarball, so the grant travels with the artifact rather than only with the
+repository. There are no per-file licence headers. The grant is carried by
+<code>LICENSE</code>, <code>NOTICE</code> and the <code>license</code> field of every <code>package.json</code>.</p>
+<p><strong>Dependencies.</strong> Filelayer has <strong>no runtime dependencies</strong>, and a job in CI
+fails the build if one appears. Its third-party packages are all
+<code>devDependencies</code>: <a href="https://github.com/electric-sql/pglite" target="_blank" rel="noopener noreferrer"><code>@electric-sql/pglite</code></a>
+(Apache-2.0), which is also an <em>optional peer dependency</em> and is what
+<code>quickstart()</code> and most of the suite run on, plus <code>pg</code> and <code>embedded-postgres</code>
+for the eight contention tests that need a server with two real backends. A
+production install contains none of them. It is installed from the registry rather than vendored, ships no <code>NOTICE</code>
+file of its own, and is recorded in ours for convenience. No third-party code is
+copied or embedded anywhere in this repository.</p>
+<h2>Contributing, security and conduct</h2>
+<ul>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer"><code>CONTRIBUTING.md</code></a>
+— how to set up, what <code>npm run verify</code> covers, and what a pull request needs.</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer"><code>SECURITY.md</code></a>
+— <strong>report vulnerabilities privately</strong>, never as a public issue. Includes our
+disclosure timetable and what is in and out of scope.</li>
+<li><a href="https://github.com/filelayer/filelayer/blob/main/CODE_OF_CONDUCT.md" target="_blank" rel="noopener noreferrer"><code>CODE_OF_CONDUCT.md</code></a>
+— Contributor Covenant 2.1.</li>
+</ul>
+<p>Bugs, questions and "this document is wrong" reports go to
+<a href="https://github.com/filelayer/filelayer/issues" target="_blank" rel="noopener noreferrer">GitHub Issues</a>. A report that
+the product does not do what this README says is the most valuable thing you can
+send us, and every one so far has been fixed the same day.</p>
