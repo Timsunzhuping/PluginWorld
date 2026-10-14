@@ -1,0 +1,120 @@
+<h1>Condux</h1>
+<p>Condux is a source-available error monitoring platform with a built-in AI fix engine.</p>
+<p><a href="https://condux.ai" target="_blank" rel="noopener noreferrer"><img src="https://condux.ai/screenshots/issue-detail-light.jpg" alt="An issue in Condux, with its stack trace, source context, volume chart and triage actions" /></a></p>
+<p>SDKs report errors to a stateless ingest relay, which authenticates the DSN, applies per-plan rate
+limits and quotas, and scrubs PII before buffering through Redpanda. A consumer fingerprints and groups
+events into issues, writes time series to ClickHouse and issue state to PostgreSQL. A Next.js dashboard
+reads that back as grouped issues with stack traces, breadcrumbs, tag facets and per-hour charts, and
+alerting fires on new and regressed issues to email, Slack, Discord and webhooks.</p>
+<h2>The Conductor</h2>
+<p>The fix engine takes an issue to a draft pull request. It assembles a scoped, scrubbed context from the
+stack trace and the project's code mappings, sends it to Claude or to a model the organisation supplies,
+and applies the returned changes on a new branch as a <strong>draft</strong> pull request. Fixes are never merged
+automatically.</p>
+<p><a href="https://condux.ai" target="_blank" rel="noopener noreferrer"><img src="https://condux.ai/screenshots/fix-run-light.jpg" alt="A Conductor fix run on an issue, showing its status, the model token usage and the draft pull request it opened" /></a></p>
+<p>Repository access is a GitHub App with short-lived installation tokens; the model is not given the
+token. After a fix PR merges, a verification loop compares the issue against its subsequent event
+counts and resolves it once it stays silent for a configured window.</p>
+<p>Open Dependabot findings on a connected repository can be turned into dependency-bump draft PRs through
+the same engine.</p>
+<p>Each run is metered against the organisation's monthly allowance and a spend ceiling, with per-run cost
+derived from recorded model token usage.</p>
+<h2>Compatibility</h2>
+<p>Ingestion accepts the <strong>Sentry envelope and store formats</strong>, so an existing Sentry SDK reports to Condux
+by changing its DSN. <strong>OTLP/HTTP logs</strong> are also accepted, which lets an OpenTelemetry-instrumented
+application report without an SDK.</p>
+<p>First-party SDKs are published for JavaScript/Node, browser, edge, Next.js, Python, Go, Ruby, PHP, JVM
+and .NET, with framework adapters for React, Express, Flask/Django/FastAPI, Rails, ASP.NET Core and
+Spring Boot. The SDKs are Apache-2.0; the server is FSL.</p>
+<h2>MCP endpoint</h2>
+<p>A read-only Model Context Protocol endpoint lets an AI agent debug against real production errors.
+Point Claude, Cursor or any MCP client at a project with a scoped token and it can list issues, read
+stack traces and page through occurrences. There are no write tools, and a token resolves to exactly
+one project.</p>
+<p><a href="https://condux.ai" target="_blank" rel="noopener noreferrer"><img src="https://condux.ai/screenshots/mcp-tab-light.jpg" alt="The MCP tab of a project, where a scoped read-only token is minted with its client configuration snippet" /></a></p>
+<h2>Architecture</h2>
+<p>.NET 10 services and a Next.js / React / TypeScript dashboard.</p>
+<pre><code> SDKs ──envelope──▶ [Relay] ──▶ [Redpanda] ──▶ [Consumer] ──▶ ClickHouse (events, time series)
+                                                          └──▶ PostgreSQL (issues, orgs, audit)
+ Dashboard ──▶ [ControlPlane] ──▶ [Conductor] ──▶ draft PR
+</code></pre>
+<p>Valkey backs rate limiting and monthly quotas. The relay holds no state. Raw events expire per plan
+through a column-driven ClickHouse TTL rather than a scheduled job.</p>
+<h2>Repository layout</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>backend/</code></td>
+<td>.NET solution: <code>Condux.Relay</code> (ingest), <code>Condux.ControlPlane</code> (API), <code>Condux.Consumer</code>, <code>Condux.Conductor</code> (fix engine), <code>Condux.Core</code> (scrubbing, grouping, plans, quotas)</td>
+</tr>
+<tr>
+<td><code>web/</code></td>
+<td>Next.js dashboard</td>
+</tr>
+<tr>
+<td><code>sdks/</code></td>
+<td>Client SDKs and framework adapters</td>
+</tr>
+<tr>
+<td><code>packages/</code></td>
+<td>Shared frontend packages</td>
+</tr>
+<tr>
+<td><code>proto/</code></td>
+<td>Protobuf contracts</td>
+</tr>
+<tr>
+<td><code>migrations/</code></td>
+<td>PostgreSQL and ClickHouse schema, numbered and idempotent</td>
+</tr>
+<tr>
+<td><code>contracts/</code></td>
+<td>Exported OpenAPI document and Postman collection</td>
+</tr>
+<tr>
+<td><code>deploy/</code></td>
+<td>Docker Compose stack and Helm chart</td>
+</tr>
+<tr>
+<td><code>examples/</code></td>
+<td>Sample applications that report errors</td>
+</tr>
+</tbody></table>
+<h2>Requirements</h2>
+<ul>
+<li>.NET SDK 10.0 or later</li>
+<li>Node 22 or later, with pnpm</li>
+<li>Docker and Compose</li>
+</ul>
+<h2>Running it</h2>
+<pre><code class="language-bash">cp deploy/.env.example deploy/.env
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+</code></pre>
+<p>The dashboard is at <a href="http://localhost:3200" target="_blank" rel="noopener noreferrer">http://localhost:3200</a> and the API on 8080.</p>
+<p>Building and testing from source:</p>
+<pre><code class="language-bash">cd backend &amp;&amp; dotnet build Condux.sln -c Release
+cd backend &amp;&amp; dotnet test Condux.sln --filter "Category!=Integration"
+cd web &amp;&amp; pnpm install &amp;&amp; pnpm build
+</code></pre>
+<p>Integration tests start real datastores through Testcontainers and bind the same ports as the Compose
+stack, so run them with that stack stopped.</p>
+<h2>Deployment</h2>
+<p><code>deploy/docker-compose.yml</code> runs the whole platform on a single host. <code>deploy/charts/condux</code> is a Helm
+chart that deploys the services against externally managed PostgreSQL, ClickHouse and a Kafka-API
+broker rather than running datastores in the cluster. Its <a href="https://github.com/tripledownab/condux/blob/HEAD/deploy/charts/condux/README.md" target="_blank" rel="noopener noreferrer"><code>README.md</code></a>
+covers the values, including <code>config.ingestHost</code>, which is required because every DSN the control plane
+mints points at it. You build and push the service images yourself; the chart does not ship any.</p>
+<h2>Security</h2>
+<p>Report suspected vulnerabilities privately by email as described in <a href="https://github.com/tripledownab/condux/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer"><code>SECURITY.md</code></a>, rather
+than in a public issue or pull request.</p>
+<h2>License</h2>
+<p>Condux is source-available under the <strong>Functional Source License (FSL-1.1-ALv2)</strong>. It may be read,
+self-hosted and modified for any purpose other than offering a competing commercial service, and each
+release converts to Apache-2.0 two years after it is published.</p>
+<p>See <a href="https://github.com/tripledownab/condux/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><code>LICENSE</code></a> for the terms and <a href="https://github.com/tripledownab/condux/blob/HEAD/LICENSING.md" target="_blank" rel="noopener noreferrer"><code>LICENSING.md</code></a> for a plain-language summary.
+The SDKs under <code>sdks/</code> are Apache-2.0.</p>

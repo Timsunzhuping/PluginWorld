@@ -1,0 +1,775 @@
+<h1>dsh-wsl</h1>
+<p><a href="https://github.com/XINY11451/dsh-wsl/blob/HEAD/README.md" target="_blank" rel="noopener noreferrer">English</a> | <a href="https://github.com/XINY11451/dsh-wsl/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+<p>A model-facing <strong>WSL</strong> tool plugin for DeepSeek Harness (DSH). It lets an agent run
+Linux commands through <code>wsl.exe</code> directly — no hand-written <code>.sh</code> scripts or <code>pwsh</code>
+wrappers — and for command execution it essentially matches a native Linux DSH: a
+real Linux kernel and bash, exit codes and signals, timeouts, truncation with spill
+files, background jobs the built-in job tools read back, stdin, and automatic
+Windows/WSL path translation.</p>
+<p>It can also work the way you would, in a <strong>terminal you can watch</strong>: one shell per piece
+of work, every command visible as it is typed, a record of each piece above the composer,
+and the keyboard back in your hands with one click.</p>
+<p>Two limits are worth knowing before you rely on it. A <code>wsl</code> call runs below DSH's
+sandbox, so a file policy does not confine it (see <a href="#sandboxing" target="_blank" rel="noopener noreferrer">Sandboxing</a>); and a
+project kept on a Windows drive keeps <strong>Windows</strong> filesystem semantics — no POSIX
+permissions, case-insensitive names, no file-change notifications — at a fraction
+of the speed (see <a href="#notes" target="_blank" rel="noopener noreferrer">Notes</a>).</p>
+<p><img src="https://raw.githubusercontent.com/XINY11451/dsh-wsl/HEAD/assets/market-preview-features-8.png" alt="What the plugin does, in order of importance" /></p>
+<h2>Tools</h2>
+<p>The plugin registers six tools (only <code>wsl-bootstrap</code> has a switch of its own, and it is
+OFF by default):</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>wsl</code></td>
+<td>Run a Linux command and return <code>stdout</code>/<code>stderr</code> with exit-code, timeout and truncation markers.</td>
+</tr>
+<tr>
+<td><code>wsl-path</code></td>
+<td>Convert between Windows and WSL paths via <code>wslpath</code>.</td>
+</tr>
+<tr>
+<td><code>wsl-env</code></td>
+<td>Summarize the WSL environment (distros, kernel, cpu, mem, disk).</td>
+</tr>
+<tr>
+<td><code>wsl-doctor</code></td>
+<td>Compare what a project needs with what the distribution has — including commands that are really Windows binaries. Read-only.</td>
+</tr>
+<tr>
+<td><code>wsl-bootstrap</code></td>
+<td>Install the missing toolchain inside the distribution, from a fixed recipe list, plan first.</td>
+</tr>
+<tr>
+<td><code>wsl-term</code></td>
+<td>Work in the session's terminal: one shell per piece of work, with a record of each above the composer.</td>
+</tr>
+</tbody></table>
+<h3><code>wsl</code></h3>
+<p>Runs:</p>
+<pre><code>wsl.exe [-d &lt;distro&gt;] -e bash -lc "cd &lt;workdir&gt; &amp;&amp; &lt;command&gt;"
+</code></pre>
+<p>and returns <code>stdout</code>/<code>stderr</code> with <code>[exit code: N]</code> / <code>[killed by signal: ...]</code> /
+<code>[timed out after Nms; the command was killed]</code> / <code>[output truncated: ...]</code> markers.</p>
+<p><code>&lt;distro&gt;</code> is the caller's <code>distro</code> argument, else <code>DSH_WSL_DISTRO</code>, else omitted
+entirely so <code>wsl.exe</code> uses the <strong>system default distribution</strong> — that is what makes
+the package portable to a machine that has no <code>Ubuntu-22.04</code>.</p>
+<p>A script longer than the Windows command-line limit (32767 characters) is fed to
+<code>wsl.exe [-d &lt;distro&gt;] -e bash -ls</code> on <strong>stdin</strong> instead, so long commands work
+without any size ceiling.</p>
+<p>Pass <code>stdin</code> to write text into the command (the default is <code>/dev/null</code>, so an
+interactive command gets EOF), and <code>runInBackground: true</code> for work that outlives
+the call: the command becomes a job in the host's registry, which the model then
+reads with the <strong><code>job_output</code></strong> tool and stops with <strong><code>job_kill</code></strong> — no extra tool
+is involved. Background jobs need <code>@deepseek-ai/dsh-tool-jobs</code> in the preset's
+composition; without it the call fails with that instruction instead of silently
+running in the foreground.</p>
+<h3><code>wsl-path</code></h3>
+<p>Converts a path in either direction: <code>C:\Users\me\a.txt</code> -&gt; <code>/mnt/c/Users/me/a.txt</code>
+or <code>/home/me/a.txt</code> -&gt; <code>\\wsl.localhost\Ubuntu-22.04\home\me\a.txt</code>. Direction is
+auto-detected from the path, or forced with <code>direction: 'win' | 'linux'</code>.</p>
+<h3><code>wsl-env</code></h3>
+<p>Returns the distribution list, the probed distro, kernel and architecture, CPU
+count, memory and disk usage, and what the machine can actually <strong>do</strong>:</p>
+<pre><code>distro: Ubuntu-22.04 (system default)
+Linux 6.6.87.2-microsoft-standard-WSL2 x86_64
+nproc: 24
+Ubuntu 22.04.5 LTS · WSL2 · cgroup v2
+systemd: yes · docker: not installed
+GPU: /dev/dxg present (GPU passthrough enabled) · nvidia-smi: GPU 0: NVIDIA GeForce RTX 5070 Laptop GPU
+drives: /mnt/c /mnt/d
+/etc/wsl.conf: [boot];systemd=true;[user];default=xiny; · .wslconfig: not set
+launcher: WSL 版本: 2.6.3.0 · 内核版本: 6.6.87.2-1 · WSLg 版本: 1.0.71 · Windows: 10.0.26200.9457
+</code></pre>
+<p>so an agent can decide what is available before running commands: WSL1 vs WSL2,
+whether systemd manages services, the cgroup version (matters for containers),
+GPU passthrough, docker (installed / cli-only / daemon version), which drives are
+mounted, and how <code>/etc/wsl.conf</code> and the Windows-side <code>.wslconfig</code> are
+configured. Takes an optional <code>distro</code>.</p>
+<p>Every fact is optional and degrades honestly: a probe that cannot run leaves its
+line out, an empty value is stated (<code>docker: not installed</code>, <code>.wslconfig: not set</code>), a failed probe is reported in the summary instead of being dropped, and an
+unknown distro is an error rather than a partial answer. Note that <code>wsl --version</code>
+is <strong>localized</strong>, so its labels are passed through as the launcher printed them
+rather than parsed by name; the Direct3D/MSRDC/DXCore versions are omitted.</p>
+<h3><code>wsl-doctor</code></h3>
+<p>Answers the question a project's own README cannot: <strong>will the tooling this
+checkout expects actually work inside this distribution?</strong> It reads the manifests
+in the directory (<code>package.json</code> and lockfiles, <code>.nvmrc</code>, <code>tsconfig.json</code>,
+<code>Cargo.toml</code>, <code>go.mod</code>, <code>pyproject.toml</code>, <code>requirements.txt</code>, <code>Dockerfile</code>,
+<code>docker-compose.yml</code>, <code>Makefile</code>, <code>CMakeLists.txt</code>) and reports, per need, whether
+it resolves on the Linux side:</p>
+<pre><code>distro: Ubuntu-22.04 (system default)
+workspace: /mnt/d/proj (Windows drive mount /mnt/d — builds, installs and git are much slower here; …)
+project: package.json, pnpm-lock.yaml
+
+needs (from the project): node, npm, pnpm
+  MISSING node — not on PATH in this distribution (from package.json)
+  WINDOWS npm — resolves to /mnt/c/Program Files/nodejs/npm, a Windows binary reached through interop; …
+  MISSING pnpm — not on PATH in this distribution (from pnpm-lock.yaml)
+
+usable on the Linux side: python3 3.10.12, gcc 11.4.0, make 4.3, git 2.34.1, curl, rsync, tar, sudo
+Windows binaries on the Linux PATH (interop): npm -&gt; /mnt/c/Program Files/nodejs/npm, npx -&gt; …
+privileges: uid=1000 (xiny) · sudo: requires a password (unusable from a tool call) · root: switched off
+
+next: node, npm are not usable — wsl-bootstrap({ recipes: ["node", "pnpm"] }) installs them …
+</code></pre>
+<p>That <code>WINDOWS</code> row is the reason the tool exists. WSL appends the Windows <code>PATH</code>
+to the Linux one, so <code>npm</code> resolves on a machine whose distribution has no <code>node</code>
+at all — measured here as <code>/mnt/c/Program Files/nodejs/npm</code> — and the errors a
+model gets from running it against a Linux directory name neither cause. Overall
+it is read-only, cheap, and worth running before blaming a failed command on the
+command. Takes an optional <code>workspace</code> (a Linux directory; default: the configured
+directory, else the session workspace) and <code>distro</code>.</p>
+<h3><code>wsl-bootstrap</code></h3>
+<p>Installs the missing toolchain <strong>inside the distribution</strong>, from a fixed recipe
+list and nothing else: <code>node</code> (Node.js LTS into <code>/usr/local</code>, checksum-verified,
+with corepack), <code>pnpm</code>, <code>python</code> (python3 + pip + venv), <code>build</code>
+(build-essential), <code>tools</code> (jq, rsync, curl, git, ca-certificates). Dependencies
+are added when they are needed: <code>pnpm</code> brings <code>node</code>, and <code>node</code> brings <code>tools</code>
+when <code>curl</code> is missing.</p>
+<p><strong>It is off by default</strong>, and its <code>dryRun</code> defaults to <code>true</code>, so the first call
+prints the plan and changes nothing:</p>
+<pre><code>dry run — nothing has been installed (distro Ubuntu-22.04)
+
+already present:
+  python — python3, pip and venv (apt)
+
+to install (python, tools):
+  [tools] apt packages: ca-certificates curl git jq rsync — runs as root inside the distribution
+      export DEBIAN_FRONTEND=noninteractive; apt-get update &amp;&amp; apt-get install -y ca-certificates curl git jq rsync
+
+apt would report:
+  Inst libjq1 (1.6-2.1ubuntu3.2 Ubuntu:22.04/jammy-updates [amd64])
+  …
+
+run it for real with `dryRun: false`.
+</code></pre>
+<p>Recipes that are already satisfied are skipped, and the plan includes what apt itself
+would do, so you can see the exact changes before anything is installed. Installation
+runs as root; a failing step stops the run.</p>
+<h3><code>wsl-term</code></h3>
+<p>Every other tool here starts a <strong>fresh shell per call</strong>. That is what makes them
+safe to run in parallel, and it stays the default. <code>wsl-term</code> is the other way
+round: <strong>one shell for one piece of work</strong>. It is for the jobs where the shell's own
+state is the point — a build worth watching, an interactive program, a directory or
+an environment that has to survive between steps.</p>
+<p><code>wsl-term</code> works in that terminal:</p>
+<pre><code>wsl-term({ action: "list" })                                  → which terminals are open
+wsl-term({ action: "read" })                                  → the current screen
+wsl-term({ action: "run", command: "make sta", subtask: "跑通 sta 流程" })
+                                                               → runs it there, returns output and exit code
+wsl-term({ action: "input", data: "ls", submit: true })        → raw keystrokes
+wsl-term({ action: "interrupt" })                              → Ctrl-C
+wsl-term({ action: "close", id: "…" })                         → ends a terminal you name
+wsl-term({ action: "subtask-done", subtask: "跑通 sta 流程", result: "三条连跑全通过" })
+                                                               → writes the result and decides the shell
+</code></pre>
+<h4>Work is recorded as subtasks</h4>
+<p>Naming a <code>subtask</code> on <code>run</code> opens a record for that piece of work and logs every command
+it ran with its exit code. The dock above the composer lists those records — running ones
+first, then finished ones with their result — and clicking a row opens its detail: the
+terminal's full description, the result, and the commands. <code>subtask-done</code> writes the
+result and decides the shell: <code>keepTerminal: true</code> (the default) leaves it idle for a
+follow-up step, <code>false</code> closes a shell the tool opened. A terminal <strong>you</strong> opened is never
+closed this way, and <code>close</code> is the other way to end one. The records live in memory for
+the current DSH run — they describe this conversation's work, and a restart clears them
+along with the terminals.</p>
+<p>You do not have to open a terminal first. <code>run</code> and <code>read</code> work in the newest running
+terminal of this session, and you can watch what happens; if the session has none, the tool
+opens its own — a normal shell for that session, but <strong>not a sidebar tab</strong>, so open your own
+when you want to see or use it. Terminals belong to the current DSH run — restarting DSH
+ends them — and the app can re-create one under a <strong>new id</strong> when its tab is re-created, so
+an id from an earlier answer may no longer exist. The tool then falls back to the newest
+running terminal and says which one it used.</p>
+<p>Four things worth knowing:</p>
+<ul>
+<li><strong>The terminal is read-only while the model works in it, and it stays read-only
+afterwards</strong>: click <strong>「接管输入」</strong> in that terminal to type again. If you are typing
+when the model calls, the call is refused instead of landing in the middle of your
+line.</li>
+<li><strong><code>read</code> returns the screen.</strong> Anything that has scrolled away is gone, and
+full-screen programs (<code>vim</code>, <code>htop</code>) come back as their raw screen.</li>
+<li><strong><code>run</code> needs a POSIX-style shell</strong> (<code>sh</code>, <code>bash</code>, <code>zsh</code>). On <code>cmd.exe</code> or
+PowerShell, use <code>input</code>.</li>
+<li><strong>Long output is not thrown away.</strong> A build or synthesis log's answer is at the
+bottom, so what comes back is the end of the output; the complete text is written
+to a file and the result names it.</li>
+</ul>
+<p>Commands run as <strong>you</strong>, exactly as if you had typed them — and you see each one as a short,
+readable line (<code>__dsh_term_run 'make syn'</code>), because the first command in a terminal defines
+that one-line helper there. What comes back is the output between its two markers, plus the
+exit code. <strong>There is no switch for this tool</strong>: it is always available, the terminal it
+works in is either yours or one it opened for this session, and every command it types is
+visible there. A destructive command still stops at the guard unless the caller says it is
+intended.</p>
+<p>Reach for it only when the work needs <strong>one shell across several steps</strong> — a long build worth
+watching go by, an interactive program, a directory or environment that has to persist. For
+everything self-contained the plain <code>wsl</code> tool is the better deal: a fresh shell per call runs
+in parallel, needs no terminal at all, and never takes the keyboard away from you.</p>
+<h2>Running privileged commands (<code>asRoot</code>)</h2>
+<p>WSL's root does not need a password, so a single call can run as root (that is
+<code>wsl -u root</code>). It is gated by a panel switch (「管理员模式（root）」, off by default):</p>
+<pre><code>wsl({ command: 'apt-get install -y jq', description: 'install jq', asRoot: true })
+</code></pre>
+<p>The switch is the authorisation, not the parameter: with it off, <code>asRoot: true</code> is
+<strong>refused and told which switch to turn on</strong>, never quietly downgraded to your user
+account. Every privileged result is marked (<code>[ran as root: wsl -u root]</code>), and the
+destructive-command guard still applies on top: <code>rm -rf</code> needs <code>allowDangerous: true</code>
+whether or not the call runs as root.</p>
+<h2>Install</h2>
+<p>The published npm package is <strong><code>dsh-wsl-tool</code></strong>, not <code>dsh-wsl</code>: the registry
+refuses <code>dsh-wsl</code> as too similar to the existing package <code>is-wsl</code>, and no token
+or setting overrides that. The repository, the plugin and the market listing keep
+the <code>dsh-wsl</code> name. The bundle patch points at its own entry by relative path, so
+the folder under <code>node_modules</code> is free to differ — what has to match is the
+specifier you install under.</p>
+<ol>
+<li><p>Add the package to your DSH profile (<code>profiles/&lt;profile&gt;/package.json</code>):</p>
+<pre><code class="language-json">{ "dependencies": { "dsh-wsl-tool": "file:&lt;path-to-this-repo&gt;" } }
+</code></pre>
+<p>or run <code>dsh plugin add --profile &lt;profile&gt; dsh-wsl-tool</code> to install from npm,
+or <code>dsh plugin add --profile &lt;profile&gt; file:&lt;path-to-this-repo&gt;</code> from a
+checkout (which names the dependency after this package).</p>
+</li>
+<li><p>Nothing else. The package's <code>cordis.patch.yml</code> inserts the <code>tool-wsl</code> row
+itself when the bundle is loaded, process-wide, so the tools are
+available to every agent preset without further wiring. <strong>There is no mode to
+pick and nothing to add to a preset</strong> — the left-sidebar WSL panel arrives the
+same way.</p>
+<p>Do <strong>not</strong> also list <code>tool-wsl</code> in a preset: DSH registers tools by name, and
+the second registration fails with
+<code>tool "wsl" is already registered in this scope</code>. One row, from the bundle.</p>
+</li>
+<li><p>Restart DSH.</p>
+</li>
+</ol>
+<p>The settings panel is the one optional piece: its form needs
+<code>@deepseek-ai/schemastery</code>, which most profiles already have (any plugin that
+depends on it brings it in — add it to the profile's dependencies if yours does
+not). Without it, the tools and the panel's 「WSL 终端启动路径」 field work
+as usual and only the switches are absent — the panel says so instead of waiting
+forever.</p>
+<h2>Compatibility</h2>
+<p>The manifest declares the DSH it needs — <code>"engines": { "dsh": "&gt;=0.1.7-rc.2" }</code> —
+which is the floor this section documents. The plugin market reads that
+declaration from the published manifest and shows it as a requirement on the
+entry (<code>DSH &gt;=0.1.7-rc.2</code>), warning before an install or update onto an older
+host; DSH itself ignores <code>engines</code>, so the declaration is advice, not a gate.
+The <code>-rc.2</code> is load-bearing: <code>&gt;=0.1.7</code> alone excludes the <code>0.1.7-rc.2</code> release
+this line was verified on, and the market would then report the plugin as
+incompatible with its own verified host.</p>
+<p>Verified against DSH <strong>0.1.7-rc.2</strong> (earlier releases of this plugin were verified
+on 0.1.5-rc.2): the tool schemas
+pass DSH's own <code>assertSupportedJsonSchema</code>, the subprocess seam is exercised
+against the real provider rather than a shim, and the background-job path is
+checked against the real job registry, including the session-id ownership fence
+that 0.1.7 tightened. <code>test/real-seam.mjs</code> is that check and it re-verifies a host
+in about a minute, so point it at any DSH installation after an upgrade:</p>
+<pre><code class="language-sh">DSH_SUBPROCESS_LOCAL=/path/to/dsh/node_modules npm run test:real
+</code></pre>
+<p>A background job is owned by the calling session (<code>owner: exec.agent.id</code>), which
+is what lets the model read it back with <code>job_output</code>/<code>job_kill</code> and what keeps
+other sessions out; an execution with no agent starts the job unowned.</p>
+<h2>The WSL panel (left sidebar)</h2>
+<p>The plugin ships a small client half: a <strong>WSL</strong> entry in the desktop app's left
+sidebar, whose panel carries one switch per feature, each with a one-line
+explanation.</p>
+<table>
+<thead>
+<tr>
+<th>Switch</th>
+<th>What it controls</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>wsl</code> 命令执行</td>
+<td>registers the <code>wsl</code> tool</td>
+</tr>
+<tr>
+<td><code>wsl-path</code> 路径转换</td>
+<td>registers the <code>wsl-path</code> tool</td>
+</tr>
+<tr>
+<td><code>wsl-env</code> 能力体检</td>
+<td>registers the <code>wsl-env</code> tool</td>
+</tr>
+<tr>
+<td><code>wsl-doctor</code> 项目体检</td>
+<td>registers <code>wsl-doctor</code></td>
+</tr>
+<tr>
+<td><code>wsl-bootstrap</code> 安装工具链</td>
+<td>registers <code>wsl-bootstrap</code>, which may install into the distribution. <strong>Off by default</strong>, and its <code>dryRun</code> still has to be turned off per call</td>
+</tr>
+<tr>
+<td>后台任务</td>
+<td>whether <code>wsl</code> accepts <code>runInBackground</code></td>
+</tr>
+<tr>
+<td>自动转换路径</td>
+<td>the default for the per-call <code>translatePaths</code></td>
+</tr>
+<tr>
+<td>默认跟随会话工作区</td>
+<td>start in the session's directory instead of <code>~</code> when <code>workdir</code> is omitted. <strong>On by default</strong>: with it off, every relative path an agent writes lands in the Linux home, which is invisible from Explorer and grows the WSL disk image</td>
+</tr>
+<tr>
+<td>Linux 默认工作目录</td>
+<td>a fixed Linux directory (for example <code>/mnt/d/project</code>) used when <code>workdir</code> is omitted. Filling it in wins over the switch above; clearing it goes back to following the session</td>
+</tr>
+<tr>
+<td>WSL 终端启动路径</td>
+<td>the optional sidebar terminal's startup directory — <code>--cd &lt;dir&gt;</code> on the <code>terminal-controller</code> row of your <strong>profile patch</strong> (see <a href="#optional-a-wsl-terminal-in-the-sidebar" target="_blank" rel="noopener noreferrer">Optional: a WSL terminal in the sidebar</a>). Empty clears it, and the panel reads the current value from the same file</td>
+</tr>
+<tr>
+<td>终端历史行数</td>
+<td>how many lines of output that terminal keeps (<code>scrollback</code> on the same row). The platform default is 1000; <code>0</code> keeps none and an empty box restores the default. Both fields take effect at the next DSH start</td>
+</tr>
+<tr>
+<td>危险命令守卫</td>
+<td>whether a destructive command needs an explicit <code>allowDangerous</code></td>
+</tr>
+<tr>
+<td>管理员模式（root）</td>
+<td>whether <code>wsl</code> accepts <code>asRoot: true</code> (<code>wsl -u root</code>). WSL's root needs no password, so this switch is the authorisation itself; <strong>off by default</strong></td>
+</tr>
+</tbody></table>
+<p>The panel edits the plugin's own configuration, so the same values can be written
+by hand (<code>- id: tool-wsl</code> with <code>config:</code> in a profile patch) or by environment
+variables. <code>lib/config.js</code> owns the precedence — <strong>plugin configuration, then the
+environment, then the built-in defaults</strong> — and a switch left at its default lets
+the layer below decide, which is why <code>DSH_WSL_WORKDIR=session</code> keeps working for
+someone who never opened the panel.</p>
+<p>「WSL 终端启动路径」 is the one exception: the sidebar terminal belongs to another
+plugin, so that field edits your profile's patch layer instead — the file is backed
+up before every write, only the terminal row's <code>args</code> line is rewritten, and the
+result is read back and undone if it is not exactly that one line.</p>
+<p><strong>A change takes effect immediately</strong>, tool switches included: registering a tool
+returns its own disposer, so every settings update is diffed into the tool registry
+and a switch flips the tool on or off in place — no restart, which matters because
+the panel is where these get flipped. The one exception is 「WSL 终端启动路径」: it
+edits another plugin's startup arguments in your profile patch, which that plugin
+reads at boot, so that field applies after a restart. Distro and timeout are values
+rather than features — set them in the patch or with <code>DSH_WSL_DISTRO</code> /
+<code>DSH_WSL_TIMEOUT_MS</code>, and the panel shows what is currently in effect.</p>
+<p>The settings surface needs <code>@deepseek-ai/schemastery</code>, which the plugin declares as
+an optional peer dependency: without it the tools still run on their defaults
+and only the panel is missing.</p>
+<p>At the bottom of the panel there is one feedback entry, next to it a short
+submission guide, and — see <a href="#feedback" target="_blank" rel="noopener noreferrer">Feedback</a> — a 「复制插件信息」 button. The
+button asks the host half on <code>/dsh-wsl-tool/info</code> for this plugin's own facts (name,
+version and repository read from its manifest, Node, platform), the DSH build it is
+running inside, and the WSL facts <code>wsl-env</code> reports (default distribution, kernel,
+capability flags) — then copies the result together with the effective
+configuration. Nothing here is a string a release has to remember to edit, and a
+probe that fails says so instead of inventing a value.</p>
+<h2>Optional: a WSL terminal in the sidebar</h2>
+<p>The desktop app's sidebar terminal can open WSL instead of a Windows shell. It is
+<strong>opt-in</strong> — installing this plugin does not change which shell your terminals
+open — and the patch that enables it ships in the package as
+<a href="https://github.com/XINY11451/dsh-wsl/blob/HEAD/extras/terminal-wsl.patch.yml" target="_blank" rel="noopener noreferrer"><code>extras/terminal-wsl.patch.yml</code></a>.</p>
+<p>To turn it on, copy that entry into your profile's own patch layer
+(<code>$DSH_HOME/profiles/&lt;profile&gt;/cordis.patch.yml</code>); a CLI launch can instead pass
+<code>--patch &lt;path to the installed file&gt;</code>. It applies at the next app start.</p>
+<p>The panel can set the startup directory for you: 「WSL 终端启动路径」 (beside 「默认
+Linux 工作目录」) reads the current value out of that file and writes <code>--cd &lt;dir&gt;</code> onto
+the row's <code>args</code> line — backing the patch up first, changing only that one line, and
+checking what landed before it is kept. Clearing the field removes the flag, which puts
+the terminal back on the session workspace (the Windows directory it is started from,
+translated to <code>/mnt/…</code>); <code>~</code> pins it to the Linux home. It takes effect at the next app
+start too.</p>
+<p>Beside it, 「终端历史行数」 sets <code>scrollback</code> on the same row: how many lines of output
+the terminal keeps, so long builds stay readable instead of scrolling away (the platform
+default is 1000). <code>0</code> keeps none, and an empty box goes back to the default. A longer
+history costs memory in both the app and the Host, which is why it is a number you
+choose rather than a fixed large value. Same write rules and the same next-start rule.</p>
+<pre><code class="language-yaml">- id: terminal-controller
+  config:
+    shell:
+      path: 'C:\Windows\System32\wsl.exe'
+      name: WSL
+      args: ['-e', 'bash', '-l']
+</code></pre>
+<ul>
+<li>The sidebar's 新建终端 list is built from the composed <code>terminal-controller</code>
+row: it lists the configured <code>shell</code> first and keeps the shells it discovers
+(<code>powershell</code>, <code>cmd</code>, <code>bash</code>, …) selectable. The picker is core UI, so overriding
+that row is the supported way in — which is also why this cannot be a plain
+plugin entry.</li>
+<li>No distribution is pinned, so <code>wsl.exe</code> follows the system default — the same
+rule the tools use when <code>DSH_WSL_DISTRO</code> is unset. Add <code>-d &lt;name&gt;</code> to <code>args</code> to
+pin one.</li>
+<li>The session workspace is a Windows path that <code>wsl.exe</code> translates, so the
+terminal opens in <code>/mnt/&lt;drive&gt;/…</code> exactly like the Windows shells do; and it is
+a real PTY (<code>xterm-256color</code>), so full-screen programs work.</li>
+<li>An id-targeted patch replaces that row's whole config, so restate anything else
+you had set on it (terminal limits, scrollback, a custom <code>shellCandidates</code> list).</li>
+</ul>
+<h2><code>wsl</code> parameters</h2>
+<table>
+<thead>
+<tr>
+<th>Param</th>
+<th>Required</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>command</code></td>
+<td>yes</td>
+<td>string</td>
+<td>Linux command to execute</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>yes</td>
+<td>string</td>
+<td>short UI label</td>
+</tr>
+<tr>
+<td><code>workdir</code></td>
+<td>no</td>
+<td>string</td>
+<td>Linux path (<code>/home/me</code>, <code>~/src</code>) or Windows path, default <code>~</code></td>
+</tr>
+<tr>
+<td><code>timeoutMs</code></td>
+<td>no</td>
+<td>number</td>
+<td>timeout in milliseconds, default 600000 (10 min); the process is killed and the result marked as timed out</td>
+</tr>
+<tr>
+<td><code>distro</code></td>
+<td>no</td>
+<td>string</td>
+<td>WSL distribution; defaults to the system default distribution</td>
+</tr>
+<tr>
+<td><code>env</code></td>
+<td>no</td>
+<td>object</td>
+<td>extra environment variables to export (keys must be valid shell names)</td>
+</tr>
+<tr>
+<td><code>stdin</code></td>
+<td>no</td>
+<td>string</td>
+<td>text written to the command stdin (UTF-8) before it runs</td>
+</tr>
+<tr>
+<td><code>runInBackground</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>run as a job and return its id immediately; read with <code>job_output</code>, stop with <code>job_kill</code></td>
+</tr>
+<tr>
+<td><code>allowDangerous</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>set <code>true</code> to run destructive commands</td>
+</tr>
+<tr>
+<td><code>asRoot</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>run this call as root (<code>wsl -u root</code>); refused unless the panel's 管理员模式 switch is on</td>
+</tr>
+<tr>
+<td><code>translatePaths</code></td>
+<td>no</td>
+<td>boolean</td>
+<td>default <code>true</code>; set <code>false</code> to pass <code>command</code> through verbatim</td>
+</tr>
+</tbody></table>
+<h2>Configuration</h2>
+<p>The panel's switches and value fields (<code>tools.wsl</code>, <code>tools.path</code>, <code>tools.env</code>,
+<code>tools.doctor</code>, <code>tools.bootstrap</code>, <code>backgroundJobs</code>, <code>translatePaths</code>,
+<code>startInSessionWorkspace</code>, <code>workdir</code>, <code>dangerGuard</code>, <code>allowRoot</code>, <code>distro</code>,
+<code>timeoutMs</code>) live in the profile patch and take effect as described on each row.
+Two of them have no environment variable on purpose: <code>dangerGuard</code> (its OFF
+position is the footgun) and <code>allowRoot</code> (WSL's root needs no password, so the
+switch IS the authorisation). The environment layer:</p>
+<table>
+<thead>
+<tr>
+<th>Environment variable</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DSH_WSL_DISTRO</code></td>
+<td>(system default)</td>
+<td>Pin the distribution for every call.</td>
+</tr>
+<tr>
+<td><code>DSH_WSL_TIMEOUT_MS</code></td>
+<td><code>600000</code></td>
+<td>Default deadline for a model-issued command; <code>timeoutMs</code> overrides it per call.</td>
+</tr>
+<tr>
+<td><code>DSH_WSL_MAX_TIMEOUT_MS</code></td>
+<td><code>86400000</code></td>
+<td>Ceiling for a per-call <code>timeoutMs</code>, mirroring the platform shell tools' <code>maxTimeoutMs</code>. The default deadline obeys it too.</td>
+</tr>
+<tr>
+<td><code>DSH_WSL_WORKDIR</code></td>
+<td><code>home</code></td>
+<td>Where a call starts without a <code>workdir</code>: <code>home</code> (the Linux <code>~</code>), <code>session</code> (the session working directory, i.e. <code>/mnt/&lt;drive&gt;/...</code> for a Windows checkout), or any explicit path.</td>
+</tr>
+<tr>
+<td><code>DSH_WSL_MAX_OUTPUT_BYTES</code></td>
+<td><code>65536</code></td>
+<td>Per-stream in-memory window (1 KiB – 8 MiB). Also raises the spill ceiling when set above 64 MiB.</td>
+</tr>
+</tbody></table>
+<p>An unparsable or out-of-range value falls back to the default: one bad variable
+must not take every tool down. Values are read once per mount, so a change
+takes effect on restart.</p>
+<h2>Notes</h2>
+<ul>
+<li><p>Each call runs in a fresh shell — no cwd/variables/functions persist between calls.</p>
+</li>
+<li><p><strong>stdin is <code>/dev/null</code> unless you pass <code>stdin</code>.</strong> An interactive command (<code>read</code>,
+<code>cat</code>, a <code>sudo</code> password prompt without <code>-S</code>) otherwise gets EOF immediately and
+cannot wait for input; nothing in this plugin can prompt. A password passed via
+<code>stdin</code> is recorded in the session transcript.</p>
+</li>
+<li><p>The default <code>workdir</code> is <code>~</code>; set <code>DSH_WSL_WORKDIR=session</code> to start in the
+session's working directory instead (see Configuration).</p>
+</li>
+<li><p>The distro is the caller's <code>distro</code>, else <code>DSH_WSL_DISTRO</code>, else the system
+default; there is no hardcoded fallback name.</p>
+</li>
+<li><p>An unknown distro is reported as a clear error (<code>distribution "X" is not registered</code>) instead of a raw <code>-1</code> exit code, and any other launcher failure (<code>Wsl/Service/WSL_E_*</code>) is surfaced with its code rather than passed off as the command's own exit status.</p>
+</li>
+<li><p><strong>A background job outlives the call.</strong> <code>runInBackground: true</code> returns a job id (<code>wsl-N</code>) immediately and registers the work with the host's job registry, so <code>job_output</code> reads it (with the same markers as a foreground call) and <code>job_kill</code> stops it. The 10-minute default deadline does <strong>not</strong> apply in the background; an explicit <code>timeoutMs</code> still does. A non-zero exit is reported as <code>completed</code> with the exit code in the detail, exactly like the foreground rendering.</p>
+</li>
+<li><p>Windows paths in <code>command</code> and <code>workdir</code> are translated to <code>/mnt/...</code> automatically:</p>
+<ul>
+<li><code>C:\Users\me\a.txt</code> -&gt; <code>/mnt/c/Users/me/a.txt</code>, and paths containing spaces work in either slash style and with several paths on one line: <code>C:\Program Files\Git</code>, <code>C:/Program Files/Git</code>, <code>C:\Program Files (x86)\Steam</code> and <code>cp C:\a.txt D:\b.txt</code> (both paths are translated) all behave;</li>
+<li><code>\\wsl.localhost\&lt;distro&gt;\home\x</code> and <code>\\wsl$\&lt;distro&gt;\home\x</code> -&gt; <code>/home/x</code>;</li>
+<li>text that only <em>looks</em> like a drive path is left alone: a single lowercase letter followed by <code>/</code> (<code>a:/b</code>), a drive letter inside another expression (<code>sed "s/C:\x/y/"</code>), and a drive-like segment inside a URL;</li>
+<li>set <code>translatePaths: false</code> when the path belongs to a <strong>Windows</strong> program launched through interop — WSL does not translate <code>/mnt/c/...</code> back, so <code>notepad.exe C:\file.txt</code> needs its original spelling. This affects <code>command</code> only; <code>workdir</code> is always translated.</li>
+</ul>
+</li>
+<li><p>A <code>~</code> in <code>workdir</code> or in a <code>wsl-path</code> argument is expanded by the shell (<code>~/my dir</code> works). Any other path is single-quoted, so <code>$VAR</code> inside a path is <strong>not</strong> expanded.</p>
+</li>
+<li><p>Output is capped at 64 KiB per stream. The tail is kept and the marker names the spill file holding the <strong>complete</strong> stream, so nothing is unrecoverable:</p>
+<pre><code>[stdout truncated: at most the last 65536 of 1288895 bytes were kept; full stream: C:\...\stdout.log]
+</code></pre>
+</li>
+<li><p><strong>Host shell facts are forwarded into the distro</strong>, because WSL does not pass Windows environment variables across on its own: <code>DSH_SESSION_ID</code>, <code>DSH_SHELL</code> and <code>DSH_HOME</code> (translated to its <code>/mnt/...</code> view) are exported ahead of the command, so a script sees the same session facts the platform's own shell tools inject. They are resolved <strong>per call</strong> from the host's <code>shellEnv</code> registry — the same source the other shell tools read — because they are session-scoped, not host constants; reading the host's own <code>process.env</code> finds nothing and silently forwards nothing. <strong><code>DSH_WEB_URL</code> is deliberately not forwarded</strong> — it is a <code>127.0.0.1</code> URL for the Windows-side server, and in the default NAT networking mode WSL cannot reach Windows loopback (measured: HTTP 000 on both <code>127.0.0.1</code> and the host IP, which the server does not bind either). An explicit <code>env</code> entry always overrides a forwarded one.</p>
+</li>
+<li><p><code>timeoutMs</code> defaults to 10 minutes so a wedged <code>wsl.exe</code> cannot hang the call forever; pass a larger value for genuinely long work, up to the <code>DSH_WSL_MAX_TIMEOUT_MS</code> ceiling (24 h by default) — a slip of the keyboard cannot mean "never time out". The value reported back is always the deadline actually armed. The timeout also kills the Linux-side process (the provider uses <code>taskkill /T /F</code> on Windows).</p>
+</li>
+<li><p><code>wsl-env</code> also states where the session's own files live, and whether that is a Windows drive mount:</p>
+<pre><code>workspace: /mnt/d/DSHworkarea (Windows drive mount /mnt/d — builds, installs and git are much slower here; prefer a path under /home when it matters)
+</code></pre>
+<p>It is worth believing. Measured on the author's machine: a 128 MB sequential write
+ran at ~2.1 GB/s on ext4 against ~247 MB/s on <code>/mnt/d</code>, and creating 400 small
+files took under 10 ms against 0.72 s (a later re-run: 884 vs 116 MB/s, and 13 ms
+against 745 ms — the ratios hold at roughly 8× and 50×).</p>
+<p>It is not only slower. <code>/mnt/&lt;drive&gt;</code> is a 9p (drvfs) mount, so it keeps <strong>Windows</strong>
+filesystem semantics: <code>chmod</code>/<code>chown</code> do not stick (a <code>chmod 600</code> reads back as
+<code>777</code>), names are case-insensitive (so a case-sensitive import only fails on Linux
+CI), symlinks and the executable bit are synthetic, and <strong>inotify does not work at
+all</strong> — a watcher inside the distro receives no events for writes from either side
+(measured with an inotify probe on <code>/mnt/d</code>: zero events for a Windows-side write
+and for a Linux-side write, while the same probe on ext4 reported create, modify
+and close-write). Dev servers, <code>--watch</code> modes and file-watching tests are
+therefore blind on a Windows drive. Keep a project under <code>/home</code> when it matters:
+it recovers real semantics, real watch events, and the speed above.</p>
+</li>
+<li><p>Destructive commands are refused unless the call passes <code>allowDangerous: true</code>:</p>
+<ul>
+<li><strong>any recursive delete</strong> — <code>rm -r</code>, <code>rm -rf</code>, <code>rm -r -f</code>, <code>rm -R --force</code>, <code>rm --recursive</code> — because with stdin on <code>/dev/null</code> nothing prompts, so <code>rm -r tree</code> deletes silently. Each <code>rm</code> invocation is judged on its own command segment, so <code>rm a -f; rm b -r</code> cannot combine into a pass;</li>
+<li><code>dd</code> onto a block device, <code>mkfs</code>, partitioning/wiping tools (<code>fdisk</code>, <code>parted</code>, <code>wipefs</code>, <code>mkswap</code>, …), power control (<code>shutdown</code>, <code>reboot</code>, <code>systemctl reboot</code>, …), redirection onto a block device, and fork bombs;</li>
+<li>the guard tolerates the ways a command word can be spelled (<code>sudo rm -r -f</code>, <code>bash -c "rm -rf /"</code>, <code>find . -exec rm -rf {} +</code>, <code>rm$IFS-rf</code>, <code>\rm -rf</code>, <code>$(which rm) -rf</code>) but matches device/power tools at <strong>command position</strong>, so inspecting them is fine: <code>man fdisk</code>, <code>grep -rn reboot /var/log/syslog</code> and <code>echo "the mkfs tool formats disks"</code> all run.</li>
+</ul>
+</li>
+<li><p>Repeated launcher noise is stripped from stderr: the localhost-proxy warning and procps' <code>screen size is bogus</code> line.</p>
+</li>
+<li><p>Uses <code>wsl.exe -e</code> (<code>--exec</code>) so quoting and <code>$VAR</code> expansion behave like a normal shell; the default <code>--</code> pass-through mangles single quotes and variables.</p>
+</li>
+</ul>
+<h2>Sandboxing</h2>
+<p>DSH's file sandbox is enforced at two points: the shell executors
+(<code>@deepseek-ai/dsh-bash-sandbox</code>, <code>-pwsh-sandbox</code>, which wrap the exact argv
+through <code>ctx.sandbox</code>) and the filesystem service (<code>@deepseek-ai/dsh-fs-sandbox</code>,
+a policy fence on the two mutations). <strong><code>wsl</code> is in neither.</strong> It spawns
+<code>wsl.exe</code> through the host <code>subprocess</code> service, below that layer, so a
+<code>workspace-write</code> policy does not confine it: it can write anywhere the Linux
+side can, and anywhere under <code>/mnt/&lt;drive&gt;</code> that Windows permits.</p>
+<p>That is not a gap this plugin can close by "joining" the sandbox. On Windows the
+sandbox resolves to an ACL / restricted-token runner, while the file work happens
+inside the Linux kernel: a write to <code>/home/...</code> touches the distro's own
+filesystem image, which no Windows token constrains, and a write to <code>/mnt/c/...</code>
+travels through the filesystem bridge, where ACL enforcement is not something to
+rely on. Wrapping <code>wsl.exe</code> would confine the launcher, not the writes — and a
+false sense of isolation is worse than a documented absence. (The platform's own
+<code>dsh-fs-sandbox</code> is candid about its own limits too: "containment, not a security
+boundary".)</p>
+<p>What <code>wsl</code> does have is the destructive-command guard described above: a
+deterministic refusal list, not a kernel boundary. Treat this tool as able to
+touch anything your WSL installation can, and grant it accordingly.</p>
+<h2>Install from the plugin list</h2>
+<p>The package declares a <code>dsh.bundle</code> manifest (see <code>package.json</code>), so once the
+repository is listed it can be installed by name, e.g.
+<code>dsh plugin add dsh-wsl-tool</code>, and storefronts will offer it for one-click
+install. Installing from a local path (<code>file:</code>) as shown above keeps working
+either way.</p>
+<h2>How it works</h2>
+<p>The plugin is a cordis module that injects the host-plane <code>tools</code> and
+<code>subprocess</code> registries. <code>index.js</code> is only the entry point; the implementation
+is split by concern:</p>
+<table>
+<thead>
+<tr>
+<th>Module</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>lib/config.js</code></td>
+<td>Defaults and environment overrides, resolved once per mount.</td>
+</tr>
+<tr>
+<td><code>lib/paths.js</code></td>
+<td>Shell quoting and Windows -&gt; WSL path translation.</td>
+</tr>
+<tr>
+<td><code>lib/guard.js</code></td>
+<td>The destructive-command rules.</td>
+</tr>
+<tr>
+<td><code>lib/result.js</code></td>
+<td>Launcher-noise filters, truncation facts, marker rendering.</td>
+</tr>
+<tr>
+<td><code>lib/diagnostics.js</code></td>
+<td>The <code>wsl-env</code> capability probe, its parser and its lines.</td>
+</tr>
+<tr>
+<td><code>lib/runner.js</code></td>
+<td>The single spawn path plus launcher-error classification.</td>
+</tr>
+<tr>
+<td><code>lib/tools/*.js</code></td>
+<td>The tool definitions (schema, execute, presentCall).</td>
+</tr>
+<tr>
+<td><code>lib/doctor.js</code></td>
+<td>The project probe for <code>wsl-doctor</code>: one shell script, its parser, the report composer.</td>
+</tr>
+<tr>
+<td><code>lib/bootstrap.js</code></td>
+<td>The recipes, plan builder and outcome rendering for <code>wsl-bootstrap</code>.</td>
+</tr>
+<tr>
+<td><code>lib/terminal.js</code></td>
+<td>The text and selection work behind <code>wsl-term</code>: escape stripping, command markers, terminal picking.</td>
+</tr>
+</tbody></table>
+<ul>
+<li><code>apply()</code> resolves the configuration and registers the enabled tools, each with a
+JSON-schema parameter definition, an output schema, a <code>render</code> hook and an
+async <code>execute</code>.</li>
+<li>Every call goes through one spawn path (<code>runner.runWsl</code>): <code>wsl.exe -d &lt;distro&gt; -e bash -lc "&lt;exports; cd workdir &amp;&amp; command&gt;"</code> through the host <code>subprocess</code>
+service, with stdout/stderr capped at the configured window (spilling to disk
+up to 64 MiB), a 3 s grace period after abort, and a deadline that defaults to
+10 minutes. The plugin's own probes get a 30 s ceiling so a wedged WSL service
+cannot hang a tool call forever.</li>
+<li><code>env</code> entries are exported at the front of the command so they reach the
+Linux side reliably; Windows drive paths are rewritten to <code>/mnt/...</code> before
+the command is built.</li>
+<li>Output is returned as <code>{ exitCode, signal, timedOut, timeoutMs, truncated, stdout, stderr, stdoutTotalBytes, stdoutDroppedBytes, stderrTotalBytes, stderrDroppedBytes, stdoutSpillPath, stderrSpillPath, jobId }</code>; the <code>render</code> hook
+formats it into text with the markers listed above. The truncation marker
+quotes the window size rather than a count derived from the decoded text,
+which can be off by a byte or two when the window starts inside a multi-byte
+character.</li>
+<li><code>jobId</code> is set only by a background start; every other path returns <code>null</code>, so
+the declared shape holds for both.</li>
+<li>Launching and settling are separate steps (<code>runner.launch</code> / <code>settle</code>) because
+a background job has to hand the registry a synchronous <code>cancel</code>/<code>done</code> pair
+while a foreground call simply awaits the same settle. A cancelled job maps the
+provider's early-termination rejection onto <code>killed</code>, since <code>JobHooks.done</code>
+must never reject.</li>
+<li>A destructive-command guard splits the command into <code>;</code>/<code>&amp;</code>/<code>|</code>/newline
+segments, judges each <code>rm</code> invocation on its own flags, and matches the
+device/power tools at command position before dispatch.</li>
+</ul>
+<p>The plugin publishes no services of its own and is inserted process-wide by its own
+bundle patch, so it needs no realm — and no preset entry either.</p>
+<h2>Development</h2>
+<p>The plugin is plain ESM with no build step or runtime dependencies outside the
+DSH host plane. Iterate by pointing a profile dependency at the checkout:</p>
+<pre><code class="language-json">{ "dependencies": { "dsh-wsl-tool": "file:/path/to/dsh-wsl" } }
+</code></pre>
+<p>then restart DSH and call the tools from <strong>any</strong> session: the bundle patch registers
+them process-wide, so no preset declares the row.</p>
+<h3>Tests</h3>
+<pre><code class="language-sh">npm test          # 826 host checks against real WSL (shim for ctx.subprocess) + 170 client checks
+npm run test:real # the same checks against the REAL provider, plus the seam-fact suite
+</code></pre>
+<p><code>npm test</code> substitutes only <code>ctx.subprocess</code>, with a shim that reproduces the
+seam's bounded tail windows, spill files and termination ladder, and drives the
+the tools against the real WSL installation. It covers path translation,
+workdir quoting, the destructive guard, distro selection, exit-code/timeout/
+truncation markers, <code>wsl-path</code>, <code>wsl-env</code>, argument validation, configuration
+parsing, launcher-error classification, the returned shape against each declared
+<code>output.schema</code>, and a token budget for the model-facing catalog.</p>
+<p><code>npm run test:real</code> runs that same suite against <code>LocalSubprocessRuntime</code> — the
+shim must not drift from the real seam — and then <code>test/real-seam.mjs</code>, which
+checks the facts a shim cannot vouch for (that <code>readFrom(0).nextOffset</code> is the
+whole-stream total, that the spill file holds the complete stream, that a
+timeout really kills the Linux side of <code>wsl.exe</code>) and validates every published
+schema with DSH's own <code>assertSupportedJsonSchema</code>. It needs a DSH installation:</p>
+<pre><code class="language-sh">DSH_SUBPROCESS_LOCAL=/path/to/dsh/node_modules npm run test:real
+</code></pre>
+<h3>Syncing a profile</h3>
+<p>A <code>file:</code> dependency is a <strong>copy</strong>, so editing this checkout does not change what
+DSH loads. After any change:</p>
+<pre><code class="language-sh">npm run sync                  # copies into ~/.dsh/profiles/desktop/node_modules/dsh-wsl
+npm run sync -- /path/to/profiles/&lt;profile&gt;/node_modules/&lt;your-key&gt;
+</code></pre>
+<p>The target must be the folder your profile's dependency key created (the default
+above is this checkout's own key); the plugin loads its entry by relative path, so
+the folder name itself never matters.</p>
+<p>then restart DSH — the plugin is imported once at load.</p>
+<p>Releasing — the tag-triggered workflow, the npm name, and the catalog entry — is
+documented in <a href="https://github.com/XINY11451/dsh-wsl/blob/HEAD/PUBLISHING.md" target="_blank" rel="noopener noreferrer"><code>PUBLISHING.md</code></a>.</p>
+<h2>Listing</h2>
+<p>The repository carries the <code>dsh-plugin</code> topic and is listed under the <code>wsl</code>
+category of the awesome-dsh-plugin community list.</p>
+<h2>Feedback</h2>
+<p>The sidebar panel ends with one feedback entry, and it sends nothing by itself.</p>
+<ul>
+<li><strong>A bug or a concrete request</strong> →
+<a href="https://github.com/XINY11451/dsh-wsl/issues/new/choose" target="_blank" rel="noopener noreferrer">open an issue</a>. The
+templates ask for the environment once, which is the difference between a report
+that can be reproduced and a round trip.</li>
+<li><strong>Usage questions and ideas</strong> →
+<a href="https://github.com/XINY11451/dsh-wsl/discussions" target="_blank" rel="noopener noreferrer">Discussions</a>.</li>
+<li><strong>GitHub unreachable?</strong> The panel's 「复制插件信息」 button asks the host half for
+this package's own facts — name, version and repository straight out of its
+<code>package.json</code>, plus Node, the platform and the effective configuration — and
+copies them, together with the switch states the panel is already showing. Paste
+that into the issue's 「补充」 field and only the prose is left to write. The
+submission guide sits next to the button, in the panel.</li>
+</ul>
+<p>Everything in that block is text you can read and edit before it goes anywhere: no
+paths, host names or credentials are collected, and the plugin makes no request of
+its own — the route the button reads is served by the local host, not the network.
+Problems that belong elsewhere go to their own repositories — DSH itself →
+<a href="https://github.com/deepseek-ai/deepseek-harness/issues" target="_blank" rel="noopener noreferrer">deepseek-harness</a>, the
+market UI →
+<a href="https://github.com/dsh-market/dsh-market/issues" target="_blank" rel="noopener noreferrer">dsh-market</a>, the catalog listing →
+<a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/issues" target="_blank" rel="noopener noreferrer">awesome-dsh-plugin</a>.
+The full routing table is in <a href="https://github.com/XINY11451/dsh-wsl/blob/HEAD/SUPPORT.md" target="_blank" rel="noopener noreferrer">SUPPORT.md</a>.</p>

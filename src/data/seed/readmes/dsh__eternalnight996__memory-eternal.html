@@ -522,6 +522,36 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 </tr>
 </thead>
 <tbody><tr>
+<td><strong>v0.10.29</strong></td>
+<td>2026-10-14</td>
+<td><strong>失败的接管不再破坏现场（issue #30 复测的关键发现）</strong>。报告者在 0.10.26 上实测：<code>restart</code> 失败后<strong>锁文件被删除</strong>、端口上还是同一个 web —— 现场从此看起来像「从来没有过常驻实例」，只剩一个孤儿。四处修复：① <strong>释放锁不再删文件</strong>（<code>releaseWatchdogLock</code> 留一条带 <code>endedAt</code> 的「已结束」记录，<code>status</code> 会显示「已退出（陈旧记录）」；这种槽<strong>永不阻挡</strong>新实例，pid 复用也不怕）；② <strong>失败的 restart 把替换前的登记写回去</strong>（<code>restoreWatchdogLock</code>，只在本端口没有活着的登记时才写）；③ <strong>枚举不到占用者时不再误判「端口已空」</strong>——<code>clearResidentForTakeover</code> 用 <strong>TCP 复核</strong>（受限环境里进程查询被拒会返回空，旧实现据此认为端口空出 → 新 web 绑不上 → 自检「（无响应）」+ 锁被清空），还在监听就中止接管且<strong>一个登记都不动</strong>；④ <strong>锁写不进去时前置拒绝接管</strong>（写不进锁 → 新实例无法登记 → 只会留孤儿；直接报错并给前台观察的出路）。另外 <code>restart</code> 失败信息补上「<strong>端口上现在是谁</strong>」+「锁有没有写回」，<code>status</code> 把「端口探测」与「锁登记」<strong>分段标注</strong>（报告者指出旧输出两者并列会误导）。<code>npm test</code> 共 <strong>348 项</strong></td>
+</tr>
+<tr>
+<td><strong>v0.10.28</strong></td>
+<td>2026-10-14</td>
+<td><strong>新增「版本对齐检查」：把「插件迭代后旧接口 / 旧接线还在」一次查清</strong>。插件升级只换<strong>磁盘文件</strong>，两类「旧」不会自己消失：① <strong>运行时</strong> —— DSH 宿主进程内存里注册的事件订阅（<code>agent/turn-stopping</code>、<code>agent/inbox/claimed</code>…）来自它<strong>启动时加载的那份代码</strong>，不重启 DSH 就会一直用旧接口（那条「轮次收尾事件疑似失效」多半就是它：本机实测宿主 <strong>v0.10.8</strong> / 磁盘 v0.10.27，而且该告警文案里的「累计 135/75」本身就证明跑的是 ≥0.10.20 之前的旧判据）；② <strong>持久接线</strong> —— 插件写进 <code>~/.claude.json</code>、<code>~/.claude/settings.json</code>、<code>~/.codex/config.toml</code>、<code>~/.cursor/mcp.json</code> 的 MCP 与 hooks 条目含<strong>旧安装路径 / 旧 node 路径 / 旧参数</strong>，升级后不会自动改写。新增 <code>lib/align.js</code> + <code>GET /align</code> + <code>dsh-memory align [--json] [--fix]</code> + 面板「用量/今日 → 🔧 版本对齐检查」：逐条给结论与<strong>可执行动作</strong>（<code>完全退出并重开 DSH</code> / <code>dsh-memory restart --port N</code> / <code>dsh-memory setup</code> 重写接线 / 更新插件），<code>--fix</code> 只重写插件自己的键（不动数据与配置）。新增 <code>tests/align.test.mjs</code>（6 项，含「同一 node 但条目是旧写法」的措辞准确性守卫）。<code>npm test</code> 共 <strong>345 项</strong></td>
+</tr>
+</tbody></table>
+<details>
+<summary>更早的更新日志（v0.10.27 及以前 · 共 54 版，点开查看）</summary><table>
+<thead>
+<tr>
+<th>版本</th>
+<th>日期</th>
+<th>关键改动</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>v0.10.27</strong></td>
+<td>2026-10-13</td>
+<td><strong>「损坏时从备份重建」从引导升级成可执行（issue #31 的现实出路）</strong>。WAL 头一旦损坏，代码修不了<strong>数据</strong> —— 上一版只能告诉你「有哪些备份、按什么顺序替换」，现在多了 <code>dsh-memory doctor --restore latest|备份名</code>：<strong>不带 <code>--yes</code> 只演练</strong>（一个文件都不动，先告诉你备份里有几张卡、会不会覆盖可写库）；执行时四道闸门：① <strong>校验备份</strong>（只读打开 + <code>PRAGMA quick_check</code> + 数卡片）；② 当前库<strong>此刻</strong>完好时要求显式 <code>--force</code>（用<strong>当场探测</strong>判，不信缓存的体检结论）；③ 检测到常驻看门狗还活着就<strong>中止</strong>（避免边写边换，除非 <code>--force</code>）；④ 恢复后<strong>复核</strong>（重新打开 + 写探针 + 卡片数）。原现场<strong>一律改名 <code>*.corrupt-&lt;时间戳&gt;</code> 留证，绝不删除</strong>（库 + <code>-wal</code> + <code>-shm</code> 一起）。新增 <code>tests/db-restore.test.mjs</code>（4 项：坏库重建 / 完好库需 force 且演练不动任何文件 / 拒绝危险来源 / 体检结论刷新）。<code>npm test</code> 共 <strong>339 项</strong></td>
+</tr>
+<tr>
+<td><strong>v0.10.26</strong></td>
+<td>2026-10-13</td>
+<td><strong>撞锁改用「应用层异步重试」，而不是 <code>busy_timeout</code>（issue #31/#33 实测对症）</strong>。本机对照实验：外部进程持写事务时我方立刻拿到 <code>database is locked</code>，而且<strong>对方被强杀之后仍然锁着</strong> —— 老实现没有忙等，一撞锁就永久失败（在 A: 盘那类受限 / 被外部占用的现场，表现出来就是「整个记忆库坏了」）。评审已否决 <code>PRAGMA busy_timeout</code>（<code>node:sqlite</code> 的 <code>DatabaseSync</code> 是<strong>同步 API</strong>，忙等会阻塞宿主事件循环、把整个 DSH 卡住），所以改成新增 <code>withDbRetry()</code>：撞锁时<strong>让出事件循环睡一小会儿再试</strong>（线性退避，最多 3 次），只用<strong>写路由</strong>；「响应已发出」时显式禁止重试（<code>e.noRetry</code>，避免重复写），非锁类错误（数据 / 语法）只试一次并原样抛。测试覆盖：重试到成功 / 非忙错误只试一次 / <code>noRetry</code> 生效 / 试满仍失败 / 源码守卫（不许偷偷加 <code>busy_timeout</code>）。<code>npm test</code> 共 <strong>335 项</strong></td>
+</tr>
+<tr>
 <td><strong>v0.10.25</strong></td>
 <td>2026-10-13</td>
 <td><strong>「判不出来」不再冒充「未托管」+ 库不可写时的统一 UX（issue #33 第③层收口）</strong>。① <strong>托管状态变三态</strong>：<code>/version-check</code> 增报 <code>resident.managedKnown</code>、<code>lock:{path,writable,error}</code> 与 <code>pid</code> —— 受限环境（沙箱禁写 / ACL / 非系统盘）写不进看门狗锁文件时，面板不再显示「未托管」（那会让用户以为实例坏了、反复重启），改为「<strong>托管状态未知</strong>：锁文件写不进去 → 无法判断；保活通常仍然有效」，并同时显示真实原因与路径；<code>writeWatchdogLock</code> 的失败也不再全静默（每个进程留一条可查的痕）。② <strong>库不可写时统一 UX</strong>：写路由（delete / merge / card / refine-apply / optimize-execute / …）在入口<strong>短路径失败</strong>（503 + <code>DB_UNAVAILABLE</code> + 恢复指引），没枚举到的写路径由最外层兜底把 SQLite 原文翻译成同一套答复；面板<strong>跨标签顶部</strong>明示「记忆库当前不可写 —— 卡片读写会失败，但<strong>配置仍可保存</strong>」。③ <code>dsh-memory doctor</code> 增报看门狗锁可写性（受限环境一眼可见）。<code>npm test</code> 共 <strong>334 项</strong></td>
@@ -531,17 +561,7 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 <td>2026-10-13</td>
 <td><strong>「同目标、不同做法」也能归到一起了（issue #36 第三块，闭环）</strong>。前两版解决了「冗余合并」与「矛盾判别」，但最后一块 —— 同一目的、不同工作流/代码 —— 按正文相似度<strong>根本抓不到</strong>（「用 7z 压缩」「用 tar.gz 分发」「npm 包瘦身」字面差很远、目标却一样）。做法：<strong>先让模型给每张卡抽一句「这张卡解决什么问题」，再按目标聚类</strong> —— 目标抽取结果缓存在 <code>refine-goals.json</code>（同一张卡只抽一次，第二次扫描 0 次调用），聚类用并查集；命中后按「同一目标 N 张卡」成组给出，动作二选一：<strong>都保留</strong>（记两两决策，下次不再提示）或<strong>合并这一组</strong>（走现有 /merge，新卡进审核队列）。<em>全程只读，唯一写入是目标缓存</em>。入口：面板「整理 → 🎯 同目标不同做法」+ API <code>/refine-goals</code>、<code>/refine-goals-keep</code>；CLI <code>dsh-memory refine --goals --keep --path A --path B</code>（聚类本身需要模型，在面板跑）。<code>npm test</code> 共 <strong>332 项</strong></td>
 </tr>
-</tbody></table>
-<details>
-<summary>更早的更新日志（v0.10.23 及以前 · 共 50 版，点开查看）</summary><table>
-<thead>
 <tr>
-<th>版本</th>
-<th>日期</th>
-<th>关键改动</th>
-</tr>
-</thead>
-<tbody><tr>
 <td><strong>v0.10.23</strong></td>
 <td>2026-10-13</td>
 <td><strong>存量「注入垃圾卡」可一键清理（issue #36 第二刀）</strong>。上一版修掉了<strong>新生成</strong>的注入垃圾卡（技能目录 / <code>&lt;system-reminder&gt;</code> 被当 user 消息 → 剥标签后仍被当知识沉淀），但<strong>存量还在</strong>：在真实库里一跑就找出 <strong>32 张</strong>「和对话毫无关系」的卡（<code>- \</code>code-review`: Review the changes…<code> 这种目录行、</code>用户system-reminder-you-are-teammate-c…<code>这种碎片）。新增</code>findInjectedCards()<code>（只**提议**、不动数据；判据：含注入标签 / 技能目录条目占比 ≥30% / 剥离注入后只剩 &lt;200 字 / 标题是碎片）与 </code>purgeInjected()<code>（**走回收站、可还原**，逐个报告失败）。入口：面板「整理 → 🧹 注入垃圾卡」（扫描存量 / 单张回收 / 全部回收）+ CLI </code>dsh-memory refine --junk [--purge --path P] [--json]<code>；API </code>/refine-junk<code>、</code>/refine-junk-purge<code>。</code>npm test` 共 <strong>331 项</strong></td>

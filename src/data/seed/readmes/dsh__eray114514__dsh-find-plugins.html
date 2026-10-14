@@ -1,0 +1,185 @@
+<h1>dsh-find-plugins</h1>
+<p>给 DeepSeek Harness <strong>找到对的那个</strong>插件，而不是找到一堆插件。</p>
+<p><strong>中文</strong> | <a href="https://github.com/Eray114514/dsh-find-plugins/blob/HEAD/README.en.md" target="_blank" rel="noopener noreferrer">English</a></p>
+<p>本插件给 agent 一个工具 —— <code>find_dsh_plugins</code> —— 搜遍整个 DSH 插件生态，
+并按 <strong>相关度 × 可信度 × 新鲜度 × 热度</strong> 排序，而不是只看 star。</p>
+<hr />
+<h2>为什么要有它</h2>
+<p>两种显而易见的做法都有可以量化的毛病。</p>
+<p><strong>只取 GitHub 一页再按 star 排</strong>，会让一个名字里恰好带关键词的大仓库压掉真正的插件。
+搜 <code>memory</code> 返回 8 个通用 agent 库、<strong>0 个 DSH 插件</strong>；搜 <code>terminal</code> 第 1 名是一个终端
+<strong>coding agent</strong>，不是插件。</p>
+<p><strong>只按字面名字匹配</strong>，会让一个名字里不含关键词的知名插件沉底。实测一个 ★3k 的终端 UI
+插件在搜 <code>terminal</code> 时排到 <strong>第 117 位</strong>，前面全是一排 ★1 仓库。</p>
+<p>本插件的做法是聚合多个目录、按各自隐含的审查强度加权，并且把热度保留为一个<strong>有界</strong>信号
+而不是全部答案：</p>
+<table>
+<thead>
+<tr>
+<th>查询</th>
+<th>本工具</th>
+<th>GitHub 单页 + star</th>
+<th>字面名字匹配</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>terminal</code></td>
+<td><code>dsh-tianshu-tui</code> ★277 第 1（radar 实测 + 4 目录互证），<code>DSH-better-sidebar</code> ★3604 靠前</td>
+<td>终端 coding agent 第 1</td>
+<td>全是 ★1–★20 冷门仓库</td>
+</tr>
+<tr>
+<td><code>memory</code></td>
+<td><code>graph-memory</code> ★622、<code>MindMemOS</code> ★985、<code>dsh-mnemon</code> ★374</td>
+<td>只有通用 agent 库</td>
+<td><code>graph-memory</code> 第 1</td>
+</tr>
+</tbody></table>
+<hr />
+<h2>安装</h2>
+<pre><code class="language-sh">dsh plugin --profile &lt;你的 profile&gt; add dsh-find-plugins
+</code></pre>
+<p>然后重启 DSH。agent 就多了一个工具 <code>find_dsh_plugins</code>。</p>
+<p>需要 DSH 带 <code>@deepseek-ai/dsh-tools</code>（0.1.5-rc.2 起，含 0.2.x）与 Node ≥ 22。</p>
+<blockquote>
+<p><code>dsh-tools</code> 提供 <code>tools</code> 服务，<strong>必须与宿主共享同一个实例</strong>，所以走 <code>peerDependencies</code>
+而不是 <code>dependencies</code> —— 后者会让 profile 里出现一份副本，覆盖运行时版本、导致服务激活失败。</p>
+</blockquote>
+<hr />
+<h2>agent 会看到什么</h2>
+<pre><code>本次查询了 7 个源：dsh.so ✓(11322 条) · radar ✓(280 条) · 岚叔目录 ✓(558 条) · awesome-dsh-plugin ✓(3722 条) · npm ✓(50 条 · 相关 4980) · dsh.works ✓(13056 条) · GitHub topic ✓(34 条 · 相关 43)
+候选池 16368 条，命中 1185 条，返回 8 条。
+（还有 1177 条命中未返回：需要更多就把 limit 调大，上限 20。）
+
+1. huiliyi37/dsh-tianshu-tui  ★276  更新于 2026-09-14
+   用途：DeepSeek Harness 的终端 UI（TUI）。
+   装它：@huiliyi37/dsh-tianshu-tui
+   npm 版本：1.0.0-rc.1（仓库已核对）
+   可信：radar + 岚叔目录 + awesome-dsh-plugin + dsh.works · 实测过
+   兼容：核对于 dsh 0.1.0-rc.8（2026-08-20）
+</code></pre>
+<p>这段输出里有五处比看起来更重要：</p>
+<ul>
+<li><strong>源状态头</strong> —— 让 agent 能区分「生态里就这些」和「有一个目录超时了」；<code>相关 N</code> 只在源自己报了
+匹配总数时出现（搜索类源读的永远是一页，不是全部）；</li>
+<li><strong><code>可信</code></strong> —— 哪些目录认识它、验证等级、安全扫描结果；</li>
+<li><strong><code>风险</code></strong> —— 各目录自己的审查结论，包括「发现安装生命周期脚本」这类东西；</li>
+<li><strong><code>兼容</code></strong> —— 目录是拿哪个 dsh 版本核对过的。兼容性是这生态第一失败模式（核心一次发版就可能砍掉
+某个 client 模块入口），所以源报了就一定呈现；</li>
+<li><strong><code>npm 版本</code></strong> —— 装它这一行给的是 npm 包时，附上 registry 里的版本；<code>（仓库已核对）</code> 表示拉过
+manifest 确认过 repository 字段指向同一个仓库。</li>
+</ul>
+<hr />
+<h2>怎么工作的</h2>
+<p><strong>数据源</strong>（全部只读、实时拉取、进程内缓存）：</p>
+<table>
+<thead>
+<tr>
+<th>源</th>
+<th>规模</th>
+<th>提供什么</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>dsh.so 索引</td>
+<td>~15k</td>
+<td>验证等级 L1–L5、安全扫描、仓库健康度</td>
+</tr>
+<tr>
+<td>dsh.works 注册表</td>
+<td>~13.5k</td>
+<td>每条都能指出安装路径的证据文件、核对时用的 dsh 版本、17 个功能标签、monorepo 子目录</td>
+</tr>
+<tr>
+<td>dsh-plugin-radar</td>
+<td>~280</td>
+<td>唯一会<strong>真的跑一遍</strong>它收录的插件的目录</td>
+</tr>
+<tr>
+<td>awesome-dsh-plugin</td>
+<td>~3.6k</td>
+<td>人工双语描述、npm 包名</td>
+</tr>
+<tr>
+<td>岚叔目录</td>
+<td>~560</td>
+<td>归档状态、最后提交时间、许可证、审查结论</td>
+</tr>
+<tr>
+<td>npm registry 搜索</td>
+<td>实时(同类包 ~5k)</td>
+<td>只有它能看到"只发在 npm、没进任何目录、连仓库字段都没有"的包</td>
+</tr>
+<tr>
+<td>GitHub <code>dsh-plugin</code> / <code>dsh-plugins</code> topic</td>
+<td>实时</td>
+<td>唯一能看到「今天刚发布」的源</td>
+</tr>
+</tbody></table>
+<p>挂掉的源只汇报自己的状态、不贡献内容；<strong>拉取成功过、之后才失败</strong>的源会回落到进程内缓存
+副本并标注出来。<strong>不落盘</strong>，所以不会悄悄过期。</p>
+<p><strong>安装目标（<code>装它</code> 那一行）</strong></p>
+<ul>
+<li>源给的 npm 名优先；没有 npm 名时给 <code>github:owner/repo</code>；</li>
+<li><strong>源钉住的版本 ref 会保留</strong>：目录发布的是 <code>github:o/r#v0.3.90</code>，就给 <code>#v0.3.90</code>，而不是退回
+<code>github:o/r</code> 去装"现在的 HEAD"——目录验证过的是那个版本；</li>
+<li>monorepo 里的包带 <code>#path:/&lt;子目录&gt;</code>（与 <code>#ref</code> 同时存在时用 <code>&amp;</code> 连接）；</li>
+<li>返回的每一行（≤20）会再拉一次 npm manifest 做校验：<strong>manifest 声明了 <code>dsh</code></strong> 且
+<code>repository</code> 与条目仓库一致时，安装目标升级成 npm 包并附版本（npm tarball 是作者带着构建
+产物发布的；<code>github:</code> 安装不跑构建，仓库没提交 lib/ 的插件装出来就是缺文件的）。
+只有 npm 来源、且 manifest 里没有 <code>dsh</code> 的条目会被剔除并计数（关键字是自报的，不能当证据）。</li>
+</ul>
+<p><strong>排序</strong></p>
+<pre><code>最终 = 相关度 × 可信度 × 新鲜度 × 热度
+</code></pre>
+<ul>
+<li><strong>相关度</strong> —— BM25，检索字段含 name / repo / npm 名 / 中英描述 / 分类 / topics。
+中文按<strong>二字切分</strong>，所以 <code>跨会话记忆</code> 能命中写着 <code>跨会话长期记忆</code> 的描述。
+原始分做了幂次压缩（0.45），否则乘数根本没机会影响排序。</li>
+<li><strong>可信度</strong> —— 多源互相印证、dsh.so 验证等级、radar 实测过、安全风险、归档状态。
+<strong>没有任何 DSH 专属目录认识它</strong>的条目会被打折：dsh.so 也索引通用 agent 项目。
+npm 不算 DSH 专属证据——它的关键字是自报的。</li>
+<li><strong>新鲜度</strong> —— 按最后提交时间衰减。<strong>时间未知给中性分而不是零</strong>：只有部分源提供时间，
+把「未知」当「已废弃」会把生态里大部分条目直接删掉。</li>
+<li><strong>热度</strong> —— star 走<strong>对数</strong>，范围 0.6–1.3。★1 和 ★3000 只差约 1.5 倍。够用来偏向
+「有人在用」，不足以覆盖真实的相关度差距。</li>
+</ul>
+<p><strong>风险等级是破平局用的，不是排除理由。</strong> 自动化静态分析是弱信号，误报不该让一个好用的
+插件掉队——何况装之前本来就该读源码。结论会<strong>原样展示</strong>在输出里，排序只轻轻推一下。</p>
+<p><strong>查询</strong>支持空格分隔的多个词，而且<strong>更多词通常更好而不是更窄</strong>——中英混排会让双语条目
+的排序更准。几十组常见中英对照会自动扩展，<strong>单复数也会双向折叠</strong>（<code>screenshots</code> 与
+<code>screenshot</code> 换出同一批候选——实测不折叠时一个命中 92 条、另一个只有 26 条且排名被换掉）；
+只有调用方才知道的词（功能背后的服务名、用户没说出口的同义词）需要调用方补上。</p>
+<p><strong>首调不等 20 秒</strong>：目录类源是几 MB 的慢变数据，所以在插件加载后 5 秒起后台预热一次
+（查询类源不预热——空查询不发请求）。冷启动实测从 ~20s 降到 ~3s。
+<code>DSH_FIND_PLUGINS_NO_PREWARM=1</code> 可以彻底关掉预热。</p>
+<p><strong>任何一次调用都有 25 秒的墙钟预算</strong>：单个源的请求超时（最长 60s）约束不了整个调用，
+所以超预算的源按 <code>timeout</code> 汇报（它的请求会继续跑并把结果留在缓存里，下一次是热的），
+其余源照常返回。</p>
+<hr />
+<h2>边界</h2>
+<p>这些是刻意的，而且是有承重的：</p>
+<ul>
+<li><strong>只读。</strong> 不装、不卸、不启停，绝不碰 profile 或 <code>cordis.patch.yml</code>。</li>
+<li><strong>不拥有索引。</strong> 不内置快照、不写磁盘缓存。把过期数据当当前数据呈现，比没有数据更糟。</li>
+<li><strong>自己不做模型调用。</strong> 调它的 agent 本身就是模型；再花一次调用去重排只会更慢更差。</li>
+<li><strong>完全不知道 dsh 外面套着什么桌面壳。</strong> 本插件对任何 DSH 用户行为一致，这正是重点。</li>
+</ul>
+<hr />
+<h2>开发</h2>
+<pre><code class="language-sh">npm install
+node --test test/*.test.mjs
+</code></pre>
+<p><strong>测试全部离线</strong>（<code>globalThis.fetch</code> 被换成分派器，认不出的 URL 直接抛错，所以漏网的网络请求会
+以失败的形式暴露），跑一遍不到 1 秒。fixtures 是<strong>从各源真实抓取的样本</strong>（<code>test/fixtures/</code>），
+解析器是对着源<strong>实际发出的格式</strong>写的，不是对着它<strong>应该发出的格式</strong>。</p>
+<h3>可选：GitHub token</h3>
+<p>唯一用到凭据的地方是 GitHub 搜索源（其余目录都是公开 JSON，不需要认证）。
+不带 token 时走匿名配额 <strong>10 次/分钟</strong>，正常使用足够（每次调用默认 2 个请求：单数/复数话题各一页）；
+想放宽就设一个：</p>
+<pre><code class="language-sh">DSH_FIND_PLUGINS_GITHUB_TOKEN=ghp_xxx     # 或沿用通用的 GITHUB_TOKEN
+</code></pre>
+<p>只读公开数据，不需要任何 scope。</p>
+<hr />
+<h2>许可</h2>
+<p>MIT</p>

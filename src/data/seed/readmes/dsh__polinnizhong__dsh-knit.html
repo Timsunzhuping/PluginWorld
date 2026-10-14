@@ -7,7 +7,9 @@
 组织成 <strong>主要 / 辅助 / 相关</strong> 三层上下文（Context Pack），交给面板、也交给 agent；
 再持续追踪这些上下文<strong>有没有被读、被读之后有没有变</strong>。</p>
 <p><strong>找到 → 组织 → 追踪</strong>，默认的<strong>词法模式</strong>三步都在本机用字符串运算完成 —— 不调模型、不联网、零延迟、内容不出本机。
-可选的<strong>混合模式默认关闭</strong>（需你自己配置 provider；配了<strong>远程</strong> provider 时它会收到文件的<strong>标题与摘要</strong>，正文不发送），见下。</p>
+可选的<strong>混合模式默认关闭</strong>：只有你自己配好 provider <strong>并且</strong>手动切到混合检索，才会有出网请求；
+那时发出去的是<strong>你这句查询原话 + 每篇候选文件的标题与摘要</strong>（<strong>完整正文、绝对路径都不发</strong>）——
+⚠️ 这里有两个容易想当然的地方，见下面的「<strong>混合模式到底发出去了什么</strong>」。</p>
 <pre><code class="language-text">                      当前任务
                          │
                     工作区检索
@@ -118,8 +120,42 @@ v0.19 起代码进了同一条链路。再往后，「排在前面」也不够�
 <li><strong>它不止于「找」</strong>：找完还要<strong>组织</strong>（三层 + 可核验的理由）和<strong>追踪</strong>（哪些真被读了、读完有没有变）。</li>
 </ol>
 <p><strong>默认词法模式下不调模型、不联网</strong>：全是本地字符串运算，零延迟、零成本、内容不出本机。
-可选的<strong>混合模式默认关闭</strong>：配了<strong>远程</strong> provider 时它只把文件的<strong>标题与摘要</strong>发过去（正文不发送），
-指向**本机服务（loopback）**时内容不出这台机器。⚠️ 语义收益仍待真 provider 实测（<code>value-evidence: pending</code>），不承诺召回提升。</p>
+可选的<strong>混合模式默认关闭</strong>，指向**本机服务（loopback）**时内容不出这台机器。
+⚠️ 语义收益仍待真 provider 实测（<code>value-evidence: pending</code>），不承诺召回提升。</p>
+<h3>混合模式到底发出去了什么</h3>
+<p>这段是<strong>按报文实测</strong>写的，不是按设计意图写的 —— 复现命令与逐条断言见
+<a href="https://github.com/PolinniZhong/dsh-knit/blob/main/docs/evaluations/hybrid-retrieval.md" target="_blank" rel="noopener noreferrer"><code>docs/evaluations/hybrid-retrieval.md</code></a>（审计脚本
+<code>tools/semantic-request-audit.mjs</code> 会把每一次请求的 body 录下来再逐条判）。</p>
+<p><strong>发出去了</strong>（请求体只有 <code>{ model, input }</code> 两个字段，<code>input</code> 是一串文本）：</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>内容</th>
+<th>精确边界</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>①</td>
+<td><strong>你这句查询原话</strong></td>
+<td>面板走会话路径时是「最近一条有实质内容的用户消息」，截到 <strong>80 字</strong>；<code>knit_docs(query=…)</code> 走显式路径时最多 2000 字。<strong>每一轮刷新都会重发一次</strong>（文档向量有缓存，查询没有）</td>
+</tr>
+<tr>
+<td>②</td>
+<td><strong>每篇候选文件的标题</strong></td>
+<td>Markdown 是正文里的第一个 <code># 标题</code>（没有就用文件名）；代码是<strong>带扩展名的文件名</strong>；图片 / 视频是<strong>去掉扩展名的文件名</strong></td>
+</tr>
+<tr>
+<td>③</td>
+<td><strong>每篇候选文件的摘要</strong></td>
+<td>Markdown 的「摘要」是<strong>正文首个正文段落的节选（≤ 60 字）</strong>——它<strong>来自正文</strong>；代码的「摘要」是<strong>工作区相对目录</strong>（如 <code>src/host/</code>）；媒体没有摘要</td>
+</tr>
+</tbody></table>
+<p><strong>没有发出去</strong>：完整正文（审计对工作区里每一篇够长的文件都做了「开头 200 字 + 中段 200 字」两处探针，一处都没出现）、
+绝对路径（工作区根 / 家目录 / <code>file://</code> 一条都没出现）、会话历史、你工作区里没被选中的文件。</p>
+<p>⚠️ <strong>两个容易想当然的地方</strong>：
+①**「摘要」不等于「与正文无关的元数据」<strong>——Markdown 的摘要是正文的节选，所以</strong>会有至多 60 字的正文离开本机**；
+②<strong>图片 / 视频的文件名也会被发出去</strong>（它们没有摘要，发的是文件名本身，例如 <code>screenshot-media</code>）。</p>
 <hr />
 <h2>安装</h2>
 <pre><code class="language-sh">dsh plugin --profile web add dsh-knit
@@ -275,7 +311,11 @@ v0.19 起代码进了同一条链路。再往后，「排在前面」也不够�
 <td>✅</td>
 </tr>
 <tr>
-<td><strong>可选混合模式（默认关闭）</strong>（v0.23）：需你自己配置 provider（Ollama / OpenAI 兼容）。配了<strong>远程</strong> provider 时，发出去的是工作区文件的<strong>标题与摘要</strong>（<strong>不发送正文</strong>）；向量只在内存里，配置存在 DSH 存储的独立单元 <code>knit_semantic</code>。指向<strong>本机服务（loopback）<strong>时内容不出这台机器。⚠️ <strong>语义收益的证据仍待真 provider 实测</strong>（<code>value-evidence: pending</code>）—— 本项目</strong>不承诺</strong>召回提升</td>
+<td><strong>可选混合模式（默认关闭）</strong>（v0.23）：需你自己配置 provider（Ollama / OpenAI 兼容）。配了<strong>远程</strong> provider 时，发出去的是<strong>你这句查询原话 + 每篇候选文件的标题与摘要</strong> —— 完整正文与绝对路径都不发，但 Markdown 的「摘要」是<strong>正文首个段落 ≤ 60 字的节选</strong>、图片 / 视频发的是<strong>文件名</strong>（逐条口径见上面的「<strong>混合模式到底发出去了什么</strong>」）；向量只在内存里，配置存在 DSH 存储的独立单元 <code>knit_semantic</code>。指向<strong>本机服务（loopback）<strong>时内容不出这台机器。⚠️ <strong>语义收益的证据仍待真 provider 实测</strong>（<code>value-evidence: pending</code>）—— 本项目</strong>不承诺</strong>召回提升</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>Git 变更关联（默认关闭）</strong>（v0.24）：按工作区里<strong>未提交的改动</strong>列出「还该一起看的文件」，依据是 Knit 已有的四类证据（引用 / 导入 / 测试配对 / 文档提及），每条都给出<strong>起点 + 类型 + 行号</strong>。<strong>只读</strong>：只跑一条 <code>git status</code>（关掉 fsmonitor 与可选索引刷新，子进程环境白名单 —— 任何 <code>GIT_*</code> 都不继承），<strong>不读 diff、不读文件正文、不发网络</strong>；读不到时如实写出原因（不是只放在悬停里）。⚠️ 本版新增宿主接口，<strong>升级后需要重启 DSH</strong></td>
 <td>✅</td>
 </tr>
 </tbody></table>
@@ -924,7 +964,7 @@ Coverage 的三层圆点与文档行这一颗<strong>同一套 token、同一个
 <pre><code class="language-sh">git clone https://github.com/PolinniZhong/dsh-knit.git
 cd dsh-knit
 
-npm test          # 775 项，零依赖，不需要先 npm install
+npm test          # 828 项，零依赖，不需要先 npm install
 node tools/clean-room-test.mjs   # 发版前闸门：npm pack → 解包 → 在解包目录里再跑一遍测试
 </code></pre>
 <p><strong>改动生效方式</strong>：宿主半边（<code>src/host/</code>）改了<strong>必须重启 DSH</strong>（实测不热加载）；
@@ -951,7 +991,7 @@ node tools/clean-room-test.mjs   # 发版前闸门：npm pack → 解包 → 在
 │   ├── host/feedback.js  # 使用反馈：读时归因 / Context Epoch / Delta（纯逻辑，只读事件流）
 │   ├── host/tool.js      # agent 文档工具 knit_docs（手写 ToolDefinition）
 │   └── client/client.js  # 双宿主注册 + 面板 UI
-└── test/                 # 775 项测试
+└── test/                 # 828 项测试
     ├── eval/             # 检索质量评测：语料 + 用例 + 冻结的 v0.5.2 基线 + Deep Context 四指标
     └── context/          # 上下文分层评测：24 篇语料 + 12 条任务型用例
 </code></pre>
