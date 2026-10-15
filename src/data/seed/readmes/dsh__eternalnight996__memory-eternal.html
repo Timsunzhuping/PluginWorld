@@ -522,6 +522,26 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 </tr>
 </thead>
 <tbody><tr>
+<td><strong>v0.10.31</strong></td>
+<td>2026-10-15</td>
+<td><strong><code>restart</code> 在「端口枚举很慢」的机器上 100% 失败的根因修复（#30 第三/四轮复测，报告者定位到行）</strong>。机制：<code>--replace</code> 助手的顺序是「清场 → 端口空了才写锁 → 启动看门狗」，而清场里 <code>Get-NetTCPConnection</code> 实测要 <strong>4–13.6 秒</strong>且不受 8 秒预算约束 → 助手<strong>永远走不到写锁那一步</strong> → 锁里什么都没有 → <code>waitForTakeover</code>（要求「锁里出现新的活看门狗」）<strong>必然超时</strong> → CLI 与面板按钮在这类机器上 100% 报「（无响应）」，<strong>与版本号无关</strong>。修法：① <strong>清场失败也必须留下登记</strong>（<code>acquireWatchdogLock({force:true})</code>），现场不再出现「端口有 web、锁里空白」；② <strong><code>acquireWatchdogLock</code> 支持 <code>force</code></strong>（<code>--replace</code> 的语义就是替换同端口那个，不许让位 —— 否则助手在清场没跑完时先退出）；③ 0.10.30 已给枚举执行器加超时（<code>defaultExec</code> 真掐断子进程、<code>findPortListener({timeoutMs})</code> 逐层传递、清场给 ≤2.5s 有界值）；④ CLI 的 <code>restart</code> 结果<strong>真的写进自动沉淀日志</strong>（提示里一直这么说，但 CLI 路径过去不写）。他还实测到「两个接管助手互相赛跑」（宿主 tick + CLI 各拉一个）—— 登记 + force 之后这种赛跑的危害大幅降低（后到者接管登记，而不是双双留空）。<code>npm test</code> 共 <strong>355 项</strong></td>
+</tr>
+<tr>
+<td><strong>v0.10.30</strong></td>
+<td>2026-10-15</td>
+<td><strong>两处「让整页不可用」的修复：畸形 tags 黑屏（#41）+ 接管链路的两个真病灶（#30 第三/四轮复测）</strong>。① <strong>#41</strong>：<code>/write</code> 传字符串 <code>tags</code>（如 <code>"[\"a\",\"b\"]"</code>）被 <code>writeCard</code> 直接 <code>JSON.stringify</code> → <strong>双重编码</strong>落库 → 读出来仍是字符串 → 前端 <code>card.tags.slice(...).map</code> 抛错 → <strong>React 根组件挂载失败、整页黑屏</strong>（重启 DSH / 插件 / 常驻实例都无效，因为坏数据一直在库里）。现在 <code>normalizeTags()</code> 是<strong>唯一入口</strong>：数组 / JSON 字符串 / 逗号串 / <strong>双重编码的旧数据</strong>都收敛成数组，写路径与<strong>所有读路径</strong>都走它（既有坏数据不必用户手工修）；渲染层再加兜底（坏 tags 最多少显示几个标签，不许把整棵树带走）。② <strong>#30</strong>：报告者在我 0.10.29 里又抓出两处 —— <code>restoreWatchdogLock</code> 的「活登记」判定<strong>少了 <code>!w.endedAt</code></strong>（PID 复用/正在退出时，写回会被放弃）；<strong>Windows 端口枚举没有超时</strong>（实测 <code>Get-NetTCPConnection</code> 无条件要 4–7.5 秒、一次 13.6 秒，而接管清场的 8 秒预算根本管不住它 → 决策基于过期数据）。现在 <code>defaultExec</code> 支持超时并真的掐断子进程、<code>findPortListener({timeoutMs})</code> 逐层传下去、接管清场给有界值（≤2.5s）。新增 <code>tests/tags-normalize.test.mjs</code>（4 项）+ <code>watchdog-restart</code> 2 项回归。<code>npm test</code> 共 <strong>354 项</strong></td>
+</tr>
+</tbody></table>
+<details>
+<summary>更早的更新日志（v0.10.29 及以前 · 共 56 版，点开查看）</summary><table>
+<thead>
+<tr>
+<th>版本</th>
+<th>日期</th>
+<th>关键改动</th>
+</tr>
+</thead>
+<tbody><tr>
 <td><strong>v0.10.29</strong></td>
 <td>2026-10-14</td>
 <td><strong>失败的接管不再破坏现场（issue #30 复测的关键发现）</strong>。报告者在 0.10.26 上实测：<code>restart</code> 失败后<strong>锁文件被删除</strong>、端口上还是同一个 web —— 现场从此看起来像「从来没有过常驻实例」，只剩一个孤儿。四处修复：① <strong>释放锁不再删文件</strong>（<code>releaseWatchdogLock</code> 留一条带 <code>endedAt</code> 的「已结束」记录，<code>status</code> 会显示「已退出（陈旧记录）」；这种槽<strong>永不阻挡</strong>新实例，pid 复用也不怕）；② <strong>失败的 restart 把替换前的登记写回去</strong>（<code>restoreWatchdogLock</code>，只在本端口没有活着的登记时才写）；③ <strong>枚举不到占用者时不再误判「端口已空」</strong>——<code>clearResidentForTakeover</code> 用 <strong>TCP 复核</strong>（受限环境里进程查询被拒会返回空，旧实现据此认为端口空出 → 新 web 绑不上 → 自检「（无响应）」+ 锁被清空），还在监听就中止接管且<strong>一个登记都不动</strong>；④ <strong>锁写不进去时前置拒绝接管</strong>（写不进锁 → 新实例无法登记 → 只会留孤儿；直接报错并给前台观察的出路）。另外 <code>restart</code> 失败信息补上「<strong>端口上现在是谁</strong>」+「锁有没有写回」，<code>status</code> 把「端口探测」与「锁登记」<strong>分段标注</strong>（报告者指出旧输出两者并列会误导）。<code>npm test</code> 共 <strong>348 项</strong></td>
@@ -531,17 +551,7 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 <td>2026-10-14</td>
 <td><strong>新增「版本对齐检查」：把「插件迭代后旧接口 / 旧接线还在」一次查清</strong>。插件升级只换<strong>磁盘文件</strong>，两类「旧」不会自己消失：① <strong>运行时</strong> —— DSH 宿主进程内存里注册的事件订阅（<code>agent/turn-stopping</code>、<code>agent/inbox/claimed</code>…）来自它<strong>启动时加载的那份代码</strong>，不重启 DSH 就会一直用旧接口（那条「轮次收尾事件疑似失效」多半就是它：本机实测宿主 <strong>v0.10.8</strong> / 磁盘 v0.10.27，而且该告警文案里的「累计 135/75」本身就证明跑的是 ≥0.10.20 之前的旧判据）；② <strong>持久接线</strong> —— 插件写进 <code>~/.claude.json</code>、<code>~/.claude/settings.json</code>、<code>~/.codex/config.toml</code>、<code>~/.cursor/mcp.json</code> 的 MCP 与 hooks 条目含<strong>旧安装路径 / 旧 node 路径 / 旧参数</strong>，升级后不会自动改写。新增 <code>lib/align.js</code> + <code>GET /align</code> + <code>dsh-memory align [--json] [--fix]</code> + 面板「用量/今日 → 🔧 版本对齐检查」：逐条给结论与<strong>可执行动作</strong>（<code>完全退出并重开 DSH</code> / <code>dsh-memory restart --port N</code> / <code>dsh-memory setup</code> 重写接线 / 更新插件），<code>--fix</code> 只重写插件自己的键（不动数据与配置）。新增 <code>tests/align.test.mjs</code>（6 项，含「同一 node 但条目是旧写法」的措辞准确性守卫）。<code>npm test</code> 共 <strong>345 项</strong></td>
 </tr>
-</tbody></table>
-<details>
-<summary>更早的更新日志（v0.10.27 及以前 · 共 54 版，点开查看）</summary><table>
-<thead>
 <tr>
-<th>版本</th>
-<th>日期</th>
-<th>关键改动</th>
-</tr>
-</thead>
-<tbody><tr>
 <td><strong>v0.10.27</strong></td>
 <td>2026-10-13</td>
 <td><strong>「损坏时从备份重建」从引导升级成可执行（issue #31 的现实出路）</strong>。WAL 头一旦损坏，代码修不了<strong>数据</strong> —— 上一版只能告诉你「有哪些备份、按什么顺序替换」，现在多了 <code>dsh-memory doctor --restore latest|备份名</code>：<strong>不带 <code>--yes</code> 只演练</strong>（一个文件都不动，先告诉你备份里有几张卡、会不会覆盖可写库）；执行时四道闸门：① <strong>校验备份</strong>（只读打开 + <code>PRAGMA quick_check</code> + 数卡片）；② 当前库<strong>此刻</strong>完好时要求显式 <code>--force</code>（用<strong>当场探测</strong>判，不信缓存的体检结论）；③ 检测到常驻看门狗还活着就<strong>中止</strong>（避免边写边换，除非 <code>--force</code>）；④ 恢复后<strong>复核</strong>（重新打开 + 写探针 + 卡片数）。原现场<strong>一律改名 <code>*.corrupt-&lt;时间戳&gt;</code> 留证，绝不删除</strong>（库 + <code>-wal</code> + <code>-shm</code> 一起）。新增 <code>tests/db-restore.test.mjs</code>（4 项：坏库重建 / 完好库需 force 且演练不动任何文件 / 拒绝危险来源 / 体检结论刷新）。<code>npm test</code> 共 <strong>339 项</strong></td>

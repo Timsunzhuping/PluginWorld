@@ -1,0 +1,131 @@
+<h1>hivehouse</h1>
+<p>A Claude Code plugin that runs a software task with a team of Claude sessions in tmux: an orchestrator, the agents the task needs, reviews and gates before anything lands, context rotation, unattended overnight runs, and cleanup afterwards. A hub session in your work folder hands each task to its project's orchestrator and carries your words both ways.</p>
+<p><a href="https://github.com/user-attachments/assets/4d7cd596-8090-4e91-b258-3f470838e277" target="_blank" rel="noopener noreferrer">https://github.com/user-attachments/assets/4d7cd596-8090-4e91-b258-3f470838e277</a></p>
+<p>Skills are instructions; every mechanical action is a tested bash executable in <code>bin/</code>.</p>
+<p>Ask Claude to customise anything: roles, rules, skills' behaviour, options. The one exception is loosening delegate (away) mode, which takes one sudo paste from you. See <a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/customise.md#customise-hivehouse" target="_blank" rel="noopener noreferrer">Customise hivehouse</a>.</p>
+<h2>Delegate mode</h2>
+<p>The default is relay mode: every start, wake and answer waits for you. Delegate mode is the mode the hub runs while you are away: it decides internal work inside your projects and keeps the teams running, and it keeps pushes, deploys and spending for you. It is on only while a file only you can write says so, for at most 7 days. Details, and what it guards and does not, are in <a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/away-mode.md#delegate-mode-away" target="_blank" rel="noopener noreferrer">Delegate mode (away)</a>; what you can allow it to do is in <a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/away-mode.md#customising-what-away-mode-allows" target="_blank" rel="noopener noreferrer">Customising what away mode allows</a>.</p>
+<h2>What hivehouse runs and sends</h2>
+<p>hivehouse is bash scripts and a few hooks. One of them, <code>hooks/hub.tsx</code>, draws the hub's screen. Its <code>hub_auto_start</code> option is on by default: a plain <code>claude</code> started in the hub's folder then renames its session to hub and opens the hub, which takes one model turn. Apart from the push and the ssh below, it makes no network calls of its own, and it sends nothing to us. (The Claude sessions it starts talk to Anthropic like any Claude Code session.) This is everything it does outside its own files:</p>
+<ul>
+<li><strong>It starts Claude sessions in tmux and types into their panes.</strong> Only into panes it started or recorded as part of a team. It waits until the pane is idle and never types over a dialog. It types the first line of a started or woken session, <code>/clear</code> and the pickup line after a context rotation, and the keys for the option you chose in a Claude Code dialog (a digit, Escape, or arrows and Enter). It answers a dialog only after you chose, and never in delegate mode.</li>
+<li><strong>Git worktrees and cleanup.</strong> A team agent can get its own git worktree and branch in your repository. Cleanup removes only what its manifest recorded: temporary folders, files it moves to <code>.hivehouse/trash</code>, and the processes and panes it started.</li>
+<li><strong>Bypass, only in delegate mode.</strong> While you're away, only while a file that only you can write allows it (7 days at most), and only if hivehouse's <code>permission_mode_local</code> option is auto, the hub starts and wakes team sessions with <code>--permission-mode bypassPermissions</code>. A hook in those sessions refuses pushes, publishing, uploads and changes to Claude Code's settings and hooks. In the default relay mode, and on remote hosts, hivehouse starts nothing in bypass.</li>
+<li><strong>MCP server config for those sessions.</strong> <code>hh-hub away</code> copies the config of the MCP servers you allowed (none by default) from <code>~/.claude.json</code> and the project's <code>.mcp.json</code> into <code>.hivehouse-hub/away-mcp.json</code>, and each session it starts gets a copy in its own folder. That config can hold the servers' secrets. The files are mode 0600.</li>
+<li><strong>A delete guard first in PATH.</strong> A SessionStart hook adds one line to Claude Code's <code>CLAUDE_ENV_FILE</code> that puts the plugin's <code>bin/guard</code> first in PATH, so <code>rm</code>, <code>find</code> and <code>rsync</code> called by name in every Bash command refuse to delete protected folders. See <a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/rm-guard.md" target="_blank" rel="noopener noreferrer">docs/rm-guard.md</a>.</li>
+<li><strong>Pushes only on your word.</strong> <code>hh-push</code> pushes one commit by its full hash to a remote you name, fast-forward only, never forced; it reads the remote first (<code>git ls-remote</code>, <code>git fetch</code>). Agents are not pre-approved to run it, the team's rules say only the orchestrator runs it and only when you say so, and it refuses in delegate mode.</li>
+<li><strong>ssh, scp and rsync to your own machines.</strong> For an overnight run on a host you listed in the <code>remote_hosts</code> option, <code>hh-remote-sync</code> copies four things to it: the git branches you name (as a git bundle), the project files you list, your Claude memory files (every <code>*.md</code> in the memory folder), and one secret file you name (into the project's <code>.hivehouse/tmp</code>, mode 600). The listed files replace what is there. A memory file or the secret file that differs there is never overwritten. Its <code>start-agent</code> step starts a Claude session on the host. Every call asks for your permission, and it refuses in delegate mode.</li>
+<li><strong>What <code>hooks/hub.tsx</code> runs.</strong> Only in a session started in the hub's folder (the one holding <code>.hivehouse-hub/</code>), and always from that folder. It runs <code>bin/hh-hub</code> with <code>status</code> and <code>tasks</code> every 20 seconds, <code>dialog</code> for a question waiting on a screen, <code>wake</code> and <code>continue</code> when you press Resume or Continue, <code>answer</code> when you press an option of a dialog, and <code>name</code> and <code>naming</code> to pick the hub's name. With <code>hub_auto_start</code> on, at the start of a session that has had no turn yet, it types the slash commands <code>/rename</code> (to the free hub name) and then <code>/hivehouse:hub</code>. It reads the hub's own files (<code>.hivehouse-hub/projects.json</code>) and the paths of the files an edit would touch, and it sends nothing off the machine. Its <code>tool.call</code> hooks refuse Edit, Write and NotebookEdit on project files, and common git commands that change a repository, in the hub session. Its command hook (<code>command.run</code> for <code>/hub-screen</code>) only opens the hub screen.</li>
+<li><strong>Local files.</strong> It reads Claude Code's own records: the session records (<code>~/.claude/sessions</code>), the session transcripts, <code>~/.claude.json</code> (folder trust, MCP servers) and <code>~/.claude/settings.json</code>. It reads the root-owned file you write to switch delegate mode on. It reads the launch environment of other Claude processes, to check the away marker. It keeps its state as files in your project's <code>.hivehouse/</code>, the hub's <code>.hivehouse-hub/</code> and <code>~/.hivehouse</code>.</li>
+</ul>
+<h2>Requirements</h2>
+<ul>
+<li>tmux ≥ 3.2 (<code>new-session</code> and <code>new-window</code> take <code>-e</code>; hh-spawn hands each pane its environment that way)</li>
+<li>git ≥ 2.31; ≥ 2.38 for <code>hh-gate-verify commits</code> to count a merge's own files exactly (<code>merge-tree --write-tree</code>;
+before it a merge is counted by <code>--cc</code>, which is near and not exact)</li>
+<li>bash (the macOS 3.2 is enough), jq, perl and shasum (both ship with macOS)</li>
+<li>ssh and rsync, for remote runs</li>
+<li>Claude Code ≥ 2.1.291 (the hub's screen is a function-hooks module, <code>hooks/hub.tsx</code>, named under <code>modules</code> in
+<code>hooks/hooks.json</code>; built and tested on 2.1.291)</li>
+</ul>
+<p>The idle check reads the Claude Code terminal UI (the prompt box and the dialog wording), checked against 2.1.x. The text it
+looks for is in one place, <code>HH_DIALOG_TEXT</code> and <code>hh_pane_idle_text</code> in <code>bin/hh-lib.sh</code>; update it there when a release
+changes the screen.</p>
+<p><code>hh-*</code> executables are on the PATH only inside Claude sessions where the plugin is enabled. To run one by hand, call it
+by its install path (<code>claude plugin list --json</code> shows it), for example <code>&lt;installPath&gt;/bin/hh-slot status</code>.</p>
+<h2>Install</h2>
+<pre><code>claude plugin marketplace add Cleveland-RD/hivehouse
+claude plugin install hivehouse@hivehouse
+</code></pre>
+<h2>For an agent installing this</h2>
+<p>A person may hand you this repository's link and say "install this". Do these steps in order; each says how to check it.
+Where a step says <strong>ask</strong>, ask the person and wait: never decide it for them.</p>
+<ol>
+<li><strong>Check what it needs.</strong> Run each and compare with Requirements above:
+<code>tmux -V</code>, <code>git --version</code>, <code>jq --version</code>, <code>perl -v</code>, <code>shasum --version</code>, <code>claude --version</code>.
+If one is missing or too old, tell the person which, and how they would add it (on macOS: <code>brew install tmux jq</code>).
+<strong>Ask</strong> before installing anything yourself.</li>
+<li><strong>Install the plugin</strong> with the two commands under Install. Check it is there and enabled:
+<code>claude plugin list --json | jq '.[] | select(.id == "hivehouse@hivehouse") | {version, enabled}'</code>.
+It must print the version in <code>.claude-plugin/plugin.json</code> and <code>"enabled": true</code>.</li>
+<li><strong>Settings.</strong> The plugin's settings are its <code>userConfig</code> in <code>.claude-plugin/plugin.json</code> (models, efforts, permission
+mode, files per commit, rotation level, overnight ceiling, <code>hub_auto_start</code>); each has a default, so nothing must be
+set. <strong>Ask</strong> whether the person wants any changed; Claude Code's <code>/plugin</code> menu changes them. Claude Code may say
+"N userConfig options not yet set" after the install: that needs no action, the defaults are in use.</li>
+<li><strong>The hub (optional).</strong> <strong>Ask</strong> whether they want one, and which folder is their work folder: the one that holds
+their projects, never a project itself. On their yes, set it up there:
+<code>cd &lt;folder&gt; &amp;&amp; &lt;installPath&gt;/bin/hh-hub init</code>, with the <code>installPath</code> that <code>claude plugin list --json</code> shows for
+<code>hivehouse@hivehouse</code> (it refuses inside a repository). Then tell them to run <code>&lt;installPath&gt;/bin/hh-hub start</code> in that folder: it opens the hub in a
+tmux session named <code>hub</code>, which opens the hub and offers to group their folders into projects. You cannot start that session for
+them: it is theirs.</li>
+<li><strong>Tell the person what they got:</strong> <code>/hivehouse:start &lt;task&gt;</code> runs a team on a task inside a project; <code>&lt;installPath&gt;/bin/hh-hub start</code>
+in the work folder opens the hub. Nothing runs until they ask.</li>
+</ol>
+<p>Never: start agents or sessions the person did not ask for, start a session in <code>bypassPermissions</code> (hivehouse does it only while the owner is away, through the owner's delegate file), install the
+optional i-have-adhd plugin unasked, or push anything.</p>
+<h2>Skills</h2>
+<table>
+<thead>
+<tr>
+<th>Skill</th>
+<th>Who runs it</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/hivehouse:hub</code></td>
+<td>owner</td>
+<td>the hub: hand tasks to each project's orchestrator, wake them, report back (starts by itself in the hub's folder)</td>
+</tr>
+<tr>
+<td><code>/hivehouse:start</code></td>
+<td>owner</td>
+<td>plan, approve and run a team on a task</td>
+</tr>
+<tr>
+<td><code>/hivehouse:overnight</code></td>
+<td>owner</td>
+<td>queue and run unattended, here or on a remote host</td>
+</tr>
+<tr>
+<td><code>/hivehouse:gate</code></td>
+<td>orchestrator, builders</td>
+<td>run the gate into a log and verify every step</td>
+</tr>
+<tr>
+<td><code>/hivehouse:bubble-review</code></td>
+<td>reviewer</td>
+<td>review a diff by depth, nine bubble categories</td>
+</tr>
+<tr>
+<td><code>/hivehouse:handoff</code></td>
+<td>any agent</td>
+<td>write the handoff and START HERE block</td>
+</tr>
+<tr>
+<td><code>/hivehouse:cleanup</code></td>
+<td>owner</td>
+<td>remove what the manifest recorded</td>
+</tr>
+<tr>
+<td><code>/hivehouse:review-plan</code>, <code>/hivehouse:doc-updater</code></td>
+<td>any</td>
+<td>moved-in skills</td>
+</tr>
+<tr>
+<td><code>/hivehouse:docs-health-check</code></td>
+<td>owner</td>
+<td>documentation sweep of the current project, report mode by default (a workflow, not a skill)</td>
+</tr>
+</tbody></table>
+<p><code>docs-health-check</code> is a Claude Code workflow: <code>workflows/docs-health-check.workflow.js</code>, with no <code>SKILL.md</code>. Claude Code's plugin docs say a <code>workflows/</code> directory at the plugin root is loaded without a manifest entry and that a plugin workflow runs as <code>/&lt;plugin&gt;:&lt;meta.name&gt;</code>. <strong>Unverified here:</strong> it has not been run through a live Claude Code session, only through a stand-in for the workflow runtime (<code>tests/test_docs_health.sh</code>). The report is written to <code>.hivehouse/reports/</code> (git-ignored), so report mode leaves the working tree as it was; when <code>.hivehouse/</code> is tracked or cannot be written, it goes to <code>$TMPDIR</code> outside every repository and the returned path says so; <code>apply</code> mode edits the working tree and never commits.</p>
+<h2>Docs</h2>
+<ul>
+<li><a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/hub.md" target="_blank" rel="noopener noreferrer">The hub</a>: the work folder's session, projects, handing tasks over, overnight runs and dialogs.</li>
+<li><a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/away-mode.md" target="_blank" rel="noopener noreferrer">Delegate mode (away)</a>: what the hub does while you are away, what it guards and what you can allow.</li>
+<li><a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/customise.md" target="_blank" rel="noopener noreferrer">Customise hivehouse</a>: roles, rules, options, and the optional i-have-adhd plugin.</li>
+<li><a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/state-and-restarts.md" target="_blank" rel="noopener noreferrer">State and restarts</a>: where hivehouse keeps its files and what to do after a restart.</li>
+<li><a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/rm-guard.md" target="_blank" rel="noopener noreferrer">The delete guard</a>: the <code>rm</code>, <code>find</code> and <code>rsync</code> guards that refuse to delete a root folder, and what they do not stop.</li>
+<li><a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/docs/development.md" target="_blank" rel="noopener noreferrer">Development</a>: running the tests and the evals.</li>
+<li><a href="https://github.com/Cleveland-RD/hivehouse/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a>: the supported version and how to report a vulnerability privately.</li>
+</ul>

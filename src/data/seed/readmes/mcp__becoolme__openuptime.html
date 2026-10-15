@@ -1,0 +1,217 @@
+<p><img src="https://raw.githubusercontent.com/becoolme/openuptime/HEAD/apps/web/public/og.png" alt="OpenUptime" /></p>
+<h1>OpenUptime</h1>
+<p>Open-source uptime monitoring and status pages. Runs on Cloudflare Workers with Postgres, or in one Docker container.</p>
+<p><a href="https://openuptime.app" target="_blank" rel="noopener noreferrer">Hosted version</a> · <a href="https://openuptime.app/docs/self-host" target="_blank" rel="noopener noreferrer">Docs</a> · <a href="https://github.com/becoolme/openuptime/blob/HEAD/docs/reference.md" target="_blank" rel="noopener noreferrer">Reference</a> · <a href="https://github.com/becoolme/openuptime/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT license</a></p>
+<ul>
+<li>HTTP, TCP, DNS, heartbeat, PostgreSQL, MySQL and Redis checks, with keyword matching and slow-response alerts</li>
+<li>Incidents, maintenance windows and public status pages with email / RSS subscriptions</li>
+<li>Alerts to Slack, Lark / Feishu, Telegram, PagerDuty, webhooks and email</li>
+<li>Workspaces, projects, roles, API keys, an MCP server for agents, JSON import / export</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Stack</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>apps/api</code></td>
+<td>Hono, better-auth, Cloudflare Worker (cron + queue consumer)</td>
+</tr>
+<tr>
+<td><code>apps/web</code></td>
+<td>Astro (static pages, SSR for status pages) + React islands</td>
+</tr>
+<tr>
+<td><code>packages/repo</code></td>
+<td>Storage interface (<code>Repo</code>) and entity types</td>
+</tr>
+<tr>
+<td><code>packages/db-pg</code></td>
+<td>Postgres implementation of <code>Repo</code>: Drizzle schema, migrations</td>
+</tr>
+</tbody></table>
+<h2>Deploy to Cloudflare</h2>
+<p>The site is two Workers on one domain:</p>
+<table>
+<thead>
+<tr>
+<th>Worker</th>
+<th>Serves</th>
+<th>Also does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>openuptime-api</code></td>
+<td><code>your-domain/api/*</code> (a Worker <strong>route</strong> on your zone)</td>
+<td>minute cron, queue consumer that runs the checks</td>
+</tr>
+<tr>
+<td><code>openuptime-web</code></td>
+<td>everything else on <code>your-domain</code> (a Worker <strong>custom domain</strong>)</td>
+<td>status pages (SSR); reaches the API through a service binding</td>
+</tr>
+</tbody></table>
+<p>Keeping the API under <code>/api/*</code> of the same domain means session cookies stay same-origin. You need no separate API hostname.</p>
+<p><strong>Before you start</strong></p>
+<ul>
+<li>A Cloudflare account and a domain whose DNS is on Cloudflare (the zone).</li>
+<li>A Postgres database reachable from the internet (Neon, Supabase, RDS, your own). Workers connect through Hyperdrive.</li>
+<li>Node.js 22+ and pnpm (<code>corepack enable</code> provides the pinned version).</li>
+<li>Workers <strong>Paid</strong> plan for the Queue (default). On the Free plan, run in inline mode instead: see <a href="https://github.com/becoolme/openuptime/blob/HEAD/docs/reference.md#cloudflare-free-plan" target="_blank" rel="noopener noreferrer">Reference</a>.</li>
+</ul>
+<h3>1. Get the code and sign in</h3>
+<pre><code class="language-bash">git clone https://github.com/becoolme/openuptime.git &amp;&amp; cd openuptime
+pnpm install
+cd apps/api &amp;&amp; npx wrangler login
+</code></pre>
+<p>All <code>npx wrangler …</code> commands below run in <code>apps/api</code> unless noted.</p>
+<h3>2. Create the Queue and Hyperdrive</h3>
+<pre><code class="language-bash">npx wrangler queues create openuptime-checks
+npx wrangler hyperdrive create openuptime-prod --connection-string="postgres://user:pass@host:5432/db"
+</code></pre>
+<p>The second command prints an id. In <code>apps/api/wrangler.jsonc</code> uncomment the <code>hyperdrive</code> line and paste it:</p>
+<pre><code class="language-jsonc">"hyperdrive": [{ "binding": "HYPERDRIVE", "id": "&lt;id printed above&gt;" }],
+</code></pre>
+<p>The commented <code>placement</code> line is optional (it runs the Worker next to your database host); leave it commented unless you
+want that.</p>
+<h3>3. Create the schema</h3>
+<p>From the repository root:</p>
+<pre><code class="language-bash">DATABASE_URL="postgres://user:pass@host:5432/db" pnpm db:migrate
+</code></pre>
+<p>It only applies what is new, so run it again after every upgrade. It never issues <code>CREATE SCHEMA</code>, so a role without
+database-level <code>CREATE</code> works too.</p>
+<h3>4. Point the config at your domain</h3>
+<p>Edit two files. In both, replace <code>status.example.com</code> with your own domain.</p>
+<p><code>apps/api/wrangler.jsonc</code>, where <code>zone_name</code> is the zone (the apex domain) even when you serve from a subdomain.
+Uncomment <code>routes</code> and set:</p>
+<pre><code class="language-jsonc">"routes": [{ "pattern": "status.example.com/api/*", "zone_name": "example.com" }],
+"vars": {
+  "BETTER_AUTH_URL": "https://status.example.com",   // public origin: cookies, OAuth, email links
+  "WEB_ORIGIN": "https://status.example.com",        // same value
+  "EMAIL_FROM": "alerts@example.com"                 // sender address; optional, see below
+}
+</code></pre>
+<p>Email is optional: without it invitations and alerts are written to the Worker log. To send it, onboard your domain
+under <strong>Email Sending</strong> in the Cloudflare dashboard first (see <a href="https://github.com/becoolme/openuptime/blob/HEAD/docs/reference.md#email" target="_blank" rel="noopener noreferrer">Reference</a>).</p>
+<p><code>apps/web/wrangler.jsonc</code>:</p>
+<pre><code class="language-jsonc">"routes": [{ "pattern": "status.example.com", "custom_domain": true }],
+"vars": { "PRODUCT_URL": "https://status.example.com" }   // target of the "Powered by" link on status pages
+</code></pre>
+<p>The custom domain creates its DNS record and certificate for you; the hostname must not already have a DNS record
+pointing elsewhere.</p>
+<p><strong>No domain on Cloudflare?</strong> Leave <code>routes</code> out of both files and set <code>BETTER_AUTH_URL</code> and <code>WEB_ORIGIN</code> to the web
+Worker's <code>https://openuptime-web.&lt;your-subdomain&gt;.workers.dev</code> address. The web Worker then forwards <code>/api/*</code> to the API
+Worker through the service binding, so cookies stay same-origin.</p>
+<h3>5. Set the secrets</h3>
+<pre><code class="language-bash">npx wrangler secret put BETTER_AUTH_SECRET     # openssl rand -hex 32
+npx wrangler secret put CRON_SECRET            # any long random string; guards /internal/*
+</code></pre>
+<p>If wrangler asks to create the Worker first, answer yes. Optional: <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> add
+"Sign in with GitHub".</p>
+<h3>6. Deploy</h3>
+<pre><code class="language-bash">pnpm exec wrangler deploy                     # in apps/api
+cd ../web &amp;&amp; pnpm build &amp;&amp; pnpm exec wrangler deploy
+</code></pre>
+<p>Deploy the API first: the web Worker binds to it by name.</p>
+<h3>7. Check it</h3>
+<pre><code class="language-bash">curl https://status.example.com/api/health    # {"ok":true}
+</code></pre>
+<p>Open the domain and sign up. Once your own account exists you can set <code>"DISABLE_SIGNUP": "true"</code> in the API <code>vars</code> and
+deploy again to close registration (invited people can still join).</p>
+<p><strong>Upgrade later:</strong> pull, <code>pnpm install</code>, <code>pnpm db:migrate</code>, then deploy the API and the web Worker, in that order.</p>
+<h2>Self-host with Docker</h2>
+<p>One container runs the API, the web app and the check scheduler; Postgres comes with the compose file. Either run the
+published image or build it from source; the settings are the same.</p>
+<h3>Option A: run the published image</h3>
+<p>Tagged releases are published to <code>ghcr.io/becoolme/openuptime</code> for <code>linux/amd64</code> and <code>linux/arm64</code>. You need no clone and
+no build:</p>
+<pre><code class="language-bash">mkdir openuptime &amp;&amp; cd openuptime
+curl -fsSLO https://raw.githubusercontent.com/becoolme/openuptime/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/becoolme/openuptime/main/.env.docker.example -o .env
+</code></pre>
+<p>Edit <code>.env</code>: set <code>POSTGRES_PASSWORD</code> and <code>BETTER_AUTH_SECRET</code> (<code>openssl rand -hex 32</code>), and uncomment <code>OPENUPTIME_IMAGE</code>.
+Pin a version (<code>ghcr.io/becoolme/openuptime:0.1.0</code>) or follow the newest release (<code>:latest</code>). Then:</p>
+<pre><code class="language-bash">docker compose pull &amp;&amp; docker compose up -d     # http://localhost:8080
+</code></pre>
+<p>Upgrade: change the tag if you pinned one, then run the same two commands again. Migrations run on start.</p>
+<h3>Option B: build from source</h3>
+<pre><code class="language-bash">git clone https://github.com/becoolme/openuptime.git &amp;&amp; cd openuptime
+cp .env.docker.example .env      # set POSTGRES_PASSWORD and BETTER_AUTH_SECRET (openssl rand -hex 32)
+docker compose up -d --build     # http://localhost:8080
+</code></pre>
+<p>Upgrade: <code>git pull</code>, then <code>docker compose up -d --build</code>.</p>
+<h3>Either way</h3>
+<p>The schema is migrated on start and the data lives in the <code>pgdata</code> volume. Set <code>PUBLIC_URL</code> when the app is not served
+from <code>http://localhost:8080</code>. Email is optional; see <a href="https://github.com/becoolme/openuptime/blob/HEAD/docs/reference.md#email" target="_blank" rel="noopener noreferrer">Reference</a>.</p>
+<p>Once your own account exists, set <code>DISABLE_SIGNUP=true</code> in <code>.env</code> and run <code>docker compose up -d</code> to close registration
+(invited people can still join).</p>
+<h2>Develop</h2>
+<pre><code class="language-bash">pnpm install
+cp .env.example apps/api/.dev.vars   # edit DATABASE_URL and secrets
+DATABASE_URL=postgres://user:pass@localhost:5432/openuptime_dev pnpm db:migrate   # same URL as in .dev.vars
+pnpm dev:api    # http://localhost:8787  (checks run inline every 15s)
+pnpm dev:web    # http://localhost:4321  (proxies /api to the API)
+pnpm typecheck
+</code></pre>
+<h2>MCP server</h2>
+<p>Agents (Claude, Cursor, Codex and any MCP client) can manage monitors, incidents and status pages over Streamable HTTP at
+<code>/api/mcp</code>, authorizing with OAuth or an API key:</p>
+<pre><code class="language-bash">claude mcp add --transport http openuptime https://openuptime.app/api/mcp   # or https://&lt;your-host&gt;/api/mcp
+</code></pre>
+<p>Client setup, scopes and the tool list are in the <a href="https://openuptime.app/docs/mcp" target="_blank" rel="noopener noreferrer">MCP docs</a>.
+An agent skill that teaches the common workflows ships in <a href="https://github.com/becoolme/openuptime/blob/HEAD/skills/openuptime" target="_blank" rel="noopener noreferrer">skills/openuptime</a>:
+<code>npx skills add becoolme/openuptime</code>.
+ The hosted server is listed
+in the <a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">MCP Registry</a> as <code>app.openuptime/mcp</code>; <a href="https://github.com/becoolme/openuptime/blob/HEAD/server.json" target="_blank" rel="noopener noreferrer">server.json</a> is its entry.</p>
+<p>Tests, how checks run, the MCP server, alert channels and the other details are in <a href="https://github.com/becoolme/openuptime/blob/HEAD/docs/reference.md" target="_blank" rel="noopener noreferrer">docs/reference.md</a>.</p>
+<h2>Open source vs hosted</h2>
+<p>The monitoring itself is the same code in both. The hosted service at <a href="https://openuptime.app" target="_blank" rel="noopener noreferrer">openuptime.app</a> adds
+plans, billing and a few features that live only in that build; it plugs into this repo through one interface
+(<code>Edition</code>, see <a href="https://github.com/becoolme/openuptime/blob/HEAD/docs/editions.md" target="_blank" rel="noopener noreferrer">docs/editions.md</a>), so nothing in the core is locked or throttled.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Self-hosted (this repo, MIT)</th>
+<th>Hosted (<a href="https://openuptime.app" target="_blank" rel="noopener noreferrer">openuptime.app</a>)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Monitors, incidents, status pages, alert channels, API, MCP</td>
+<td>All of it</td>
+<td>All of it</td>
+</tr>
+<tr>
+<td>Limits</td>
+<td>None: no plans, quotas or metering</td>
+<td>Free plan, paid plans from $5/month (<a href="https://openuptime.app/pricing" target="_blank" rel="noopener noreferrer">pricing</a>); monitors, checks, emails and history length depend on the plan</td>
+</tr>
+<tr>
+<td>Running it</td>
+<td>You: Postgres, the Worker or container, a mail provider, backups, upgrades</td>
+<td>We do; nothing to install</td>
+</tr>
+<tr>
+<td>SSL certificate monitoring (expiry alerts, <code>ssl</code> monitor type)</td>
+<td>Not included</td>
+<td>Lite and above</td>
+</tr>
+<tr>
+<td>Custom domain for a status page</td>
+<td>Not included</td>
+<td>Team</td>
+</tr>
+<tr>
+<td>Where your data lives</td>
+<td>Your database</td>
+<td>Ours (Postgres on managed hosting)</td>
+</tr>
+</tbody></table>
+<p>Pick self-hosting if you want to own the data and the infrastructure, or have no limits to worry about. Pick hosted if
+you would rather not run anything. Both receive the same core updates.</p>
+<h2>Contributing &amp; security</h2>
+<p>See <a href="https://github.com/becoolme/openuptime/blob/HEAD/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">CONTRIBUTING.md</a>. Report vulnerabilities privately as described in <a href="https://github.com/becoolme/openuptime/blob/HEAD/SECURITY.md" target="_blank" rel="noopener noreferrer">SECURITY.md</a>, not in public issues.</p>
+<h2>License</h2>
+<p><a href="https://github.com/becoolme/openuptime/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>
