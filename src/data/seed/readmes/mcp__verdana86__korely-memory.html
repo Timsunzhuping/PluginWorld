@@ -1,0 +1,199 @@
+<h1>Korely Memory</h1>
+<p>Memory for AI agents that knows what is still true.</p>
+<p>Korely stores what your agent learns as <strong>typed facts with a validity window</strong>. When something changes, the old fact is superseded instead of overwritten. Your agent reads the current truth, and you can still ask what was true on any past date.</p>
+<pre><code class="language-python">import time
+from korely_memory import Korely
+
+korely = Korely()  # reads KORELY_API_KEY from the environment
+
+korely.add("Maria is on the Pro plan, billed yearly.", user_id="maria")
+korely.add("Maria downgraded to Free.", user_id="maria")
+
+time.sleep(10)  # facts are extracted server-side; see "Writes settle asynchronously"
+
+ctx = korely.get_context(query="what plan is Maria on?", user_id="maria")
+print(ctx.context)
+# ## Known facts
+# - Maria downgraded_to Free (since 2026-09-08)
+# - Maria billing_frequency yearly (since 2026-09-08)
+#
+# Pro is gone from the current facts. It was superseded, not deleted.
+</code></pre>
+<p>The exact predicate is chosen by the extractor, so <code>downgraded_to</code> here might be
+<code>subscribes_to</code> or <code>plan</code> on your run. What is guaranteed is the behaviour: the
+old value leaves the current set, and stays retrievable with its <code>invalid_at</code>.</p>
+<p>Nothing was deleted. The Pro fact is still there, carrying <code>invalid_at</code> and a pointer to what replaced it:</p>
+<pre><code class="language-python">korely.get_facts(user_id="maria", include_invalidated=True)
+# Maria downgraded_to Free    valid_from=... invalid_at=None
+# Maria plan Pro              valid_from=... invalid_at=2026-09-08T08:31:09Z
+</code></pre>
+<h2>Time travel over real dates</h2>
+<p>Pass <code>timestamp</code> when the event happened in the past, and facts inherit it as
+<code>valid_from</code>. Then <code>as_of</code> answers over the world's timeline, not your ingestion
+order:</p>
+<pre><code class="language-python">korely.add("Franco signed up on the Pro plan.", user_id="franco", timestamp="2026-01-15")
+korely.add("Franco downgraded to Free.",        user_id="franco", timestamp="2026-06-20")
+
+korely.get_facts(user_id="franco", as_of="2026-03-01")   # subscribes_to -&gt; Pro plan
+korely.get_facts(user_id="franco", as_of="2026-08-01")   # subscribes_to -&gt; Free
+korely.get_facts(user_id="franco")                       # subscribes_to -&gt; Free
+</code></pre>
+<p>Without <code>timestamp</code> every fact starts being true the moment you write it, so
+<code>as_of</code> on an earlier date returns nothing. That is correct, and usually not
+what you want when you are importing history.</p>
+<p><code>as_of</code> answers what was true on a date, as the store knows it today.
+<code>known_as_of</code> (Korely Agent 0.1.26) answers the other question: what the store
+knew on that date. They differ when a change is told late. An agent learns on
+5 October that a customer moved on 1 September:</p>
+<pre><code class="language-python">korely.get_facts(user_id="maria", as_of="2026-09-20")        # lives_in -&gt; Turin
+korely.get_facts(user_id="maria", known_as_of="2026-09-20")  # lives_in -&gt; Milan
+</code></pre>
+<p>On 20 September the move had happened, and the store did not know it yet.
+<code>known_as_of</code> is on <code>get_facts</code>, <code>get_profile</code> and <code>get_context</code>, which rebuilds
+the block as the store could have built it then: what an agent could have
+known when it decided. Each fact carries <code>closed_known_at</code>, when the store
+learned it had ended.</p>
+<h2>Writes settle asynchronously</h2>
+<p><code>add()</code> returns as soon as the memory is stored, then extraction runs server-side. That means:</p>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th>Available</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search()</code> over raw memories</td>
+<td>immediately</td>
+</tr>
+<tr>
+<td><code>get_facts()</code> and <code>get_context()</code> typed facts</td>
+<td>after a few seconds</td>
+</tr>
+</tbody></table>
+<p>The <code>time.sleep(10)</code> above exists only so the snippet works when you paste it. <strong>You do not need it in production</strong>: an agent writes at the end of one turn and reads at the start of the next, and by then the facts are there.</p>
+<p>If you do need to know exactly when, ask instead of guessing. Every memory carries a <code>status</code> of <code>processing</code>, <code>ready</code>, or <code>error</code>, and <code>events()</code> reports what is still in flight:</p>
+<pre><code class="language-python">page = korely.events()
+page.processing  # 0
+page.events[0]   # MemoryEvent(memory_id='mem_...', status='ready', ...)
+</code></pre>
+<p><code>processing == 0</code> means none of your project's writes (in the <code>user_id</code> scope, if you pass one) is still being extracted, however many there are, so a script can wait on that one number instead of walking every id. After a <code>batch()</code> import, wait for <code>batch_status()</code> to finish first: memories the job has not stored yet are not counted.</p>
+<p>Polling is the only signal: no webhook fires when extraction finishes. The webhook events are <code>memory.created</code>, <code>fact.invalidated</code> and <code>quota.warning</code>.</p>
+<h2>Install</h2>
+<pre><code class="language-bash">pip install korely-memory      # Python, plus the `korely` CLI
+npm install korely-memory      # Node / TypeScript
+</code></pre>
+<p>Both clients have <strong>zero runtime dependencies</strong>.</p>
+<p>For LangGraph, the optional <code>pip install 'korely-memory[langgraph]'</code> adds a store, memory tools and a context helper: see <a href="https://github.com/verdana86/korely-memory/blob/HEAD/python/README.md#langgraph" target="_blank" rel="noopener noreferrer">python/README.md</a>.</p>
+<h2>Get a key</h2>
+<p>The hobby tier is free and needs no signup form:</p>
+<pre><code class="language-bash">curl -X POST https://api.korely.ai/v1/agents/init \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_caller": "your-name-here"}'
+</code></pre>
+<p>The response carries a <code>kor_live_</code> key. Set it as <code>KORELY_API_KEY</code> and the SDK, the CLI, and the REST API all authenticate with it. From code, <code>Korely.init_agent()</code> (Python) and <code>Korely.initAgent()</code> (JS) make the same call.</p>
+<p>The account behind that key has no login: the key is the account. Keep it, because it is also the only way to delete the account (<code>korely delete-account --yes</code>, or <code>delete_account(confirm=True)</code> in the SDK).</p>
+<p>Or let the CLI do it for you. <code>korely init</code> saves the key to <code>~/.korely/config.json</code>, and the SDK reads it from there when <code>KORELY_API_KEY</code> is not set, so this is enough to get going:</p>
+<pre><code class="language-bash">pip install korely-memory
+korely init --agent --agent-caller your-name
+python -c "from korely_memory import Korely; print(Korely().get_context(query='hi').tokens)"
+</code></pre>
+<h2>TypeScript</h2>
+<pre><code class="language-ts">import { Korely } from "korely-memory";
+
+const korely = new Korely();
+
+await korely.add("Maria downgraded to Free.", { user_id: "maria" });
+const ctx = await korely.getContext({ query: "what plan is Maria on?", user_id: "maria" });
+</code></pre>
+<p>With the Vercel AI SDK, <code>withKorelyMemory(model, { userId })</code> from <code>korely-memory/ai-sdk</code> gives any model this memory in one line: see <a href="https://github.com/verdana86/korely-memory/blob/HEAD/js/README.md#vercel-ai-sdk" target="_blank" rel="noopener noreferrer">js/README.md</a>.</p>
+<h2>CLI</h2>
+<pre><code class="language-bash">korely add "Maria downgraded to Free." --user-id maria
+korely context "what plan is Maria on?" --user-id maria
+korely facts --as-of 2026-03-01 --user-id maria
+korely audit --user-id maria --all --json &gt; maria.json   # everything that touched Maria
+</code></pre>
+<p>Every command is listed in <a href="https://github.com/verdana86/korely-memory/blob/HEAD/python/README.md#cli" target="_blank" rel="noopener noreferrer">python/README.md</a>.</p>
+<h2>What Korely does</h2>
+<ul>
+<li><strong>Typed facts.</strong> Subject, predicate, object, extracted server-side. No prompt engineering on your side.</li>
+<li><strong>Bi-temporal validity.</strong> Every fact carries <code>valid_from</code> and <code>invalid_at</code>, so the store separates when something was true from when it was recorded.</li>
+<li><strong>Contradiction resolution.</strong> A new fact that conflicts with an old one supersedes it and records which fact replaced it. Nothing is silently dropped.</li>
+<li><strong>Point-in-time queries.</strong> <code>as_of</code> answers what was true on any past date, and
+<code>known_as_of</code> what the store knew on it.</li>
+<li><strong>Entity graph.</strong> Entities and relations are extracted automatically and available on every tier, including free.</li>
+<li><strong>Semantic retrieval.</strong> Memories and facts are ranked by meaning (vector similarity), and facts also by how recently a memory confirmed them.</li>
+<li><strong>Prompt-ready context.</strong> <code>get_context()</code> returns a block you can paste straight into a system prompt, with the token count.</li>
+<li><strong>EU-hosted.</strong> Runs in Helsinki. End users can see, correct, and erase what agents remember about them.</li>
+</ul>
+<h2>Async</h2>
+<p>An agent in production does not make one call at a time. <code>AsyncKorely</code> mirrors
+every method of <code>Korely</code>, so everything you learned carries over:</p>
+<pre><code class="language-python">import asyncio
+from korely_memory import AsyncKorely
+
+async def main():
+    korely = AsyncKorely()
+    contexts = await asyncio.gather(
+        korely.get_context(query="what plan?", user_id="a"),
+        korely.get_context(query="what plan?", user_id="b"),
+        korely.get_context(query="what plan?", user_id="c"),
+    )
+
+asyncio.run(main())
+</code></pre>
+<p>Six calls against the live API: <strong>5.6s sequential, 1.7s concurrent</strong>.</p>
+<p>Calls run on a thread pool rather than an async HTTP library, because keeping
+this package at <strong>zero runtime dependencies</strong> is worth more than the last drop
+of efficiency. Your event loop is never blocked and requests really do overlap.</p>
+<h2>Examples</h2>
+<p><a href="https://github.com/verdana86/korely-memory/blob/HEAD/examples/audit_trail.py" target="_blank" rel="noopener noreferrer"><code>examples/audit_trail.py</code></a> answers the question this
+store exists for: <strong>what did your agent know on the day it answered?</strong></p>
+<p>A support agent tells a customer in March that they have priority support. In
+June the customer moves to a cheaper plan. In September they complain, quoting
+your bot back at you. Was the bot wrong, or right at the time?</p>
+<pre><code>  What the store believed in March, when the agent answered:
+      customer-4821 · subscribes_to · Business plan
+      Business plan · includes · priority support
+
+  What is true today:
+      customer-4821 · subscribes_to · Standard plan
+      customer-4821 · lacks · priority support
+</code></pre>
+<p>Right in March, right today, and both provable. Run it yourself in about
+twenty seconds:</p>
+<pre><code class="language-bash">pip install korely-memory
+korely init --agent --agent-caller audit-example
+python examples/audit_trail.py
+</code></pre>
+<p>It checks its own claims rather than making them, erasure included.</p>
+<h2>Repository layout</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Package</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>python/</code></td>
+<td><a href="https://pypi.org/project/korely-memory/" target="_blank" rel="noopener noreferrer"><code>korely-memory</code></a> on PyPI, includes the <code>korely</code> CLI and an MCP stdio server</td>
+</tr>
+<tr>
+<td><code>js/</code></td>
+<td><a href="https://www.npmjs.com/package/korely-memory" target="_blank" rel="noopener noreferrer"><code>korely-memory</code></a> on npm</td>
+</tr>
+<tr>
+<td><code>n8n/</code></td>
+<td><a href="https://www.npmjs.com/package/n8n-nodes-korely" target="_blank" rel="noopener noreferrer"><code>n8n-nodes-korely</code></a>, a community node for self-hosted n8n (see its README)</td>
+</tr>
+</tbody></table>
+<h2>MCP</h2>
+<p>Korely runs a hosted MCP server, so a coding agent can read and write memory without any package:</p>
+<pre><code class="language-bash">claude mcp add --transport http korely https://api.korely.ai/agent/mcp \
+  --header "Authorization: Bearer kor_live_..."
+</code></pre>
+<h2>Documentation</h2>
+<p>Full REST contract, concepts, and integration guides: <a href="https://korely.ai/agents/docs" target="_blank" rel="noopener noreferrer">korely.ai/agents/docs</a></p>
+<h2>License</h2>
+<p>MIT. These clients are open source; the hosted service they talk to is not.</p>

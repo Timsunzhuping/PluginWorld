@@ -76,8 +76,11 @@ Linux machine, pipx's folder is not on <code>PATH</code> yet.</p>
 <p>You can also run it with npx. The npm package only starts this engine, so it needs uv, pipx, or
 Python 3.11+ with <code>skilltotal</code> installed. With uv or pipx it runs the PyPI release that matches
 the npm version; when it falls back to an installed Python <code>skilltotal</code> of another release, it
-says so on stderr.</p>
-<pre><code class="language-bash">npx -y skilltotal scan https://github.com/owner/repo
+says so on stderr. Name the release with <code>--package</code>: a plain <code>npx skilltotal</code> run inside a
+repository first runs any <code>skilltotal</code> program in that repository's <code>node_modules/.bin</code>, and a
+repository you are about to scan can ship one (with <code>--package</code>, npx runs only that exact release;
+<code>uvx</code> does not look in the folder at all).</p>
+<pre><code class="language-bash">npx -y --package=skilltotal@0.73.0 -- skilltotal scan https://github.com/owner/repo
 </code></pre>
 <p>From source (development):</p>
 <pre><code class="language-bash">pip install -e ".[dev]"
@@ -108,10 +111,10 @@ skilltotal scan pypi:requests==2.31.0
 # JSON to stdout
 skilltotal scan ./component --json
 
-# SARIF 2.1.0 (GitHub Code Scanning / IDE) to a file; the console gets the readable summary
+# SARIF 2.1.0 (GitHub Code Scanning / IDE) to a file; the console gets a short summary
 skilltotal scan ./component --sarif --output report.sarif
 
-# Write the report to a file (SARIF if --sarif, else JSON)
+# Write the report to a file (SARIF if --sarif, else JSON); the folder must exist
 skilltotal scan ./component --output report.json
 
 # SARIF for a subfolder: repository-root paths and a Code Scanning category of its own
@@ -172,11 +175,17 @@ skilltotal inventory --sbom             # AI-BOM: CycloneDX 1.6 JSON of your age
 skilltotal rules list
 skilltotal rules list --json
 </code></pre>
+<p><code>scan</code> on its own exits 0 whatever it finds, even for a malicious verdict. In a script, use
+<code>skilltotal guard</code> or a gate (<code>--fail-on</code>) and check the exit code. With <code>--output FILE</code>, the full
+report goes to the file and the console gets a short summary: the verdict, the risk, the finding
+counts, any gate lines and <code>Full report: FILE</code>. Options must be spelled out in full: <code>--out</code> is
+an error, not <code>--output</code>.</p>
 <p><strong>Baseline</strong> suppresses findings by a stable fingerprint of
 <code>(rule id, file, code snippet)</code>, independent of line numbers, so it survives edits.
 Suppressed findings are removed before scoring and do not affect the risk score. Writing a baseline
 is how you adopt the tool on existing code: <code>--write-baseline</code> writes the file and exits 0,
-whatever it found.</p>
+whatever it found, and warns on stderr when the baseline accepts a malicious indicator. A scan
+with a baseline says how many occurrences it suppressed on a <code>Baseline  :</code> line.</p>
 <p><strong>Diff</strong> reports new / resolved / changed findings, evidence-level additions and removals
 (matched by the same line-independent fingerprint as the baseline, so pure line shifts are
 not noise), capability changes, and the risk-score delta. <code>--fail-on-new LEVEL</code> gates only
@@ -191,7 +200,9 @@ weighs the aggregate risk level rather than single findings. It also does not bl
 a secret it ships: that puts the publisher at risk, not the person installing the package.</p>
 <p><strong>Inventory and <code>guard --installed</code></strong> read agent configuration files and never start a server:
 <code>~/.claude.json</code> (Claude Code's user-scope servers and its local-scope servers per project), the
-Claude Code plugins you installed, Claude Desktop, Cursor (<code>~/.cursor/mcp.json</code>), Windsurf, VS Code
+Claude Code plugins you installed, an organization's Claude Code <code>managed-mcp.json</code> (in
+<code>/etc/claude-code</code>, <code>/Library/Application Support/ClaudeCode</code> or <code>C:\Program Files\ClaudeCode</code>),
+Claude Desktop, Cursor (<code>~/.cursor/mcp.json</code>), Windsurf, VS Code
 (the user <code>mcp.json</code> and <code>settings.json</code> <code>mcp.servers</code>) and Gemini CLI configs, and the skills in
 <code>~/.claude/skills</code>. With <code>--project DIR</code> they also read that project's <code>.mcp.json</code>,
 <code>.cursor/mcp.json</code>, <code>.vscode/mcp.json</code> and <code>.claude/skills</code>. Claude Code's <code>~/.claude/settings.json</code>
@@ -232,7 +243,7 @@ error suggests the closest id), or a <code>--config</code> path that does not ex
 path is resolved against the config file's folder.</p>
 <p>An applied config is always named: on a <code>Config    :</code> line in the text report, as a
 <code>config applied: ...</code> line on stderr with <code>--json</code> or <code>--sarif</code>, and in the report's
-<code>metadata.config_applied</code>.</p>
+<code>metadata.config_applied</code>. A <code>baseline</code> set in the config is named there too.</p>
 <blockquote>
 <p><strong>Protect the config in CI.</strong> The GitHub Action and the pre-commit hook run from the root of the
 repository they scan, so that repository's own <code>.skilltotal.toml</code> is applied, and a pull request
@@ -249,6 +260,10 @@ commas; a bare <code>skilltotal:ignore</code> accepts every rule on that line. I
 you scan a local directory (your own code, as in CI). In a package, repository, archive or file
 that SkillTotal fetches or unpacks they are ignored, so a component cannot silence its own
 findings. Suppressed occurrences are counted in the report (<code>metadata.suppressed_count</code>).</p>
+<p>A marker never hides a malicious indicator, in any source. The finding stays, and a
+<code>needs_review</code> note says so. To accept one after review, record it in a baseline or set its rule
+to <code>warn</code> under <code>[policy]</code>. A marker that names a rule id no rule has suppresses nothing and gets
+a <code>needs_review</code> note suggesting the closest id.</p>
 <h3>Environment variables</h3>
 <p><strong>Settings</strong> (environment variables, for the CLI, the plugin and the action):</p>
 <table>
@@ -312,17 +327,17 @@ positive whole number is an error. The plugin's own settings are listed in
 </tr>
 <tr>
 <td>1</td>
-<td>Usage, config or collection error (for example an unknown flag value, an invalid <code>.skilltotal.toml</code> or an unknown rule id in it, a missing path, a failed clone, a source over a size limit). <code>guard --installed</code> also exits 1 when a component could not be checked or none was found, unless <code>--allow-unchecked</code> is given</td>
+<td>Usage, config or collection error (for example an unknown or abbreviated flag, an invalid <code>.skilltotal.toml</code> or an unknown rule id in it, a missing path, an <code>--output</code> folder that does not exist, a failed clone, a source over a size limit). <code>guard --installed</code> also exits 1 when a component could not be checked or none was found, unless <code>--allow-unchecked</code> is given</td>
 </tr>
 <tr>
 <td>2</td>
 <td>A configured gate tripped (<code>--fail-on</code>/<code>--fail-on-high</code> severity, <code>--fail-on-score</code>, <code>--fail-on-unanalyzed</code>, a <code>block</code> policy or <code>diff --fail-on-new</code>), or <code>guard</code> blocked a component</td>
 </tr>
 </tbody></table>
-<p>When a gate trips, stderr gets one <code>gate:</code> line per gate, naming the gate and the finding that
-tripped it, for example
-<code>gate: --fail-on high tripped by ST-COMBO-EXFIL (index.js:7) and 1 more</code> or
-<code>gate: fail_on = "critical" in .skilltotal.toml tripped by ...</code>.</p>
+<p>When a gate trips, stderr gets one <code>gate:</code> line per gate, naming the gate, the finding that
+tripped it and why it counts, for example
+<code>gate: --fail-on high tripped by ST-COMBO-EXFIL (index.js:7), severity critical and 1 more</code> or
+<code>gate: fail_on = "critical" in .skilltotal.toml tripped by ST-INSTALL-NPM-REMOTE-EXEC (package.json:1), a malicious indicator</code>.</p>
 <blockquote>
 <p><strong>Gate semantics:</strong> <code>--fail-on</code>/<code>--fail-on-high</code> trip on the <strong>severity of a single finding</strong>,
 not the aggregate <code>risk_score</code>. They count risk findings: a malicious indicator at any severity,
@@ -352,13 +367,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: pezhik/skilltotal@v0.70.0
+      - uses: pezhik/skilltotal@v0.73.0
+        id: skilltotal
         with:
           source: .             # a path, a git URL, or an npm:/pypi:&lt;name&gt; spec
           fail-on: high         # fail on a high/critical risk finding (or 'none')
           fail-on-unanalyzed: 'false' # 'true': also fail when part of it could not be analyzed
           comment-on-pr: 'true' # post a sticky summary comment on pull requests (optional)
+          # upload-sarif: 'false'     # a private repository without GitHub Advanced Security
+      # Runners are discarded after the job: keep the report as an artifact, also after a tripped gate
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: skilltotal-report
+          path: skilltotal.sarif
+      - if: always()
+        run: echo "verdict=$VERDICT score=$SCORE"
+        env:
+          VERDICT: ${{ steps.skilltotal.outputs.verdict }}
+          SCORE: ${{ steps.skilltotal.outputs.risk-score }}
 </code></pre>
+<p><code>on: [push, pull_request]</code> runs the scan twice for a branch with an open pull request, once for
+each event. To scan once, limit <code>push</code> to your default branch (<code>push: { branches: [main] }</code>).</p>
 <p>The action runs the engine that ships with the tag you pin, so nothing is downloaded from PyPI and
 the tag pins the scanner too. Pin it to a released tag (see
 <a href="https://github.com/pezhik/skilltotal/releases" target="_blank" rel="noopener noreferrer">Releases</a>), or to that release's commit SHA
@@ -415,7 +445,7 @@ the same scan is <code>skilltotal scan . --sarif --output skilltotal.sarif --fai
 <tr>
 <td><code>sarif-file</code></td>
 <td><code>skilltotal.sarif</code></td>
-<td>Where the SARIF report is written</td>
+<td>Where the SARIF report is written. A missing folder is created</td>
 </tr>
 <tr>
 <td><code>sarif-category</code></td>
@@ -430,16 +460,28 @@ the same scan is <code>skilltotal scan . --sarif --output skilltotal.sarif --fai
 <tr>
 <td><code>version</code></td>
 <td>empty</td>
-<td>Install this <code>skilltotal</code> release from PyPI instead of running the engine that ships with the tag. It must be at least as new as the action</td>
+<td>Install this <code>skilltotal</code> release from PyPI instead of running the engine that ships with the tag. It must be at least as new as the action; an older one gives a warning</td>
 </tr>
 </tbody></table>
 <p>Outputs: <code>risk-level</code>, <code>risk-score</code>, <code>sarif-file</code> and <code>verdict</code>, which is <code>malicious</code> whenever a
-malicious indicator was found, whatever the score.</p>
+malicious indicator was found, whatever the score. Read them as
+<code>steps.&lt;id&gt;.outputs.&lt;name&gt;</code> after giving the step an <code>id</code>. A tripped gate fails the step, so a
+later step that should still run needs <code>if: always()</code>.</p>
 <p>How it behaves:</p>
 <ul>
 <li><strong>The gate decides the job.</strong> The semantics above apply: a malicious indicator fails the job at
 any severity, and a capability on its own, such as a shell call or network access, never does.
-The Scan step's log says which gate tripped.</li>
+The Scan step's log says which gate tripped, and each gate line is also an error annotation.
+With <code>fail-on</code> empty and no gate in <code>.skilltotal.toml</code>, the log names the gate
+<code>fail-on high (action default)</code>.</li>
+<li><strong>Errors are not verdicts.</strong> A usage, config or fetch error fails the job as "SkillTotal could
+not run the scan (exit 1): ...", not as a tripped gate.</li>
+<li><strong>Job summary.</strong> Each run writes one: the applied <code>.skilltotal.toml</code> and what it sets, the
+verdict, the risk score and the gate result, the gate lines that tripped, a table of risk findings
+(severity, rule, file:line and title; up to 20, then a count), the capabilities, and how many
+findings a baseline or inline marker suppressed. The pull request comment says the same in
+short. A pull request that changes the applied config gets a warning when the base branch is
+fetched (<code>fetch-depth: 0</code>).</li>
 <li><strong>The log lists the findings.</strong> It prints a count of risk findings and, separately, capability
 findings (not scored, never gated), then every location of each risk finding: up to 10 per rule,
 then "and N more" (the SARIF and JSON reports have them all). When Code Scanning is off, this is
@@ -448,24 +490,40 @@ in the log.</li>
 <li><strong>SARIF paths.</strong> For a <code>source</code> in a subfolder, SARIF locations are made relative to the
 repository root, so alerts point at real files. SARIF for an <code>npm:</code>, <code>pypi:</code> or git-URL source is
 written to <code>sarif-file</code> but not uploaded: its alerts would point at files the repository does not
-have.</li>
+have. For an <code>npm:</code> or <code>pypi:</code> source it describes the same release the gate scanned. If the
+SARIF report cannot be written, the action warns and skips the upload; the gate still decides
+the job.</li>
 <li><strong>Without Code Scanning.</strong> A private repository has Code Scanning only with GitHub Advanced
 Security. Without it, GitHub's upload action shows an error annotation of its own, the next step
-prints a warning explaining why, and the job result is still decided by the gate; the report
-stays in <code>sarif-file</code>. Set <code>upload-sarif: 'false'</code> to skip the upload.</li>
-<li><strong>PR comment.</strong> With <code>comment-on-pr: 'true'</code>, the action posts one summary comment on the pull
-request (verdict, risk level and score, the gate result, the number of risk findings and of
-malicious indicators, capability findings counted apart, the capabilities) and updates it in
-place on later runs. On a pull request from a fork the token is read-only: the comment is skipped
-with a warning, and the job is not failed for it.</li>
+prints a warning explaining why, and the job result is still decided by the gate. Set
+<code>upload-sarif: 'false'</code> to skip the upload, and keep the report with <code>actions/upload-artifact</code>
+as in the example above: the runner and its files are gone after the job.</li>
+<li><strong>PR comment.</strong> With <code>comment-on-pr: 'true'</code>, the action keeps one comment on the pull request
+up to date: the verdict, the risk and the gate result, the gate lines, the top five risk
+findings with file:line, the capabilities, the suppressed count and a link to the workflow run.
+On a pull request from a fork the token is read-only: the comment is skipped with a warning,
+and the job is not failed for it.</li>
 <li><strong>The repository's config is applied.</strong> See <a href="#project-config" target="_blank" rel="noopener noreferrer">Protect the config in CI</a>.</li>
 </ul>
+<p>To re-check a third-party package you depend on, on a schedule:</p>
+<pre><code class="language-yaml">on:
+  schedule: [{ cron: '0 6 * * 1' }]   # runs only from the default branch
+jobs:
+  mcp-server:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: pezhik/skilltotal@v0.73.0
+        with:
+          source: npm:some-mcp-server@1.4.2
+          config: none         # this repository's .skilltotal.toml is not about that package
+</code></pre>
 <h3>Use as a pre-commit hook</h3>
 <p>Run SkillTotal on every commit via <a href="https://pre-commit.com" target="_blank" rel="noopener noreferrer">pre-commit</a>:</p>
 <pre><code class="language-yaml"># .pre-commit-config.yaml
 repos:
   - repo: https://github.com/pezhik/skilltotal
-    rev: v0.70.0
+    rev: v0.73.0
     hooks:
       - id: skilltotal
         args: [".", "--fail-on-high"]   # scan the repo; block the commit on a high/critical finding
@@ -482,16 +540,20 @@ report; it does not write GitLab's security report format, so publish the files 
 Write reports outside the scanned folder, or into a folder you <code>--exclude</code> (SkillTotal also
 recognises its own SARIF, JSON and baseline files by content and skips them). <code>--output</code> does not
 create folders, so create the report folder first.</p>
-<p>A shell step:</p>
-<pre><code class="language-bash">pipx install skilltotal==0.70.0
+<p>A shell step (a virtual environment outside the checkout, so it is not scanned):</p>
+<pre><code class="language-bash">python3 -m venv "$HOME/.skilltotal-venv"
+"$HOME/.skilltotal-venv/bin/pip" install skilltotal==0.73.0
 OUT="$(mktemp -d)"
-skilltotal scan . --sarif --output "$OUT/skilltotal.sarif" --fail-on high
+"$HOME/.skilltotal-venv/bin/skilltotal" scan . --sarif --output "$OUT/skilltotal.sarif" --fail-on high
 </code></pre>
+<p>Where pipx is on <code>PATH</code>, <code>pipx run --spec skilltotal==0.73.0 skilltotal</code> followed by the same
+arguments runs the pinned CLI without a virtual environment. The <code>python:*-slim</code> images do not
+include pipx.</p>
 <p>GitLab CI (<code>allow_failure: exit_codes: [2]</code> would turn the gate into a warning):</p>
 <pre><code class="language-yaml">skilltotal:
   image: python:3.12-slim
   script:
-    - pip install skilltotal==0.70.0
+    - pip install skilltotal==0.73.0
     - mkdir -p skilltotal-reports
     - skilltotal scan . --exclude "skilltotal-reports/*" --sarif --output skilltotal-reports/skilltotal.sarif --fail-on high
   artifacts:
@@ -504,7 +566,7 @@ skilltotal scan . --sarif --output "$OUT/skilltotal.sarif" --fail-on high
   steps {
     sh '''
       python -m venv .skilltotal-venv    # a virtual environment is not scanned
-      .skilltotal-venv/bin/pip install skilltotal==0.70.0
+      .skilltotal-venv/bin/pip install skilltotal==0.73.0
       mkdir -p skilltotal-reports
       .skilltotal-venv/bin/skilltotal scan . --exclude "skilltotal-reports/*" --sarif --output skilltotal-reports/skilltotal.sarif --fail-on high
     '''
@@ -526,8 +588,9 @@ input). Findings already in the baseline no longer trip the gate; new ones do.</
 protection, so loosening them needs a review.</li>
 <li><strong>Accept a false positive.</strong> For one occurrence, prefer an inline
 <code># skilltotal:ignore[ST-ID]</code> on its line or the line above: it sits next to the code and is
-reviewed with it. Re-writing the baseline accepts every current finding at once, which is
-convenient after a review but easy to misuse. A <code>[policy]</code> <code>warn</code> or <code>ignore</code> applies to a rule
+reviewed with it. A malicious indicator needs the baseline or a <code>[policy]</code> <code>warn</code> instead.
+Re-writing the baseline accepts every current finding at once, which is convenient after a
+review but easy to misuse. A <code>[policy]</code> <code>warn</code> or <code>ignore</code> applies to a rule
 everywhere. <a href="https://github.com/pezhik/skilltotal/issues" target="_blank" rel="noopener noreferrer">Report false positives</a> too: they are
 fixed in the open.</li>
 <li><strong>Decide on <code>--fail-on-unanalyzed</code>.</strong> It is off by default, so the gate passes code it could
@@ -559,8 +622,9 @@ score.</li>
 what was not and why.</li>
 <li><strong>CI is fail-closed:</strong> in CI (<code>CI</code>, <code>GITLAB_CI</code>, <code>JENKINS_URL</code> and similar, or
 <code>SKILLTOTAL_STRICT=1</code>) nobody can answer a question, so everything it would ask about is denied,
-and so are installs it could not check (from a lockfile, a local path or a downloaded script)
-unless <code>SKILLTOTAL_ALLOW_UNCHECKED</code> lists their kind.</li>
+and so are installs it could not check (from a lockfile, a local path, a downloaded script, a
+company registry, or an MCP server at a URL or in a container) unless
+<code>SKILLTOTAL_ALLOW_UNCHECKED</code> lists their kind.</li>
 </ul>
 <p>What it does not check:</p>
 <ul>
@@ -573,26 +637,48 @@ are reported as not checked</li>
 </ul>
 <p>The plugin also adds a <code>/skilltotal:scan &lt;target&gt;</code> command and registers the SkillTotal MCP server.
 It is a static guardrail, not a sandbox: for code you don't trust, run the agent in a container.
-The full reference (every recognized command, the strict-mode variables, cache, timing and
-troubleshooting) is in <a href="https://github.com/pezhik/skilltotal/blob/main/docs/plugin.md" target="_blank" rel="noopener noreferrer">docs/plugin.md</a>.</p>
+The full reference is in <a href="https://github.com/pezhik/skilltotal/blob/main/docs/plugin.md" target="_blank" rel="noopener noreferrer">docs/plugin.md</a>:
+every recognized command, the settings, cache and timing,
+<a href="https://github.com/pezhik/skilltotal/blob/main/docs/plugin.md#rolling-out-to-a-team" target="_blank" rel="noopener noreferrer">rolling it out to a team</a>
+and <a href="https://github.com/pezhik/skilltotal/blob/main/docs/plugin.md#troubleshooting" target="_blank" rel="noopener noreferrer">troubleshooting</a>.</p>
 <h2>MCP server</h2>
 <p>Let your agent check a component <em>before</em> installing it. <code>skilltotal mcp</code> runs the engine
 as a stdio MCP server (stdlib-only, still zero dependencies). The Claude Code plugin already
-registers it, so don't add it a second time there. For Claude Desktop, Cursor, Windsurf or any
-client that reads <code>mcpServers</code>:</p>
+registers it, so don't add it a second time there. In Claude Code without the plugin:</p>
+<pre><code class="language-bash">claude mcp add skilltotal -- skilltotal mcp
+</code></pre>
+<p>For Claude Desktop, Cursor, Windsurf or any client that reads <code>mcpServers</code>:</p>
 <pre><code class="language-json">{ "mcpServers": { "skilltotal": { "command": "skilltotal", "args": ["mcp"] } } }
 </code></pre>
 <p>For VS Code (<code>.vscode/mcp.json</code> or the user <code>mcp.json</code>):</p>
 <pre><code class="language-json">{ "servers": { "skilltotal": { "type": "stdio", "command": "skilltotal", "args": ["mcp"] } } }
 </code></pre>
-<p>If you have not installed it locally, use <code>"command": "npx", "args": ["-y", "skilltotal", "mcp"]</code>
-instead. This needs uv, pipx, or Python 3.11+ with <code>skilltotal</code>; if it falls back to an installed
-Python <code>skilltotal</code> of another release, it warns on stderr (stdout stays the MCP session).</p>
-<p>Tools exposed: <code>scan_component</code> (full report for a path / git URL / <code>npm:</code> / <code>pypi:</code>
-source), <code>diff_components</code> (upgrade review: what changed between two versions), and
-<code>list_rules</code> (pass <code>verbose: true</code> for each rule's description and recommendation). All three are
-annotated read-only. Scans run locally with the same never-execute static engine; the component's
-code is not uploaded anywhere.</p>
+<p>A desktop app started from the Dock, Start menu or Finder does not see the <code>PATH</code> that pipx set
+up in your shell. If it cannot start <code>skilltotal</code>, give the full path that <code>which skilltotal</code>
+(<code>where skilltotal</code> on Windows) prints as <code>command</code>.</p>
+<p>If you have not installed it locally, use <code>"command": "uvx", "args": ["skilltotal@0.73.0", "mcp"]</code>
+(pinned) or <code>"command": "npx", "args": ["-y", "--package=skilltotal@0.73.0", "--", "skilltotal", "mcp"]</code> (with <code>--package</code>, npx does not run whatever <code>skilltotal</code> program the <code>node_modules/.bin</code>
+of the client's folder holds). The npx form needs uv, pipx, or Python 3.11+ with
+<code>skilltotal</code>; if it falls back to an installed Python <code>skilltotal</code> of another release, it warns on
+stderr (stdout stays the MCP session).</p>
+<p>Tools exposed, all annotated read-only:</p>
+<ul>
+<li><code>scan_component</code> scans a local path, git URL, <code>npm:</code> or <code>pypi:</code> source. By default it answers
+with a summary of a few kilobytes: the verdict, the risk, why (each finding with up to three
+locations), the capabilities, notes to check by hand and what the scan does not cover. Pass
+<code>detail: "full"</code> for the complete report.</li>
+<li><code>diff_components</code> reviews an upgrade: what changed between two versions. It takes the same
+<code>detail</code>.</li>
+<li><code>list_rules</code> lists the detection rules. Narrow it with <code>ids</code> or <code>query</code>; pass <code>verbose: true</code>
+for each rule's description and recommendation.</li>
+</ul>
+<p>A local path must be absolute, because the server's working directory is not the client's. The
+home folder (under any name for it, a link included), any folder above it and a filesystem root
+are refused, and <code>~</code> is not expanded. So are network shares and device paths (<code>\\host\share</code>,
+<code>\\?\...</code>) and NTFS streams. The server runs two requests at a time and answers <code>ping</code> at once; a cancelled request gets no
+answer. Scans run locally with the same never-execute static engine; the component's code is not
+uploaded anywhere. To raise a size limit for the server, set the variable in the <code>env</code> of its
+entry in the client's config.</p>
 <h2>Status badge</h2>
 <p>Scan a component on <a href="https://www.skilltotal.ai" target="_blank" rel="noopener noreferrer">skilltotal.ai</a> and each report offers an
 <strong>"Add this badge"</strong> snippet: a small SVG that reflects the website's latest public scan of that
@@ -795,6 +881,8 @@ counts them in <code>verdict.unanalyzed_files</code>.</li>
 from those folders by a literal path (a relative <code>require</code>/<code>import</code>, a Python import, a
 <code>package.json</code> or <code>pyproject.toml</code> entry point) is read anyway.</li>
 <li><strong>Dependencies are not scanned.</strong> A scan covers the component's own files, not what it installs.</li>
+<li><strong>Public registries only.</strong> <code>npm:</code> and <code>pypi:</code> sources come from the public npm registry and
+PyPI; a company registry or mirror is not supported yet (see <a href="#network-access" target="_blank" rel="noopener noreferrer">Network access</a>).</li>
 <li><strong>Code that is not in the files is not analyzed:</strong> code fetched or generated at run time, and
 binaries or compiled artifacts (counted in <code>metadata.files_skipped_binary</code>).</li>
 <li><strong>Languages.</strong> Shell execution, network access, file access and dynamic code are analyzed in
@@ -863,13 +951,16 @@ hosts, for the packages they check</li>
 </ul>
 <p>There is no telemetry, no account and no LLM call. The MCP server makes the same requests for
 the sources an agent asks it to scan.</p>
+<p><code>npm:</code> and <code>pypi:</code> sources are always fetched from the public npm registry and PyPI. Scanning
+through a company registry or mirror is not supported yet: download the package archive yourself
+and scan the file.</p>
 <h2>Measured, not asserted</h2>
 <p>Detection claims are cheap, so the numbers behind them are published with the data and the code
 that produced them.</p>
 <ul>
 <li><strong><a href="https://github.com/pezhik/skilltotal/blob/main/docs/efficacy-report.md" target="_blank" rel="noopener noreferrer">Detection efficacy</a></strong>:
-recall and precision on a labeled corpus we built and publish (124 malicious and
-87 benign samples), regenerated every release and enforced by CI as a floor. A perfect
+recall and precision on a labeled corpus we built and publish (125 malicious and
+89 benign samples), regenerated every release and enforced by CI as a floor. A perfect
 score on our own corpus guards against regressions; it is not a claim about every attack in the
 wild.</li>
 <li><strong><a href="https://github.com/pezhik/skilltotal/blob/main/docs/mcp-registry-survey.md" target="_blank" rel="noopener noreferrer">The MCP registry, scanned</a></strong>

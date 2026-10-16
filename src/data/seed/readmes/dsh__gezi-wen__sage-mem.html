@@ -140,13 +140,86 @@ dsh plugin --profile web add sage-mem
 <h2>检索是怎么工作的</h2>
 <p>透明的东西值得说清楚它怎么选料，因为它直接决定注入多少 token：</p>
 <ul>
-<li><strong>信号是 <code>description</code>，不是全文</strong>。每条记忆的 <code>description</code>（「一句话说清这条是什么」）、文件名、以及可选的 <code>aliases</code>（别称）一起参与打分，最多注入 <strong>10 条</strong>相关记忆。旧版拿问题里的双字去全文里蒙，长记忆天生占便宜——实测长记忆在全文匹配下连寒暄问句都能注入上千 token；改用 <code>description</code> 后噪音大幅下降</li>
-<li><strong>换个说法也能命中</strong>：打分是<strong>词面重合</strong>（双字组覆盖率），不是语义的——问「我有什么待办」而文件里写的是「代办清单」，差一个字就完全不命中。给这类记忆加一行 <code>aliases: [待办, todo]</code> 就能补上</li>
-<li><strong>正文超 1500 字符就截断</strong>并标 <code>…（截断）</code>，单条记忆不会吃掉整个上下文</li>
-<li><strong>同一个问题不会重复注入</strong>（按会话记签名），问第二遍不会又追加一遍</li>
-<li><strong>单场会话累计注入到 60 KB 就停</strong>（<code>MAX_SESSION_BYTES</code>）。条数上限管的是「一次注多少」，这条管「一场会话总共注多少」—— 长会话里问题一直在换、签名一直在变，累积本来没有上限。到顶之后新的记忆不再注入（这时该让 agent 直接读文件），<strong>压缩或清空之后账面自动归零</strong>，又能注进来</li>
+<li><strong>两段式检索：先摘要，再正文</strong>。第一段用 <code>description</code>（「一句话说清这条是什么」）+ 文件名 + <code>aliases</code>（别称）打分，最多取 <strong>10 条</strong>候选；第二段对这些候选做<strong>正文段落检索</strong>（BM25，中文按双字词元），把最相关的那一段注入。旧版拿问题里的双字去全文里蒙，长记忆天生占便宜——实测长记忆在全文匹配下连寒暄问句都能注入上千 token。新版比的是<strong>段落</strong>，每份文件最多贡献一段，长文不再靠段数多占候选位</li>
+<li><strong>摘要没写到的，正文能找回来</strong>。摘要是精准的一句话，代价是正文细节天生检索不到；摘要一条都没命中时改由正文检索兜底——此前这种情况直接等于「没有记忆可用」。正文检索只在问题<strong>至少 4 个字符</strong>时才跑：<code>继续</code> 这种两个字的问题拿去做正文匹配，命中的全是「继续」这个词本身</li>
+<li><strong>换个说法也能命中</strong>：打分是<strong>词面重合</strong>，不是语义的——问「我有什么待办」而文件里写的是「代办清单」，差一个字就完全不命中。给这类记忆加一行 <code>aliases: [待办, todo]</code> 就能补上</li>
+<li><strong>注入的是命中段落，不是文件开头</strong>。命中段落标成 <code>### 项目_部署.md:40-52</code>，agent 据此能直接跳到那几行核对来源；段落前补一句该记忆的 <code>description</code>，补回「这段是从哪条记忆切出来的」。<code>baseline</code> 与没命中正文的文件仍注入开头。单条正文超 1500 字符截断并标 <code>…（截断）</code></li>
+<li><strong>相邻的重复问题不会重复注入</strong>（按会话只留一个签名），连着问两遍不会又追加一遍。注意这<strong>不是</strong>「整个会话同题只给一次」：问 A → 问 B → 再问 A，第三次会重新注入 —— 再次要求回忆时重新给证据未必是坏事</li>
+<li><strong>单场会话预算 60 KB，拆成两本账</strong>（<code>MAX_SESSION_BYTES</code>）：<strong>正文池</strong> = 总上限 − <strong>状态卡预留</strong>（5%，夹在 1–4 KB）。总上限的数字没变，变的是到顶之后的行为 —— 旧行为是「正文装不下就一个字都不注，连为什么都没有」；现在是「正文照旧不注，但缺口状态卡发得出来，告诉你漏了什么、下一步怎么查」。<strong>压缩或清空之后两本账与卡的去重签名一起归零</strong>，又能注进来</li>
+<li><strong>缺口状态卡只在真有缺口时说话</strong>：有候选没读、或有候选被预算省略时才出现，说清范围、条数、最佳线索和<strong>一个可做的动作</strong>；一条都没命中时<strong>只在你问自己的历史时</strong>才说（否则提示会被当噪音忽略）。单张卡上限 512 字节，且按内容签名去重 —— 同一张卡不会每一步都追加一遍</li>
+</ul>
+<h3>模型也能自己翻：两个检索工具</h3>
+<p>到 0.9.17 为止，检索的触发权一直全在插件手里（它猜你想看什么）。现在<strong>分一半给模型</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search_memory(query, scope?, limit?, cursor?)</code></td>
+<td>先比摘要、再按段落查正文；返回候选、命中片段、行号，以及<strong>覆盖情况</strong>（扫了几份、几段因相关性不够被滤掉、有没有下一页）</td>
+</tr>
+<tr>
+<td><code>read_memory(name, startLine?, startByte?, maxBytes?, revision?)</code></td>
+<td>按行分页读正文。带上你上次读到的 <code>revision</code>，内容被人改过时会回 <code>revision_changed</code>，<strong>并且不返回内容</strong> —— 否则你会拿着过期行号读错东西</td>
+</tr>
+</tbody></table>
+<p>两个工具走的是<strong>同一条</strong>安全读路径（<code>safeName</code> → 符号链接与保留名身份检查 → 体积闸门），
+没有为工具另开一条绕过闸门的入口。它们用 <code>ctx.inject(['tools'], …)</code> 挂子 fiber 注册 ——
+<strong>不是硬依赖</strong>：宿主不提供工具服务时，插件照常工作，只是状态卡换一套「直接读记忆目录」的说法。</p>
+<ul>
+<li><strong>摘要侧也有相关性门槛</strong>：中文里「怎么」「什么」这类词元在大量 <code>description</code> 里都有，一句无关的「今天天气怎么样」曾靠一个「怎么」命中十几份记忆。门槛按<strong>语料自身的 IDF 尺度</strong>归一，实测真实目录里无关问题的候选数降到约七分之一；离线评测集上还不只是没退化、而是更好了（Recall@5 84%→87%、误注入 14%→5.6%）—— 被清掉的弱摘要候选原先在挤占名额</li>
+<li><strong>意图识别绝不在四类显式请求上抑制重复</strong>：「上次决定用 A 对吧」（核实）、「不用 A 了」（更正）、「之前为什么没选 A」（问依据）必须给原文；判不出来就不判，不猜</li>
+</ul>
+<h3>长任务的接力棒：任务检查点</h3>
+<p>宿主什么时候压缩上下文，插件控制不了 —— 所以<strong>不承诺「压缩前保存」</strong>。能做的是：如果
+<code>&lt;状态根&gt;/tasks/&lt;任务 id&gt;/WORKING.md</code> 存在，注入末尾会给一条短句柄，说清任务、revision
+与去哪读。<strong>压缩后账本归零会连去重一起清掉</strong>，句柄因此重新出现 —— 这就是恢复路径。</p>
+<p>任务 id 取 <code>SAGE_MEM_TASK_ID</code>（给跨会话的同一条任务用），否则用会话 id。<strong>绝不用你的问题
+原文去决定读哪个目录。</strong> 检查点里「已完成」的条目如果没有任何证据标记（路径、命令、测试结果），
+解析时会如实报出来 —— 格式完美、内容错误的交接材料仍然是错的。</p>
+<h3>访问台账：三种「用过」分开记</h3>
+<p><code>&lt;状态根&gt;/access.json</code> 记三件事：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>injected</code></td>
+<td>插件<strong>被动</strong>注入了这份记忆</td>
+</tr>
+<tr>
+<td><code>read</code></td>
+<td>模型<strong>主动</strong>读了它（用内置 <code>read</code> / <code>grep</code> 翻记忆目录时会记上）</td>
+</tr>
+<tr>
+<td><code>use</code></td>
+<td>明确被采用的次数（自报）</td>
+</tr>
+</tbody></table>
+<p>分开记是因为这三件事的含义完全不同：<strong>被注入</strong>只说明插件觉得相关，<strong>被主动读</strong>只说明模型
+选了它，都不等于内容有用、更不等于内容正确。混成一个「热度」就再也分不开了。</p>
+<p><strong>这张台账目前只用于诊断与自动归档阈值，不参与检索排序。</strong> 观测有已知盲区：<code>pwsh</code> 里
+<code>cat 某记忆</code> 认不出来，那就不认 —— 我们不会把「看不到」说成「没读过」。</p>
+<h3>两个写入者撞上时，不会互相覆盖</h3>
+<p>记忆是<strong>文件</strong>，所以「你正在编辑」和「agent 正在改」完全可能同时发生。默认行为是<strong>后写的赢、
+先写的悄悄消失</strong> —— 那是最糟的一种，因为你不会发现。</p>
+<p>sage-mem 给记忆目录的写入加了<strong>版本守卫</strong>：写入前记下当前版本，写入时要求版本没变过。
+变了就<strong>明确拒绝</strong>，而不是盖掉。模型用内置 <code>write</code> / <code>edit</code> 改记忆时会自动带上这层守卫。</p>
+<p><strong>被拒的那次会落成一条待处理的记录</strong>（<code>&lt;状态根&gt;/conflicts/&lt;id&gt;.json</code>），里面留着
+<strong>盘上那一版</strong>和<strong>想要写的那一版</strong> —— 因为只有一边等于没得判。</p>
+<ul>
+<li><strong>冲突不会自动合并</strong>，保留哪边由你决定。静默重试和静默放弃都是在替你决定。</li>
+<li>同一条冲突重复上报时 id 相同，队列里不会长出重复项。</li>
+<li>已知边界：<strong>在 shell 里改记忆不走这条路</strong>（<code>pwsh</code> 里 <code>cat &gt; 某个记忆</code> 我们认不出来）。
+写门守的是「经过工具的记忆写入」，不是「所有对文件的修改」。</li>
 <li><strong>每条记忆的标题带新鲜度</strong>：<code>（保存于 N 天前）</code>，<strong>优先读 frontmatter 的 <code>updated:</code>，缺失才回落文件 mtime</strong> —— 手写的时间戳是权威，文件系统时间会被复制 / 备份还原 / checkout 整批改掉。理由是陈旧记忆被当事实引用时，「引用」这个动作本身会让它显得更权威而不是更可疑，所以注入文本开头还带一节<strong>引用纪律</strong>（提到路径先确认存在、提到函数先 grep、要动手先核实）。它<strong>独立成节</strong>而不是一条 bullet：Claude Code 实测同一句话埋成 bullet 命中 0/3、独立成节 3/3</li>
-<li><strong><code>baseline: true</code> 的记忆每场会话第一步无条件注入</strong>，最多 8 条——给「你是谁」「待办清单」这类每次开场都该在场的记忆用。多条 baseline 之间的先后由 <code>baselinePriority</code> 决定（数字越大越前，缺省 0），<strong>不按文件名排</strong></li>
+<li><strong><code>baseline: true</code> 的记忆每场会话第一步无条件注入</strong>，最多 8 条——给「你是谁」「待办清单」这类每次开场都该在场的记忆用。⚠️ <strong>「不吃段落替换」不等于整份</strong>：它同样受单文件长度上限（默认 1500 字符）截断，<strong>关键内容若落在尾部会看不到</strong> —— baseline 适合放短摘要，完整正文留给工具去读。多条 baseline 之间的先后由 <code>baselinePriority</code> 决定（数字越大越前，缺省 0），<strong>不按文件名排</strong></li>
 <li>记忆目录读不到、权限错、frontmatter 格式坏，这些都<strong>降级为不注入并写日志</strong>，不会静默失效</li>
 </ul>
 <p>单文件上限 512 KB，<strong>读写两侧都校验</strong>（读的时候先看体积，超了就不读进来）；标签最多 20 个、每个 40 字符（再多就不是标签，是一句话被塞进 <code>tags</code> 了）。</p>

@@ -522,18 +522,18 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 </tr>
 </thead>
 <tbody><tr>
+<td><strong>v0.10.32</strong></td>
+<td>2026-10-15</td>
+<td><strong>「常驻实例不可替换」变成长期状态，而不是每次开机重试（#30 第五轮复测：A: 盘的稳态）</strong>。报告者实测 5 天 44 次「版本漂移」，机制是<strong>每一步都按设计工作、合起来永远换不掉</strong>：升级 → 端口上仍是上一代 → 宿主探测漂移 → 拉起 <code>--replace</code> 助手 → 助手前置探到 <code>lock.writable=false</code> → <strong>正确地拒绝</strong>（0.10.29 的设计，零破坏）→ 旧实例继续存活 → 下次开机再报一次。修法：① 新增 <code>lib/resident-state.js</code>：把「不可替换（环境限制）」<strong>记成状态</strong>（原因 / 锁路径 / 端口 / 版本 / 次数，7 天有效）；② 宿主在重启前<strong>先探锁可写性</strong>，不可写就<strong>不再重试注定失败的替换</strong>，只记一条 —— <strong>首次 <code>warn</code></strong>、之后每次开机降级为 <code>boot</code> 级「已知状态」（报告者原话：不想每次开机都看到一条 warn 永久持续）；③ 措辞与「漂移」显式分开：<strong>「常驻实例不可替换（环境限制）」</strong> + 出路（修权限后 restart，或 <code>dsh-memory watchdog --port N</code> 前台观察）；④ 面板 / <code>/version-check</code> / <code>align</code> 都能看到这个状态（<code>resident.replaceBlocked</code>；<code>align</code> 里是一条 <code>warn</code> 级结论，环境修好后自动清除）。<code>npm test</code> 共 <strong>359 项</strong></td>
+</tr>
+<tr>
 <td><strong>v0.10.31</strong></td>
 <td>2026-10-15</td>
 <td><strong><code>restart</code> 在「端口枚举很慢」的机器上 100% 失败的根因修复（#30 第三/四轮复测，报告者定位到行）</strong>。机制：<code>--replace</code> 助手的顺序是「清场 → 端口空了才写锁 → 启动看门狗」，而清场里 <code>Get-NetTCPConnection</code> 实测要 <strong>4–13.6 秒</strong>且不受 8 秒预算约束 → 助手<strong>永远走不到写锁那一步</strong> → 锁里什么都没有 → <code>waitForTakeover</code>（要求「锁里出现新的活看门狗」）<strong>必然超时</strong> → CLI 与面板按钮在这类机器上 100% 报「（无响应）」，<strong>与版本号无关</strong>。修法：① <strong>清场失败也必须留下登记</strong>（<code>acquireWatchdogLock({force:true})</code>），现场不再出现「端口有 web、锁里空白」；② <strong><code>acquireWatchdogLock</code> 支持 <code>force</code></strong>（<code>--replace</code> 的语义就是替换同端口那个，不许让位 —— 否则助手在清场没跑完时先退出）；③ 0.10.30 已给枚举执行器加超时（<code>defaultExec</code> 真掐断子进程、<code>findPortListener({timeoutMs})</code> 逐层传递、清场给 ≤2.5s 有界值）；④ CLI 的 <code>restart</code> 结果<strong>真的写进自动沉淀日志</strong>（提示里一直这么说，但 CLI 路径过去不写）。他还实测到「两个接管助手互相赛跑」（宿主 tick + CLI 各拉一个）—— 登记 + force 之后这种赛跑的危害大幅降低（后到者接管登记，而不是双双留空）。<code>npm test</code> 共 <strong>355 项</strong></td>
 </tr>
-<tr>
-<td><strong>v0.10.30</strong></td>
-<td>2026-10-15</td>
-<td><strong>两处「让整页不可用」的修复：畸形 tags 黑屏（#41）+ 接管链路的两个真病灶（#30 第三/四轮复测）</strong>。① <strong>#41</strong>：<code>/write</code> 传字符串 <code>tags</code>（如 <code>"[\"a\",\"b\"]"</code>）被 <code>writeCard</code> 直接 <code>JSON.stringify</code> → <strong>双重编码</strong>落库 → 读出来仍是字符串 → 前端 <code>card.tags.slice(...).map</code> 抛错 → <strong>React 根组件挂载失败、整页黑屏</strong>（重启 DSH / 插件 / 常驻实例都无效，因为坏数据一直在库里）。现在 <code>normalizeTags()</code> 是<strong>唯一入口</strong>：数组 / JSON 字符串 / 逗号串 / <strong>双重编码的旧数据</strong>都收敛成数组，写路径与<strong>所有读路径</strong>都走它（既有坏数据不必用户手工修）；渲染层再加兜底（坏 tags 最多少显示几个标签，不许把整棵树带走）。② <strong>#30</strong>：报告者在我 0.10.29 里又抓出两处 —— <code>restoreWatchdogLock</code> 的「活登记」判定<strong>少了 <code>!w.endedAt</code></strong>（PID 复用/正在退出时，写回会被放弃）；<strong>Windows 端口枚举没有超时</strong>（实测 <code>Get-NetTCPConnection</code> 无条件要 4–7.5 秒、一次 13.6 秒，而接管清场的 8 秒预算根本管不住它 → 决策基于过期数据）。现在 <code>defaultExec</code> 支持超时并真的掐断子进程、<code>findPortListener({timeoutMs})</code> 逐层传下去、接管清场给有界值（≤2.5s）。新增 <code>tests/tags-normalize.test.mjs</code>（4 项）+ <code>watchdog-restart</code> 2 项回归。<code>npm test</code> 共 <strong>354 项</strong></td>
-</tr>
 </tbody></table>
 <details>
-<summary>更早的更新日志（v0.10.29 及以前 · 共 56 版，点开查看）</summary><table>
+<summary>更早的更新日志（v0.10.30 及以前 · 共 57 版，点开查看）</summary><table>
 <thead>
 <tr>
 <th>版本</th>
@@ -542,6 +542,11 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 </tr>
 </thead>
 <tbody><tr>
+<td><strong>v0.10.30</strong></td>
+<td>2026-10-15</td>
+<td><strong>两处「让整页不可用」的修复：畸形 tags 黑屏（#41）+ 接管链路的两个真病灶（#30 第三/四轮复测）</strong>。① <strong>#41</strong>：<code>/write</code> 传字符串 <code>tags</code>（如 <code>"[\"a\",\"b\"]"</code>）被 <code>writeCard</code> 直接 <code>JSON.stringify</code> → <strong>双重编码</strong>落库 → 读出来仍是字符串 → 前端 <code>card.tags.slice(...).map</code> 抛错 → <strong>React 根组件挂载失败、整页黑屏</strong>（重启 DSH / 插件 / 常驻实例都无效，因为坏数据一直在库里）。现在 <code>normalizeTags()</code> 是<strong>唯一入口</strong>：数组 / JSON 字符串 / 逗号串 / <strong>双重编码的旧数据</strong>都收敛成数组，写路径与<strong>所有读路径</strong>都走它（既有坏数据不必用户手工修）；渲染层再加兜底（坏 tags 最多少显示几个标签，不许把整棵树带走）。② <strong>#30</strong>：报告者在我 0.10.29 里又抓出两处 —— <code>restoreWatchdogLock</code> 的「活登记」判定<strong>少了 <code>!w.endedAt</code></strong>（PID 复用/正在退出时，写回会被放弃）；<strong>Windows 端口枚举没有超时</strong>（实测 <code>Get-NetTCPConnection</code> 无条件要 4–7.5 秒、一次 13.6 秒，而接管清场的 8 秒预算根本管不住它 → 决策基于过期数据）。现在 <code>defaultExec</code> 支持超时并真的掐断子进程、<code>findPortListener({timeoutMs})</code> 逐层传下去、接管清场给有界值（≤2.5s）。新增 <code>tests/tags-normalize.test.mjs</code>（4 项）+ <code>watchdog-restart</code> 2 项回归。<code>npm test</code> 共 <strong>354 项</strong></td>
+</tr>
+<tr>
 <td><strong>v0.10.29</strong></td>
 <td>2026-10-14</td>
 <td><strong>失败的接管不再破坏现场（issue #30 复测的关键发现）</strong>。报告者在 0.10.26 上实测：<code>restart</code> 失败后<strong>锁文件被删除</strong>、端口上还是同一个 web —— 现场从此看起来像「从来没有过常驻实例」，只剩一个孤儿。四处修复：① <strong>释放锁不再删文件</strong>（<code>releaseWatchdogLock</code> 留一条带 <code>endedAt</code> 的「已结束」记录，<code>status</code> 会显示「已退出（陈旧记录）」；这种槽<strong>永不阻挡</strong>新实例，pid 复用也不怕）；② <strong>失败的 restart 把替换前的登记写回去</strong>（<code>restoreWatchdogLock</code>，只在本端口没有活着的登记时才写）；③ <strong>枚举不到占用者时不再误判「端口已空」</strong>——<code>clearResidentForTakeover</code> 用 <strong>TCP 复核</strong>（受限环境里进程查询被拒会返回空，旧实现据此认为端口空出 → 新 web 绑不上 → 自检「（无响应）」+ 锁被清空），还在监听就中止接管且<strong>一个登记都不动</strong>；④ <strong>锁写不进去时前置拒绝接管</strong>（写不进锁 → 新实例无法登记 → 只会留孤儿；直接报错并给前台观察的出路）。另外 <code>restart</code> 失败信息补上「<strong>端口上现在是谁</strong>」+「锁有没有写回」，<code>status</code> 把「端口探测」与「锁登记」<strong>分段标注</strong>（报告者指出旧输出两者并列会误导）。<code>npm test</code> 共 <strong>348 项</strong></td>

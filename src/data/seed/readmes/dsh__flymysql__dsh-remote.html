@@ -91,7 +91,16 @@
 <li>若远端已经在跑一个界面（比如你自己在终端里起的），可以选机器后把它的
 <code>http://127.0.0.1:&lt;端口&gt;/?token=…</code> 粘进输入框，点「连接已有实例」，插件不会再去启第二个。</li>
 <li>远端 <code>dsh</code> 不在 SSH 登录 PATH 时，用 <code>webAttachCommand</code> 指向它的绝对路径；
-想让它别污染远端用户自己的会话/设置，用 <code>webAttachDshHome</code> 指一个临时目录。</li>
+想让它别污染远端用户自己的会话/设置，用 <code>webAttachDshHome</code> 指一个临时目录。
+<strong>按机器设</strong>：设置 → 远程工作区 → 机器卡片 → 展开「高级」→「远端 dsh 命令」，
+填绝对路径即可（例如
+<code>/home/you/.nvm/versions/node/v22.19.0/bin/node /home/you/.dsh-remote/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js</code>）；
+留空则用全局的 <code>webAttachCommand</code>。「部署并验证」成功后也会自动写进这个字段。</li>
+<li>隧道跟着 SSH 连接走：连接断了界面会显示「连接已断开」，<strong>不会</strong>影响本机 DSH 进程；
+池自动重连后插件会重新解析远端端口（必要时重启它自己启动的那个远端进程），界面点「重连」即可继续用。</li>
+<li>远端 node 需要 <strong>≥ 20.12</strong>（dsh 启动要用 <code>node:util</code> 的 <code>parseEnv</code>，该导出从 20.12 起才有）。
+node 太旧时体检会直接报 blocker：npm 只会给 EBADENGINE 警告、照样把包装完，
+直到启动才崩在 <code>does not provide an export named 'parseEnv'</code>，所以必须在装之前拦住。</li>
 </ul>
 <h3>连不上？先体检，再一键部署</h3>
 <p><strong>连不上大多不是插件的问题，而是远端 dsh 的版本或环境不对。</strong> 最典型的一种：dsh 0.1.0-rc.6
@@ -277,7 +286,7 @@ scripts/dev-run.sh --status    # 是否在运行
 <td><code>proxy</code></td>
 <td>object</td>
 <td>—</td>
-<td>跳板机：<code>{ host, port?, username?, password?, privateKeyPath? }</code></td>
+<td>跳板机：<code>{ host, port?, username?, password?, privateKeyPath? }</code>；语义是「在跳板机上连目标 host:port」，所以也能用来连跳板机上 docker 容器的 sshd（见「常见问题」里的 issue #56）</td>
 </tr>
 <tr>
 <td><code>autoPush</code></td>
@@ -367,7 +376,7 @@ scripts/dev-run.sh --status    # 是否在运行
 <td><code>webAttachCommand</code></td>
 <td>string</td>
 <td><code>dsh</code></td>
-<td>在远端启动 <code>dsh web</code> 用的命令；远端 <code>dsh</code> 不在 SSH 登录 PATH 时改这里</td>
+<td>在远端启动 <code>dsh web</code> 用的命令；远端 <code>dsh</code> 不在 SSH 登录 PATH 时改这里（也可按机器在设置页「高级」里单独设，机器级优先）</td>
 </tr>
 <tr>
 <td><code>webAttachDshHome</code></td>
@@ -405,9 +414,51 @@ scripts/dev-run.sh --status    # 是否在运行
 </blockquote>
 <h2>常见问题 / 排查</h2>
 <p><strong><code>@</code> 能列出远程文件，但内置读文件工具打不开</strong> —— harness 自带工具看到的是<strong>本地镜像</strong>，要等 <code>rw_sync</code> 下载后才有内容。读远程文件请用 <code>rw_read_file</code> 或侧栏远程文件 tab。</p>
+<p><strong>远程会话里的文件链接打不开</strong>（issue #55）—— 已修。链接被点开时 harness 会把它变成
+<code>dsh-resource://file/session/&lt;会话&gt;/&lt;路径&gt;</code>，然后交给内置的文本预览去读；而那个预览读的是<strong>本机</strong>
+文件系统，远程会话的 cwd 是<strong>本地镜像目录</strong>（<code>rw_sync</code> 之前是空的），所以打开只会失败。
+插件现在注册了一个更高优先级的地址处理器，把这个地址按远程主机解析后用 SFTP 打开（和侧栏「远程文件」同一个编辑器）。
+安全边界是保守的：只有当该会话的 cwd <strong>确实落在某个镜像目录里</strong>、且镜像表已加载时才接管，
+本地会话与页面刚加载的那一瞬间仍然走内置预览 —— 不会把本地文件误当成远程文件。
+两个仍然开不了的情况会给出明确提示而不是空白页：链接指向的是<strong>绝对</strong>远端路径之外无法映射的地址，
+或该会话的工作区不是一个远程镜像目录。</p>
+<p><strong>远程会话里的终端还是本机的</strong>（issue #55）—— 这是<strong>设计如此，插件改不了</strong>，但有等效方案。
+DSH 的侧栏终端是核心功能：它的 PTY 来自<strong>全局唯一</strong>的 <code>subprocess</code> 服务，cwd 取会话自己的
+工作区目录（远程会话就是本地镜像），插件既不能替换那个服务、也不能把核心终端重定向到 SSH。
+想要「真正的远程终端」，用**「远程 DSH 界面」<strong>（见上文）：它在本机浏览器里打开</strong>远端机器自己**的
+DSH，那个界面里的终端就跑在远端主机上，零额外配置。只想偶尔跑一条远程命令则用 <code>rw_exec</code>
+（要交互式 PTY 就加 <code>pty: true</code>）。</p>
 <p><strong>主机指纹变了</strong> —— <code>/remote forget-key</code>（或设置页 → 机器 → 重新信任）。</p>
 <p><strong>连接报「认证失败」</strong> —— 检查用户名/密码/私钥路径；加密私钥要填 Passphrase；需要动态码时勾选 keyboard-interactive。</p>
 <p><strong>连不上内网机器</strong> —— 填「跳板机」主机（也可先把跳板机本身配成一台机器）。</p>
+<p><strong>能不能拿远程主机上的 docker 容器当工作空间？</strong>（issue #56）—— 能，<strong>不需要改插件</strong>；
+插件对容器没有任何专门代码，但下面两条既有配置已经完整覆盖这个需求。请按容器<strong>有没有对外暴露端口</strong>二选一：</p>
+<ul>
+<li><strong>A：容器把 sshd 端口映射出来了</strong>（例如 <code>docker run -p 127.0.0.1:2222:22 …</code>）—— 纯「跳板机」配置：
+Host 填 <code>127.0.0.1</code>、Port 填 <code>2222</code>、用户/私钥填容器里的，再把「跳板机」主机填<strong>那台远程主机</strong>。
+为什么这样文件就能落到容器里：<code>proxy</code> 的语义是「<strong>在跳板机上</strong>连 <code>&lt;host&gt;:&lt;port&gt;</code>」
+（<code>lib/pool.js</code> 的 <code>pclient.forwardOut(...this.config.host, this.config.port...)</code>），
+拿到的通道会被当成主连接自己的 transport（<code>opts.sock</code>），于是 SFTP 走的是<strong>容器自己的 sshd</strong> ⇒
+<code>rw_list_dir</code>/<code>rw_read_file</code>/<code>rw_write_file</code>/<code>rw_sync</code> 全部读写的都是容器内的文件。
+命令行等价写法：<code>rw_connect(host="127.0.0.1", port=2222, username="&lt;容器用户&gt;", privateKeyPath="&lt;私钥&gt;")</code>。
+要求：远程主机的 sshd 允许转发（<code>AllowTcpForwarding yes</code>，默认就是）。</li>
+<li><strong>B：容器没有暴露端口</strong> —— 纯 <code>~/.ssh/config</code> + 系统 OpenSSH 后端，在<strong>本机</strong> <code>~/.ssh/config</code> 写：</li>
+</ul>
+<pre><code class="language-sshconfig">Host devbox
+    HostName devbox.invalid
+    User dev
+    IdentityFile ~/.ssh/id_ed25519
+    ProxyCommand ssh &lt;远程主机&gt; docker exec -i &lt;容器名&gt; sh -c 'exec socat - TCP:127.0.0.1:22'
+</code></pre>
+<p>  然后 <code>rw_connect(host="devbox", useSshConfig=true, backend="openssh")</code>。
+  为什么 <code>exec</code> 和文件操作<strong>都会</strong>进容器：<code>openssh</code> 后端把别名原样交给 <code>ssh</code>，
+  自己<strong>从不</strong>生成 <code>ProxyCommand</code>（<code>lib/openssh.js</code> 明确不传，就是为了让 <code>~/.ssh/config</code> 说了算），
+  而 <code>ssh -s &lt;目标&gt; sftp</code> 与 <code>ssh -- &lt;目标&gt; &lt;命令&gt;</code> 走的是同一条流 ⇒ 两者都穿过这个 ProxyCommand。
+  要求：容器里有 sshd，且有 <code>socat</code>（或用支持 stdio 的 <code>nc</code>）。
+  ⚠️ <strong>Windows 上有个坑</strong>：POSIX OpenSSH 会把 <code>ProxyCommand</code> 交给 shell 展开，<strong>Windows 自带的 OpenSSH 9.5 不会</strong>
+  （实测它把整串按字面当成 argv）。所以在 Windows 跑本插件时，要么把 <code>ProxyCommand</code> 写成
+  不含 shell 元字符的单条命令，要么把「ssh 路径」指向 Git Bash 的 <code>ssh.exe</code>。
+  （另：<code>docker exec -i</code> 传二进制是否逐字节无损，我这边没有 docker 环境验证过，B 方案建议先用小文件试。）</p>
 <p><strong>企业机器只允许 GSSAPI/Kerberos（<code>kinit</code> 后 <code>ssh</code> 能进，插件进不去）</strong> —— 在设置 → 远程工作区 → 高级配置里把「连接后端」改成 <strong><code>openssh</code></strong>（调用本机 <code>ssh</code>），并勾选「使用 ssh_config 别名」，Host 填 <code>~/.ssh/config</code> 里那个<strong>别名</strong>（不是 IP）。这样登录由本机 ssh 用你的 Kerberos 票据完成，且 <code>ProxyCommand</code>、<code>GSSAPIAuthentication</code> 等全部照 <code>~/.ssh/config</code> 生效 —— <strong>配置只有 <code>~/.ssh/config</code> 一个来源</strong>（issue #50/#51）。命令行等价写法：<code>rw_connect(host="&lt;别名&gt;", useSshConfig=true, backend="openssh")</code>。</p>
 <p><strong><code>rw_sync</code>/<code>rw_push</code> 报冲突</strong> —— 两边都改过的文件会被跳过并列出（绝不静默覆盖）；手动合并后重试，或用 <code>force=true</code> 以一边为准。</p>
 <p><strong>Windows 远程</strong> —— 全部走 SFTP，不依赖 POSIX shell；中文文件用 <code>encoding=gbk</code>。</p>
