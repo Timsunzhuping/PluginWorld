@@ -522,6 +522,36 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 </tr>
 </thead>
 <tbody><tr>
+<td><strong>v0.10.36</strong></td>
+<td>2026-10-16</td>
+<td><strong>把两种新状态接到所有入口（align / doctor）+ 修一处测试卫生</strong>。① align 新增一条结论：<strong>常驻实例由宿主托管</strong>（锁不可写 → 看门狗路径被绕过，改由宿主停旧起新并保活）—— <strong>warn 级</strong>，明确写「实例是有人管的，不是孤儿；锁恢复可写后自动交还看门狗」（align.ok 不受影响，warn 不算失败）；② dsh-memory doctor 增印一行 <strong>常驻实例托管：</strong>（看门狗 / 宿主托管 / 不可替换（环境限制）），配合已有的 journal 模式、写探针、锁可写性、备份清单，一次看清这台机器处于哪种状态；③ <strong>测试卫生</strong>：/restart-self 的 alreadyCurrent 用例依赖<strong>开发者本机真实的锁文件</strong>（我本机锁里只剩一条 endedAt 记录，于是它不再判 alreadyCurrent、用例翻红）—— 把「读锁」做成可注入（deps.readWatchdogLock），用例自己注入一条活登记，从此与开发机状态无关。npm test 共 <strong>371 项</strong></td>
+</tr>
+<tr>
+<td><strong>v0.10.35</strong></td>
+<td>2026-10-16</td>
+<td><strong>接管助手单飞互斥（#30 第六轮实测：宿主 tick 与 CLI 各拉一个 --replace 互相踩）</strong>。报告者观察到失败的 restart 期间同端口上<strong>同时存在两个互不相识的接管助手</strong>（父 = DSH 宿主 / 父 = CLI），谁都不写锁、还互相收对方的 web —— 现场更难复盘。修法：新增 <strong>claim 文件</strong>（memory-eternal-replace.claim，与看门狗锁同目录）—— ① <strong>助手开工前独占抢 claim</strong>，抢不到就<strong>直接退出</strong>（把接管让给已经在跑的那个），并在退出时释放；② <strong>restartResident 发现接管进行中</strong>（持有者活着且 &lt;60s）就<strong>不再拉第二个助手</strong>，返回 stage「in-flight」并说明是谁在跑、多久前启动；③ <strong>失败开放</strong>：受限环境写不了 claim 时<strong>照常接管</strong>（不能让权限问题把接管彻底堵死），但把原因写进返回值 / 日志。测试覆盖：先到先得 / 活持有者让位 / 过期与死 pid 可接管 / 只清自己的 claim / restartResident 的 in-flight 分支。npm test 共 <strong>370 项</strong></td>
+</tr>
+</tbody></table>
+<details>
+<summary>更早的更新日志（v0.10.34 及以前 · 共 61 版，点开查看）</summary><table>
+<thead>
+<tr>
+<th>版本</th>
+<th>日期</th>
+<th>关键改动</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>v0.10.34</strong></td>
+<td>2026-10-16</td>
+<td><strong>治本：锁不可写时由「宿主」自己托管常驻实例（采纳 #30 报告者第四点建议）</strong>。他的诊断：那台机器上「登记」恰好落在<strong>唯一写不了锁的那个进程</strong>上 → 自动替换被永久拒绝。修法：① 宿主的 <code>autoWebMode=interval</code> 保活循环<strong>不再只探存活</strong>，还探<strong>端口上服务的版本</strong> —— 落后且锁可写 → 仍交给看门狗 / 漂移路径（宿主不抢）；落后且<strong>锁不可写</strong> → <strong>宿主自己接管</strong>（<code>ensureWebServer({forceTakeover:true})</code>：只收掉<strong>自家</strong> web、在<strong>同端口</strong>起新实例、由宿主保活）；② 新增可测试的 <code>takeoverOwnWeb()</code>（安全闸门：只对 <code>looksLikeOurWeb</code> 为真的占用者下手，别人的进程一个都不动）；③ 「宿主托管」记成状态（<code>recordHostManaged</code>）→ <code>/version-check</code> 报 <code>resident.managedBy='host'</code>，面板显示「<strong>宿主托管</strong>」而不是「未托管 / 孤儿」；看门狗重新登记后自动清除。<code>npm test</code> 共 <strong>366 项</strong></td>
+</tr>
+<tr>
+<td><strong>v0.10.33</strong></td>
+<td>2026-10-15</td>
+<td><strong>蒸馏供应商：动态下拉 + 跟随当前会话（尽力）+ 仅试首选 + 测试按钮（issue #42 第一刀）</strong>。① <strong>动态下拉</strong>：新增只读接口 <code>/llm-routes</code>（宿主侧的 listProviders/listModels），配置页的「蒸馏 provider / model」从<strong>手填编号</strong>变成<strong>下拉选择</strong>（取不到时自动回退成文本输入）；② <strong>跟随当前会话</strong>（他的最高优先级）：新增配置 <code>captureFollowSession</code>，开启后宿主蒸馏<strong>先尝试</strong>用这一轮会话的 provider/model（<code>sessionRouteFrom()</code> 按 <code>agent / session / session.route / session.options</code> 逐个嗅探），<strong>读不到就回退显式配置并记一条日志</strong>（DSH 未保证会话对象暴露 route —— 这条日志就是以后补适配的依据，不猜）；后台 / 无会话任务（CLI、watchdog、hooks）天然只能回退配置；③ <strong>仅试首选 + 测试按钮</strong>：<code>captureFirstOnly</code> 让选路只取第一个候选、失败即停（避免「先打官方 → 白烧一次调用 → 再轮换」）；<code>POST /llm-test</code> 用真实调用路径打一次小请求，回显 <strong>provider / model / 耗时 / 候选数 / 错误码</strong>，也是 ①② 的验证手段。④ 顺带修一处<strong>探测抖动</strong>：<code>probeServedVersion()</code> 现在退避重试 3 次（报告者实测「同一时刻 version-check 200、2 秒后 status 说没有服务」），单发探测不再被重启窗口/瞬时拒绝骗到。<code>npm test</code> 共 <strong>363 项</strong></td>
+</tr>
+<tr>
 <td><strong>v0.10.32</strong></td>
 <td>2026-10-15</td>
 <td><strong>「常驻实例不可替换」变成长期状态，而不是每次开机重试（#30 第五轮复测：A: 盘的稳态）</strong>。报告者实测 5 天 44 次「版本漂移」，机制是<strong>每一步都按设计工作、合起来永远换不掉</strong>：升级 → 端口上仍是上一代 → 宿主探测漂移 → 拉起 <code>--replace</code> 助手 → 助手前置探到 <code>lock.writable=false</code> → <strong>正确地拒绝</strong>（0.10.29 的设计，零破坏）→ 旧实例继续存活 → 下次开机再报一次。修法：① 新增 <code>lib/resident-state.js</code>：把「不可替换（环境限制）」<strong>记成状态</strong>（原因 / 锁路径 / 端口 / 版本 / 次数，7 天有效）；② 宿主在重启前<strong>先探锁可写性</strong>，不可写就<strong>不再重试注定失败的替换</strong>，只记一条 —— <strong>首次 <code>warn</code></strong>、之后每次开机降级为 <code>boot</code> 级「已知状态」（报告者原话：不想每次开机都看到一条 warn 永久持续）；③ 措辞与「漂移」显式分开：<strong>「常驻实例不可替换（环境限制）」</strong> + 出路（修权限后 restart，或 <code>dsh-memory watchdog --port N</code> 前台观察）；④ 面板 / <code>/version-check</code> / <code>align</code> 都能看到这个状态（<code>resident.replaceBlocked</code>；<code>align</code> 里是一条 <code>warn</code> 级结论，环境修好后自动清除）。<code>npm test</code> 共 <strong>359 项</strong></td>
@@ -531,17 +561,7 @@ curl http://127.0.0.1:7999/memory-eternal/api/web-info    # 独立 web 是否活
 <td>2026-10-15</td>
 <td><strong><code>restart</code> 在「端口枚举很慢」的机器上 100% 失败的根因修复（#30 第三/四轮复测，报告者定位到行）</strong>。机制：<code>--replace</code> 助手的顺序是「清场 → 端口空了才写锁 → 启动看门狗」，而清场里 <code>Get-NetTCPConnection</code> 实测要 <strong>4–13.6 秒</strong>且不受 8 秒预算约束 → 助手<strong>永远走不到写锁那一步</strong> → 锁里什么都没有 → <code>waitForTakeover</code>（要求「锁里出现新的活看门狗」）<strong>必然超时</strong> → CLI 与面板按钮在这类机器上 100% 报「（无响应）」，<strong>与版本号无关</strong>。修法：① <strong>清场失败也必须留下登记</strong>（<code>acquireWatchdogLock({force:true})</code>），现场不再出现「端口有 web、锁里空白」；② <strong><code>acquireWatchdogLock</code> 支持 <code>force</code></strong>（<code>--replace</code> 的语义就是替换同端口那个，不许让位 —— 否则助手在清场没跑完时先退出）；③ 0.10.30 已给枚举执行器加超时（<code>defaultExec</code> 真掐断子进程、<code>findPortListener({timeoutMs})</code> 逐层传递、清场给 ≤2.5s 有界值）；④ CLI 的 <code>restart</code> 结果<strong>真的写进自动沉淀日志</strong>（提示里一直这么说，但 CLI 路径过去不写）。他还实测到「两个接管助手互相赛跑」（宿主 tick + CLI 各拉一个）—— 登记 + force 之后这种赛跑的危害大幅降低（后到者接管登记，而不是双双留空）。<code>npm test</code> 共 <strong>355 项</strong></td>
 </tr>
-</tbody></table>
-<details>
-<summary>更早的更新日志（v0.10.30 及以前 · 共 57 版，点开查看）</summary><table>
-<thead>
 <tr>
-<th>版本</th>
-<th>日期</th>
-<th>关键改动</th>
-</tr>
-</thead>
-<tbody><tr>
 <td><strong>v0.10.30</strong></td>
 <td>2026-10-15</td>
 <td><strong>两处「让整页不可用」的修复：畸形 tags 黑屏（#41）+ 接管链路的两个真病灶（#30 第三/四轮复测）</strong>。① <strong>#41</strong>：<code>/write</code> 传字符串 <code>tags</code>（如 <code>"[\"a\",\"b\"]"</code>）被 <code>writeCard</code> 直接 <code>JSON.stringify</code> → <strong>双重编码</strong>落库 → 读出来仍是字符串 → 前端 <code>card.tags.slice(...).map</code> 抛错 → <strong>React 根组件挂载失败、整页黑屏</strong>（重启 DSH / 插件 / 常驻实例都无效，因为坏数据一直在库里）。现在 <code>normalizeTags()</code> 是<strong>唯一入口</strong>：数组 / JSON 字符串 / 逗号串 / <strong>双重编码的旧数据</strong>都收敛成数组，写路径与<strong>所有读路径</strong>都走它（既有坏数据不必用户手工修）；渲染层再加兜底（坏 tags 最多少显示几个标签，不许把整棵树带走）。② <strong>#30</strong>：报告者在我 0.10.29 里又抓出两处 —— <code>restoreWatchdogLock</code> 的「活登记」判定<strong>少了 <code>!w.endedAt</code></strong>（PID 复用/正在退出时，写回会被放弃）；<strong>Windows 端口枚举没有超时</strong>（实测 <code>Get-NetTCPConnection</code> 无条件要 4–7.5 秒、一次 13.6 秒，而接管清场的 8 秒预算根本管不住它 → 决策基于过期数据）。现在 <code>defaultExec</code> 支持超时并真的掐断子进程、<code>findPortListener({timeoutMs})</code> 逐层传下去、接管清场给有界值（≤2.5s）。新增 <code>tests/tags-normalize.test.mjs</code>（4 项）+ <code>watchdog-restart</code> 2 项回归。<code>npm test</code> 共 <strong>354 项</strong></td>

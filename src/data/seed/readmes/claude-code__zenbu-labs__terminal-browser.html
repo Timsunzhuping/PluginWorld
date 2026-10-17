@@ -176,10 +176,91 @@ terminal-browser upgrade # upgrade to the latest version
 <li>Minimize the size of your PR for the best chance to get it landed</li>
 </ul>
 <p>To get a local development setup of terminal-browser, the recommended way is to ask a coding agent.</p>
-<h3>Adding enhanced support for a new terminal</h3>
-<p><code>terminal-browser</code>'s cli includes sub commands that rely on terminal/multiplexer scripting features. 
-To implement support for a terminal/multiplexer not yet supported, reference existing implementations
-located here <a href="https://github.com/zenbu-labs/terminal-browser/tree/main/terminals/src/terminals" target="_blank" rel="noopener noreferrer">https://github.com/zenbu-labs/terminal-browser/tree/main/terminals/src/terminals</a></p>
+<h3>Terminal support</h3>
+<p>terminal-browser exposes an API that terminals can implement which will allow terminal-browser to reliably script the terminal it is running inside. This allows terminal-browser to open new panes, split panes, send text to a coding agent, and focus panes. Terminals that implement this API can be used to run terminal-browser in a more integrated way.</p>
+<h4>Implementing the API in your terminal</h4>
+<p>A terminal implements the API by listening on a unix socket and telling terminal-browser where it is:</p>
+<ol>
+<li>On launch, listen on a unix socket (for example <code>$TMPDIR/&lt;your-app-id&gt;.terminal-browser.sock</code>). Only accept connections from the same user.</li>
+<li>Set <code>TERMINAL_BROWSER_TERMINAL_SOCKET=&lt;socket path&gt;</code> in the environment of every shell you spawn. </li>
+<li>Handle requests. Whenever terminal-browser needs something from the terminal it connects to your socket, writes a JSON request terminated by a newline, and waits for a JSON reply terminated by a newline. Once you have written the reply, close the connection. Every request gets its own connection, so there is no session state to keep.</li>
+</ol>
+<p>A request is a JSON object with the method to run, its params, and who is asking. <code>caller</code> is the process that ran terminal-browser:</p>
+<pre><code class="language-json">{ "id": "&lt;unique string&gt;", "method": "&lt;name&gt;", "params": { ... }, "caller": { "pid": 12345, "cwd": "/path" } }
+</code></pre>
+<p>Reply with the same <code>id</code> and either a <code>result</code> or an <code>error</code>:</p>
+<pre><code class="language-json">{ "id": "&lt;same id&gt;", "result": { ... } }
+{ "id": "&lt;same id&gt;", "error": { "message": "..." } }
+</code></pre>
+<p>The first request is always <code>hello</code>. Your reply lists which methods you implement, and terminal-browser disables any feature that depends on a method you leave out:</p>
+<pre><code class="language-json">→ { "method": "hello", "params": { "protocol": 1 } }
+← { "result": { "name": "my-terminal", "methods": ["getCurrentPane", "split", "listPanes", "neighbor", "sendText", "pasteKey", "focusPane"] } }
+</code></pre>
+<p>A pane is <code>{ "id": string, "tab": string }</code>. <code>id</code> is any stable identifier for the pane, <code>tab</code> is shared by every pane that is visible on screen together</p>
+<p>API:</p>
+<table>
+<thead>
+<tr>
+<th>method</th>
+<th>params</th>
+<th>result</th>
+<th>powers</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>getCurrentPane</code></td>
+<td><code>{ tty, cwd }</code></td>
+<td><code>{ pane }</code> or <code>{ pane: null }</code></td>
+<td><code>ls</code>, <code>new-tab</code>, picking where <code>--split</code> goes</td>
+</tr>
+<tr>
+<td><code>split</code></td>
+<td><code>{ from: pane, direction, command: string[], size, tty }</code></td>
+<td><code>{}</code></td>
+<td><code>--split</code></td>
+</tr>
+<tr>
+<td><code>listPanes</code></td>
+<td><code>{ tty }</code></td>
+<td><code>{ panes: [{ id, tab, tty, command }] }</code></td>
+<td>finding the coding agent's pane</td>
+</tr>
+<tr>
+<td><code>neighbor</code></td>
+<td><code>{ from: pane, direction }</code></td>
+<td><code>{ pane }</code> or <code>{ pane: null }</code></td>
+<td>opening next to an existing browser</td>
+</tr>
+<tr>
+<td><code>sendText</code></td>
+<td><code>{ pane, text }</code></td>
+<td><code>{}</code></td>
+<td>sending page content to a coding agent</td>
+</tr>
+<tr>
+<td><code>pasteKey</code></td>
+<td><code>{ pane }</code></td>
+<td><code>{}</code></td>
+<td>sending images to a coding agent</td>
+</tr>
+<tr>
+<td><code>focusPane</code></td>
+<td><code>{ pane }</code></td>
+<td><code>{}</code></td>
+<td>jumping between the browser and the agent</td>
+</tr>
+</tbody></table>
+<p>Extra notes:</p>
+<ul>
+<li><code>direction</code> is one of <code>right</code>, <code>left</code>, <code>down</code>, <code>up</code>. <code>size</code> is the fraction of the space the new pane should take (<code>0.4</code>) or <code>null</code> for your default.</li>
+<li><code>split</code> should run <code>command</code> (an argv array, quote it for the shell yourself) in the new pane, in the caller's <code>cwd</code>.</li>
+<li><code>getCurrentPane</code> receives the caller's <code>tty</code>, but the caller may be under a nested pty (a multiplexer, a coding agent wrapper) that no pane owns. When no pane matches the tty, walk the ancestors of <code>caller.pid</code> and return the pane whose tty appears first in that chain.</li>
+<li><code>listPanes</code> entries carry the pane's <code>tty</code> and the command line of its foreground process, or <code>null</code> when unknown.</li>
+<li><code>pasteKey</code> must deliver a literal ctrl+v keypress (byte <code>0x16</code>), not a bracketed paste, so a coding agent treats it as a key and reads the clipboard.</li>
+</ul>
+<p>The client side, including the exact schema terminal-browser accepts for every result, is <a href="https://github.com/zenbu-labs/terminal-browser/blob/HEAD/shared/src/terminal-socket.ts" target="_blank" rel="noopener noreferrer">shared/src/terminal-socket.ts</a>. A minimal terminal written in node that answers every method is the <code>fakeTerminal</code> in <a href="https://github.com/zenbu-labs/terminal-browser/blob/HEAD/shared/test/terminal-socket.test.js" target="_blank" rel="noopener noreferrer">shared/test/terminal-socket.test.js</a>, which is a good starting point.</p>
+<h4>Built in support</h4>
+<p>If a terminal does not implement this API itself, terminal-browser ships built in implementations located in <a href="https://github.com/zenbu-labs/terminal-browser/blob/HEAD/pixel/packages/pixel/src/terminal/terminals" target="_blank" rel="noopener noreferrer">pixel/packages/pixel/src/terminal/terminals</a> for: ghostty, kitty, wezterm, cmux, tmux, vscode, tty7, herdr, and supacode. These implement the same operations as the socket methods above as the <code>Terminal</code> interface in <a href="https://github.com/zenbu-labs/terminal-browser/blob/HEAD/pixel/packages/pixel/src/terminal/terminal.ts" target="_blank" rel="noopener noreferrer">pixel/packages/pixel/src/terminal/terminal.ts</a>, using each terminal's own scripting cli. To add support for another terminal or multiplexer, add a file there that implements <code>Terminal</code> and register it in <code>terminals/index.ts</code>.</p>
 <h3><a href="https://discord.gg/t3jzHHfc6z" target="_blank" rel="noopener noreferrer">Discord</a></h3>
 <h3>Acknowledgments</h3>
 <ul>

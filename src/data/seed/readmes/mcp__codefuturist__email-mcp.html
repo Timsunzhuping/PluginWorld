@@ -95,6 +95,7 @@
 <li><a href="#install" target="_blank" rel="noopener noreferrer">Install</a></li>
 <li><a href="#usage" target="_blank" rel="noopener noreferrer">Usage</a></li>
 <li><a href="#api" target="_blank" rel="noopener noreferrer">API</a></li>
+<li><a href="#roadmap" target="_blank" rel="noopener noreferrer">Roadmap</a></li>
 <li><a href="#maintainers" target="_blank" rel="noopener noreferrer">Maintainers</a></li>
 <li><a href="#contributing" target="_blank" rel="noopener noreferrer">Contributing</a></li>
 <li><a href="#license" target="_blank" rel="noopener noreferrer">License</a></li>
@@ -117,7 +118,7 @@
 <li><strong>Provider auto-detection</strong> — Gmail, Outlook, Yahoo, iCloud, Fastmail, ProtonMail, Zoho, GMX</li>
 </ul>
 <h2>Install</h2>
-<p>Requires Node.js ≥ 22.</p>
+<p>Requires Node.js ≥ 24.</p>
 <pre><code class="language-bash"># Run directly (no install needed)
 npx @codefuturist/email-mcp setup
 # or
@@ -128,6 +129,14 @@ npm install -g @codefuturist/email-mcp
 # or
 pnpm add -g @codefuturist/email-mcp
 </code></pre>
+<p><code>npm install -g</code> fails with <code>EACCES</code> when npm's global prefix is a root-owned
+directory (common on a system Node install) — the <code>npx</code>/<code>pnpm dlx</code> form above
+avoids this entirely by not installing anything globally. If you do want a
+permanent global install, fix npm's prefix instead of reaching for <code>sudo</code>
+(<code>npm config set prefix ~/.npm-global</code> and add that to <code>PATH</code>, or use a Node
+version manager like <code>nvm</code>/<code>fnm</code>/<code>volta</code>) — running <code>npm install -g</code> as root
+routinely leaves root-owned files mixed into a user-owned <code>node_modules</code> tree,
+which causes harder-to-diagnose permission errors on the <em>next</em> global install.</p>
 <h3>Homebrew (native binary)</h3>
 <p>The prebuilt, dependency-free binary — no Node.js at runtime — from the
 <a href="https://github.com/codefuturist/homebrew-tap" target="_blank" rel="noopener noreferrer">codefuturist tap</a>:</p>
@@ -576,12 +585,19 @@ save_to_sent = false    # file a copy of each sent message in the IMAP Sent fold
 [settings.attachments]
 auto_download = true  # save attachments locally when calendar events are created from emails
 
+[settings.attachment_download]
+# dir = "/data/attachments"  # unset (default) disables download_attachment's saveToDownloadDir
+allowed_extensions = ["pdf", "png", "jpg", "jpeg", "webp", "tiff", "txt", "md", "doc", "docx", "odt", "xls", "xlsx", "csv"]
+max_bytes = 26214400  # 25 MB
+
 [[accounts]]
 name = "personal"
 email = "you@gmail.com"
 full_name = "Your Name"
 password = "keychain:personal"  # or "env:VAR", or a plaintext app password
 # max_attachment_mb = 25  # optional per-account override (beats global + provider limits)
+# sent_mailbox = "INBOX.Sent Messages"  # optional, see "Sent-folder copies" below
+# save_to_sent = true                    # optional per-account override of the Gmail-skip guess
 
 [accounts.imap]
 host = "imap.gmail.com"
@@ -785,6 +801,21 @@ max_messages = 100
 <td><code>MCP_EMAIL_SCHEDULER_SENT_RETENTION_DAYS</code></td>
 <td><code>90</code></td>
 <td>Days of sent-email history to keep; <code>0</code> keeps everything</td>
+</tr>
+<tr>
+<td><code>MCP_EMAIL_ATTACHMENT_DOWNLOAD_DIR</code></td>
+<td>—</td>
+<td>Directory <code>download_attachment</code>'s <code>saveToDownloadDir</code> writes into; unset disables the option</td>
+</tr>
+<tr>
+<td><code>MCP_EMAIL_ATTACHMENT_DOWNLOAD_ALLOWED_EXTENSIONS</code></td>
+<td><em>(built-in list — see below)</em></td>
+<td>Comma-separated extension allowlist for saved attachments</td>
+</tr>
+<tr>
+<td><code>MCP_EMAIL_ATTACHMENT_DOWNLOAD_MAX_BYTES</code></td>
+<td><code>26214400</code> (25 MB)</td>
+<td>Max attachment size <code>saveToDownloadDir</code> will write</td>
 </tr>
 </tbody></table>
 <h3>Local Cache</h3>
@@ -1216,15 +1247,52 @@ plainly instead of appearing empty.</li>
 used as the body when the message carries no other text (forward-as-attachment,
 digests).</li>
 </ul>
-<p><strong>Sent-folder copies.</strong> SMTP delivers mail; it does not file it. Gmail and
-Outlook capture sent mail server-side, so <code>[settings.send] save_to_sent</code>
-defaults to <strong>false</strong> — enabling it on those providers would give you two
-copies of everything. Turn it on for an IMAP host that does not capture sends
-itself. The copy carries the same <code>Message-ID</code> the server accepted, is flagged
+<p><strong>Attachment download directory.</strong> <code>download_attachment</code> normally returns the
+file base64-encoded (≤5 MB). Set <code>[settings.attachment_download] dir</code> (or
+<code>MCP_EMAIL_ATTACHMENT_DOWNLOAD_DIR</code>) to a directory and pass
+<code>saveToDownloadDir: true</code> to instead write the file there and get back its
+path — useful for larger files, or when the caller just wants the attachment
+on disk rather than inlined into the conversation. The option is unavailable
+(the call fails) until <code>dir</code> is set — there is no default location. Only
+<code>allowed_extensions</code> are written (default: common document/image types; see
+the config example above); <code>max_bytes</code> caps the size, independent of the
+5 MB base64 cap. Pass <code>saveAs</code> to choose the filename written there (a plain
+basename — no path separators); otherwise the attachment's own filename is
+sanitized and used. Running in Docker, point <code>dir</code> at a mounted volume shared
+with whatever reads the files back, e.g. in <code>docker-compose.yml</code>:</p>
+<pre><code class="language-yaml">services:
+  email-mcp:
+    environment:
+      MCP_EMAIL_ATTACHMENT_DOWNLOAD_DIR: /data/attachments
+    volumes:
+      - attachments:/data/attachments
+  other-service:
+    volumes:
+      - attachments:/data/attachments:ro
+volumes:
+  attachments:
+</code></pre>
+<p><strong>Sent-folder copies.</strong> SMTP delivers mail; it does not file it. <code>[settings.send] save_to_sent</code> defaults to <strong>false</strong>; turn it on for an IMAP host that does not
+capture sends itself. Gmail does capture sends server-side, so an account
+whose IMAP server advertises the <code>X-GM-EXT-1</code> capability is skipped
+automatically even with the setting on — filing a copy there would give you
+two of everything. Set the account's own <code>save_to_sent</code> to force the decision
+either way (<code>true</code> files anyway, <code>false</code> never files, regardless of the
+global setting or the Gmail guess).</p>
+<p>The copy carries the same <code>Message-ID</code> the server accepted, is flagged
 <code>\Seen</code>, and lands in the folder the server marks <code>\Sent</code> (or a folder named
-<code>Sent</code>, created if absent). It omits <code>Bcc</code>, which the MIME composer strips
-unconditionally. A failure to file never fails the send — the mail has already
-left, and saying otherwise would invite a duplicate send.</p>
+<code>Sent</code>, created if absent). On a mailbox that carries several sent-shaped
+folders — a leftover <code>Sent</code> beside the one actually in use — that guess can
+land on an empty one; set the account's <code>sent_mailbox</code> to the full path
+(as <code>list_mailboxes</code> reports it) to settle it. The copy omits <code>Bcc</code>, which the
+MIME composer strips unconditionally.</p>
+<p>A failure to file never fails the send — the mail has already left, and
+saying otherwise would invite a duplicate send — but <code>send_draft</code> keeps the
+draft in that case rather than deleting the only remaining copy of the
+message. <code>send_email</code>, <code>reply_email</code>, <code>forward_email</code> and <code>send_draft</code> all
+report the outcome in their result's <code>sentCopy</code> field: <code>{kind: "filed", path}</code>,
+<code>{kind: "skipped"}</code> (setting off, or Gmail's own capture), or
+<code>{kind: "failed", error}</code>.</p>
 <p>Outbound HTML (<code>html: true</code>) is sent as <code>multipart/alternative</code> with a
 generated plain-text alternative. Forwards quote the original as converted
 text; pass <code>html: true</code> to <code>forward_email</code> to also carry the original HTML.</p>
@@ -1246,15 +1314,15 @@ text; pass <code>html: true</code> to <code>forward_email</code> to also carry t
 </tr>
 <tr>
 <td><code>list_emails</code></td>
-<td>Paginated email listing with date, sender, subject, and flag filters</td>
+<td>Paginated email listing with date, sender, subject, and flag filters; marks bulk mail; optional body preview</td>
 </tr>
 <tr>
 <td><code>get_email</code></td>
-<td>Read full email content with attachment metadata (HTML converted to readable text by default)</td>
+<td>Read full email content with attachment metadata and bulk-mail classification (HTML converted to readable text by default)</td>
 </tr>
 <tr>
 <td><code>get_emails</code></td>
-<td>Fetch full content of multiple emails in a single call (max 20)</td>
+<td>Fetch full content of multiple emails in a single call (max 20); same bulk markers</td>
 </tr>
 <tr>
 <td><code>get_email_status</code></td>
@@ -1262,11 +1330,11 @@ text; pass <code>html: true</code> to <code>forward_email</code> to also carry t
 </tr>
 <tr>
 <td><code>search_emails</code></td>
-<td>Search by keyword across subject, sender, and body</td>
+<td>Search by keyword across subject, sender, and body; same bulk markers and optional preview as <code>list_emails</code></td>
 </tr>
 <tr>
 <td><code>download_attachment</code></td>
-<td>Download an email attachment by filename or MIME part id</td>
+<td>Download an email attachment by filename or MIME part id, base64-encoded or (if configured) saved to the server's attachment download directory</td>
 </tr>
 <tr>
 <td><code>find_email_folder</code></td>
@@ -1278,7 +1346,7 @@ text; pass <code>html: true</code> to <code>forward_email</code> to also carry t
 </tr>
 <tr>
 <td><code>get_thread</code></td>
-<td>Reconstruct a conversation thread via References/In-Reply-To</td>
+<td>Reconstruct a conversation thread via References/In-Reply-To; same bulk markers</td>
 </tr>
 <tr>
 <td><code>list_templates</code></td>
@@ -1293,6 +1361,58 @@ text; pass <code>html: true</code> to <code>forward_email</code> to also carry t
 <td>Connection health, latency, quota, and IMAP capabilities</td>
 </tr>
 </tbody></table>
+<h4>Bulk-mail classification</h4>
+<p><code>list_emails</code>, <code>search_emails</code>, <code>get_email</code>, <code>get_emails</code> and <code>get_thread</code> mark
+list and machine-generated mail, so an inbox can be triaged without reading
+bodies:</p>
+<table>
+<thead>
+<tr>
+<th>Marker</th>
+<th>Meaning</th>
+<th>Derived from</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>📰 <code>newsletter</code></td>
+<td>Mailing list or subscription</td>
+<td><code>List-Unsubscribe</code> (RFC 2369), <code>List-Id</code> (RFC 2919), <code>Precedence: list</code></td>
+</tr>
+<tr>
+<td>🤖 <code>automated</code></td>
+<td>Machine-generated notification</td>
+<td><code>Auto-Submitted</code> (RFC 3834), <code>Precedence: bulk</code>/<code>junk</code></td>
+</tr>
+<tr>
+<td><em>(none)</em></td>
+<td>Ordinary person-to-person mail</td>
+<td>no bulk headers present</td>
+</tr>
+</tbody></table>
+<p>A newsletter also reports its unsubscribe URI when the sender offers one, and
+flags <code>1-click</code> when RFC 8058 one-click unsubscribe is supported. The headers
+are requested as part of the listing fetch, so classifying a whole page costs no
+extra round trip.</p>
+<p>Classification is header-derived and therefore deterministic — no model call and
+no heuristics on subject text. A sender that omits the headers is reported as
+personal mail rather than guessed at. These are sender-asserted headers, not
+verified ones — treat the marker as a signal to weigh, not a fact to defer to.</p>
+<h4>Body previews</h4>
+<p><code>list_emails</code> and <code>search_emails</code> accept <code>preview: true</code> to include roughly 200
+characters of each message body. It is <strong>off by default</strong>: it fetches 1500 extra
+bytes per message and lengthens the tool output, which is a cost the caller
+should choose rather than inherit.</p>
+<p>The preview is decoded from one body part rather than from message source —
+IMAP section 1, or 1.1 when section 1 is itself a multipart. Because the fetch
+stops at a byte count rather than at an encoding boundary, decoding tolerates
+input cut mid-stream: base64 is truncated to a whole group, a half-written
+quoted-printable escape is dropped, and the replacement character left by a
+severed UTF-8 sequence is trimmed. Charsets beyond UTF-8 are handled — real mail
+still ships <code>iso-8859-1</code>.</p>
+<p>Markup is stripped whether or not the sender declared it, since bulk senders
+routinely put HTML and stylesheets in a part labelled <code>text/plain</code>. Entities and
+zero-width preheader padding are decoded, and a preview that reduces to markup
+residue is omitted: <strong>no preview beats a misleading one</strong>.</p>
 <h4>Write (9)</h4>
 <table>
 <thead>
@@ -1663,6 +1783,20 @@ text; pass <code>html: true</code> to <code>forward_email</code> to also carry t
 ├── safety/                — Audit trail and rate limiter
 └── types/                 — Shared TypeScript types
 </code></pre>
+<h2>Roadmap</h2>
+<p>Ideas raised but deliberately not built yet, kept here so they aren't lost or
+quietly re-proposed:</p>
+<ul>
+<li><strong>AgentMail as an alternative provider.</strong> <a href="https://agentmail.to" target="_blank" rel="noopener noreferrer">AgentMail</a>
+offers API-key-only, programmatic <code>@agentmail.to</code> inboxes — no IMAP/SMTP
+host/port/TLS/credential setup, useful for spinning up throwaway
+agent-owned addresses. It would be additive (a second provider alongside
+real IMAP/SMTP accounts, not a replacement), but is a product/architecture
+decision — a new vendor dependency and tool surface — rather than a bug fix
+or gap-fill, so it's parked here rather than auto-built. Revisit if there's
+real demand for agent-provisioned inboxes rather than access to existing
+mailboxes.</li>
+</ul>
 <h2>Maintainers</h2>
 <p><a href="https://github.com/codefuturist" target="_blank" rel="noopener noreferrer">@codefuturist</a></p>
 <h3>Release prerequisites</h3>

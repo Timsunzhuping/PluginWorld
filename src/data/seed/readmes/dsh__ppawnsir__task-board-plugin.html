@@ -109,13 +109,13 @@ git pull
 <li><strong>自动 salvage（截断抢救）</strong>：隔离前先尝试抢救——从首字节起截到第一个完整 JSON 值（<code>JSON.parse</code> 报错 <code>position</code> 截断法，与人工恢复同款手法），成功则以抢救出的完整板为底自动写回继续（<code>healthHints</code> 红条记「已抢救保留 N 张卡，丢弃撕裂残片」），失败才回退空板。两种情况下原始文件都留档 <code>.corrupt-&lt;ts&gt;</code>，可随时人工恢复。</li>
 </ul>
 <h2>功能总览</h2>
-<p><strong>核心能力一页速览</strong>（<code>★</code> 为 v1.7.5–1.8.0 新栈）：</p>
+<p><strong>核心能力一页速览</strong>（<code>★</code> 为 v1.7.5–1.8.1 新栈）：</p>
 <ul>
 <li><strong>看板</strong>：六列状态流、拖拽 / 多选批量 / 文本·优先级·标签筛选、归档留档、会话隔离</li>
-<li><strong>派发</strong>：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、<strong>spawn 落闸锁内重验</strong>（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate 落在 spawn 在途窗口即弃权——同卡同秒双 run 竞态根治）、<strong>高优干预分态</strong>（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）</li>
+<li><strong>派发</strong>：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、<strong>spawn 落闸锁内重验</strong>（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate/dependsOn 后补 落在 spawn 在途窗口即弃权——竞态与后补依赖双双根治）、<strong>高优干预分态</strong>（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）、<strong>建卡派发预警</strong>（将自动派发时 lintWarnings 瞬态提示「约 1s 内被领取，想占位请 draft:true」）</li>
 <li><strong>验收治理</strong> <code>★</code>：硬性验收脚本独立复跑、驳回全量带回重派、Verifier 自测指南（userTest）、风险队列「待你过目」、验收时序防护（Verifier 在场时主窗口抢批需显式 <code>force:true</code>；有活跃 run 的卡禁止归档；Verifier 迟到结论落 <code>lateVerdict</code> 留痕+迟到驳回直投告警，不再静默吞掉）</li>
 <li><strong>度量</strong> <code>★</code>：Token 消耗（总量 / 有效 / 缓存读，按模型·按任务·按日）+ 记分卡（模型表现 / 质量趋势 / 驳回聚类）</li>
-<li><strong>可运维性</strong> <code>★</code>：运行时健康自检（派发冻结 / 结算停滞告警）、异常驱动审视（风险队列 / 质量异动告警 / 批次摘要）、起草 lint、数据安全（原子写盘 / 腐坏隔离 / 自动 salvage）、<strong>僵尸 run 留档清扫</strong>（host 重启后「落定卡上的 running 无 endedAt 留档」在派发周期自动关账 <code>stale-closed</code> + 清认领位，归档门禁不再被幻影 run 永久拦截）</li>
+<li><strong>可运维性</strong> <code>★</code>：运行时健康自检（派发冻结 / 结算停滞告警）、异常驱动审视（风险队列 / 质量异动告警 / 批次摘要）、起草 lint、数据安全（原子写盘 / 腐坏隔离 / 自动 salvage）、<strong>僵尸 run 留档清扫</strong>（host 重启后「落定卡上的 running 无 endedAt 留档」在派发周期自动关账 <code>stale-closed</code> + 清认领位，归档门禁不再被幻影 run 永久拦截）、<strong>子会话生命周期收口</strong>（一次性 run 落定/迟到 verdict 落账后主动 interrupt 子会话——「结算≠停止」空转根治；continuable 收紧为「续跑位真在本 child 手上」才豁免，残影 Worker 无处藏身）、<strong>terminate 三保险</strong>（no-rec 也按认领位盲杀补刀 + interrupt 失败 err 级可见化 + <code>hold:true</code> 原子「终止+转手动」）、<strong>配置审计</strong>（set-board-config 成功写入落板级 configLog {key,from,to,actor,at} 截尾 50 条；模型下拉两段式选中≠保存）</li>
 <li><strong>学习反馈</strong>：候选教训信号 → 主窗口沉淀（零耦合，不碰任何笔记 / 记忆工具 API）</li>
 </ul>
 <p>以下各节是完整规格。</p>
@@ -182,6 +182,7 @@ git pull
 <li><strong>硬性验收</strong>：<code>acceptance</code> 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑</li>
 <li><strong>git 纪律红线</strong>：Worker prompt 写死禁止还原命令（<code>git checkout</code> / <code>git restore</code> / <code>git reset --hard</code> / <code>git clean</code> 等——会冲掉并行 Worker 与你自己的未提交在途编辑）；只改自己写的文件、别人改了别的文件与你无关，确实需要干净基线时走歧义上报（<code>board_report</code> kind=escalate）由主窗口裁决；<strong>提交只允许精确路径 <code>git add</code></strong>（本卡 <code>touches</code> 声明的文件，或逐一列出明确改过的文件路径），禁止 <code>git add -A</code> / <code>git add .</code> / <code>git add 目录</code>——并行 Worker 共享暂存区，宽泛 add 会把别卡在途编辑卷进 commit（实证 n-mv6xntg1p6i5：三起暂存吞并）</li>
 <li><strong>大文件交付纪律</strong>：Worker prompt 写死分块写入指引——单文件交付预估 &gt;8KB（或 spec 含全量文案/长代码）时禁止单次 <code>write</code> 写入全量（单次超长输出会撞模型输出上限、上下文耗尽零产出），先 <code>write</code> 落主体骨架、再用 <code>edit</code> 追加续块（每块 ≤4KB）逐块落地</li>
+<li><strong>前轮半成品提示</strong>：卡片 runs[] 含已落定 worker run 时，Worker prompt 追加「先 <code>git status</code> 看工作区有无未提交半成品，能续作就续作，别盲目从零」——重发/重派场景的旧产物先盘点再决定</li>
 <li><strong>文件级排他</strong>：<code>touches</code> 声明本任务要改的文件/glob（如 <code>["src/**", "README.md"]</code>）；持有文件锁的任务（<code>in-progress</code>/<code>verifying</code>）与候选 touches 重叠就跳过本轮（卡片显示 <code>🔒 等文件释放</code>，详情页列出在等谁），<strong>锁随工作态</strong>：状态流转到已完成（<code>resolved</code>）即放锁，<code>cancelled</code>/归档同样不再持锁（归档回归纯收纳动作、不再是释放点）——锁只护「正在写」的阶段，「验收后-提交前」的窗口期由主窗口「回执到即提交」纪律 + 史诗 post-hook 承接，不用长持锁把整批串行化。避免并行 Worker 改同一批文件互踩；手动「派发」遇到冲突会列出冲突任务，确认后才以 <code>force</code> 越权派发</li>
 <li><strong>里程碑进展通道</strong>：Worker 每完成一个可验证的里程碑，可调用 <code>board_report</code>（<code>kind: "progress"</code>，<code>question</code> 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目</li>
 <li><strong>防表演式汇报</strong>：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress <strong>静默不通知主窗口</strong>（不进回执聚合），也不写 <code>history</code> 流转记录，避免刷屏</li>

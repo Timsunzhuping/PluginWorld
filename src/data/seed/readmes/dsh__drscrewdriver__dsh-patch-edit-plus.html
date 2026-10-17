@@ -1,0 +1,206 @@
+<h1>dsh-patch-edit-plus</h1>
+<p>English | <a href="https://github.com/drscrewdriver/dsh-patch-edit-plus/blob/HEAD/README.zh.md" target="_blank" rel="noopener noreferrer">简体中文</a> | <a href="https://github.com/drscrewdriver/dsh-patch-edit-plus/blob/HEAD/README.ja.md" target="_blank" rel="noopener noreferrer">日本語</a> | <a href="https://github.com/drscrewdriver/dsh-patch-edit-plus/blob/HEAD/README.ko.md" target="_blank" rel="noopener noreferrer">한국어</a> | <a href="https://github.com/drscrewdriver/dsh-patch-edit-plus/blob/HEAD/README.fr.md" target="_blank" rel="noopener noreferrer">Français</a> | <a href="https://github.com/drscrewdriver/dsh-patch-edit-plus/blob/HEAD/README.de.md" target="_blank" rel="noopener noreferrer">Deutsch</a> | <a href="https://github.com/drscrewdriver/dsh-patch-edit-plus/blob/HEAD/README.it.md" target="_blank" rel="noopener noreferrer">Italiano</a> | <a href="https://github.com/drscrewdriver/dsh-patch-edit-plus/blob/HEAD/README.ru.md" target="_blank" rel="noopener noreferrer">Русский</a> | <a href="https://github.com/drscrewdriver/dsh-patch-edit-plus/blob/HEAD/README.es.md" target="_blank" rel="noopener noreferrer">Español</a></p>
+<p>Patch-style file editing for <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness (DSH)</a>: one model-facing <code>apply_patch</code> tool that accepts <strong>git/unified diff</strong> (default) and <strong>Codex <code>apply_patch</code> syntax</strong> (opt-in), applies every change <strong>all-or-nothing</strong>, and stays completely out of DSH's way.</p>
+<h2>DSH version compatibility</h2>
+<table>
+<thead>
+<tr>
+<th>DSH version</th>
+<th>Status</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>0.2.0-rc.1+</code></td>
+<td>✅ supported (this line, v0.3.0+)</td>
+<td>Declarative settings: <code>allowCodexPatch</code> is marked <code>.volatile()</code> — the settings form renders automatically and <code>loader/volatile-update</code> re-registers the tool without a remount. No registration call. Delete/Move migrated to the <code>ShellExecutor.execute()</code> + <code>result()</code> foreground API.</td>
+</tr>
+<tr>
+<td><code>0.1.7-rc.1+</code></td>
+<td>↗ maintenance line</td>
+<td>Served by the <code>compat/0.1.7</code> branch / <code>dsh-0.1.7</code> dist-tag (v0.2.1 there). 0.2.0's shell executor renamed <code>run</code> → <code>execute</code> (introduced between 0.1.2 and 0.1.7), so one codebase cannot serve both lines type-safely.</td>
+</tr>
+<tr>
+<td><code>0.1.2-rc.1</code> ~ <code>0.1.5-rc.2</code></td>
+<td>↗ maintenance line</td>
+<td>Served by the pre-0.1.7 branch / <code>dsh-0.1.5</code> dist-tag. 0.1.7 removed the imperative settings APIs the dual-API fallback relied on.</td>
+</tr>
+</tbody></table>
+<p>Settings are declarative on this line: fields marked <code>.volatile()</code> in <code>Config</code> become the settings form; the plugin subscribes to <code>loader/volatile-update</code> instead of receiving registration hooks.</p>
+<h2>Why patch at all? (tool routing guide)</h2>
+<p>The tool description explicitly routes the model:</p>
+<ul>
+<li><strong>Single small change in one already-read file</strong> → prefer the native <code>edit</code> tool (a patch costs more tokens than a literal edit).</li>
+<li><strong>Small change inside a LARGE file</strong> → <code>apply_patch</code> (no need to echo the whole file).</li>
+<li><strong>Batched changes across MANY files</strong> → <code>apply_patch</code> (one call, verified atomically).</li>
+<li><strong>New file with substantial content / delete / rename</strong> → <code>apply_patch</code>.</li>
+</ul>
+<h2>Installation</h2>
+<pre><code class="language-bash">dsh plugin --profile web add &lt;path-to-dsh-patch-edit-plus&gt;
+dsh web --dump-config   # verify the plugin row appears
+# restart DSH
+</code></pre>
+<h2>Usage</h2>
+<h3>Unified diff (default, enabled)</h3>
+<pre><code class="language-text">--- a/src/app.ts
++++ b/src/app.ts
+@@ -10,4 +10,4 @@ export function main() {
+   init()
+-  start(oldPort)
++  start(newPort)
+   await shutdown()
+ }
+</code></pre>
+<h3>Codex apply_patch syntax (opt-in)</h3>
+<pre><code class="language-text">*** Begin Patch
+*** Update File: src/app.ts
+@@
+   init()
+-  start(oldPort)
++  start(newPort)
+*** Add File: docs/notes.md
++# Notes
+*** Delete File: tmp/junk.txt
+*** Move to: src/app.ts   (via `*** Move to:` after *** Update File:)
+*** End Patch
+</code></pre>
+<p>Enable with <code>allowCodexPatch: true</code>. When a Codex patch arrives while disabled, the tool returns an <strong>actionable hint</strong> (how to enable or how to retry in unified diff) instead of a generic parse error — Codex syntax is a strong prior for GPT-family models and a silent failure traps them in retry loops.</p>
+<h3>Operations</h3>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Unified diff</th>
+<th>Codex</th>
+<th>Execution path</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Add</td>
+<td><code>new file mode</code> + <code>/dev/null</code></td>
+<td><code>*** Add File:</code></td>
+<td><code>ctx.fs.writeText</code> (official intent dance)</td>
+</tr>
+<tr>
+<td>Update (multi-hunk)</td>
+<td><code>@@</code> hunks</td>
+<td><code>@@</code> hunks</td>
+<td><code>ctx.fs.writeText</code></td>
+</tr>
+<tr>
+<td>Delete</td>
+<td><code>deleted file mode</code> + <code>/dev/null</code></td>
+<td><code>*** Delete File:</code></td>
+<td><code>ctx.shell</code> (sandbox-aware, env-passed path)</td>
+</tr>
+<tr>
+<td>Move / rename</td>
+<td><code>rename from/to</code></td>
+<td><code>*** Move to:</code></td>
+<td><code>ctx.shell</code></td>
+</tr>
+</tbody></table>
+<h2>Guarantees</h2>
+<ul>
+<li><strong>All-or-nothing</strong>: the whole patch is verified against current file content first (context location, workspace containment, symlink policy, duplicate paths); any failure aborts with zero bytes written.</li>
+<li><strong>Read-before-write gate respected</strong>: every write replicates the official <code>write</code> tool's intent dance — <code>fs/write-intent</code> waterfall → guarded <code>writeText</code> → <code>fs/observed</code> emit. A bare <code>writeText</code> would silently bypass the gate because DSH providers never dispatch <code>fs/*</code> events themselves.</li>
+<li><strong>Precise failure diagnostics</strong>: on hunk mismatch the error carries file + hunk index, search origin line, expected-line preview (whitespace made visible), the file's actual excerpt, and a targeted hint.</li>
+<li><strong>Newline fidelity</strong>: CRLF files are written back as CRLF; no-trailing-newline tails are preserved unless the patch changes the tail.</li>
+<li><strong>Pure addition</strong>: the plugin registers exactly one tool, never calls <code>tools.restrict()</code>, never overrides a native tool, registers no global services, and removes everything on unload. Name conflicts with other <code>apply_patch</code> providers (<code>bainianlaoyao/dsh-codex-mode</code>, <code>shuind/dsh-codex-harness</code>, …) are resolved by rename avoidance (<code>apply_patch_1</code>, <code>…_2</code>, …) so DSH never fails to start.</li>
+</ul>
+<h2>Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>toolName</code></td>
+<td><code>apply_patch</code></td>
+<td>Model-facing tool name.</td>
+</tr>
+<tr>
+<td><code>conflictPolicy</code></td>
+<td><code>rename</code></td>
+<td><code>rename</code> / <code>skip</code> / <code>fail</code> when the tool name is taken.</td>
+</tr>
+<tr>
+<td><code>renameSuffix</code></td>
+<td><code>_1</code></td>
+<td>Suffix used by rename avoidance.</td>
+</tr>
+<tr>
+<td><code>allowUnifiedDiff</code></td>
+<td><code>true</code></td>
+<td>Accept git/unified diffs.</td>
+</tr>
+<tr>
+<td><code>allowCodexPatch</code></td>
+<td><code>false</code></td>
+<td>Accept Codex <code>apply_patch</code> syntax. Also editable in the DSH settings panel; changes take effect immediately, no restart needed.</td>
+</tr>
+<tr>
+<td><code>deleteBackend</code></td>
+<td><code>shell</code></td>
+<td><code>shell</code> or <code>none</code> (Delete/Move return a structured error).</td>
+</tr>
+<tr>
+<td><code>shellDialect</code></td>
+<td><code>auto</code></td>
+<td><code>auto</code> (pwsh on win32) / <code>posix</code> / <code>pwsh</code>.</td>
+</tr>
+<tr>
+<td><code>deleteCommand</code> / <code>moveCommand</code></td>
+<td>built-in</td>
+<td>Custom command templates. Paths still arrive <strong>only via env</strong> (<code>DSH_PATCH_TARGET</code> / <code>DSH_PATCH_SOURCE</code>); never interpolate them into the command string.</td>
+</tr>
+<tr>
+<td><code>dryRunByDefault</code></td>
+<td><code>false</code></td>
+<td>Treat calls as dry runs unless <code>dryRun: false</code>.</td>
+</tr>
+<tr>
+<td><code>followSymlinks</code></td>
+<td><code>false</code></td>
+<td>Allow patch paths to traverse symlinks.</td>
+</tr>
+<tr>
+<td><code>maxFiles</code></td>
+<td><code>50</code></td>
+<td>Max file sections per patch.</td>
+</tr>
+<tr>
+<td><code>maxPatchBytes</code></td>
+<td><code>524288</code></td>
+<td>Max patch text size in bytes.</td>
+</tr>
+<tr>
+<td><code>maxDiffBytes</code></td>
+<td><code>16384</code></td>
+<td>Max per-file diff kept in the result metadata (larger diffs are emptied and marked <code>truncated</code>).</td>
+</tr>
+</tbody></table>
+<h2>Limitations (disclosed)</h2>
+<ul>
+<li><strong>Delete/Move run through <code>ctx.shell</code>.</strong> The sandbox strength is whatever the loaded shell executor enforces (<code>bash-sandbox</code> fences; <code>bash-local</code> does not) — the same risk posture as the native bash tool. Every request carries a <code>sandboxPolicy</code> and reports sandbox facts so "policy denied" is distinguishable from "command failed".</li>
+<li><strong>Every write and every Delete/Move carries the session-scoped policy.</strong> <code>apply_patch</code> resolves <code>ctx.sandboxPolicy.resolve({ session })</code> per call — the session's mode override plus its cwd as the workspace root — exactly like the native <code>write</code>/<code>edit</code> tools, and resolves plan paths against that same root. Without it the enforcing filesystem falls back to the deployment root, which makes in-workspace writes fail as <code>workspace-write</code> denials even in a <code>danger-full-access</code> session. A <code>workspace-write</code> denial surfaces as a <code>PatchError</code> whose message carries the backend text (the structured <code>[sandbox: …]</code> marker and the same-turn escalation fields are not implemented; use the native <code>write</code>/<code>edit</code> tools when you need to escalate).</li>
+<li><strong>Add does not create parent directories.</strong> This matches the native <code>write</code> tool (<code>ctx.fs</code> has no mkdir); the error names the missing directory.</li>
+<li>No fuzzy/offset matching: hunk location is exact → <code>trimEnd</code> → <code>trim</code>, deliberately (fuzzy matching is unsafe for destructive ops; it is on the roadmap).</li>
+<li>Binary patches are rejected with a clear error.</li>
+</ul>
+<h2>Development</h2>
+<pre><code class="language-bash">npm install
+npm run typecheck        # against 0.2.0-rc.1 peers (devDependencies)
+npm run typecheck:0.2.0  # against real 0.2.0-rc.1 peer packages installed from the registry (dual-baseline proof)
+npm test                 # vitest, 92 tests
+npm run lint
+npm run build            # lib/
+npm run verify:source    # static safety assertions (intent dance, no node:fs, …)
+npm run smoke            # load-level smoke against a stub host
+</code></pre>
+<p>Manual verification on a live DSH (<code>dsh plugin --profile web add</code> → restart → call the tool in a session) is intentionally left to the operator.</p>
+<h2>License</h2>
+<p>MIT</p>
