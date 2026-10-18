@@ -1,0 +1,240 @@
+<h1>Developing Expo Apps on Limrun</h1>
+<p>Use this skill for Expo / React Native-specific setup and dev-client iteration, on iOS simulators and Android emulators. Use <strong>limrun-ios-simulator</strong> and <strong>limrun-android-emulator</strong> for command details, device interaction, screenshots, recordings, and cleanup, and the build skills (<strong>limrun-xcode</strong>, <strong>limrun-gradle</strong>) for build flag details and non-Expo workflows.</p>
+<p>All builds and device operations must run on Limrun. Do not use local Xcode, local simulators, a local Android SDK, or local emulators; local <code>adb</code> is used only to talk to the remote emulator through the CLI's tunnel.</p>
+<h2>Expo Readiness</h2>
+<p>Before changing Expo dependencies or app config, check the app's Expo SDK version and use the matching Expo versioned docs.</p>
+<p>Verify this is an Expo app:</p>
+<pre><code class="language-bash">npx expo config --type introspect --json
+</code></pre>
+<p>Derive:</p>
+<ul>
+<li><code>BUNDLE_ID</code> from <code>ios.bundleIdentifier</code> (iOS) and <code>PACKAGE</code> from <code>android.package</code> (Android). When <code>android.package</code> is missing, introspect reports a placeholder (like <code>com.placeholder.appid</code>) while the build generates a different real applicationId; set <code>android.package</code> in <code>app.json</code> before building so <code>$PACKAGE</code> matches the installed app.</li>
+<li><code>SLUG</code> from <code>slug</code></li>
+<li><code>SCHEME</code> from <code>scheme</code>, falling back to <code>exp+${SLUG}</code></li>
+<li><code>BRANCH</code> from <code>git branch --show-current</code>, falling back to <code>main</code></li>
+<li><code>ASSET_NAME="${BUNDLE_ID}/${BRANCH}-debug.zip"</code> on iOS, <code>ASSET_NAME="${PACKAGE}/${BRANCH}-debug.apk"</code> on Android</li>
+</ul>
+<h2>Ensure Dev Client</h2>
+<p>Expo development builds require <code>expo-dev-client</code>. If it is missing from <code>package.json</code>, add it:</p>
+<pre><code class="language-bash">npx expo install expo-dev-client
+</code></pre>
+<p>Installing <code>expo-dev-client</code>, adding/removing/updating native dependencies, or changing native app config means the uploaded Debug asset is stale. Build a fresh Debug app before starting the dev loop. A changed native dependency makes the uploaded Debug asset stale, so the rebuild comes before the dev loop.</p>
+<h2>Debug Build Asset</h2>
+<p>First check whether a reusable Debug dev-client asset already exists:</p>
+<pre><code class="language-bash">lim asset list --name-prefix "$BUNDLE_ID/"   # iOS
+lim asset list --name-prefix "$PACKAGE/"     # Android
+</code></pre>
+<p>Reuse the exact <code>$ASSET_NAME</code> only when:</p>
+<ul>
+<li>it exists, and</li>
+<li>no native dependency or native config changed in this session.</li>
+</ul>
+<p>If the current task changed native dependencies or native config, skip asset reuse even if <code>$ASSET_NAME</code> exists.</p>
+<p>When reusing the asset, create or reuse a device and install it:</p>
+<pre><code class="language-bash">lim ios create \
+  --reuse-if-exists \
+  --install-asset "$ASSET_NAME" \
+  --label repo=&lt;repo&gt; \
+  --label agent=&lt;agent&gt;
+
+lim android create \
+  --reuse-if-exists \
+  --install-asset "$ASSET_NAME" \
+  --no-open \
+  --label repo=&lt;repo&gt; \
+  --label agent=&lt;agent&gt;
+</code></pre>
+<p>Android note: keep the tunnel that <code>create</code> opens by default (do not pass
+<code>--no-connect</code> here, unlike plain driving sessions); the Metro reverse
+tunnel below runs over it. Note the instance ID from the output and pass
+<code>--id</code> to every later <code>lim android</code> call: Metro and Expo run from the app
+directory, and instance resolution is per git worktree, so commands run from
+elsewhere will not find the instance on their own.</p>
+<h3>Fresh build on Android</h3>
+<p>Build the Debug APK remotely and upload it as the asset (Expo prebuild,
+<code>--expo-app-dir</code>, and other build flags belong to <strong>limrun-gradle</strong>; the
+default <code>assembleDebug</code> task is the right dev-client build):</p>
+<pre><code class="language-bash">lim gradle build . --upload "$ASSET_NAME"
+lim android create --reuse-if-exists --install-asset "$ASSET_NAME" --no-open --label repo=&lt;repo&gt; --label agent=&lt;agent&gt;
+</code></pre>
+<p>For a later native rebuild on a running emulator, rebuild with <code>--upload</code> and
+install the new APK via the Download URL the build prints (the instance
+fetches it server-side):</p>
+<pre><code class="language-bash">lim gradle build . --upload "$ASSET_NAME"
+lim android install-app "&lt;Download URL from the build output&gt;" --id &lt;android-instance-id&gt;
+</code></pre>
+<h3>Fresh build on iOS</h3>
+<p>When building fresh, create or reuse a standalone Xcode sandbox and build
+before creating a simulator, so the simulator doesn't sit idle (and hit its
+inactivity timeout) during a long build:</p>
+<pre><code class="language-bash">lim xcode create --reuse-if-exists --label repo=&lt;repo&gt; --label agent=&lt;agent&gt;
+
+lim xcode build . \
+  --configuration Debug \
+  --upload "$ASSET_NAME"
+</code></pre>
+<p>Run <code>lim xcode version set &lt;major|major.minor&gt;</code> once in the repo when the
+project needs a specific Xcode (<code>27</code> for the Xcode 27 GA, <code>27.1</code> for the beta);
+see <code>limrun-xcode</code> for the rules.</p>
+<p>Use <code>--expo-app-dir</code>, <code>--scheme</code>, or <code>--workspace</code> when the project layout requires it.</p>
+<p>Then create the simulator attached to that Xcode target; the attach installs
+and launches the build immediately:</p>
+<pre><code class="language-bash">lim ios create --attach \
+  --reuse-if-exists \
+  --label repo=&lt;repo&gt; \
+  --label agent=&lt;agent&gt;
+</code></pre>
+<p>Add <code>--no-open</code> to any <code>create</code> when you have no browser to show the user; it
+skips opening the stream URL and leaves the URL in the output to share.</p>
+<p>If an iOS simulator is already running from a reused asset and a later native rebuild becomes necessary, attach that same simulator instead of creating a second one:</p>
+<pre><code class="language-bash">lim xcode attach-simulator &lt;ios-instance-id&gt; --id &lt;xcode-instance-id&gt;
+</code></pre>
+<p>After the attach, every successful <code>lim xcode build</code> installs and launches the app on the attached simulator.</p>
+<h2>Start Metro Through Limrun on iOS</h2>
+<p>This flow is for iOS. Android uses <code>adb reverse</code>; skip to <strong>Start Metro on
+Android</strong> instead of running the <code>lim ios</code> commands.</p>
+<p>Start one destination tunnel after the Debug app is installed. Metro can keep
+its normal local port; Expo advertises localhost:</p>
+<pre><code class="language-bash">METRO_PORT=8081
+lim ios tunnel \
+  --selector "localhost:${METRO_PORT}" \
+  --detach \
+  --id &lt;ios-instance-id&gt;
+TUNNEL_URL="http://localhost:${METRO_PORT}"
+echo "TUNNEL_URL=$TUNNEL_URL"
+
+EXPO_PACKAGER_PROXY_URL="$TUNNEL_URL" \
+  npx expo start --dev-client --port "$METRO_PORT"
+</code></pre>
+<p><code>EXPO_PACKAGER_PROXY_URL</code> keeps localhost and the declared port in manifests,
+bundle URLs, and deep links. Set it inline so it takes precedence over project dotenv
+values. Keep Metro and the detached tunnel running while the user iterates.
+Run Metro as a managed background process, or copy the printed <code>TUNNEL_URL</code> into
+a second terminal before launching the app.</p>
+<p>If port 8081 is already occupied, choose another explicit port and use the same
+value for the tunnel selector, <code>TUNNEL_URL</code>, and Expo's <code>--port</code>. Selector sets
+are immutable: stop and recreate the tunnel with the complete selector list
+when the port changes.</p>
+<p>Only add <code>--offline</code> in a genuinely network-isolated environment after
+dependencies are installed. Offline mode disables network checks and dependency
+validation, so do not use it to compensate for ordinary Expo authentication.</p>
+<h3>Launch the iOS dev client</h3>
+<p>Open the Debug app through the dev-client URL:</p>
+<pre><code class="language-bash">ENCODED_URL="$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$TUNNEL_URL")"
+DEV_CLIENT_URL="${SCHEME}://expo-development-client/?url=${ENCODED_URL}"
+lim ios open-url --id &lt;ios-instance-id&gt; "$DEV_CLIENT_URL"
+</code></pre>
+<p>If opening fails and the primary scheme came from <code>scheme</code>, retry once with
+<code>exp+${SLUG}</code>. On a fresh instance, the iOS dev-menu onboarding sheet can
+consume the first deep link; tap through it and open the URL again.</p>
+<p>For Expo Go, replace <code>--dev-client</code> with <code>--go</code>, then open:</p>
+<pre><code class="language-bash">lim ios open-url \
+  --id &lt;ios-instance-id&gt; \
+  "exp://${TUNNEL_URL#http://}"
+</code></pre>
+<p>Tunnel lifecycle:</p>
+<pre><code class="language-bash">lim ios tunnel status --id &lt;ios-instance-id&gt; --json
+lim ios tunnel stop --id &lt;ios-instance-id&gt;
+</code></pre>
+<p>One instance accepts one active destination tunnel. Stop the current tunnel
+before starting another route set. When iteration ends, stop Metro with
+<code>Ctrl+C</code> and stop the detached tunnel with the command above.</p>
+<p>If the simulator attempts a route while Metro is stopped, the tunnel remains
+active and status records a correlated <code>connection_refused</code>. Restart Metro with
+the same proxy URL and reopen the dev-client URL; do not recreate the simulator
+or tunnel.</p>
+<h2>Start Metro on Android</h2>
+<p>Android uses <code>adb reverse</code> over the CLI's ADB tunnel. Metro stays on its default
+port 8081, no packager hostname override is needed, and the emulator reaches
+Metro at <code>http://127.0.0.1:8081</code>:</p>
+<pre><code class="language-bash">lim android connect --id &lt;android-instance-id&gt;   # background shell; prints "Tunnel started on 127.0.0.1:&lt;port&gt;."
+adb -s 127.0.0.1:&lt;port&gt; reverse tcp:8081 tcp:8081
+
+npx expo start --dev-client --port 8081
+
+DEV_CLIENT_URL="${SCHEME}://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8081"
+lim android open-url "$DEV_CLIENT_URL" --id &lt;android-instance-id&gt;
+</code></pre>
+<p>The ADB tunnel dies with the shell that started it, and the port changes on
+every reconnect; re-run <code>adb reverse</code> with the new serial after any reconnect.
+See <strong>limrun-android-emulator</strong> for tunnel details.</p>
+<p>On the first launch, tap through the dev-menu onboarding sheet
+(<code>lim android tap-element --text Continue</code>) and close the dev menu. The bundle
+loads behind the native sheet.</p>
+<h2>Fallback: Expo Tunnel</h2>
+<p>If the Limrun endpoint cannot be used, start Expo's public tunnel:</p>
+<pre><code class="language-bash">npm install --save-dev '@expo/ngrok@^4.1.0'
+npx expo start --dev-client --tunnel
+</code></pre>
+<p>Use the complete dev-client URI Expo prints:</p>
+<pre><code class="language-bash">DEV_CLIENT_URL="&lt;complete URI printed by Expo&gt;"
+lim ios open-url --id &lt;ios-instance-id&gt; "$DEV_CLIENT_URL"
+lim android open-url "$DEV_CLIENT_URL" --id &lt;android-instance-id&gt;
+</code></pre>
+<h2>Legacy iOS fixed-port reverse tunnel</h2>
+<p><code>lim ios reverse</code> remains available for workflows that already use the reserved
+57090–57099 range. Expo dev-client can derive or advertise multiple packager
+URLs, so mismatched mappings like <code>57090:8081</code> can leave some URLs pointing at
+the local Metro port instead of the simulator-facing reverse endpoint.</p>
+<p>Use the simulator-facing host printed by <code>lim ios reverse</code> in both <code>REACT_NATIVE_PACKAGER_HOSTNAME</code> and the encoded dev-client URL. Keep the reverse command running in a separate or background terminal while Metro is running:</p>
+<pre><code class="language-bash">lim ios reverse 57090:57090 --id &lt;ios-instance-id&gt;
+
+REACT_NATIVE_PACKAGER_HOSTNAME=&lt;reverse-host&gt; \
+  npx expo start --dev-client --host lan --port 57090
+
+ENCODED_URL="$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "http://&lt;reverse-host&gt;:57090")"
+DEV_CLIENT_URL="${SCHEME}://expo-development-client/?url=${ENCODED_URL}"
+lim ios open-url --id &lt;ios-instance-id&gt; "$DEV_CLIENT_URL"
+</code></pre>
+<h2>Verify</h2>
+<p>For quick static validation, prefer:</p>
+<pre><code class="language-bash">npx tsc --noEmit
+</code></pre>
+<p>Only run <code>npm run lint</code> or <code>npx expo lint</code> when the repo already has ESLint configured. Expo lint can create ESLint config and mutate dependencies in projects that have not configured linting yet.</p>
+<p>On iOS, use the element tree first:</p>
+<pre><code class="language-bash">lim ios element-tree
+</code></pre>
+<p>Success means the app UI is visible or the Expo dev menu shows it is connected to the tunnel. On a fresh instance the first dev-client launch can land on the dev-menu onboarding sheet covering the launcher: tap through it (<code>lim ios tap-element --ax-label Continue</code>), then open the dev-client URL again, since the first deep link is consumed by the sheet. If the tree does not confirm the connection, inspect app logs:</p>
+<pre><code class="language-bash">lim ios app-log "$BUNDLE_ID" --tail 100
+</code></pre>
+<p>On Android, verify with screenshots, not the element tree: Expo apps
+typically expose no accessibility nodes there, so a rendered screen and an
+empty tree coexist (see <strong>limrun-android-emulator</strong>):</p>
+<pre><code class="language-bash">lim android screenshot check.png --id &lt;android-instance-id&gt;
+</code></pre>
+<p>To see why the app died (crash, ANR), relaunch it watched; the command blocks
+while the app runs (run it in a background shell) and prints the exit reason,
+stack trace, and a recent app log tail when the app dies:</p>
+<pre><code class="language-bash">lim android launch-app "$PACKAGE" --mode RelaunchIfRunning --id &lt;android-instance-id&gt;
+</code></pre>
+<h2>Iterating</h2>
+<p>Once connected, JS/TS edits should update through Metro without another native build. If the task changes native dependencies, native config, or build settings, rebuild Debug before relaunching the dev loop.</p>
+<p>Tell the user:</p>
+<ul>
+<li>device stream as a short Markdown link, for example <code>[Open simulator stream](&lt;signedStreamUrl&gt;)</code> or <code>[Open emulator stream](&lt;signedStreamUrl&gt;)</code></li>
+<li>uploaded Debug asset name</li>
+<li>that JS/TS changes can now iterate through Metro</li>
+<li>that native changes require a new Debug build</li>
+</ul>
+<h2>Final Preview</h2>
+<p>For a final shareable preview or PR demo, use a Release build so the user does not need Metro running:</p>
+<pre><code class="language-bash">ASSET_NAME="&lt;bundle-id&gt;/&lt;pr-or-session&gt;.zip"
+lim xcode build . --configuration Release --upload "$ASSET_NAME"
+
+ASSET_NAME="&lt;package&gt;/&lt;pr-or-session&gt;.apk"
+lim gradle build . --task assembleRelease --upload "$ASSET_NAME"
+</code></pre>
+<p>Preview URL (<code>platform=android</code> for APK assets):</p>
+<pre><code class="language-text">https://console.limrun.com/preview?asset=${ASSET_NAME}&amp;platform=ios
+</code></pre>
+<h2>Gotchas</h2>
+<ul>
+<li><code>npx expo start --dev-client</code> requires <code>expo-dev-client</code>; without it Expo cannot determine the development-build scheme.</li>
+<li><code>No script URL provided</code> usually means the app is not a dev-client build or was launched without a dev-client URL.</li>
+<li>After a fresh native rebuild/install, a stale Metro/runtime error like <code>Cannot find native module</code> may come from the old app process. Relaunch the dev-client URL and verify with <code>element-tree</code> before assuming the rebuild failed.</li>
+<li>If a Debug build after adding a native dependency still behaves like the old native graph, that is unexpected Limrun behavior. Retry the build; creating a fresh build/device target is only a troubleshooting fallback.</li>
+<li>Expo tunnel startup can be flaky. Retry before changing the workflow.</li>
+<li>Do not reuse uploaded Debug assets after native dependency or native config changes.</li>
+<li>On Android, pass <code>--id &lt;android-instance-id&gt;</code> to every <code>lim android</code> call in this loop: instance resolution is per git worktree and the loop's commands run from mixed directories.</li>
+<li>An empty Android element tree while the screenshot shows the app is normal for Expo apps; verify by screenshot.</li>
+</ul>

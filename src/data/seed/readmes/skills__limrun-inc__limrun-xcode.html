@@ -1,0 +1,450 @@
+<h1>Remote Xcode build</h1>
+<p>Build Apple projects on Limrun's remote Xcode, from any environment (Linux,
+Windows, macOS, VM, container). <code>lim xcode build</code> syncs your sources to a remote
+Xcode instance, builds there, and (when a simulator is attached) installs and
+relaunches the app. This workflow builds on the remote instance; local Xcode, local simulators,
+and local build tools are not part of it. A finished run has the app running
+and verified on a Limrun simulator.</p>
+<p>For driving the app once it's running (tap, type, element tree, screenshot,
+record), use the <strong><code>limrun-ios-simulator</code></strong> skill. For Bazel workspaces, use
+<strong><code>limrun-bazel</code></strong> instead of this skill.</p>
+<h2>Auth and CLI</h2>
+<p>Install if needed: <code>npm install --global lim</code>. Auth is <code>lim login</code> or
+<code>LIM_API_KEY</code> (it may already be set in the user's environment even when <code>.env</code> and the shell do not show it; check before asking for it). The CLI is the source of truth:
+the commands in this skill are verified, but if a flag errors or you need one
+not shown here, check <code>--help</code> instead of guessing:</p>
+<pre><code class="language-bash">lim xcode --help
+lim xcode build --help
+lim xcode run --help
+</code></pre>
+<h2>Build</h2>
+<p>Instead of <code>xcodebuild</code>, build with:</p>
+<pre><code class="language-bash">lim xcode build .
+</code></pre>
+<p>This creates or reuses the remembered Xcode target, syncs the current directory,
+and streams the build logs through stdout and stderr.</p>
+<p>Use <code>--scheme</code> and <code>--workspace</code> if the project has multiple schemes or uses a
+workspace file:</p>
+<pre><code class="language-bash">lim xcode build . --scheme MyApp --workspace MyApp.xcworkspace
+</code></pre>
+<p>Use <code>--configuration Debug</code> or <code>--configuration Release</code> for a specific Xcode
+configuration. If omitted, Limrun uses limbuild's project-type default: <code>Debug</code>
+for native Xcode builds, <code>Release</code> for React Native / Expo builds.</p>
+<pre><code class="language-bash">lim xcode build . --configuration Debug
+</code></pre>
+<h3>Detached builds and logs</h3>
+<p>Use <code>--detach</code> to return once the build is accepted; a webhook is optional.
+<code>logs</code> reads the latest build without an exec ID, including persisted logs after
+instance deletion; add <code>--follow</code> to wait for completion.</p>
+<pre><code class="language-bash">lim xcode build . --detach
+lim xcode logs
+lim xcode logs --follow
+</code></pre>
+<h3>Pick the Xcode version</h3>
+<p>A sandbox builds with its node's default Xcode (26.4 today). The fleet carries
+one released (GA) Xcode per major plus one beta while Apple seeds one: today
+26.4 GA, 27.0 GA and 27.1 beta. Two selectors cover them:</p>
+<ul>
+<li>A bare major (<code>27</code>) binds the newest GA release of that major, never a beta,
+and follows Apple's point releases on its own. Use it for App Store builds.</li>
+<li>A major.minor (<code>27.1</code>) pins that exact version. This is how you pick a beta.</li>
+</ul>
+<p>Set a preference once for the workspace; every later build, test, RBE session
+and new sandbox follows it, and the flag overrides it for one command:</p>
+<pre><code class="language-bash">lim xcode version list      # Select is the value to type, Channel is ga or beta; * marks the one in use
+lim xcode use xcode@27      # prefer the Xcode 27 GA for this workspace; switches the remembered sandbox now
+lim xcode build .           # builds with 27
+lim xcode version           # "27.0 (27A266a)" shows the sandbox's current Xcode
+lim xcode version set 27.1  # pin the 27.1 beta instead
+lim xcode build . --xcode-version 26   # one-off override, not remembered
+lim xcode version unset     # forget the preference; the sandbox goes back to the node default
+</code></pre>
+<p>Combine Xcode and mise selections with <code>lim xcode use xcode@27 node@24</code>.</p>
+<p>For scripting, <code>lim xcode version list --quiet</code> prints one selector per line
+(<code>26</code>, <code>27</code>, <code>27.1</code>) and <code>--json</code> returns <code>{ installed, bound, preferred }</code>
+(<code>installed[].channel</code> is <code>ga</code> or <code>beta</code>). The table marks the Xcode in use
+with <code>*</code>. <code>lim xcode version set</code> does not record a version the node lacks (the
+error lists the available ones) but keeps it when the sandbox is merely busy.</p>
+<p>When the sandbox is on another Xcode than the workspace prefers, the next
+build says so and switches it first. Switching invalidates the build cache made
+with the other version (the next build starts cold) and is refused while a build,
+sync or <code>lim xcode rbe</code> stack is running. With persistent disk snapshots
+(<code>--snapshot-key</code>), use a separate key per Xcode lane, for example <code>myapp-27</code> and
+<code>myapp-27.1</code>: archives are stored per key and a restore under a different Xcode
+is wiped.</p>
+<p>A major.minor pin lasts until the fleet retires that version; then
+<code>lim xcode build</code> fails with the daemon's message and a hint to run
+<code>lim xcode version set 27</code> or <code>lim xcode version unset</code>. When a beta becomes GA
+it replaces the beta under the same major.minor selector (one cold build); the
+bare major follows the newest released Xcode of its major, so it moves to 27.1
+as soon as 27.1 is GA on the node.</p>
+<p>App Store uploads from a beta Xcode are rejected by Apple, so keep
+<code>--upload-to-appstore</code> on a bare-major pin (<code>27</code>, not <code>27.1</code>). Gate on
+<code>channel</code>, not <code>betaSeed</code>: Apple's 27.1 seed ships without a seed number.</p>
+<p><code>--dev-server-url</code> is only supported with <code>--configuration Debug</code> for React
+Native / Expo builds. It's a post-install launch URL: limbuild validates it is a
+parseable absolute URL, then opens it unchanged after installing on the attached
+simulator. Framework-specific skills construct the correct URL.</p>
+<pre><code class="language-bash">lim xcode build . --configuration Debug --dev-server-url '&lt;absolute-url&gt;'
+</code></pre>
+<p>If the app launches without using the expected URL, open it explicitly to
+separate build/install issues from URL routing:</p>
+<pre><code class="language-bash">lim ios open-url --id &lt;ios-instance-id&gt; '&lt;absolute-url&gt;'
+</code></pre>
+<h2>Disk snapshots</h2>
+<p>Reuse source files, dependencies, and DerivedData across Xcode instances.</p>
+<p>CLI <strong>0.35.1 and earlier</strong> use <code>--cache-*</code> instead of <code>--snapshot-*</code>, and
+<code>--wait-cache</code> instead of <code>--wait-snapshot</code>. The snapshot rename preserves
+the old flags as aliases.</p>
+<p>From the project directory, create with a snapshot key, build, then delete:</p>
+<pre><code class="language-bash">XCODE_ID=$(lim xcode create --snapshot-key myapp-main --quiet)
+lim xcode build . --id "$XCODE_ID" --scheme MyApp
+lim xcode delete "$XCODE_ID" --wait-snapshot
+</code></pre>
+<p>The first run starts cold; later runs restore the saved snapshot. Termination
+saves it after a successful build with no later sync, replacing the previous
+snapshot under that key. <code>--wait-snapshot</code> waits for the save and reports its
+result. In CI, run deletion in a cleanup step even if the build fails.</p>
+<p>Leave <code>--snapshot-paths</code> unset to save the whole workspace. Keep the project
+folder's name unchanged between runs. Use separate keys per project, Xcode
+version, and concurrent CI job.</p>
+<p>For branch fallbacks, add <code>--snapshot-restore-keys "myapp-pr51,myapp-main"</code>
+at creation. Each entry tries an exact match, then the newest matching literal
+prefix, before moving to the next entry. Without this flag, the save key is
+also the restore key. Pass only restore keys to reuse a snapshot without saving.</p>
+<p>Configure snapshots at creation. Restore keys and paths stay fixed.
+On an existing instance, <code>build --snapshot-key</code> can only bind an unassigned
+save key if snapshots were already enabled; it does not restore or enable them.</p>
+<p>See the <a href="https://docs.limrun.com/docs/ios/snapshots" target="_blank" rel="noopener noreferrer">disk snapshot guide</a> for skipped
+saves, cold builds, and SDK usage.</p>
+<h2>Private dependency credentials</h2>
+<p>Copy existing credential files with <code>--additional-file</code>, also supported by <code>sync</code>:</p>
+<pre><code class="language-bash">lim xcode build . \
+  --additional-file "$HOME/.npmrc=~/.npmrc" \
+  --additional-file "$HOME/.netrc=~/.netrc"
+</code></pre>
+<p>Remote <code>~/</code> targets the sandbox home; other destinations are workspace-relative.
+Repeat the flags on later syncs to retain the files. Pass <code>--env</code> for environment
+variables referenced by the configuration.</p>
+<h2>Developer tool versions</h2>
+<p>After syncing, <code>lim xcode use</code> selects tools in the sandbox and installs missing versions.
+Run <code>lim xcode tools install</code> for synced project tool selections (<a href="https://docs.limrun.com/docs/ios/build-with-xcode" target="_blank" rel="noopener noreferrer">details</a>). Use major versions, or major.minor for Ruby, Flutter, and pre-1.0 tools such as Mint.</p>
+<pre><code class="language-bash">lim xcode tools
+# Node includes npm/npx, Ruby includes gem, Flutter includes Dart, CocoaPods includes cocoapods-patch.
+lim xcode use node@24 pnpm@10 yarn@4 bun@1 ruby@3.3 bundler@4 cocoapods@1 \
+  cmake@3 java@jetbrains-21 corretto@21 flutter@3.44 mint@0.18 \
+  xcodegen@2 xcbeautify@3 zsign@1
+lim xcode tools install
+lim xcode use --cwd apps/mobile node@24
+lim xcode tools install --cwd apps/mobile
+lim xcode run -- mise use --pin node@24.5.0
+</code></pre>
+<h2>Run project commands</h2>
+<p>Use <code>lim xcode run [relative-cwd] -- &lt;command&gt;</code> when the repository needs a
+remote macOS command before or outside <code>xcodebuild</code>. The CLI syncs the current
+directory first. The working directory is relative to that synced root and
+defaults to <code>.</code>:</p>
+<pre><code class="language-bash">lim xcode run -- make api
+lim xcode run apps/api -- make generate
+</code></pre>
+<p>Pass environment variables before the delimiter. Use <code>--no-sync</code> only when the
+same instance already has the source state you need:</p>
+<pre><code class="language-bash">lim xcode run --env API_ENV=development -- npm run generate
+lim xcode run --no-sync -- make api
+</code></pre>
+<p>The sandbox includes Node, Ruby, CMake, Mint, mise, and Homebrew. Tool installs
+made with mise, Mint, or Homebrew stay in the instance's sandbox home and
+remain available on later commands on that instance:</p>
+<pre><code class="language-bash">lim xcode run -- 'mise trust &amp;&amp; mise install'
+lim xcode run -- 'mint install apollographql/apollo-ios-cli'
+lim xcode run -- brew install tree
+</code></pre>
+<p>Commands are one-shot and non-interactive. There is no TTY or stdin channel.</p>
+<h2>Generated Xcode projects (XcodeGen)</h2>
+<p>If the repo has a <code>project.yml</code> and the <code>.xcodeproj</code> is gitignored, do not run
+xcodegen locally and do not treat the missing project as an error. The remote
+sandbox generates the project from <code>project.yml</code> before building:</p>
+<pre><code class="language-bash">lim xcode build .
+</code></pre>
+<p>The spec is found at the repo root or one directory down (like <code>ios/</code>), no
+flags needed. The project regenerates on every build, so <code>project.yml</code> edits
+take effect by just rebuilding. A committed or force-synced <code>.xcodeproj</code>
+always wins: the sandbox only generates when the sync didn't supply one.</p>
+<p>If the repo's codegen produces gitignored inputs the build needs (a generated
+local Swift package, config-derived sources), run that step locally first and
+force-sync its output with <code>--include</code>:</p>
+<pre><code class="language-bash">make generate   # or whatever the repo's codegen step is
+lim xcode build . --include '^ios/GeneratedKit/'
+</code></pre>
+<p><code>--include</code> takes a regular expression like <code>--ignore</code>, not gitignore syntax.
+To reach files under a directory that is ignored as a whole, the pattern must
+also match the directory path itself, as above.</p>
+<h2>Run on a simulator</h2>
+<p><code>lim xcode build</code> is build-and-install. Don't attach a simulator until the user
+needs to see or interact with the app. Check / attach:</p>
+<pre><code class="language-bash">lim xcode get             # is a simulator already attached?
+lim ios create --attach   # attach one (installs the last build immediately)
+</code></pre>
+<p>Add <code>--no-open</code> when you have no browser to show the user; it skips opening
+the stream URL locally and still prints it for sharing.</p>
+<p>If the attach output includes a signed stream URL, share it with the user as a
+Markdown link, such as <code>[Live simulator](&lt;signed-stream-url&gt;)</code>.</p>
+<p>When a simulator is attached, every successful <code>lim xcode build</code> automatically
+reinstalls and relaunches the app, no separate install step. To tap, type, read
+the element tree, screenshot, or record, switch to <strong><code>limrun-ios-simulator</code></strong>.</p>
+<h2>Run tests (XCTest)</h2>
+<p><code>lim xcode test</code> builds the scheme's test targets on the sandbox, runs them on
+an attached simulator (unit and UI targets alike), and streams one line per
+test case. The exec exits non-zero when any test fails, so it works as a CI
+gate.</p>
+<pre><code class="language-bash">lim xcode test .
+lim xcode test ./MyProject --scheme MyApp
+</code></pre>
+<p>It auto-acquires a simulator-backed target like <code>lim xcode build --ios</code> and
+reuses the instances on repeat runs, so iterating is fast. The scheme must
+have a test action configured (shared schemes from Xcode have one when the
+project has test targets). <code>--xcode-version 27</code> builds the tests with that
+major's GA (<code>27.1</code> selects the beta); the simulator keeps the fleet default
+runtime, so the run warns and proceeds (runtime-dependent failures are possible).</p>
+<p>Select a subset with xcodebuild's identifier format
+<code>Target[/Class[/method]]</code>; repeat the flag for multiple entries. The two flags
+are mutually exclusive:</p>
+<pre><code class="language-bash">lim xcode test . --only-testing MyAppTests/LoginTests/testValidLogin
+lim xcode test . --skip-testing MyAppUITests
+</code></pre>
+<p>A bare target name selects or skips that whole target. An <code>--only-testing</code>
+entry naming a target the build did not produce fails the run instead of
+silently running everything.</p>
+<p>For machine consumption, <code>--json</code> streams the raw per-case events as NDJSON
+and ends with a <code>{"exitCode": N}</code> record:</p>
+<pre><code class="language-bash">lim xcode test . --json &gt; results.ndjson
+</code></pre>
+<p><code>--build-only</code> compiles the test targets without acquiring a simulator; the
+products stay on the sandbox for a later run.</p>
+<p>If UI tests fail at the very first interaction on an instance that has run
+many suites back to back, prefer fresh instances with
+<code>--inactivity-timeout 30m</code> on the next run.</p>
+<h2>Signed device builds (IPA)</h2>
+<p>Prefer Apple cloud signing when the user has an App Store Connect team API key.
+Apple creates or reuses a cloud-managed certificate and provisioning profile,
+so the user does not need to supply a p12 or <code>.mobileprovision</code>. The key ID,
+issuer ID and <code>.p8</code> file are configured by the user on their own machine as
+flags or environment variables; never ask for their values in the conversation:</p>
+<pre><code class="language-bash">lim xcode build . --sdk iphoneos --configuration Release \
+  --signing-method release-testing --team-id "$APPLE_TEAM_ID" \
+  --asc-key-id "$ASC_KEY_ID" --asc-issuer-id "$ASC_ISSUER_ID" \
+  --asc-key AuthKey.p8 \
+  --upload myapp.ipa
+</code></pre>
+<p>Signing methods:</p>
+<ul>
+<li><code>debugging</code>: development-signed IPA for registered development devices.</li>
+<li><code>release-testing</code>: distribution-signed IPA for registered test devices.</li>
+<li><code>app-store-connect</code>: distribution-signed IPA for App Store Connect.</li>
+</ul>
+<p>Cloud signing requires a device SDK (<code>--sdk iphoneos</code> or <code>--sdk watchos</code>), a
+team API key with an issuer ID, and <code>--team-id</code> matching that key's Apple
+Developer team. For distribution methods,
+the API key must be an Admin key or have <strong>Access to cloud-managed distribution
+certificates</strong> enabled. A <code>Cloud signing permission error</code> means that permission
+is missing. <code>No Account for Team</code> means the team ID and API key do not match.
+<code>Failed Registering Bundle Identifier</code> means the bundle ID belongs to another
+team and cannot be registered automatically.</p>
+<p>Cloud signing takes entitlements only from <code>--entitlements</code>, never from the
+project's <code>.entitlements</code> file: the archive is unsigned and the export
+preserves entitlements only from an existing code signature. Any app using
+capabilities (HealthKit, CloudKit, app groups, push) MUST pass the flag or
+the capability is silently stripped from the IPA. A bare path targets the
+app; <code>&lt;bundleId&gt;=&lt;path&gt;</code> targets an embedded bundle (widget, watch app);
+repeat per bundle:</p>
+<pre><code class="language-bash">lim xcode build . --sdk iphoneos --configuration Release \
+  --signing-method release-testing --team-id VMBY3VYW4U \
+  --asc-key-id 2X9R4HXF34 --asc-issuer-id "$ASC_ISSUER_ID" \
+  --asc-key AuthKey.p8 \
+  --entitlements ./MyApp/MyApp.entitlements \
+  --entitlements com.example.myapp.widgets=./Widgets/Widgets.entitlements \
+  --upload myapp.ipa
+</code></pre>
+<p>The plist values must be fully expanded (no <code>$(AppIdentifierPrefix)</code>; write
+the concrete prefix), must omit export-managed keys (<code>application-identifier</code>,
+<code>com.apple.developer.team-identifier</code>, <code>get-task-allow</code>,
+<code>beta-reports-active</code>), and every capability must be enabled on the App ID in
+the developer portal or the export fails naming it.</p>
+<p>Manual signing remains available when the user already has a p12 and profiles:</p>
+<pre><code class="language-bash">lim xcode build . --sdk iphoneos --configuration Release \
+  --certificate-p12 dist.p12 --certificate-password "$P12_PASSWORD" \
+  --provisioning-profile app.mobileprovision \
+  --upload myapp.ipa
+</code></pre>
+<p>The upload output includes a download URL for the signed IPA. A SUCCEEDED build
+means the signature already passed Apple's verifier on the server, so don't
+re-verify the IPA yourself unless the user asks. Invalid signing fails the
+build loudly instead of producing a broken artifact.</p>
+<p>If the app embeds extensions (WidgetKit widgets, share sheets, intents) or a
+watch app, App Store signing needs one provisioning profile per bundle id, all
+issued for the same distribution certificate. Repeat <code>--provisioning-profile</code>
+once per bundle; each profile is matched to its bundle by the
+application-identifier inside it, so order doesn't matter:</p>
+<pre><code class="language-bash">lim xcode build . --sdk iphoneos --configuration Release \
+  --certificate-p12 dist.p12 --certificate-password "$P12_PASSWORD" \
+  --provisioning-profile app.mobileprovision \
+  --provisioning-profile widgets.mobileprovision \
+  --upload myapp.ipa
+</code></pre>
+<p>With multiple profiles, every profile must carry an explicit (non-wildcard)
+bundle id. A <code>signing preflight failed: no provisioning profile covers ...</code>
+error names the embedded bundle that lacks a profile; ask the user for a
+profile with exactly that bundle id.</p>
+<p>Use a p12 that includes its full CA chain, not just the leaf certificate. If
+needed, re-export it with the chain:</p>
+<pre><code class="language-bash">openssl pkcs12 -export -inkey dist.key -in dist.pem -certfile wwdr.pem -out dist-chain.p12
+</code></pre>
+<p>Failure strings to recognize in the build output:</p>
+<ul>
+<li><code>Unknown issuer hash</code>: the p12 lacks its CA chain; re-export it with the
+chain as above.</li>
+<li><code>code signature verification failed</code>: the platform's post-sign check rejected
+the artifact. Not a problem in the user's code; retry, and report it if it
+persists.</li>
+<li>p12 password errors: <code>--certificate-password</code> doesn't match the file; the
+user corrects the value on their machine.</li>
+</ul>
+<h2>Upload to App Store Connect</h2>
+<p>To upload the signed IPA to App Store Connect for TestFlight or App Store
+distribution, pass <code>--upload-to-appstore</code> with the App Store Connect API key
+flags on a signed device build:</p>
+<pre><code class="language-bash">lim xcode build . --sdk iphoneos --configuration Release \
+  --certificate-p12 dist.p12 --certificate-password "$P12_PASSWORD" \
+  --provisioning-profile app.mobileprovision \
+  --upload-to-appstore --asc-key-id "$ASC_KEY_ID" --asc-issuer-id "$ASC_ISSUER_ID" \
+  --asc-key AuthKey.p8
+</code></pre>
+<p>Cloud signing can sign and upload with the same API key:</p>
+<pre><code class="language-bash">lim xcode build . --sdk iphoneos --configuration Release \
+  --signing-method app-store-connect --team-id "$APPLE_TEAM_ID" \
+  --asc-key-id "$ASC_KEY_ID" --asc-issuer-id "$ASC_ISSUER_ID" \
+  --asc-key AuthKey.p8 \
+  --upload-to-appstore --auto-build-number
+</code></pre>
+<p><code>--upload-to-appstore</code> requires either cloud signing or the manual signing
+flags, plus <code>--asc-key-id</code> and <code>--asc-key</code>. Combine it with <code>--upload &lt;asset-name&gt;</code> when the user also wants the IPA in Asset Storage.</p>
+<p>Device IPAs carry the app's symbols (<code>Symbols/</code> next to <code>Payload/</code>), so App
+Store Connect symbolicates crash reports without a separate dSYM upload. This
+needs the build to produce dSYMs: <code>--configuration Release</code> does by default;
+Debug does not, and the IPA then simply ships without symbols.</p>
+<p>The user provides these on their own machine, as flags or environment variables
+the CLI reads locally; they are not pasted into the conversation. All three live
+in App Store Connect under Users and Access, Integrations tab, App Store Connect
+API:</p>
+<ul>
+<li><code>--asc-key-id</code>: the Key ID next to their API key. If they don't have one,
+point them at Team Keys with the <strong>Developer</strong> role: the least-privileged
+role that can upload builds. Creating team keys needs an Admin account.</li>
+<li><code>--asc-issuer-id</code>: the Issuer ID at the TOP of the Integrations page (a
+team value, not per-key). Cloud signing requires a team key and this flag.
+For manual signing plus upload, omit it for individual API keys.</li>
+<li><code>--asc-key</code>: path to the downloaded <code>.p8</code> file. Apple keeps no copy and
+the download link disappears after leaving the page; if the user lost it,
+they must generate a new key. Never commit the <code>.p8</code> or paste its content
+into files; pass a filesystem path.</li>
+</ul>
+<p>By default the build returns as soon as the upload commits and leaves Apple's
+processing verdict to App Store Connect (processing routinely takes many
+minutes). Pass <code>--asc-wait-timeout &lt;seconds&gt;</code> (max 1800) to watch for the
+verdict before returning. Read the outcome from the final lines:</p>
+<ul>
+<li><code>App Store Connect: upload accepted.</code>: done; the build appears in
+TestFlight once Apple finishes.</li>
+<li><code>App Store Connect: uploaded, still processing on Apple's side (upload &lt;id&gt;).</code>: the exit code is 0 and the upload succeeded; Apple is still
+processing. Do NOT retry the build.</li>
+<li><code>App Store Connect upload failed; the build and signing succeeded.</code>: exit
+code 1 with Apple's error text earlier in the log. Only the delivery
+failed.</li>
+</ul>
+<p>Failure strings to recognize:</p>
+<ul>
+<li>Apple text about the bundle version being already used: bump
+<code>CFBundleVersion</code> (Expo: <code>expo.ios.buildNumber</code> in app.json) and rebuild.</li>
+<li><code>HTTP 401</code>: key ID / issuer ID / .p8 mismatch, or a revoked key.</li>
+<li><code>HTTP 403</code>: the key's role cannot upload builds; it needs the Developer role
+or higher.</li>
+<li><code>no App Store Connect app with bundle id</code>: the app record doesn't exist;
+the user must create it in App Store Connect manually (the API cannot).</li>
+<li>Build later stuck at "Missing Compliance" in TestFlight: the app doesn't
+answer the export-compliance question at build time. Set
+<code>ITSAppUsesNonExemptEncryption</code> to <code>NO</code> in Info.plist (Expo:
+<code>expo.ios.config.usesNonExemptEncryption: false</code> in app.json) and rebuild.</li>
+</ul>
+<p>For hands-off delivery to testers, the app's internal TestFlight group must
+have automatic distribution enabled (create-only setting) and the compliance
+key above must be set; then no post-upload steps exist at all.</p>
+<h2>Preview builds</h2>
+<p>For repeatable previews on pull requests, prefer the packaged
+<a href="https://github.com/limrun-inc/ios-preview-action" target="_blank" rel="noopener noreferrer">iOS preview action</a>.
+It builds and uploads the app, updates the PR preview comment, and cleans up the
+builder; see the repository for inputs and workflow examples.</p>
+<p>Only create a reusable preview asset when the user asks for a preview build or
+when you're opening a PR. Build and upload:</p>
+<pre><code class="language-bash">ASSET_NAME="&lt;bundle id / pr number / or any session identifier&gt;.zip"
+lim xcode build . --upload ${ASSET_NAME}
+# Debug preview build:
+lim xcode build . --configuration Debug --upload ${ASSET_NAME}
+</code></pre>
+<p>Build uploads default to a 14-day TTL: each build pushes the asset's expiry
+to 14 days from that upload. Pass <code>--upload-ttl</code> with a Go duration (e.g.
+<code>720h</code>; <code>1d</code> is invalid) to change it.</p>
+<p>Then construct the preview link and include it in your last message (and in the
+PR, if you're opening one):</p>
+<pre><code>https://console.limrun.com/preview?asset=${ASSET_NAME}&amp;platform=ios
+</code></pre>
+<h2>Gotchas</h2>
+<ul>
+<li><strong>Build errors are part of the job.</strong> If a build fails, read the error output, fix the code, and rebuild before reporting back.</li>
+<li><strong>A project mise file installs tools the build never uses.</strong> The first
+build or run in a sandbox runs <code>mise install</code> for every <code>[tools]</code> entry in the
+synced mise files, so a monorepo's root <code>mise.toml</code> full of databases and
+cloud CLIs slows it down or fails it. Keep using the project file when it
+works. If it doesn't, add a <code>mise.limrun.toml</code> beside it listing only the
+build's tools (for example node and pnpm); in that directory Limrun reads it
+instead of the other mise files.</li>
+<li><strong>The embedded Xcode sandbox is gone.</strong> The TypeScript SDK (0.54.0+) and
+<code>lim</code> (0.35.0+) no longer create an Xcode sandbox inside an iOS instance.
+Symptoms after an upgrade: <code>'sandbox' does not exist in type 'Spec'</code> on
+<code>iosInstances.create</code>, <code>Property 'sandbox' does not exist on type 'Status'</code>
+where code reads <code>status.sandbox.xcode.url</code>, or <code>Expected an Xcode instance (sandbox_...), got ios_...</code> from a <code>lim xcode</code> command. Create the Xcode
+sandbox on its own and attach the simulator: <code>lim ios create --xcode</code>, or
+<code>lim xcode create --attach --simulator-id &lt;ios-instance-id&gt;</code> for an existing
+simulator; in the SDK, <code>xcodeInstances.create</code> then <code>attachNewSimulator()</code> or
+<code>attachSimulator(iosInstance)</code> on its client. Pass the <code>sandbox_</code> ID to
+<code>lim xcode</code> commands and the <code>ios_</code> ID to <code>lim ios</code> commands. Details:
+<a href="https://docs.limrun.com/docs/ios/build-with-xcode#moving-off-the-embedded-xcode-sandbox" target="_blank" rel="noopener noreferrer">https://docs.limrun.com/docs/ios/build-with-xcode#moving-off-the-embedded-xcode-sandbox</a></li>
+<li><strong>Instance ID for <code>lim ios</code> commands.</strong> They resolve the current instance
+from the git worktree of your cwd and can fail with <code>No instance ID provided and no recent ios instance found</code>. Get the ID from <code>lim xcode get</code> and pass
+<code>--id &lt;ios-instance-id&gt;</code>; full recipe in limrun-ios-simulator's "Targeting
+the right instance" section.</li>
+<li><strong>Bundle ID discovery.</strong> If you don't know the bundle ID, check the Xcode
+project files or run <code>lim ios list-apps</code> after a successful build.</li>
+<li><strong>Auth errors</strong> on an authenticated command mean the session expired or
+<code>LIM_API_KEY</code> is wrong; <code>lim login</code> on the user's machine renews the session.</li>
+<li><strong>Build settings override Limrun's defaults.</strong> <code>--build-setting KEY=VALUE</code>
+accepts any environment-style key and replaces the managed value with the
+same key. Device builds already use standard architectures (an embedded
+watch app keeps <code>arm64_32</code>) and disable coverage instrumentation, so App
+Store uploads need no extra settings.</li>
+<li><strong>Artifact not found after a successful build.</strong> The server resolves the
+built .app on its own, including when the scheme name differs from the
+product name (scheme "MyApp Dev" building MyApp-dev.app). If an upload
+still fails with <code>built artifact not found</code>, pass the full bundle filename
+explicitly with <code>--artifact-name MyApp-dev.app</code> (including the .app
+extension); the server then takes that name from the build products
+verbatim.</li>
+<li><strong>Keep synced files small.</strong> A single ~2MB+ file can fail the client-side
+sync with ENOMEM before the build starts; compress large assets.</li>
+<li><strong>Symlinks sync when relative and in-root.</strong> A symlink whose target is an
+absolute path is skipped with a warning; recreate it with a relative target
+if the build needs it. A relative link escaping the synced folder fails the
+sync; <code>--ignore</code> it or sync from the repo root that contains the target.</li>
+<li><strong>Signing failures are loud and specific.</strong> <code>Unknown issuer hash</code> means the
+p12 lacks its CA chain, so re-export it with the chain; <code>code signature verification failed</code> means the platform's post-sign check rejected the
+artifact, which is not a code problem, so retry or report it.</li>
+</ul>

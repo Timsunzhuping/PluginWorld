@@ -1,0 +1,116 @@
+<h1>Bazel iOS builds on Limrun RBE (legacy)</h1>
+<p><code>lim xcode rbe</code> is the legacy Bazel path. <code>lim bazel setup</code> (skill
+limrun-bazel) replaces it: no sandbox or tunnel, iOS and Android targets, and
+one cache across the organization. Use this skill only for workspaces that
+already run on <code>lim xcode rbe</code>, or when the user asks for it.</p>
+<p>Build Bazel Apple projects on Limrun's remote Mac workers — from any environment
+(Linux, Windows, macOS, VM, container), no local Xcode. <code>lim xcode rbe</code> brings up
+a remote RBE stack, tunnels it to a local port, and writes a <code>.limrun/</code> config so
+<code>bazelisk build --config=limrun</code> runs Apple actions remotely. Local Xcode and
+local build tools are not part of this workflow.</p>
+<h2>Auth and CLI</h2>
+<p>Install if needed: <code>npm install --global lim</code>. Auth is <code>lim login</code> or
+<code>LIM_API_KEY</code> (it may already be set in the user's environment even when the
+shell does not show it; check before asking for it). The CLI is the source of truth: the commands in this skill are
+verified, but if a flag errors or you need one not shown here, check
+<code>lim xcode rbe --help</code> instead of guessing.</p>
+<h2>Build</h2>
+<ol>
+<li>From the <strong>Bazel workspace root</strong> (has <code>MODULE.bazel</code> / <code>WORKSPACE</code>), run
+<code>lim xcode rbe</code>. It sets up the instance + <code>.limrun/</code> config and <strong>prints the
+exact build command</strong>. The tunnel runs in the background (prints a PID);
+<code>--no-daemon</code> keeps it foreground.</li>
+<li>Run the printed command, e.g.
+<code>bazelisk --digest_function=sha256 build --config=limrun //App</code>.</li>
+</ol>
+<p>Don't hand-write <code>.limrun/</code> or the flags — the CLI generates them for the
+sandbox's Xcode and your OS. <code>lim xcode version set 27</code> (or the one-off
+<code>lim xcode rbe --xcode-version 27</code>) builds with another installed Xcode: a bare
+major binds that major's GA release, a major.minor such as <code>27.1</code> pins that
+exact version (the beta). Re-run <code>lim xcode rbe</code> (after <code>--stop</code>) to refresh
+after a fleet Xcode upgrade or an Xcode switch.</p>
+<p>To add your own Bazel flags to the limrun path without editing the generated
+config, put them in <strong><code>user.limrun.bazelrc</code></strong> at the workspace root. The
+generated config try-imports it last, so your <code>build:limrun --…</code> lines win, and
+it survives <code>lim xcode rbe</code> regeneration (<code>.limrun/</code> does not).</p>
+<h2>Run on a simulator</h2>
+<p><code>lim xcode rbe</code> is build-only; attach a simulator when the user wants to see or
+run the app. Check or attach (it installs the last build immediately, so no
+rebuild is needed):</p>
+<pre><code class="language-bash">lim xcode get             # is a simulator already attached?
+lim ios create --attach   # attach one
+</code></pre>
+<p>Add <code>--no-open</code> when you have no browser to show the user; it skips opening
+the stream URL locally and still prints it for sharing.</p>
+<p>If the attach output includes a signed stream URL, share it with the user as a
+Markdown link, such as <code>[Live simulator](&lt;signed-stream-url&gt;)</code>.</p>
+<p>With a simulator attached, every successful <code>--config=limrun</code> build automatically
+reinstalls and relaunches the app, no separate install step:</p>
+<pre><code class="language-bash">bazelisk --digest_function=sha256 build --config=limrun //App
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li><strong>Attach upfront</strong> if you already know you want a sim: <code>lim xcode rbe --ios</code>
+(attaches at startup, removed on <code>--stop</code>).</li>
+<li>Auto-install happens server-side from the build's events; there is no
+<code>lim xcode rbe install</code> subcommand or <code>--target</code> flag. To force a reinstall,
+rebuild (a cache-hit rebuild is seconds).</li>
+<li>It fires when the successful invocation produced a single app, so in a
+multi-app workspace build one app target per invocation (<code>//App</code>, not
+<code>//...</code>); a multi-app build succeeds but installs nothing.</li>
+</ul>
+<p>To tap, type, read the element tree, screenshot, or record the running app,
+switch to the <strong><code>limrun-ios-simulator</code></strong> skill.</p>
+<h2>Upload builds as assets</h2>
+<p>To publish a build as a Limrun asset (preview links, installing on other
+simulators, CI artifacts), arm uploads at tunnel start or upload one build
+after the fact:</p>
+<pre><code class="language-bash">lim xcode rbe --auto-upload preview/my-app --upload-ttl 24h  # every successful build refreshes the asset
+lim xcode rbe upload preview/my-app --ttl 24h                # one-shot: the newest successful build
+</code></pre>
+<ul>
+<li><code>--auto-upload</code> holds for the tunnel's lifetime: each successful
+<code>--config=limrun</code> build re-uploads the app under that asset name, no
+post-build step. Upload results land in <code>.limrun/rbe.log</code>.</li>
+<li><code>rbe upload</code> runs from the workspace root and needs a background tunnel
+plus at least one successful build; it errors otherwise.</li>
+<li>TTLs are Go durations (<code>24h</code>, <code>30m</code>; <code>1d</code> is invalid) and optional; each
+upload without one pushes the asset's expiry to 14 days from that upload.</li>
+<li>To change the <code>--auto-upload</code> config of a running tunnel, <code>--stop</code> and
+re-run; the CLI refuses a mismatched re-arm instead of silently ignoring it.</li>
+<li>Preview an uploaded app in a browser at
+<code>https://console.limrun.com/preview?asset=&lt;name&gt;&amp;platform=ios</code>.</li>
+</ul>
+<h2>Teardown</h2>
+<p>Stop with <strong><code>lim xcode rbe --stop</code></strong> (~20s to tear the remote stack down) and delete the instance with <strong><code>lim xcode delete &lt;id&gt;</code></strong></p>
+<h2>Gotchas</h2>
+<ul>
+<li><strong>Always pass <code>--digest_function=sha256</code> before <code>build</code></strong> (use the command the
+CLI prints verbatim). The Limrun cache is SHA256-only; Bazel 9 defaults to
+BLAKE3. It's a startup flag, so it can't live in <code>--config=limrun</code>. Symptoms:
+build → <code>Cannot use hash function BLAKE3 with remote cache</code>; install →
+<code>non-SHA256 digest … rebuild with --digest_function=sha256</code>.</li>
+<li><strong>Run <code>lim xcode rbe</code> from the workspace root</strong>, not a subdirectory — it writes
+<code>.limrun/</code> there and fails fast otherwise.</li>
+<li><strong>A green build doesn't prove remote execution</strong> — cache hits (<code>action cache hit</code> / <code>remote cache hit</code>) make builds pass even with the tunnel gone. To force
+and verify real remote execution, see <code>references/verify-remote.md</code>.</li>
+<li><strong>The printed <code>.ipa</code> path won't exist on your machine</strong> — the build command
+carries <code>--remote_download_outputs=minimal</code>, which keeps the artifact in the
+instance's cache and downloads nothing. Bazel still prints its usual
+<code>Target //App:App up-to-date: …/App.ipa</code> line, but that file is <strong>not</strong> on
+disk. This is expected, not a failed build. With a simulator attached, the
+build auto-installs from the artifact's cache digest (read from the build event
+log, not the local file). Only if you genuinely need the <code>.ipa</code> locally, drop
+<code>--remote_download_outputs=minimal</code> from the build command and Bazel downloads
+the top-level output; auto-install keeps working either way.</li>
+<li><strong>A fresh instance can fail the first build with <code>Lost inputs no longer available remotely</code></strong> (e.g. <code>… Assets.car</code>). It's a transient cache eviction
+between instances, not a code error; Bazel prints <code>Found transient remote cache error, retrying the build...</code> and the retry succeeds. To avoid hitting it
+mid-demo, pre-warm with a full build right after <code>lim xcode rbe</code>.</li>
+<li><strong><code>You don't have permission to save … in "CoreSimulator"</code></strong> (actool/ibtool) is
+a fleet-side device gap, not your config. Retry; if it persists, report it to
+Limrun.</li>
+<li><strong>The project's own Bazel settings can fight RBE</strong> (Xcode pinned via a Starlark
+transition, custom <code>remote_default_exec_properties</code>, sandbox-hostile genrules).
+These are per-project, not Limrun bugs — walk
+<code>references/project-compatibility.md</code> before concluding RBE is broken.</li>
+</ul>

@@ -10,105 +10,20 @@
 </thead>
 </table>
 <p>为 <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a>（DSH）打造的跨会话记忆插件。</p>
-<p><strong>核心理念</strong>：每个工作区维护一份结构化记忆数据库（<code>.dsh-meow/memory.db</code>，基于 <code>node:sqlite</code>）。
-静态记忆手册（数据总览 + 工具用法 + 写作准则）以固定 section 的形式放在 <strong>system prompt</strong> 里——
-文本恒定，因此不会破坏 LLM provider 的 KV/上下文缓存。动态内容（soul/user 全量、设计原则、
-记忆导引）作为<strong>第一条用户消息的前缀</strong>注入，且首轮只注入长期记忆、不做关键词命中；
-从第二轮起每条用户消息做关键词命中（top-2）。模型按需用 <code>memory_search</code> /
-<code>memory_project</code> 深入检索。每个窗口由自己的主 agent 在空闲时（"dream"）整理记忆
-（本窗口建立 + 提取过的记忆），以窗口最后一次对话时间戳冻结其知识。</p>
+<p>当前版本 <strong>0.31.0</strong> ｜ 版本变更见 <a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a> ｜ 兼容 <strong>dsh 0.1.5</strong></p>
 <h2>✨ 功能特性</h2>
 <ul>
-<li><strong>七层记忆</strong>（<code>soul</code> = AI 自身 / <code>user</code> = 用户基本信息与偏好 / <code>project</code> = 项目信息，
-含 <code>subcategory</code>（overview/structure/decisions/quotes/ops/todo）/ <code>fact</code> = 原子事实 /
-<code>lesson</code> = 教训与纠正 / <code>topic</code> = 进行中的讨论话题，带目标句 / <code>rules</code> = 设计原则与行为准则）。
-每层一张 SQLite 表，UUID 带时间前缀，id 顺序即创建顺序。</li>
-<li><strong>首轮注入（长期记忆块）</strong>：第一条用户消息前注入固定格式
-<code>===== 长期记忆 =====</code> → <code>【关于你】</code>（soul 全量）→ <code>【关于user】</code>（user 全量）→
-<code>【设计原则】</code>（全局 rules 且 importance≥2，少而精的命令式准则）→ <code>【记忆导引】</code>
-（用法说明 + 「用户的所有 project」动态列表，供 <code>memory_project</code> 选用）。
-记忆作为独立 plugin snapshot 消息放在真实 user 消息之前，不改写用户 prompt。
-<strong>首轮不跑关键词命中</strong>（命中从第二轮起）。即使首条用户消息与插件通知消息同批到达
-（如 approval policy 变更通知），快照仍会紧贴插入到真实用户消息之前、命中绝不提前。</li>
-<li><strong>每消息关键词命中</strong>：从第二条用户消息起，每条真实用户消息都检索
-fact/lesson/rules/topic（范围 = 全局 + 当前 project 锚定），top-2 命中以
-「可能相关的记忆，仅供参考：」前缀注入。命中基于<strong>条目关键词</strong>（LLM 提取或自动
-bigram）而非全文——全文匹配噪音大。打分 = 交集分 × idf × 覆盖率 × 艾宾浩斯衰减
-（按记忆时间戳）× importance 权重 × title 加成。</li>
-<li><strong>当前 project 锚定</strong>：<code>memory_remember/search/update/project</code> 带 project 参数即锚定
-该会话的当前项目；未锚定时命中只搜全局（用户闲聊不误伤）。</li>
-<li><strong>缓存友好设计</strong>：静态 <code>meow-memory:guide</code> section（order 130，紧随各 <code>tool:*</code> 说明之后）
-在 system prompt 中注册一次——文本恒定，KV 缓存友好。已见记忆（<code>injected</code> + <code>searched</code>）
-按会话记录（<code>.dsh-meow/sessions/&lt;id&gt;.json</code>）：注入绝不重复；<code>memory_search</code> 前 5 条按相关度
-无脑取（不排除已见/本 session 建立的记忆），其余从排名后续绕开已见补齐；收到会话压缩
-信号（<code>compaction/*</code>）时释放已见记录，允许压缩后被再次命中提取。</li>
-<li><strong>压缩后重注入</strong>：会话被压缩（手动 <code>/compact</code> 或 token 压力自动触发）后，下一个用户
-消息轮自动重新注入长期记忆快照 + 本会话此前用 <code>memory_project</code> 查阅过的项目全景 +
-本会话自己写入/更新过的记忆原文（均按最新数据重新整理）——压缩甩掉的"记性"一个回合
-就补回来，AI 不会因为压缩突然失忆。</li>
-<li><strong>工具集</strong>：<code>memory_remember</code>（写入，必填 content/project/keywords/importance 且缺失报错引导重填，
-自动去重合并，返回读回确认：关键词/项目归属）/
-<code>memory_search</code>（BM25 × 近期权重，支持 level/project/status/days 过滤，默认 top10 = 前 5 条
-最相关不排除已见 + 后 5 条绕开已见补齐，按记忆时间戳排序；返回检索元数据视图：
-归属 + 完整 id + 相对时间 + 关键词列表，不含原文）/
-<code>memory_project</code>（项目全景注入段落：<strong>project 参数必填</strong>——你要看哪个项目的信息？按子标签分组、未过时条目全给、每条带完整 id 与
-最后更新时间戳、todo 输出「已完成：」最近 5 条 +「To do list：」，末尾附记忆库与
-会话历史定位说明）/
-<code>memory_find_similar</code>（查重与冲突检测）/ <code>memory_read</code> / <code>memory_update</code>（含 status
-active/archived/stale、importance、goal、keywords 手动修正）/ <code>memory_dream</code>（手动触发；
-用户也可以直接在输入框敲 <code>/dream</code> 命令）。</li>
-<li><strong>记忆时间戳</strong>（<code>updated_at</code> = 最后更新时间）：dream 封存或 <code>memory_update</code> 刷新时更新。
-展示的时间戳一律是 <code>updated_at</code>；search（工作视图）带相对时间戳，命中注入/memory_project
-（原文视图）带相对 + 绝对时间戳（如「2026-08-15 10:58 [2 天前]」）。</li>
-<li><strong>project 归属</strong>：全局适用的信息 project 填 <code>"全局"</code>（与留空=未标记区分）；同时适用于
-多个项目时用英文逗号分隔（如 <code>"dsh, femo"</code>）——检索/命中按"包含当前项目名 或 全局"判定。</li>
-<li><strong>按窗口 dream</strong>：窗口空闲 ≥ <code>idleMinutes</code>（默认 <strong>180 分钟 = 3 小时</strong>）即进入允许
-触发状态（替代原夜间窗口），每个最后发言晚于上次 dream 的窗口由自己的主 agent
-整理——分轮处理（第 1 轮原子记忆 project/fact/lesson/rules/soul/user，第 2 轮 topic
-记忆，第 3 轮项目总结——本窗口涉及具体项目时追加：调 memory_project 复查并精简成
-新的项目长期记忆，被取代的旧条目归档），project 小标题分段，每条记忆附关键词行
-（AI 核查/重写关键词用），范围=本窗口
-建立 + 提取过（注入/检索/查阅 memory_read）的记忆，使用其完整会话上下文；
-长期稳定的 rules 不反复重审（<code>dream.rulesReviewDays</code> 默认 2 天内有更新才进清单，
-防"没话找话"式更新）。<strong>峰时抑制</strong>（按 <code>timeZone</code> 计算，默认
-北京时间）：<code>suppressWindows</code>（默认 09:00–12:00、14:00–18:00，API 峰谷电价峰时）
-及各自开始前 <code>suppressLeadMinutes</code>（默认 15）分钟内不触发，峰时结束后下一个检查
-周期自动触发；进行中的 dream 不打断。无 live agent 且超过 24h 的旧窗口、以及已归档
-的会话，均不处理。</li>
-<li><strong><code>/dream</code> 命令</strong>：不想等空闲触发？在输入框敲 <code>/dream</code> 立即手动唤起本窗口的记忆整理
-（与 <code>memory_dream</code> 工具同语义，不受峰时抑制）。dsh 命令平面执行、不发给模型，输入 <code>/</code>
-的补全菜单里直接可见；已有整理在进行中会明确提示，不会重复启动。</li>
-<li><strong>跳过梦境整理（client 端）</strong>：某个窗口的记忆不想被自动整理？左侧边栏该会话行的「…」
-菜单里点一下**「跳过梦境整理记忆」<strong>即可，再点</strong>「取消跳过梦境整理记忆」<strong>恢复。被跳过
-的窗口不再被空闲定时器自动 dream（<code>/dream</code> 与 <code>memory_dream</code> 手动触发不受影响），
-会话列表里显示</strong>静音灰「月牙+斜杠」**图标、一眼可辨。跳过状态持久保存、重启不丢；
-双实例共享同一记忆库，状态天然一致。</li>
-<li><strong>反思</strong>：单次任务内连续 ≥7 个工具 step 后，插件询问模型自上次整理以来是否有值得记忆的内容。
-最后工具是 <code>memory_*</code> 视为已主动记忆、不重复反思；被取消的轮次绝不触发。</li>
-<li><strong>注入折叠 UI（client 端）</strong>：首轮长期记忆 / 每消息关键词命中的注入文本在前端
-折叠成「▸ 已注入记忆（长期记忆/关键词命中）」横条（与用户气泡同宽），点开可查看
-注入全文；用户 prompt 以气泡形式直接显示，消息流干净不被注入刷屏。纯文本消息才折叠
-（带附件的保持原样）。</li>
-<li><strong>反思轮折叠 UI（client 端）</strong>：记忆反思/dream 轮的 prompt 与后续 think/tool call/汇报
-折叠成一条横条（默认折叠，显示「新增记忆 N 条」/「记忆梦境任务」），点击向下展开成
-卡片查看完整记录——卡片内 Think / tool call / 上下文注入均可点开查看细节。</li>
-<li><strong>会话列表 dream 图标（client 端）</strong>：左侧会话列表中，"dream 整理过记忆且之后无新对话
-新信息"的会话行显示<strong>淡黄色小月牙 🌙</strong>；dream 轮进行中显示<strong>白→金呼吸灯月牙</strong>（与 dsh
-状态点并存、月牙居左，不与正常工作混淆）；被<strong>跳过梦境整理</strong>的会话显示<strong>静音灰「月牙+斜杠」</strong>
-（取消跳过自动回落；优先级：呼吸灯 &gt; 跳过 &gt; 月牙）；有新活动即移除。图标放进 dsh 会话行的
-状态槽位、状态点左侧——只追加/只移除自有节点，不改写 React 拥有的子节点（整槽替换会令
-React 虚拟 DOM 失同步，commit 抛 removeChild NotFoundError 把侧边栏整树卸载）。
-数据走全页共享的 60s 轮询 diff（v0.23.0 连接池修复，替代原 SSE 长连接）：
-<code>/meow-memory/dreamed-sessions</code> 与 <code>/meow-memory/skip-dreams</code> 各一次 GET，事件语义不变——
-dream 开始推 <code>state:'dreaming'</code>、完成推 <code>state:'dreamed'</code>、有新活动推 <code>state:'active'</code>、
-跳过翻转推 <code>state:'skip'/'unskip'</code>；client 挂载时全量对账一次。
-行定位零 dsh 改动：读 React 18 fiber（<code>__reactFiber$</code> 内部属性）拿会话行渲染 key =
-session id，不依赖标题匹配。</li>
-<li><strong>dream 防重复</strong>：check 门（DB 原子 60s 检查节流）+ start 幂等抢占（<code>dream_pending</code>）+
-中断自愈（未收尾的 dream 自动补收尾）+ 孤儿收尾（跨实例/热重载后 turn 结束也能收尾）；
-插件注入轮的事件不刷新窗口活跃度——已 dream 的窗口不会反复被 dream。</li>
-<li><strong>零运行时依赖</strong>：<code>node:sqlite</code>（Node ≥22.13 默认可用；22.5–22.12 需 <code>--experimental-sqlite</code>）+ 自包含 esbuild 产物（<code>lib/index.js</code>）。
-无原生模块。</li>
+<li><strong>七层记忆</strong>：<code>soul</code>（AI 自身）/ <code>user</code>（用户信息与偏好）/ <code>project</code>（项目信息，含 <code>subcategory</code>）/ <code>fact</code>（原子事实）/ <code>lesson</code>（教训与纠正）/ <code>topic</code>（进行中的话题，带目标句）/ <code>rules</code>（设计原则与行为准则）。每层一张 SQLite 表，UUID 带时间前缀，id 顺序即创建顺序。</li>
+<li><strong>首轮注入（长期记忆块）</strong>：第一条用户消息前注入 soul / user / 设计原则 / 记忆导引。记忆作为独立 plugin snapshot 消息放在真实 user 消息之前，<strong>不改写用户 prompt</strong>；<strong>首轮不跑关键词命中</strong>（命中从第二轮起）。</li>
+<li><strong>每消息关键词命中</strong>：从第二条用户消息起，每条真实用户消息检索 fact/lesson/rules/topic（全局 + 当前 project 锚定），top-2 命中注入。命中基于<strong>条目关键词</strong>而非全文。</li>
+<li><strong>当前 project 锚定</strong>：带 project 参数即锚定该会话的当前项目；未锚定时命中只搜全局（用户闲聊不误伤）。</li>
+<li><strong>缓存友好设计</strong>：静态 <code>meow-memory:guide</code> section 在 system prompt 中注册一次——文本恒定，破坏不了 provider 的 KV 缓存。</li>
+<li><strong>压缩后重注入</strong>：会话压缩后，下一轮自动重新注入长期记忆快照 + 本会话查阅过的项目全景 + 本会话写入过的记忆原文，AI 不会因为压缩突然失忆。</li>
+<li><strong>七层之上的三件事</strong>：写入自动去重合并、按 <code>updated_at</code> 展示记忆时间戳、全局信息用全局标记（区别于留空）。</li>
+<li><strong>按窗口 dream</strong>：窗口空闲 ≥3 小时即允许整理，由该窗口自己的主 agent 分三轮处理（原子记忆 / topic / 项目总结），<strong>峰时抑制</strong>（默认北京时间 09:00–12:00、14:00–18:00，API 峰谷电价峰时）不触发。也可敲 <code>/dream</code> 立刻手动整理。</li>
+<li><strong>反思</strong>：单次任务内连续 ≥7 个工具 step 后，插件询问模型自上次整理以来是否有值得记忆的内容。最后工具是 <code>memory_*</code> 视为已主动记忆、不重复反思。</li>
+<li><strong>客户端 UI</strong>：注入文本折叠成横条、反思/dream 轮折叠成一条可展开的卡片、会话列表显示 dream 状态图标（🌙 已整理 / 呼吸灯 进行中 / 灰月牙斜杠 已跳过）。</li>
+<li><strong>零运行时依赖</strong>：<code>node:sqlite</code> + 自包含 esbuild 产物（<code>lib/index.js</code>）。<strong>无原生模块。</strong></li>
 </ul>
 <h2>📦 安装</h2>
 <h3>一键安装（推荐）</h3>
@@ -121,14 +36,22 @@ session id，不依赖标题匹配。</li>
 <h3>卸载</h3>
 <pre><code class="language-sh">dsh plugin --profile web remove meow-memory
 </code></pre>
+<h3>PT-BR Fork</h3>
+<p>想要巴西葡语打包版本的仓库：<a href="https://github.com/coutogilson" target="_blank" rel="noopener noreferrer">coutogilson</a> 的 fork：</p>
+<pre><code class="language-sh">dsh plugin --profile web add github:coutogilson/dsh-meow-memory
+</code></pre>
 <h3>手动安装（开发者，任意 DSH 安装，无需 npm）</h3>
 <ol>
-<li>把本包复制（或软链）到 profile 的 <code>node_modules</code>：<pre><code class="language-sh">mkdir -p ~/.dsh/profiles/web/node_modules
+<li><p>把本包复制（或软链）到 profile 的 <code>node_modules</code>：</p>
+<pre><code class="language-sh">mkdir -p ~/.dsh/profiles/web/node_modules
 ln -s /path/to/meow-memory ~/.dsh/profiles/web/node_modules/meow-memory
 </code></pre>
-（Windows：<code>New-Item -ItemType Junction ...</code> —— NTFS junction，无需管理员权限。）</li>
-<li>把 <code>meow-memory</code> 加进 profile <code>package.json</code> 的 <code>dsh.profile.bundles</code>（同上）。</li>
-<li>重启 <code>dsh web</code>。新会话自动加载插件。</li>
+<p>（Windows：<code>New-Item -ItemType Junction ...</code> —— NTFS junction，无需管理员权限。）</p>
+</li>
+<li><p>把 <code>meow-memory</code> 加进 profile <code>package.json</code> 的 <code>dsh.profile.bundles</code>。</p>
+</li>
+<li><p>重启 <code>dsh web</code>。新会话自动加载插件。</p>
+</li>
 </ol>
 <h2>🔌 兼容性</h2>
 <p>支持 <strong>dsh 0.1.5</strong>（含最新的 <code>0.1.5-rc.1</code>），同时向下兼容旧版本——升级 dsh 不需要改本插件，也不需要改任何配置。</p>
@@ -141,47 +64,17 @@ ln -s /path/to/meow-memory ~/.dsh/profiles/web/node_modules/meow-memory
     enabled: true          # 总开关
     projectDir: '.dsh-meow' # 记忆目录（相对工作区）
     promptLang: 'zh'       # ⚠️ 首次使用建议显式配置（见下方说明）
-    hitTopK: 2             # 每条用户消息关键词命中的条目数上限（fact/lesson/rules/topic）
-    reflect: true          # 连续 ≥reflectTurns 轮工具调用后自动反思
-    reflectTurns: 7        # 触发反思所需的连续工具轮数
+    hitTopK: 2             # 每条用户消息关键词命中的条目数上限
     dream:
       enabled: true
-      idleMinutes: 180      # 窗口空闲 ≥180 分钟（3 小时）允许 dream
-      suppressWindows:      # 峰时抑制时段（按下方 timeZone 计算，"HH:MM" 起止）
-        - start: '09:00'    #   API 峰谷电价峰时
-          end: '12:00'
-        - start: '14:00'
-          end: '18:00'
-      suppressLeadMinutes: 15  # 每个峰时开始前 15 分钟也不触发
-      checkMinutes: 15
-      timeZone: 'Asia/Shanghai'  # 用户机器时钟为美区时间；抑制时段必须
-                                 # 按此固定时区计算
-      rulesReviewDays: 2    # updated_at 距今超该天数的稳定准则不进 dream 第 1 轮
-                            # 清单（防反复整理不变化的条目）；0 = 不过滤
-    delegate:
-      model: ''            # 整理任务换模型（可选）：填写后反思轮与梦境轮自动换用
-                           # 该模型执行，轮次结束自动换回主模型；'provider/model'
-                           # 指定 provider+model，'model' 只换模型（provider 继承
-                           # 主会话）；留空 = 全程主模型
+      idleMinutes: 180     # 窗口空闲 ≥180 分钟（3 小时）允许 dream
 </code></pre>
-<h3>整理任务换模型（可选）</h3>
-<p>反思轮和 dream 各组始终在主窗口执行（steer）——prompt、模型回应、工具调用落在主会话 log（折叠 UI 负责视觉收纳）。独立 fork 子代理执行方式已于 v0.24 移除，不再提供"独立执行"开关。</p>
-<p>如果想让记忆整理换个（更便宜的）模型跑：配置 <code>delegate.model</code> 后，反思/梦境轮发起的每个 LLM 请求会经 dsh 的 <code>agent/request</code> waterfall 自动覆盖 provider/model，轮次结束自动换回主模型——正常对话、工具轮完全不受影响。实现是无状态的：按"当前 turn 是否携带反思/梦境指令标记"逐请求判定，用户中止、崩溃、热重载都不会留下"卡在换模型"的脏状态。</p>
-<h3>界面语言：跟随 DSH 语言设置（v0.27.0）</h3>
-<p>插件界面文案（折叠横条、打点气泡、会话菜单项、设置页）走独立的 <strong>UI 文案层</strong>，跟随
-DSH 的「设置 → 通用 → 语言」：内置 <strong>中文 / English / Português (Brasil)</strong> 三套字典，
-切换即时生效（设置页标签按官方契约重新注册，纯 DOM 节点经重放注册表刷新）。</p>
-<p>它与 <code>promptLang</code>（模型文案）是两层，互不影响：界面可以跟随外壳语言，而注入给模型的
-prompt 仍按 <code>promptLang</code> 走（<code>promptLang</code> 只选 <code>src/prompts/</code> 里的模型文案包，目前内置
-<code>zh</code> / <code>en</code>）。老宿主（无 locale 服务）自动降级为浏览器语言 + 内置字典，最终落 <code>zh</code>
-——中文用户浏览器也是中文时界面不变，浏览器要英文的用户则拿到英文（这正是本次改动的目的）。</p>
-<p>自定义 / 社区界面语言：加一个字典文件 + 在 <code>SUPPORTED_UI_LOCALES</code> 加一行（不改 UI 代码），
-详见 <a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/src/i18n/README.md" target="_blank" rel="noopener noreferrer"><code>src/i18n/README.md</code></a>。</p>
-<h3>promptLang：prompt 与检索语言（重要）</h3>
-<p><code>promptLang</code> 决定两件事：①注入/反思/dream 文案的语言；②工具描述的语言。它同时影响模型写记忆条目用的语言——关键词按条目语言提取，<strong>以你说话的语言为准</strong>。</p>
-<p><strong>因此首次使用时请显式配置它</strong>：<code>promptLang: 'zh'</code>（默认）、<code>'en'</code>（内置英文语言包）或 <code>'pt-br'</code>（内置巴西葡语语言包）。配置值就是子目录名，<strong>逐字匹配</strong>：填一个 <code>src/prompts/</code> 里不存在的名字（例如 <code>pt</code>）不会报错，而是静默落回中文包。</p>
-<p>检索侧说明：BM25 分词自 v0.20.0 起语言无关（类别路由），条目与查询语言不一致不再"杀检索"；<code>en</code> 模式额外启用英语归一化（停用词过滤 + Porter 词干还原），屈折变化不影响命中（<code>tokenizers</code> 能命中存为 <code>tokenizer</code> 的条目）。</p>
-<p>自定义 / 社区语言包：prompt 文案是数据文件（<code>src/prompts/</code>），一门语言一个子目录，改文件即生效、无需改代码——详见 <a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/src/prompts/README.md" target="_blank" rel="noopener noreferrer"><code>src/prompts/README.md</code></a>（含贡献指南与 <code>npm run check-lang</code> 自查）。实例级自定义：<code>&lt;home&gt;/.dsh-meow/prompts/&lt;lang&gt;/</code> 下放同名槽位文件即可覆盖（可只覆盖部分）。</p>
+<p><strong>完整字段、类型与默认值见 <a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/docs/%E9%85%8D%E7%BD%AE%E5%8F%82%E8%80%83.md" target="_blank" rel="noopener noreferrer">docs/配置参考.md</a></strong>，含 <code>titleMax</code> / <code>autoMigrate</code> / <code>homeDir</code> / <code>disabledWorkspaces</code> / <code>backup</code> / <code>delegate</code> 等全部配置项。</p>
+<blockquote>
+<p>⚠️ <strong><code>promptLang</code> 首次使用建议显式配置。</strong> 它决定注入/反思/dream 文案与工具描述的语言，同时影响模型写记忆条目用的语言——关键词按条目语言提取。内置 <code>zh</code> / <code>en</code> / <code>pt-br</code> 三套语言包。配置值就是 <code>src/prompts/</code> 的子目录名，<strong>逐字匹配</strong>：填一个不存在的名字（例如 <code>pt</code>）不会报错，而是静默落回中文包。详见 <a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/docs/%E9%85%8D%E7%BD%AE%E5%8F%82%E8%80%83.md" target="_blank" rel="noopener noreferrer">docs/配置参考.md</a>。</p>
+</blockquote>
+<h3>界面语言</h3>
+<p>插件界面文案跟随 DSH 的「设置 → 通用 → 语言」（内置中文 / English / Português (Brasil)），与 <code>promptLang</code> 是两层、互不影响。详见 <a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/docs/%E9%85%8D%E7%BD%AE%E5%8F%82%E8%80%83.md" target="_blank" rel="noopener noreferrer">docs/配置参考.md</a>。</p>
 <h2>🧠 工作原理</h2>
 <pre><code>第一条用户消息（首轮）         第二条起的每条消息                空闲≥3h 且非峰时
 ┌────────────────────┐        ┌────────────────────┐        ┌──────────────────────┐
@@ -196,6 +89,49 @@ prompt 仍按 <code>promptLang</code> 走（<code>promptLang</code> 只选 <code
  每会话只注入一次，
  首轮不做命中
 </code></pre>
+<h3>工具</h3>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>memory_remember</code></td>
+<td>写入一条记忆（必填 content/project/keywords/importance，自动去重合并）</td>
+</tr>
+<tr>
+<td><code>memory_search</code></td>
+<td>关键词检索（BM25 × 近期权重，支持 level/project/status/days 过滤）</td>
+</tr>
+<tr>
+<td><code>memory_project</code></td>
+<td>取回某项目的完整注入段落（<strong>project 参数必填</strong>）</td>
+</tr>
+<tr>
+<td><code>memory_find_similar</code></td>
+<td>查重与冲突检测</td>
+</tr>
+<tr>
+<td><code>memory_read</code></td>
+<td>按 id 读取单条完整元数据</td>
+</tr>
+<tr>
+<td><code>memory_update</code></td>
+<td>修正 status / importance / goal / keywords</td>
+</tr>
+<tr>
+<td><code>memory_dream</code></td>
+<td>手动触发本窗口的记忆整理</td>
+</tr>
+<tr>
+<td><code>memory_home</code></td>
+<td>查看 / 切换全局数据目录</td>
+</tr>
+</tbody></table>
+<p>另有 <code>/dream</code> 命令：在输入框敲 <code>/dream</code> 立即手动唤起本窗口的记忆整理，不受峰时抑制。</p>
+<p><strong>参数、返回与副作用见 <a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/docs/%E5%B7%A5%E5%85%B7%E5%8F%82%E8%80%83.md" target="_blank" rel="noopener noreferrer">docs/工具参考.md</a></strong>（含 <code>memory_project</code> 的项目锚定副作用与 <code>memory_home</code> 的三个预设目录标记）。</p>
 <h2>🛠 开发</h2>
 <pre><code class="language-sh">npm install
 npm run build          # esbuild 打包 → lib/index.js（自包含）
@@ -205,6 +141,43 @@ npm run test           # 228 项逻辑测试：db / bm25 / migrate / inject / re
 在 Windows 上，<code>npm run link-workspace</code>（或 <code>scripts/link-workspace.ps1</code>）创建 workspace
 包的 junction 镜像，使 esbuild 能解析它们；<code>build.mjs</code> 通过 <code>nodePaths</code> 引用。
 这些链接仅构建期需要。</p>
+<h2>📚 文档</h2>
+<table>
+<thead>
+<tr>
+<th>想了解</th>
+<th>看这里</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>七个工具的参数、返回与副作用</td>
+<td><a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/docs/%E5%B7%A5%E5%85%B7%E5%8F%82%E8%80%83.md" target="_blank" rel="noopener noreferrer">docs/工具参考.md</a></td>
+</tr>
+<tr>
+<td>全部配置项、类型与默认值</td>
+<td><a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/docs/%E9%85%8D%E7%BD%AE%E5%8F%82%E8%80%83.md" target="_blank" rel="noopener noreferrer">docs/配置参考.md</a></td>
+</tr>
+<tr>
+<td>为什么这样设计（缓存、命中、dream、踩过的坑）</td>
+<td><a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/docs/%E8%AE%BE%E8%AE%A1%E8%AF%B4%E6%98%8E.md" target="_blank" rel="noopener noreferrer">docs/设计说明.md</a></td>
+</tr>
+<tr>
+<td>装不上、检索不准、报错怎么读</td>
+<td><a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/docs/%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98.md" target="_blank" rel="noopener noreferrer">docs/常见问题.md</a></td>
+</tr>
+<tr>
+<td>版本变更历史</td>
+<td><a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a></td>
+</tr>
+<tr>
+<td>加界面语言</td>
+<td><a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/src/i18n/README.md" target="_blank" rel="noopener noreferrer">src/i18n/README.md</a></td>
+</tr>
+<tr>
+<td>加 prompt 语言包</td>
+<td><a href="https://github.com/Phant0Meow/dsh-meow-memory/blob/HEAD/src/prompts/README.md" target="_blank" rel="noopener noreferrer">src/prompts/README.md</a></td>
+</tr>
+</tbody></table>
 <h2>🙏 致谢</h2>
 <p>感谢每一位贡献者让 meow-memory 越来越好：</p>
 <ul>

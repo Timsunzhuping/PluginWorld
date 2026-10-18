@@ -94,6 +94,43 @@
 <p>DSH 存储层的写入是「读—改—写全量覆盖」，且官方两个后端都声明不做跨进程协调（<code>storage-json</code>：<em>writer per process and last-write-wins is correct</em>；<code>storage-sqlite</code>：<em>cross-process coordination is out of scope</em>）。插件层的处置是<strong>写前重读</strong>（等价于 update 前先 select）：每次写入在串行区里先比对存储文件指纹（mtime + size），发现磁盘被别的实例动过就先重载再写。代价是磁盘没变时的一次 <code>statSync</code>。</p>
 <p>残余窗口只剩两个实例在<strong>同一瞬间</strong>写——此时后写者赢；同时写<strong>不同</strong>记忆已不再互相影响。</p>
 <p><strong>未覆盖</strong>：<code>workspace.json</code>（工作区登记）由 DSH 自己的 workspace 服务写，插件层够不着，仍会被双实例互相覆盖；根因处置在上游——<a href="https://github.com/deepseek-ai/deepseek-harness/discussions/6882" target="_blank" rel="noopener noreferrer">discussion #6882</a>。当前防线是轮转快照备份（SSiD 侧 <code>shell/scripts/backup-storages.mjs</code> + 计划任务）。</p>
+<h2>定时备份（2026-10-18）</h2>
+<p><strong>动机</strong>：2026-10-18 的事故——<code>.dsh</code> 下的 storages 被外部整目录删除后，本插件的写入路径（读—改—写全量覆盖）在空磁盘上把内存里的 global 记忆覆盖成一条；而当时 <code>memory.json</code> <strong>没有任何一份存在于 <code>.dsh</code> 之外</strong>，无从恢复。</p>
+<p><strong>机制</strong>：插件启动后每小时（可配）把记忆文件<strong>只读复制</strong>到 <code>&lt;home&gt;/.dsh-backups/memory/&lt;YYYYMMDD-HHmmss&gt;/</code>，并写一份 <code>manifest.json</code> 记录来源与文件清单。<strong>插件关闭（dispose）时再补一次</strong>——定时器只在运行期间生效，关 DSH 前最后一段变更靠这一次兜住。保留最近 14 份（可配），超期自动清理。</p>
+<p><strong>无界面</strong>：这是行为类功能，不新增按钮、面板或设置项——行为效果即上面那段：部署后 <code>~/.dsh-backups/memory/</code> 下每小时多一个目录，目录里是当次复制出的 <code>memory.json</code>、<code>memory_project_*.json</code> 与 <code>manifest.json</code>。</p>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>默认值</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>备份内容</td>
+<td><code>memory.json</code>（global）+ <code>memory_project_*.json</code>（project）</td>
+</tr>
+<tr>
+<td>目标目录</td>
+<td><code>~/.dsh-backups/memory/&lt;时间戳&gt;/</code>（<strong>在 <code>DSH_HOME</code> 之外</strong>）</td>
+</tr>
+<tr>
+<td>间隔</td>
+<td>60 分钟（首次延迟 1 分钟）；<strong>插件关闭时另补一次</strong></td>
+</tr>
+<tr>
+<td>保留</td>
+<td>最近 14 份</td>
+</tr>
+<tr>
+<td>失败行为</td>
+<td>只写日志，不影响记忆读写与启动</td>
+</tr>
+</tbody></table>
+<p><strong>边界</strong>：</p>
+<ul>
+<li>只备份<strong>当前工作区</strong>的 project 文件（<code>&lt;cwd&gt;/.dsh/storages/</code>）；其它工作区的 project 记忆不在备份范围。</li>
+<li>只读文件、只复制——<strong>绝不复用引擎的写入路径</strong>。写路径会先 <code>reload()</code> 再合并，磁盘缺失时它会把内存覆盖掉，正是这次事故的成因；备份不能走同一条路。</li>
+</ul>
 <h2>使用流程（写入即生效，人为例外干预）</h2>
 <p>提示词模板库（0.6.0）：<code>prompt_search / prompt_get / prompt_list / prompt_add</code> 四个工具管理<strong>模板库</strong>——
 md 文件是唯一事实源（<code>~/.dsh/prompt-library/*.md</code> 为 global；<code>&lt;workspace&gt;/.dsh/prompt-library/</code> 随工作区分享），
@@ -123,6 +160,12 @@ memory_forget        →  随时删除（删除始终是人的动作）
     semanticTopK: 5              # 语义侧参与融合的 topK（仅配置 embeddings 时生效）
     # 混合语义检索（可插拔；缺省 = 纯 BM25）
     # embeddings: { embed: '...' 提供 embed(texts) 的宿主函数 或 插件名 ... }
+    # 定时备份（2026-10-18；缺省启用，目标在 DSH_HOME 之外）
+    backup:
+      intervalMinutes: 60    # 间隔（分钟）
+      keep: 14               # 保留份数
+      # targetRoot: 'D:/dsh-backups/memory'   # 自定义备份根
+      # enabled: false        # 关掉
 </code></pre>
 <p><code>embeddings</code> 接受 <code>{ embed(texts): Promise&lt;number[][]&gt;, similarity? }</code> 对象——由宿主装配层提供嵌入实现（如 DeepSeek 嵌入端点）；配置后 <code>memory_search</code> 以 BM25 + 语义 RRF 融合，向量增量生成并持久化，嵌入调用失败自动降级为纯 BM25。</p>
 <h2>SSID 系列</h2>

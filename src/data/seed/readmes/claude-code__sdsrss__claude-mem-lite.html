@@ -223,7 +223,7 @@ a measured end-to-end benchmark):</p>
 <li><strong>Observation relations</strong> -- Bidirectional links between related observations based on file overlap</li>
 <li><strong>User prompt capture</strong> -- Records user prompts via UserPromptSubmit hook for intent tracking</li>
 <li><strong>Read file tracking</strong> -- Tracks files read during sessions for richer episode context</li>
-<li><strong>Degraded fallback when the LLM fails</strong> -- An episode the deterministic rules already rate notable (an error fixed, a config or schema file changed) is saved with inferred metadata instead of being discarded. A routine edit the rules rate as noise (<code>Modified a.js, b.js</code> with no lesson) is dropped — as it is when the model answers without a lesson — so a failing provider loses those episodes; <code>claude-mem-lite doctor</code> warns when the <code>claude</code> CLI it would call does not resolve</li>
+<li><strong>Degraded fallback when the LLM fails</strong> -- An episode that fixed an error is saved with inferred metadata (as an activity event) instead of being discarded, when a command that exited 0 printed the error (<code>npm test 2&gt;&amp;1 | tail</code>): a command Claude Code reports as failed does not enter the episode, so a fix that follows one counts as edit-only. An edit-only episode, config and schema changes included, is summarised from raw tool output, which the noise rules drop in most cases (<code>Modified a.js, b.js</code> with no lesson; only a short single-file summary survives) — as they do when the model answers without a lesson — so a failing provider loses those episodes unless <code>CLAUDE_MEM_KEEP_LOW_SIGNAL=1</code> is set; <code>claude-mem-lite doctor</code> warns when the <code>claude</code> CLI it would call does not resolve</li>
 <li><strong>Two-tier dedup</strong> -- Jaccard similarity (5-minute window) + MinHash signatures (7-day cross-session window) prevent duplicates</li>
 <li><strong>Synonym expansion</strong> -- Abbreviations like <code>K8s</code>, <code>DB</code>, <code>auth</code> automatically expand to full forms in FTS5 search (100+ pairs including CJK↔EN cross-language mappings)</li>
 <li><strong>CJK synonym extraction</strong> -- Unsegmented Chinese text is scanned for known vocabulary words (数据库→database, 搜索→search, etc.) enabling cross-language memory recall</li>
@@ -376,6 +376,63 @@ rm -rf ~/claude-mem-lite/   # pre-v0.5 unhidden (if not auto-moved)
   managed/
     repos/               # Shallow-cloned source repos
 </code></pre>
+<h2>Upgrading to 6.29.0</h2>
+<p><strong>Chinese text in lessons, facts, concepts and aliases becomes searchable, and the database opens
+after the update fill that in without holding up a hook.</strong> No schema-version change: 6.28.1 still
+opens, searches and writes the database after this release has. Go back only after the fill
+finishes: rows it has not reached stay without the Latin identifiers glued to Chinese under 6.28.1.</p>
+<ul>
+<li><strong>What it costs.</strong> Each database open spends about 250 ms filling the index terms of existing
+observations, newest first, each batch committed, until all are done. On a copy of the
+maintainer's store (516 observations, most already filled by an earlier build of this pass)
+the pass walked every row in one open of 48–49 ms. On a synthetic v6.27.0 store of 250,000
+observations and 200,000 events (mostly CJK) the first open takes about 1 s (6.28.1: about 9 s,
+and a 5 s hook opening it first was killed), and the fill then takes 105 opens of about 0.5 s;
+an open after it takes 3 ms.</li>
+<li><strong>A lesson a model writes onto one of your explicit saves starts with <code>🤖</code></strong>, and <code>get</code> says
+"🤖 lesson auto-written". A lesson you write is never marked.</li>
+<li><strong>Exit codes.</strong> A flag that takes no value (<code>--force</code>, <code>--json</code>, <code>--confirm</code>, <code>--or</code>,
+<code>--dry-run</code>, …) no longer swallows the next word: <code>delete --confirm 12</code> now deletes #12, and
+<code>recent --json 5</code> prints JSON. <code>maintain</code>, <code>compress</code>, <code>optimize</code>, <code>delete</code>, <code>activity promote</code> /
+<code>delete</code>, <code>import-jsonl</code>, <code>defer drop</code> and <code>fts-check rebuild</code>, which never read <code>--dry-run</code>,
+refuse it with exit 1 on a run that would write, instead of running; <code>activity save</code>, <code>import-jsonl</code> and <code>restore</code> refuse a mistyped
+<code>--project</code>; <code>uninstall</code> exits 3 when the MCP registration is left. CHANGELOG.md lists the
+rest; a script that relied on the old behaviour needs a look.</li>
+<li><strong>Also in this release:</strong> the database waits of a hook that opens through <code>ensureDb</code> all end by
+its deadline, the first open's migration, the prompt search and the Agent injection included;
+the unattended re-enrich raises importance to 2 at most; three more background prompts send
+stored rows to the model as data, and smart-compress and cluster merge act only on an explicit
+yes. Details in CHANGELOG.md.</li>
+</ul>
+<h2>Upgrading to 6.28.1</h2>
+<p><strong>After the update, events are re-indexed so Chinese text in them is searchable</strong> (the Han ranges
+U+4E00–9FFF and U+3400–4DBF; kana, Hangul and the rarer Han extensions are not segmented). No
+schema-version change: 6.27.0 still opens, searches and writes the database after this release has,
+and an event it writes is filled the next time this release opens the database.</p>
+<ul>
+<li><strong>What it costs.</strong> The first open adds a column, rebuilds the events index and adds the Latin
+identifiers glued to Chinese text to existing observations' index text. Existing events are then
+filled newest first, about 250 ms per database open (checked after each row), each batch
+committed, so a killed open keeps its progress; with nothing left an open takes 3–4 ms. On the
+maintainer's store (6963 events) the first three opens took 295–327, 80–102 and 4 ms, and the file
+grew from 14 to 15 MB; on a CJK-heavy synthetic store of 200,000 events the first open takes 964
+ms, the fill 79 opens, and the file grows from 93 to 273 MB. Until an event is filled, a Chinese
+query misses it as before.</li>
+<li><strong>The MCP server waits out another writer's lock at startup</strong> (up to 15 s of retries) instead of
+exiting with "database is locked".</li>
+<li><strong>Exit codes.</strong> Some commands that exited 0 now exit 1, among them <code>save</code>, <code>update</code>, <code>defer add</code>
+and <code>activity save</code> given a flag they do not take, <code>save</code> and <code>defer add</code> given a mistyped
+project, <code>delete</code> given an id list with a malformed part (<code>1,abc</code>), <code>self-update</code> when it checked
+nothing, and <code>import-jsonl</code> on lines none of which is a transcript event (an empty file still
+exits 0); CHANGELOG.md lists the rest. <code>install</code> exits 3 when only the MCP registration failed. A
+script that relied on exit 0 there needs a look.</li>
+<li><strong>Also in this release:</strong> <code>install</code> no longer empties the marketplace clone's <code>hooks/hooks.json</code>
+(it puts back, with <code>git checkout</code>, one an earlier install emptied); four MCP tool texts say what
+the tools do; a hook under a long write lock exits instead of being killed (UserPromptSubmit and
+SessionStart with their context), and a lock that ends between 3.5 s and the 5 s kill, which
+6.27.0 waited out, now drops the write the hook was waiting to make (UserPromptSubmit's prompt
+row, for one). Details in CHANGELOG.md.</li>
+</ul>
 <h2>Upgrading to 6.25.0</h2>
 <p><strong>Every session gets the same first line on a file-recall block again.</strong> No schema-version
 change: 6.24.0 still opens the database after this release has.</p>
@@ -996,7 +1053,7 @@ Stop
 <p>Episodes are batched related operations (edits to the same file group) that get processed by a background LLM worker:</p>
 <pre><code>Episode buffer -&gt; Flush to JSON -&gt; claude -p --model haiku -&gt; Structured observation -&gt; SQLite
 </code></pre>
-<p>Each observation includes type, title, narrative, concepts, facts, importance (1-3), and is automatically deduplicated via two tiers: Jaccard similarity (&gt;70% within 5 minutes) and MinHash signatures (&gt;80% within 7 days across sessions). If the LLM call fails, an episode the rules rate notable is saved with inferred metadata; a routine edit the rules rate as noise is dropped. Related observations are linked via <code>related_ids</code> based on FTS5 title similarity and file overlap.</p>
+<p>Each observation includes type, title, narrative, concepts, facts, importance (1-3), and is automatically deduplicated via two tiers: Jaccard similarity (&gt;70% within 5 minutes) and MinHash signatures (&gt;80% within 7 days across sessions). If the LLM call fails, an episode that fixed an error a successful command printed is saved with inferred metadata (a command reported as failed does not enter the episode); an edit-only episode (config and schema changes included) is usually dropped as noise. Related observations are linked via <code>related_ids</code> based on FTS5 title similarity and file overlap.</p>
 <h2>Management Commands</h2>
 <pre><code class="language-bash"># Plugin install:
 /plugin install claude-mem-lite       # Install / update
@@ -1697,7 +1754,7 @@ what is already stored — only whether new work runs.</p>
 </tr>
 <tr>
 <td><code>CLAUDE_MEM_SKIP_EPISODE_LLM</code></td>
-<td>Skip LLM extraction on episode flush — observations are still batched, just not summarized.</td>
+<td>Skip LLM extraction on episode flush. Only the rule-based pre-save runs, through the noise gate: an error-fixing episode with a low-signal title ("Error: …") is dropped, where a failed call would save it as an activity event; an edit-only one is usually dropped as noise. It also turns off SessionStart's hand-off of a killed episode worker's flush file to a new worker.</td>
 <td><em>(runs)</em></td>
 </tr>
 <tr>
@@ -1747,8 +1804,8 @@ what is already stored — only whether new work runs.</p>
 </tr>
 <tr>
 <td><code>CLAUDE_MEM_FLUSH_TIMEOUT</code></td>
-<td>Seconds the Stop hook waits for pending episode flushes.</td>
-<td><code>15</code></td>
+<td>Seconds the background session-summary worker waits for its pending episode flushes; it stops as soon as they clear. The default spans the episode worker's longest legitimate run.</td>
+<td><code>275</code></td>
 </tr>
 <tr>
 <td><code>CLAUDE_MEM_BACKUP_BUDGET_MB</code></td>
@@ -1844,12 +1901,11 @@ normal use, and inert when unset.</p>
 <h3>Why "lite"? What did the original claude-mem do differently?</h3>
 <p>The original called an LLM on every tool use with raw JSON inputs. claude-mem-lite batches 5–10 operations per LLM call, uses a smaller model (Haiku), and runs a deterministic code-level filter before sending anything to the model. Net result: an estimated ~600× lower cost (an architecture estimate from the cost model above, not a measured benchmark) with equivalent search quality. See the <a href="#architecture-comparison" target="_blank" rel="noopener noreferrer">Architecture comparison</a> above.</p>
 <h3>Does this work cross-project? Cross-machine?</h3>
-<p>Project-scoped by default — each project has its own memory namespace. Single-machine only (SQLite, not networked). Use <code>mem_export</code> (JSON / JSONL) to back up or migrate between machines.</p>
+<p>Each memory belongs to the project it was saved in (an id like <code>parent--dir</code>). Search covers every project and weights the current project's rows ×2 in the ranking; name a project (<code>project</code> on the MCP tools, <code>--project</code> on the CLI) to search only that one. <code>mem_recent</code>, mem_search's <code>obs_type</code> fallback and the timeline without an anchor use the current project. Single-machine only (SQLite, not networked). Use <code>mem_export</code> (JSON / JSONL) to back up or migrate between machines.</p>
 <h3>What about privacy? Does it call external APIs?</h3>
 <p>Only the Haiku summarization step calls Anthropic's API (or the local <code>claude -p</code> CLI if no API key is set). All search, storage, and retrieval is local SQLite — no telemetry, no third-party services.</p>
 <h3>中文常见问题</h3>
 <p><strong>Claude Code 怎么跨会话记住内容？</strong> 默认不能。claude-mem-lite 通过 MCP 协议和钩子自动把决策、bug 修复、文件历史持久化到本地 SQLite，下次会话开始时再注入。</p>
 <p><strong>和 mem0、官方 MCP memory server 有什么区别？</strong> 那两个是通用 LLM 记忆框架；claude-mem-lite 是为 Claude Code 钩子生命周期定制的：批量 episode 处理、代码领域同义词扩展（K8s/DB/数据库等）、文件编辑前主动召回相关历史。</p>
-<p><strong>支持中文吗？</strong> 完整支持。FTS5 + 中英文同义词扩展（100+ 对，含 CJK ↔ EN 跨语言映射），中文记忆也可用英文关键词召回，反之亦然。</p>
-<h2>License</h2>
-<p>MIT</p>
+<p><strong>支持中文吗？</strong> 完整支持。FTS5 + 中英文同义词扩展（100+ </p>
+<p>…</p>

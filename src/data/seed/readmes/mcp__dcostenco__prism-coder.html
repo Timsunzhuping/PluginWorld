@@ -50,6 +50,61 @@ reserved text remains fail-closed (clinical images are processed locally,
 never sent to the cloud), and local/cloud usage is recorded for
 review.</li>
 </ul>
+<h3>Explicit on-device oMLX drafts</h3>
+<p><code>prism_infer</code> keeps Ollama's four-tier routing by default. For an explicitly
+selected text-only code or advisory reviewer draft, pass <code>local_backend: "omlx"</code>,
+<code>mode: "code"</code>, and optionally <code>local_model</code> with the exact advertised model ID.
+This path authenticates <code>/v1/models</code> before classification or any Ollama unload;
+an unavailable, unauthenticated, or mismatched model refuses without substitution.
+It reads <code>OMLX_API_KEY</code> or the local <code>~/.omlx/settings.json</code> key, and model/context
+settings from <code>~/.omlx/model_settings.json</code>; <code>OMLX_MODEL</code> and a loopback-only
+<code>OMLX_BASE_URL</code> can select local configuration. Redirects are refused.</p>
+<p><strong>Requires</strong> an oMLX build with Prism's control routes: the
+<a href="https://github.com/dcostenco/omlx/tree/prism-v0.7.1rc1" target="_blank" rel="noopener noreferrer"><code>prism-v0.7.1rc1</code> branch of dcostenco/omlx</a>, upstream oMLX
+0.7.1rc1 plus those routes (<a href="https://github.com/dcostenco/omlx/blob/prism-v0.7.1rc1/PRISM.md" target="_blank" rel="noopener noreferrer">install and settings</a>). With stock
+oMLX every call is refused. Generation runs as an owned
+job through those routes, so a timeout or cancel is reported only once the
+server confirms the request stopped. An unconfirmed stop refuses later calls
+(<code>omlx_stop_unproved</code>, <code>omlx_provider_busy</code>).</p>
+<p>Before classification, Prism unloads every model Ollama has loaded
+(<code>keep_alive: 0</code>; the weights stay on disk and reload on the next Ollama call)
+and waits up to 10 seconds for Ollama to report none. A failed unload, a model
+that does not drain, or one loading meanwhile refuses the call; a newcomer is
+never unloaded. Ollama must be reachable for this step. An OS-owned loopback
+lease on port 19438 excludes other candidate MCP processes; ordinary calls within
+one process share this lease. A busy lease refuses (<code>omlx_resource_busy</code>) before
+classification or unloading, and process exit releases it without lock-file
+cleanup. In-process inference and classification wait while an oMLX call owns
+the device. Unknown Ollama state, newly loaded Ollama weights, or available
+memory below a 2 GiB reserve aborts/withholds the generation. Model caches and
+daemons remain in place. Legacy/unmodified MCP processes do not honor the lease;
+their contention is observed and rejected by the watcher.</p>
+<p><strong>Safety screen.</strong> The classifier on this path is the public
+<code>dcostenco/prism-coder-9b-mlx-8bit</code>, installed under the name
+<code>prism-coder-9b-mlx-8bit</code> in oMLX's model folder (about 9.2 GB while loaded).
+Layer 1's rules only refuse here; the classifier reads everything else, and a
+prompt over 4,000 characters is read whole in 3,600-character windows (the most
+severe verdict stands), never as an excerpt. A classifier failure, an unreadable
+answer, or a missing classifier refuses the call; there is no keyword or Ollama
+fallback. A classifier read may take up to 90 seconds, so a classifier that
+macOS paged out during a long idle is waited for rather than refused.</p>
+<p>Configured oMLX sampling and reasoning are preserved unless <code>temperature</code> or
+<code>think</code> is explicit, including through repairs. Generic thinking-disable retries
+are disabled for oMLX, so a model with no thinking budget in oMLX's model
+settings can spend its whole answer reasoning and is refused <code>think_only</code>: give
+it a budget there, or pass <code>think: false</code>. The default 300-second budget bounds
+oMLX generation, repairs, and history answer checks; <code>timeout_ms</code> may override it
+up to 900 seconds. Context sizing uses conservative UTF-8 bytes and the
+configured window.</p>
+<p>The same entitlement, reserved-content, history, quality, output-safety, and
+verification policies apply. Explicit oMLX never falls back to Ollama/cloud
+inference. <code>cloud_fallback: false</code>, <code>verify: false</code>, and <code>route_guard: "local"</code>
+keep content-bearing cloud channels disabled for a local draft. Result metadata
+reports <code>backend: "omlx"</code>, the selected model, tokens, and <code>gate_outcome</code>.
+The MCP envelope carries this public metadata in <code>structuredContent</code> alongside
+the existing human header/output text; <code>next_step</code> remains available in both.
+Runtime authentication and internal verifier traces are excluded.
+A draft is advisory and requires independent host review; it is not final sign-off.</p>
 <h2>Get started</h2>
 <p>Memory search automatically applies ACT-R ranking: relevance plus recency,
 frequency and memory associations. No upvote or prompt instruction is required.
@@ -150,7 +205,63 @@ not only on <code>--refresh</code>. If you deliberately re-enable host subagents
 or by re-enabling after each run.</p>
 <hr />
 <details>
-<summary>Release history (optional)</summary><h2>What's New in v20.21.26</h2>
+<summary>Release history (optional)</summary><h2>What's New in v20.22.0</h2>
+<p><strong>Why it matters:</strong> on Apple Silicon, <code>prism_infer</code> can now draft code on an
+oMLX server instead of Ollama, opt-in per call, behind its own safety screen.
+Separately, Layer 1 now marks two more kinds of auth request reserved, on every
+path.</p>
+<ul>
+<li><strong>Opt-in oMLX backend:</strong> <code>local_backend: "omlx"</code> with <code>mode: "code"</code>, text
+only. Nothing changes for calls that do not ask for it. It <strong>requires</strong> the
+oMLX build with Prism's control routes, published as the
+<a href="https://github.com/dcostenco/omlx/tree/prism-v0.7.1rc1" target="_blank" rel="noopener noreferrer"><code>prism-v0.7.1rc1</code> branch of dcostenco/omlx</a>
+(<a href="https://github.com/dcostenco/omlx/blob/prism-v0.7.1rc1/PRISM.md" target="_blank" rel="noopener noreferrer">install and settings</a>); with stock oMLX every call is refused.</li>
+<li><strong>Its own safety screen:</strong> the 9b classifier on the same oMLX server reads
+every request; rules only refuse. In our tests, of 327 labelled sensitive
+requests, the 9b alone let 2 run locally, against 19 for the 4b classifier
+on Ollama; two rules written after reviewing those rows bring this path to
+0, so 0 is not an out-of-sample figure. Of 294 routine requests, 2 were
+escalated (27 on Ollama). Of 135 adversarial probes, 3 ran locally, all one
+shape (a documentation field).</li>
+<li><strong>Speed and cost:</strong> a classifier read took about 0.37 s at the 95th
+percentile on an idle machine and up to 0.65 s under load. The first read
+after a long idle took 14.5 s, because macOS had paged the classifier out,
+so Prism waits up to 90 s for it instead of refusing. The classifier holds
+about 9.2 GB while loaded (9.7 GB peak).</li>
+<li><strong>Fails closed:</strong> a classifier failure, an unreadable answer or a missing
+model refuses the call; it never falls back to a keyword check or to
+Ollama. A long prompt is read whole, in windows, not as an excerpt.</li>
+<li><strong>Frees memory first:</strong> Ollama's loaded models are unloaded before the call
+(they reload on the next Ollama call), so the two runtimes do not hold large
+models at once.</li>
+<li><strong>Layer 1, every path:</strong> a request that decides whether signed-out,
+anonymous or guest users may reach a route, page or endpoint (granting or
+blocking it), makes one public, or gives them admin rights is marked
+reserved by rule, and so is code that exchanges an authorization code for
+tokens. Measured on the 327 sensitive requests on
+the default Ollama path: 18 now run locally, against 19 before; routine
+escalations are unchanged (27 of 294).</li>
+</ul>
+<h2>What's New in v20.21.27</h2>
+<p><strong>Why it matters:</strong> a script that feeds Prism Browser through a pipe can
+now pause between blocks of commands. Before, commands that had already
+arrived waited for the next write, and never ran if the 600 s idle timeout
+came first, so a script that checked a result before sending more stalled
+and then failed.</p>
+<ul>
+<li><strong>Every piped command runs when it arrives.</strong> The reader waited on
+<code>select()</code> for new pipe data while <code>readline()</code> had already buffered the
+commands sent so far. It now reads the descriptor itself and decodes it as
+the text stream did (its encoding, universal newlines). Measured with two
+commands written together and a third written only after the reader hands
+over the second: the second came out only with the third before, and
+before the third is written now.</li>
+<li><strong>Unchanged:</strong> the idle timeout, <code>\</code> line continuation (CRLF endings
+included), comment lines, and streams <code>select()</code> cannot watch, now read
+blocking. At the idle timeout, a command still being written is dropped,
+never run cut short.</li>
+</ul>
+<h2>What's New in v20.21.26</h2>
 <p><strong>Why it matters:</strong> routine wording no longer lets a mixed request skip
 Layer 1, the safety screen that decides whether a request may run on your
 device. A BCBA who asks in one message for an operational
@@ -2106,111 +2217,7 @@ PRISM_SYNALUX_API_KEY=synalux_sk_... \
 </thead>
 <tbody><tr>
 <td>Local inference</td>
-<td>Direct Ollama use is unrestricted; automatic <code>prism_infer</code> routing selects up to 27B, as far as your machine's memory allows</td>
-</tr>
-<tr>
-<td>Session memory</td>
-<td>Persistent sessions, handoffs, ledger — all local SQLite</td>
-</tr>
-<tr>
-<td>Knowledge search</td>
-<td>Semantic search across session history</td>
-</tr>
-<tr>
-<td>Skills</td>
-<td>All skills available locally (run <code>sync-skills.sh</code> to populate)</td>
-</tr>
-<tr>
-<td>Drift detection</td>
-<td>Server-side GATE 5 reminders</td>
+<td>Direct Ollama</td>
 </tr>
 </tbody></table>
-<h3>Free account (Synalux sign-in, $0)</h3>
-<p>Everything in Free, plus:</p>
-<table>
-<thead>
-<tr>
-<th>Feature</th>
-<th>Details</th>
-</tr>
-</thead>
-<tbody><tr>
-<td>Multi-turn <code>prism_infer</code></td>
-<td>Conversation history carried across calls; each local answer is checked on your device before it is served</td>
-</tr>
-<tr>
-<td>Cloud answers</td>
-<td>20 a day from Gemini when a local answer cannot be used: 3.5 Flash-Lite in a conversation, 3.6 Flash for a single prompt</td>
-</tr>
-</tbody></table>
-<p>Sign in from <code>prism dashboard</code> under <strong>Account</strong>.</p>
-<h3>Pro ($15/mo) and Team ($20/seat/mo, 2-seat minimum)</h3>
-<p>Everything in the free account, plus:</p>
-<table>
-<thead>
-<tr>
-<th>Feature</th>
-<th>Details</th>
-</tr>
-</thead>
-<tbody><tr>
-<td>Cloud answers</td>
-<td>1,000 a month (Pro; 500 during the 14-day trial) or 1,500 a month per seat (Team), at most 200 a day, from Gemini 3.6 Flash; a cloud confirmation counts as one</td>
-</tr>
-<tr>
-<td>Answer confirmation</td>
-<td>A local answer that passed the on-device check is also confirmed by Synalux, on a copy with names, dates and other identifiers replaced on your device</td>
-</tr>
-<tr>
-<td>Skill routing</td>
-<td>Portal resolves which skills to load based on your project and prompt</td>
-</tr>
-<tr>
-<td>Cross-device memory</td>
-<td>Supabase cloud sync — sessions survive across machines</td>
-</tr>
-<tr>
-<td>Grounding verifier</td>
-<td>L3 NLI verification on model outputs</td>
-</tr>
-<tr>
-<td>Team features</td>
-<td>Multi-agent Hivemind, workspace collaboration, account and team skills</td>
-</tr>
-</tbody></table>
-<p>The paid tiers add <strong>intelligent routing</strong> — the Synalux portal determines which skills are relevant to your current project and prompt, so your agent gets domain expertise (stripe patterns, training protocols, clinical standards) instead of loading everything. Free users with the repo can run <code>sync-skills.sh</code> to populate all skills locally; paid routing adds project-aware and prompt-aware selection.</p>
-<ul>
-<li>Contributions require signing the <a href="https://github.com/dcostenco/prism-coder/blob/HEAD/CLA.md" target="_blank" rel="noopener noreferrer">CLA</a>.</li>
-<li>"Prism" and "Synalux" are trade names of Synalux LLC; the Apache license does
-not grant trademark rights (see §6 of the license).</li>
-</ul>
-<h3>License change (v20)</h3>
-<p>As of this release, prism-mcp is relicensed from AGPL-3.0 to Apache-2.0.
-Prior versions remain under AGPL-3.0. Existing forks retain all rights
-received under the original license.</p>
-<table>
-<thead>
-<tr>
-<th>Product</th>
-<th>License</th>
-</tr>
-</thead>
-<tbody><tr>
-<td><strong>prism-mcp-server</strong> (this repo)</td>
-<td><a href="https://github.com/dcostenco/prism-coder/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></td>
-</tr>
-<tr>
-<td><strong>VS Code extension</strong> (synalux-ai.synalux)</td>
-<td>BSL-1.1</td>
-</tr>
-<tr>
-<td><strong>Web IDE</strong> (synalux.ai/coder)</td>
-<td>Synalux Terms of Service</td>
-</tr>
-<tr>
-<td><strong>Prism AAC</strong></td>
-<td>Apache-2.0</td>
-</tr>
-</tbody></table>
-<p>This repository is licensed under Apache-2.0. Cloud features (hosted inference, cross-device memory, team features) are provided by the Synalux cloud service under separate terms.</p>
-<p>© 2026 Synalux, LLC.</p>
+<p>…</p>

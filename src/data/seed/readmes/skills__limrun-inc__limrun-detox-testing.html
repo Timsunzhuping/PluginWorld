@@ -1,0 +1,107 @@
+<h1>Limrun Detox</h1>
+<p>Use this for Detox runtime work on Limrun iOS. Keep build concerns separate
+unless the user explicitly asks for a native build.</p>
+<h2>Components</h2>
+<ul>
+<li>Tester: local Node/Jest/Detox process.</li>
+<li>Mediator: <code>detox run-server</code>, usually local to the agent machine.</li>
+<li>App client: injected by limulator through <code>lim ios launch-app --runtime detox</code>.</li>
+</ul>
+<h2>CLI Flow</h2>
+<p>Check current help before running commands you have not used in this session:</p>
+<pre><code class="language-bash">lim ios tunnel --help
+lim ios launch-app --help
+</code></pre>
+<p>Run the long-lived mediator, tester, and tunnel from separate terminals.
+Before using this quick path, ensure the project's <code>.detoxrc</code> reads the session
+environment. Detox does not consume these variables automatically:</p>
+<pre><code class="language-js">session: {
+  server: process.env.DETOX_SERVER || 'ws://localhost:8099',
+  sessionId: process.env.DETOX_SESSION_ID || 'limrun-detox',
+}
+</code></pre>
+<p>The complete configuration appears under <strong>Detox Test Setup</strong> below.</p>
+<p>Terminal 1:</p>
+<pre><code class="language-bash">npx detox run-server -p 8099 -l verbose
+</code></pre>
+<p>Terminal 2:</p>
+<pre><code class="language-bash">lim ios tunnel \
+  --selector localhost:8099 \
+  --detach \
+  --id &lt;ios-id&gt;
+DETOX_SERVER_URL="ws://localhost:8099"
+</code></pre>
+<p>Terminal 3 starts the tester before the app connects:</p>
+<pre><code class="language-bash">DETOX_SERVER="ws://localhost:8099" \
+DETOX_SESSION_ID=&lt;session-id&gt; \
+  npx detox test --no-start
+</code></pre>
+<p>Then relaunch the app from Terminal 2. <code>--detox-version</code> is optional when
+running from the project with <code>node_modules/detox</code>.</p>
+<pre><code class="language-bash">lim ios launch-app &lt;bundle-id&gt; \
+  --id &lt;ios-id&gt; \
+  --runtime detox \
+  --detox-server-url "$DETOX_SERVER_URL" \
+  --detox-session-id &lt;session-id&gt; \
+  --detox-version &lt;detox-version&gt;
+</code></pre>
+<p>Prefer starting the tester before the app connects, or use the maintained orchestration in <a href="https://github.com/limrun-inc/typescript-sdk/tree/main/examples/detox-ios" target="_blank" rel="noopener noreferrer">limrun-inc/typescript-sdk <code>examples/detox-ios</code></a>, to avoid benign mediator "cannot forward" noise.
+If you manually launch the app before <code>npx detox test --no-start</code>, that mediator message is expected until the tester connects.</p>
+<p>If tunnel start reports an active session, inspect it with <code>lim ios tunnel status --id &lt;ios-id&gt; --json</code>. Stop an obsolete session with <code>lim ios tunnel stop --id &lt;ios-id&gt;</code>, then start the declared mediator selector again.
+An open idle tunnel does not count as instance activity, so it does not prevent
+the simulator's inactivity timeout between test runs.</p>
+<h2>Detox Test Setup</h2>
+<p><code>npx detox test --no-start</code> still needs the normal Detox project configuration:</p>
+<ul>
+<li>Pass the Detox config file and configuration name from your project (see <a href="https://github.com/limrun-inc/typescript-sdk/blob/main/examples/detox-ios/.detoxrc.cjs" target="_blank" rel="noopener noreferrer"><code>examples/detox-ios/.detoxrc.cjs</code> in limrun-inc/typescript-sdk</a> for a reference layout).</li>
+<li>Use the Limrun third-party driver: <code>type: '@limrun/detox/driver'</code>.</li>
+<li>Keep <code>DETOX_SERVER</code> and <code>DETOX_SESSION_ID</code> aligned with the mediator and launch command.</li>
+<li>Provide Limrun driver env such as <code>LIMRUN_IOS_ID</code>, <code>LIMRUN_IOS_API_URL</code>, and <code>LIMRUN_IOS_TOKEN</code> when screenshots or driver calls need the instance API.</li>
+</ul>
+<p>Use <a href="https://github.com/limrun-inc/typescript-sdk/tree/main/examples/detox-ios" target="_blank" rel="noopener noreferrer">limrun-inc/typescript-sdk <code>examples/detox-ios</code></a> as the maintained happy path for exact config/env wiring. Use <code>-l trace</code> on <code>detox run-server</code> only when verbose logs are not enough.</p>
+<p>For native SwiftUI apps, a minimal Detox configuration usually looks like:</p>
+<pre><code class="language-js">const server = process.env.DETOX_SERVER || 'ws://localhost:8099';
+const sessionId = process.env.DETOX_SESSION_ID || 'limrun-detox';
+
+module.exports = {
+  testRunner: { args: { $0: 'jest' }, jest: { setupTimeout: 120000 } },
+  session: {
+    server,
+    sessionId,
+    debugSynchronization: 0,
+  },
+  apps: { ios: { type: 'ios.app', binaryPath: 'unused-by-limrun' } },
+  devices: {
+    limrun: {
+      type: '@limrun/detox/driver',
+      device: { id: process.env.LIMRUN_IOS_ID },
+    },
+  },
+  configurations: {
+    'ios.limrun': {
+      device: 'limrun',
+      app: 'ios',
+      behavior: { init: { reinstallApp: false }, cleanup: { shutdownDevice: false } },
+    },
+  },
+};
+</code></pre>
+<p>Then launch with <code>lim ios launch-app &lt;bundle-id&gt; --runtime detox ...</code> and run <code>npx detox test --no-start</code>.</p>
+<h2>Validation Signals</h2>
+<ul>
+<li>App connected: <code>detox run-server</code> logs <code>role:"app"</code> and <code>appConnected:true</code>.</li>
+<li>Tester connected: the same session reaches <code>testerConnected:true, appConnected:true</code>.</li>
+<li>Runtime loaded: the app connects to the mediator after the <code>--runtime detox</code> launch.</li>
+<li>UI visible: <code>lim ios element-tree --id &lt;ios-id&gt;</code> shows the expected app screen.</li>
+</ul>
+<h2>Gotchas</h2>
+<ul>
+<li>Do not pass arbitrary env vars, app args, or injectable paths. Use <code>--runtime detox</code>.</li>
+<li><code>--detox-version</code> should match the local <code>detox</code> package version used by the tester. If omitted, <code>lim ios launch-app</code> resolves it from the current working directory; pass it explicitly when running outside the Detox project.</li>
+<li>Unsupported bundled Detox versions should fail with a clear supported-version list.</li>
+<li><code>Cannot forward the message to the Detox client</code> can simply mean the app connected before the tester did.</li>
+<li>For SwiftUI, prefer stable accessibility identifiers, e.g. <code>.accessibilityIdentifier("greetingText")</code> with <code>by.id('greetingText')</code>; <code>by.text(...)</code> can miss labels that appear in <code>lim ios element-tree</code>.</li>
+<li>Debug failures by checking <code>lim ios element-tree --id &lt;ios-id&gt;</code> first, then mediator logs for app/tester connection state.</li>
+<li>Cleanup manual runs by stopping <code>detox run-server</code>, running <code>lim ios tunnel stop --id &lt;ios-id&gt;</code>, and deleting the instance with <code>lim ios delete &lt;ios-id&gt;</code> (<code>--id</code> is not valid for delete).</li>
+<li>This does not make Detox own the iOS lifecycle; prepare or reuse the Limrun instance separately.</li>
+</ul>

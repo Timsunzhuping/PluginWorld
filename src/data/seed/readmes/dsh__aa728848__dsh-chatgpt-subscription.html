@@ -9,6 +9,7 @@
 <li><a href="#%E7%8E%AF%E5%A2%83%E8%A6%81%E6%B1%82" target="_blank" rel="noopener noreferrer">环境要求</a></li>
 <li><a href="#%E5%AE%89%E8%A3%85" target="_blank" rel="noopener noreferrer">安装</a></li>
 <li><a href="#%E4%BD%BF%E7%94%A8" target="_blank" rel="noopener noreferrer">使用</a></li>
+<li><a href="#%E6%8E%A8%E7%90%86%E5%A1%8C%E7%BC%A9%E5%AE%88%E5%8D%AB%E7%86%94%E6%96%AD%E9%BB%98%E8%AE%A4%E5%85%B3%E9%97%AD" target="_blank" rel="noopener noreferrer">推理塌缩守卫（熔断，默认关闭）</a></li>
 <li><a href="#command-code-%E7%BA%BF%E8%B7%AF" target="_blank" rel="noopener noreferrer">Command Code 线路</a></li>
 <li><a href="#workbuddy-%E7%BA%BF%E8%B7%AF" target="_blank" rel="noopener noreferrer">WorkBuddy 线路</a></li>
 <li><a href="#claude%E8%AE%A2%E9%98%85%E7%BA%BF%E8%B7%AF" target="_blank" rel="noopener noreferrer">Claude（订阅）线路</a></li>
@@ -757,6 +758,9 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 <td><code>session</code> 只约束记录了允许列表的会话；<code>preference</code> 额外用当前设置卡列表约束未记录的会话</td>
 </tr>
 </tbody></table>
+<blockquote>
+<p>同一份插件行 <code>config</code> 里还有推理塌缩守卫的开关 <code>reasoningCollapseGuard</code>——<strong>默认 <code>false</code>（关闭）</strong>，功能保留、将来需要时按<a href="#%E6%8E%A8%E7%90%86%E5%A1%8C%E7%BC%A9%E5%AE%88%E5%8D%AB%E7%86%94%E6%96%AD%E9%BB%98%E8%AE%A4%E5%85%B3%E9%97%AD" target="_blank" rel="noopener noreferrer">推理塌缩守卫（熔断，默认关闭）</a>一节显式打开。</p>
+</blockquote>
 <p>改动只在设置卡片里保存过的勾选生效：设置改动只影响之后新建的会话（DSH 的会话快照语义），已运行的会话继续使用它自己记录的那份列表。</p>
 <blockquote>
 <p>升级提示：从 0.3.2 起，带有允许列表的会话里<strong>任何</strong>未写明 <code>provider</code> + <code>model</code> 的委派都会被拒绝（此前只有写明且不在列表内的路由会被拒绝）。这是有意的行为变更——它消除了「子代理悄悄继承主代理模型」的漏洞；把 <code>subagentModelAuthorization</code> 设为 <code>false</code> 可回到 DSH 原始行为。</p>
@@ -771,6 +775,84 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 <p><code>kimi-code</code> 会像其他 Provider 一样出现在 DSH 模型选择器中。<strong>上下文窗口</strong>默认取模型目录值，可逐模型覆盖（用于 DSH 的压缩与溢出判断，支持 <code>1M</code> / <code>256K</code> / <code>200000</code> 等写法）——注意 <code>k3</code> 的 1M 上下文需要 Allegretto 及以上套餐，因此默认按 256K 计算，升级后再在此覆盖为 1M。<strong>默认思考档位</strong>只提供 <code>low</code> / <code>high</code> / <code>max</code> 三档与「关闭思考」（服务对这三档以外的取值直接报 400）；切换模型或切换档位都会使上下文缓存失效，建议在同一会话内保持一致。</p>
 <p><strong>额度倍率</strong>取自官方模型表并显示在设置页模型能力表的「说明」列（悬停可一并看到）：<code>k3</code> = <strong>2×</strong>、<code>k3-256k</code> = <strong>1×</strong>、<code>kimi-for-coding</code> = <strong>1×</strong>、<code>kimi-for-coding-highspeed</code> = <strong>3×</strong>。倍率绑定<strong>模型 id</strong>，与上下文长度、缓存命中率都无关——选 <code>k3</code> 就是 2×，哪怕只用几千 token。注册表不认识的新模型 id 显示为<strong>未知</strong>而不是猜成 1×。</p>
 <p><strong>区域</strong>：默认使用中国大陆主机（<code>auth.kimi.com</code> / <code>api.kimi.com</code>）。国际账号可设置 <code>DSH_KIMI_CODE_OAUTH_HOST=https://auth.kimi.ai</code> 与 <code>DSH_KIMI_CODE_BASE_URL=https://api.kimi.ai/coding</code> 后重新登录；环境变量同时会钉住区域，设置页会显示当前解析到的主机。</p>
+<h2>推理塌缩守卫（熔断，默认关闭）</h2>
+<p>本线的“熔断器”就是<strong>推理塌缩守卫</strong>（<code>src/host/reasoning-collapse-guard/index.ts</code>）。一个长推理流可能退化成复读——反复绕过同一小撮短语、既不调工具也不收尾，一直到输出上限把这一轮截断（曾经有一次会话就这样烧掉 128,000 输出 token 并返回空答案）。守卫订阅 <code>llm/stream</code> 瀑布，对<strong>尾部推理窗口</strong>同时算两个信号：</p>
+<ul>
+<li><strong>字面重复度</strong>：n-gram 唯一性，健康推理接近 0，退化流接近 1；</li>
+<li><strong>语义复现度</strong>：每条句子有多强地重复了 <code>semanticLag</code> 句之前已经说过的内容——用来抓“换着词说同一件事”，这类流的字面分只有 0.48，永远碰不到 0.85 的阈值。</li>
+</ul>
+<p>两个信号必须在<strong>同一个窗口同时越线</strong>，并且连续 <code>semanticConfirmations</code> 个窗口都如此，守卫才会切断本轮流；切掉之后它只做一件事：在 Agent 空闲时 steer 一条续跑，让这一轮在新的步骤上跑完。单个信号或单个异常窗口只记日志、放行——<strong>误杀一段健康回答的代价比放过一次失控更大</strong>。</p>
+<p><strong>现状：默认关闭。</strong> 这个熔断在生产轮次里已经没有需要，所以本线不再默认接电；功能、实现与全部测试都原样保留，等将来需要时再打开。</p>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>关闭后</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>llm/stream</code> 订阅</td>
+<td>不注册（守卫连 <code>ctx.effect</code> 都不装）</td>
+</tr>
+<tr>
+<td>每回合的熔断簿记</td>
+<td>不建立</td>
+</tr>
+<tr>
+<td>切断后那条续跑</td>
+<td>不排队</td>
+</tr>
+<tr>
+<td>运行时开销</td>
+<td>零：默认配置下这段代码根本不会进入执行路径</td>
+</tr>
+</tbody></table>
+<h3>将来需要时怎么打开</h3>
+<p>守卫的开关是插件行 <code>config</code> 里的 <code>reasoningCollapseGuard</code>，写在 profile 的 <code>cordis.patch.yml</code>（与「抓取模式与上限」同一位置，<strong>重载插件或重启 DSH 后生效</strong>）：</p>
+<pre><code class="language-yaml">- id: dsh-chatgpt-subscription
+  config:
+    reasoningCollapseGuard: {}        # 空对象 = 用出厂默认值把熔断接回来
+</code></pre>
+<p>想调参就在这个对象里写字段；省略的字段取出厂默认值：</p>
+<pre><code class="language-yaml">- id: dsh-chatgpt-subscription
+  config:
+    reasoningCollapseGuard:
+      threshold: 0.85                 # 字面重复度阈值（默认 0.85）
+      windowChars: 4096               # 每次参与评分的尾部推理字符数（默认 4096）
+      maxBreaksPerTurn: 3             # 单回合最多切断几次（默认 3）
+      cooldownMs: 30000               # 两次切断的最小间隔毫秒（默认 30000）
+      semanticThreshold: 0.35         # 语义复现度阈值（默认 0.35）
+      semanticConfirmations: 3        # 双信号需连续命中的窗口数（默认 3）
+      includeModels: [gpt-6.1-sol]    # 只看这些模型；空数组 = 看全部（默认 []）
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>取值</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>不写（缺省）</td>
+<td><strong>关闭</strong>——2026-10 起的出厂默认</td>
+</tr>
+<tr>
+<td><code>{}</code></td>
+<td>打开，全部取出厂默认值</td>
+</tr>
+<tr>
+<td>对象（含调参）</td>
+<td>打开，按对象覆盖默认值；数字由守卫自己的 fail-loud 校验，非法值会让插件加载失败而不是被静默忽略</td>
+</tr>
+<tr>
+<td><code>false</code></td>
+<td>显式关闭（与缺省等价，写出来更自明）</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p><strong>将来重新开启前先验证一件事</strong>：守卫与续跑队列共用 <code>llm/stream</code> 的<strong>外层</strong>位置，开启后它在切断时不会给出 finish chunk，因此 <code>noAnswerResume</code>（无答案续跑，默认仍开启）在那种被放弃的流上不结算、也不消耗预算——这条约束在 0.26.0 的续跑预算修复里已经落实并有回归用例（<code>test/no-answer-resume.test.ts</code>）。若将来改了守卫的切断方式，需要同时复查这条边界。</p>
+</blockquote>
+<p><strong>升级提示</strong>：默认安装的 Host 升级后不再有任何塌缩熔断与随之的续跑；依赖“死循环自动刹车”的部署按上面的 YAML 显式写回即可。新增回归用例 <code>test/circuit-breaker-default.test.ts</code> 钉住了“默认必须关闭”和“打开后仍可用”两半。</p>
 <h2>Command Code 线路</h2>
 <p>插件注册 <code>command-code</code> Provider，对接 Command Code 的两套接口：</p>
 <table>
@@ -904,6 +986,13 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 </tr>
 </tbody></table>
 <p>目录里通常同时存在当前凭据与若干带时间戳的历史快照。插件<strong>优先取 <code>workbuddy-desktop.info</code> / <code>codebuddy-desktop.info</code> 这类规范文件名</strong>，其余按 token 剩余有效期取最长的一个——只按文件 mtime 选会选到过期快照。卡片会列出目录里所有可用凭据，标明各自区域。</p>
+<p><strong>失败分类与重试</strong>：这条线路把失败分成「换号能解决」与「换号也一样」两类，判据不是状态码本身。</p>
+<ul>
+<li><strong>401 不等于凭据失效</strong>：实测同一枚 bearer 在 <code>GET /v3/config</code> 上是 200、在 <code>POST /v2/chat/completions</code> 上是 401（APISIX 生成的 HTML 拒绝页）。本线路的 access token 有效期约 28 天，本地时钟<strong>几乎永远不会</strong>在 401 时触发续期，因此这类 401 多半是会话被顶掉或网关/路由层拒绝。收到 401 时先对<strong>同一个账号</strong>强制续期一次（<code>POST /v2/plugin/auth/token/refresh</code>）并用新 token <strong>原样重放同一份请求体</strong>：续期成功即说明凭据还活着，不写任何账号状态；<strong>只有续期本身被上游拒绝</strong>才把该账号记为需要重新登录，此时才换号。</li>
+<li><strong>请求期不写「需要重新登录」</strong>：401 只让该账号退出<strong>本次请求</strong>的轮换，不写号池状态。此前一次 lane 级的 401 会在同一个请求里把每一个账号依次写成 <code>expired</code>，而号池没有任何清除路径，于是整条线路要求全部重新登录。</li>
+<li><strong>自愈</strong>：被标记的账号在<strong>每个请求前</strong>与卡片列表前都会重新对照权威存储（桌面账号看 CodeBuddy 自己的凭据文件、托管账号看插件的加密存储）；换了另一枚<strong>未过期</strong> token 就清掉标记并采用新凭据，仍持着被拒那枚的账号保留标记。</li>
+<li><strong>429 冷却换号</strong>：按 <code>Retry-After</code>（缺省 5 分钟，上限 10 分钟）冷却该账号，并用同一份 body 换下一个账号重试。</li>
+</ul>
 <p><strong>上游接口</strong>：</p>
 <table>
 <thead>

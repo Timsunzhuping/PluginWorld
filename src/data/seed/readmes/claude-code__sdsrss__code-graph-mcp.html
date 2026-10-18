@@ -17,7 +17,7 @@
 <li><strong>HTTP route tracing</strong> — Map route paths to backend handler functions (Express, Flask/FastAPI, Go <code>net/http</code>, Rust axum)</li>
 <li><strong>Dead code detection</strong> — Find unreferenced symbols with smart Orphan/Exported-Unused classification</li>
 <li><strong>Impact analysis</strong> — Determine the blast radius of code changes by tracing all dependents</li>
-<li><strong>Incremental indexing</strong> — Merkle tree change detection with file system watcher for real-time updates. Smart event filtering skips metadata-only changes (chmod, xattr)</li>
+<li><strong>Incremental indexing</strong> — Merkle tree change detection with a file system watcher; changed files are re-indexed when the next MCP query tool call arrives (<code>get_index_status</code> does not count). Smart event filtering skips metadata-only changes (chmod, xattr)</li>
 <li><strong>Context compression</strong> — Token-aware snippet extraction for LLM context windows (L0→full code, L1→summaries, L2→file groups, L3→directory overview). Every MCP tool except <code>ast_search</code> takes <code>compact: true</code>, which drops code bodies from the response; what else it trims is per-tool (<code>get_ast_node</code> keeps the signature, <code>module_overview</code> drops it), and how much it saves depends on the tool and the repo, so no fixed figure is quoted here</li>
 <li><strong>Embedding model</strong> — Optional local embedding via Candle (feature-gated <code>embed-model</code>). Context reordered to prioritize structural relations over code for better embedding quality</li>
 <li><strong>Self-healing</strong> — Automatic SQLite corruption recovery with rebuild. Startup repair for incomplete indexing (Phase 3 failures)</li>
@@ -244,7 +244,7 @@ does not list is not proof that nothing dispatches to the function.</li>
 <li><strong>MCP Server</strong> — All code-graph tools available to Claude</li>
 <li><strong>Skills</strong> — <code>explore</code> (structure-first navigation before reading files) and <code>index</code> (health-check / re-index / full rebuild); see <a href="#plugin-skills" target="_blank" rel="noopener noreferrer">Plugin Skills</a></li>
 <li><strong>Code Explorer Agent</strong> — Deep code understanding expert via <code>code-explorer</code></li>
-<li><strong>Auto-indexing Hook</strong> — Incremental index on every file edit (PostToolUse)</li>
+<li><strong>Auto-indexing</strong> — The MCP server's file watcher records edited files, and the next code-graph MCP query (<code>get_call_graph</code>, <code>find_references</code>, … — not <code>get_index_status</code>) re-indexes them before it answers; a PostToolUse hook that re-indexes per edit is off by default (<code>CODE_GRAPH_HOOK_INDEX=on</code> turns it on for CLI-only use)</li>
 <li><strong>StatusLine</strong> — Real-time health display (nodes, files, watch status) and what code-graph did in this session (<code>5 answers · 2 calls</code>: answers its grep, edit, read, subagent and Stop hooks delivered to Claude, code-graph queries Claude ran) — compatible with other plugins' StatusLine via composite multiplexer</li>
 <li><strong>Auto-update</strong> — Checks for a new version at session start (throttled to at most one check every 2 minutes). Between forced checks the re-check interval is 30 minutes after an "up to date" answer and 6 hours while an update is already pending. Updates install silently.</li>
 </ul>
@@ -286,7 +286,7 @@ This writes a sentinel-wrapped managed block into <code>&lt;cwd&gt;/CLAUDE.md</c
 }
 </code></pre>
 </li>
-<li>Restart Claude Code. Session startup skips the project-map injection, UserPromptSubmit stops auto-injecting context, and the MCP <code>instructions</code> shrink to a one-line command pointer.</li>
+<li>Restart Claude Code. The hooks inject nothing (the grep, read, edit, prompt, subagent and Stop hooks stay silent, and session startup skips the project-map injection), and the MCP <code>instructions</code> shrink to a one-line command pointer.</li>
 </ol>
 <h3>Option 2: Claude Code MCP Server Only</h3>
 <p>Register as an MCP server without the plugin features:</p>
@@ -770,8 +770,10 @@ marker, so a manually filled copy is treated as not-current and re-downloaded.</
 # (the archive has no wrapping folder: model.safetensors, tokenizer.json, config.json).
 curl -sL -o models.tar.gz \
   https://github.com/sdsrss/code-graph-mcp/releases/download/v&lt;version&gt;/models.tar.gz
-curl -sL https://github.com/sdsrss/code-graph-mcp/releases/download/v&lt;version&gt;/models.tar.gz.sha256
-sha256sum -c models.tar.gz.sha256
+curl -sL -o models.tar.gz.sha256 \
+  https://github.com/sdsrss/code-graph-mcp/releases/download/v&lt;version&gt;/models.tar.gz.sha256
+# The .sha256 file holds the bare hash; sha256sum -c wants "&lt;hash&gt;  &lt;file&gt;".
+echo "$(cat models.tar.gz.sha256)  models.tar.gz" | sha256sum -c -
 mkdir -p ~/.cache/code-graph/models-manual
 tar -xzf models.tar.gz -C ~/.cache/code-graph/models-manual
 export CODE_GRAPH_MODEL_DIR=~/.cache/code-graph/models-manual
@@ -826,7 +828,7 @@ defaults are what you get by doing nothing.</p>
 </tr>
 <tr>
 <td><code>CODE_GRAPH_QUIET_HOOKS=1</code></td>
-<td>Hooks inject a one-line pointer instead of the full decision table.</td>
+<td>The hooks inject nothing (grep, read, edit, prompt, subagent and Stop stay silent), and the MCP <code>instructions</code> shrink to a one-line pointer to the full decision table.</td>
 </tr>
 <tr>
 <td><code>CODE_GRAPH_VERBOSE_HOOKS=1</code></td>
@@ -846,7 +848,11 @@ defaults are what you get by doing nothing.</p>
 </tr>
 <tr>
 <td><code>CODE_GRAPH_HOOK_INDEX=on|off</code></td>
-<td>Force the incremental-index hook on or off instead of letting it decide.</td>
+<td>Turn the per-edit incremental-index hook on (it is off by default; the MCP server's watcher re-indexes edits at its next query tool call) or keep it off.</td>
+</tr>
+<tr>
+<td><code>CODE_GRAPH_YIELD_TO_SERVER=1</code></td>
+<td>Set by SessionStart on its background refresh: <code>incremental-index</code> indexes nothing (exit 0) while another process holds <code>.code-graph/index.lock</code> — an MCP server, which keeps the index fresh itself, or a <code>rebuild-index</code>.</td>
 </tr>
 <tr>
 <td><code>CODE_GRAPH_MODEL_DIR=&lt;dir&gt;</code></td>
@@ -909,7 +915,10 @@ defaults are what you get by doing nothing.</p>
 <p>code-graph claims Claude Code's single <code>statusLine</code> slot and runs a <strong>composite</strong>
 that calls each registered provider in turn, so other plugins keep their segment
 instead of losing the slot. Whatever occupied it at install time is captured
-automatically as the <code>_previous</code> provider and restored on uninstall.</p>
+automatically as the <code>_previous</code> provider and restored on uninstall, unless
+another plugin has registered a segment through code-graph: then the slot goes
+to that plugin, so its segment keeps rendering, and your previous command stays
+listed in <code>~/.claude/statusline-providers.json</code> for you to put back.</p>
 <p>A third-party plugin registers itself through the shipped CLI:</p>
 <pre><code class="language-bash"># Resolve the script through the installed package. NOT $CLAUDE_PLUGIN_ROOT:
 # Claude Code sets that per-plugin, so inside YOUR hook it points at YOUR
