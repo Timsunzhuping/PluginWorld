@@ -1,0 +1,252 @@
+<h1>Phlow</h1>
+<p>Local, bounded planner → coder → reviewer workflows, with real file tools and a
+host-enforced verification gate. Ollama is the default backend. CLI, terminal UI
+and the MCP server share <strong>one safe runtime</strong>; none uses the old unrestricted shell
+or auto-loaded plugin path.
+<a href="https://github.com/qompassai/phlow/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a></p>
+<p>Flow can work alone or bidirectionally with <a href="https://github.com/qompassai/rose.nvim" target="_blank" rel="noopener noreferrer">Rose</a>:
+Rose calls Flow over MCP stdio; Flow calls Rose's native editor tools over a private
+Neovim socket.</p>
+<h2>Get started</h2>
+<p>Requirements: Python 3.11+, <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener noreferrer">uv</a>, and Ollama with an
+installed tool-capable model. POSIX is required for Flow's secure local file I/O;
+the primary targets are Linux and macOS.</p>
+<p>From this checkout:</p>
+<pre><code class="language-sh">uv venv .venv
+uv pip install --python .venv/bin/python -e '.[editor,dev]'
+
+# In a separate terminal, if not already running:
+ollama serve
+ollama pull qwen2.5-coder:7b
+
+# No model request or command execution; this also works without Ollama running:
+.venv/bin/flow status --workspace /absolute/path/to/project
+</code></pre>
+<p>The <code>editor</code> extra installs optional pynvim. <code>dev</code> installs pytest, Ruff and the
+wheel builder. Omit extras for the basic CLI/TUI runtime. Dependencies belong in
+the project environment, not a global Python installation.</p>
+<h3>Approve checks, then run</h3>
+<p>Create an <strong>operator-reviewed</strong> TOML file, for example <code>flow-operator.toml</code>.
+Workspace values must be at the root, <strong>before any TOML table header</strong>.</p>
+<pre><code class="language-toml">workspace_dir = "/absolute/path/to/project"
+
+[ollama]
+base_url = "http://127.0.0.1:11434"
+model = "qwen2.5-coder:7b"
+timeout = 120 # seconds
+
+[models]
+planner = "qwen2.5-coder:7b"
+coder = "qwen2.5-coder:7b"
+reviewer = "qwen2.5-coder:7b"
+
+[agent]
+max_iterations = 6      # model turns per role invocation
+max_cycles = 2          # coder → verification → reviewer cycles
+max_tool_calls = 64     # total across the entire run
+max_context_chars = 100000
+
+[checks.tests]
+cmd = [".venv/bin/python", "-m", "pytest", "-q"]
+timeout = 60000         # milliseconds, as in Rose
+required = true
+kind = "test"
+filetypes = ["python"]
+
+[checks.lint]
+cmd = [".venv/bin/ruff", "check", "."]
+timeout = 30000
+required = true
+kind = "lint"
+filetypes = ["python"]
+</code></pre>
+<p>Those executables must exist <strong>in the target project's environment</strong>; Flow does
+not install project dependencies or select commands for you. For this Flow checkout,
+the included <code>config.toml</code> supplies its own test and lint checks.</p>
+<pre><code class="language-sh">.venv/bin/flow check --config /absolute/path/to/flow-operator.toml --trusted
+.venv/bin/flow run --config /absolute/path/to/flow-operator.toml --trusted \
+  "Fix the failing parser tests and explain the changes"
+.venv/bin/flow status --workspace /absolute/path/to/project
+.venv/bin/flow tui --config /absolute/path/to/flow-operator.toml --trusted
+</code></pre>
+<p><code>run</code>, <code>check</code>, and <code>status</code> print one JSON object. Exit codes: <code>0</code> for an <code>ok</code>
+result, <code>1</code> for failed/unverified results, <code>2</code> for configuration/usage errors, and
+<code>130</code> for an interrupted session. Common flags work before or after the command.
+<code>--workspace</code> overrides configuration <strong>before</strong> runtime/tool construction;
+<code>--model</code> overrides every role. With no subcommand, <code>flow</code> starts the TUI.</p>
+<p>TUI commands: <code>/help</code>, <code>/status</code>, <code>/check [name]</code>, <code>/tools</code>, <code>/models</code>,
+<code>/model &lt;installed-model&gt;</code>, <code>/build &lt;request&gt;</code>, <code>/clear</code>, <code>/quit</code>. Ctrl-D exits.
+Natural-language tasks and <code>/build</code> use the same verified runtime. Every task has
+fresh, separate role contexts. Legacy <code>/plugins</code>, <code>/evolve</code>, <code>/memory</code>, and
+<code>/feedback</code> are explicitly unavailable, not silently wired to unsafe helpers.</p>
+<h2>What “verified” means</h2>
+<p>A run is <code>verified: true</code> only when:</p>
+<ol>
+<li>The planner/coder complete within their budgets.</li>
+<li>At least one required named check runs, and <strong>every required check passes</strong>.</li>
+<li>Every source file changed through Flow has successful relevant static analysis.</li>
+<li>A separate read-only reviewer returns a structured approval.</li>
+<li>Edited files have not changed during verification/review and attached editor
+buffers are not dirty.</li>
+</ol>
+<p>Static evidence is an explicitly configured required check with
+<code>kind = "lint"</code>, <code>"typecheck"</code>, or <code>"diagnostics"</code> and matching <code>filetypes</code>, or a
+completed native Rose linter returning <code>status="ok", verified=true</code>.
+<code>kind="test"</code>, <code>"build"</code>, and <code>"check"</code> do not by themselves establish static
+language coverage. Use language names (<code>"python"</code>), extensions (<code>".py"</code>), or an
+explicit <code>"*"</code> only when a check really covers every language you edit.
+Unknown source extensions can use their extension or suffix as the coverage key.
+Documentation/data extensions such as <code>.md</code>, <code>.json</code>, and <code>.toml</code> still require
+the named gate but do not require a source-language linter.</p>
+<p>All required checks run: <code>filetypes</code> describes coverage, never silently skips a
+required command. Optional checks are reported but cannot replace a required gate.
+Checks are language-agnostic exact argv: Rust, Go, TypeScript, C, Nix, or another
+language can use the same mechanism. There are no inferred <code>npx</code> downloads or
+automatic package-manager installs.</p>
+<p>Missing executables/checks, timeout, invalid reviewer output, absent static
+coverage and exhausted budgets are <strong>not success</strong>. Failed checks and review
+issues feed the next bounded repair cycle. Reports retain <code>checks</code>,
+<code>verification.coverage</code>, <code>verification_history</code>, changed files, role/model/turn
+counts and tool-call IDs/errors. Empty cached LSP diagnostics are only a snapshot,
+not verification; a missing LSP remains explicitly <code>unavailable</code> even when a
+real linter independently verifies its configured scope. Actual diagnostic
+errors or stale results veto native coverage.</p>
+<p>This is evidence within configured checks' scope, not a proof that all behavior,
+all languages, or an entire application are correct.</p>
+<h2>Trust and security</h2>
+<ul>
+<li>Default mode is <strong>read-only</strong>. <code>--trusted</code> allows project edits and explicitly
+configured named checks. It does not approve new model-selected commands.</li>
+<li><code>--config FILE</code> explicitly approves loading that operator file.
+Workspace <code>config.toml</code>/<code>.flow.toml</code> are never auto-loaded, even with <code>--trusted</code>.
+Only <code>$XDG_CONFIG_HOME/flow/config.toml</code> (default <code>~/.config/flow/config.toml</code>)
+is loaded automatically as user configuration.</li>
+<li>No model-controlled shell, Python/Bash code execution, executable arguments,
+cwd, environment overrides, deletion tool, plugins, Lua, or Ex commands.
+A named check may invoke an interpreter, but its <strong>entire argv</strong> is fixed by
+operator configuration and snapshotted before the run.</li>
+<li>File tools require relative paths. Parent traversal, absolute/Windows-style
+paths, <code>.git</code>, symlinks, multiply-linked files and outside-root paths are
+rejected. Writes are atomic, size-limited, descriptor-relative and no-follow.
+Root replacement is detected as stale. Operator configuration cannot be edited
+through the model file tools.</li>
+<li>File reads/writes are limited to 256 KiB. Listings are capped and exclude
+generated directories. Tool output and model response sizes are bounded.</li>
+<li>The default Ollama URL is loopback. HTTP redirects and environment proxies are
+disabled. Non-loopback endpoints require explicit <code>ollama.allow_remote=true</code>;
+no cloud fallback, API key lookup or automatic external search exists.</li>
+<li>Trusted project <strong>tests/builds/linters execute code</strong> and can access the OS,
+network and files as your user. Named commands can run project configuration,
+plugins or hooks. This is <strong>not an OS sandbox</strong>: review the project and the
+exact check command, use a container/VM for untrusted projects, and do not run
+Flow with elevated privileges. Concurrent hostile same-user processes are
+outside the security guarantee.</li>
+</ul>
+<p>Legacy executable factories now fail closed. The former application generator
+and orchestrator names require an explicit <code>Runtime</code>; their raw-write/text-to-shell
+paths are gone. Bundled prompts/profiles are installed inside <code>flow/skills</code> and
+read as package resources, never implicitly from a project's <code>skills/</code> directory.</p>
+<h2>Rose integration</h2>
+<p>Configure Rose's native entrypoint with the same absolute workspace and trust:</p>
+<pre><code class="language-lua">require('rose').setup({
+  workspace = '/absolute/path/to/project',
+  trusted = true,
+  ollama = { base_url = 'http://127.0.0.1:11434', model = 'qwen2.5-coder:7b' },
+  flow = {
+    cmd = { '/absolute/path/to/flow/.venv/bin/flow', 'serve',
+            '--config', '/absolute/path/to/flow-operator.toml' },
+    bridge = true,
+    timeout = 300000, -- milliseconds; budget for the complete bounded run
+  },
+})
+</code></pre>
+<p>Rose appends the workspace/trust flags and starts/passes a private socket for the
+reverse bridge. Manual invocation has the same interface:</p>
+<pre><code class="language-sh">flow serve --workspace /absolute/root --trusted \
+  --config /absolute/operator.toml --nvim /private/directory/nvim.sock \
+  --editor-timeout 120
+</code></pre>
+<p>The socket must be explicitly supplied and same-user/private: on POSIX use a
+<code>0700</code> parent directory or a socket inaccessible to group/others. TCP is rejected.
+<strong>A Neovim socket grants arbitrary code execution to other same-user clients</strong>;
+keep it private. Flow itself only sends the fixed expressions
+<code>return require('rose.tools').schemas()</code> and
+<code>return require('rose.tools').call(...)</code>, with names/args as parameters.</p>
+<p>Editor schemas are discovered dynamically and filtered to <code>editor_context</code>,
+<code>editor_diagnostics</code>, <code>editor_symbols</code>, <code>editor_references</code>, <code>editor_lint</code>,
+<code>editor_check</code>, <code>editor_scip</code>, and <code>editor_debug</code>. Debug launch/probes remain
+manual: the agent sees only <code>editor_debug</code> status. Planner/reviewer receive
+read-only tools, not checks/lint or writes.</p>
+<p>For buffer safety the reverse bridge also allowlists fixed <code>file_read</code> and
+<code>file_write</code> calls. Flow validates its paths, trust, role, size and protected
+configuration first, verifies Rose's resolved workspace matches, then uses
+Rose's buffer-aware I/O. Unsaved/read-only buffers are not overwritten; loaded
+buffers are synchronized with disk writes. An unavailable/mismatched bridge
+does <strong>not</strong> fall back to unsafe disk writes. Named checks refuse unsaved buffers.
+Rose's editor-context freshness API v1 is required: Flow checks the global dirty
+buffer list and compares loaded/observed workspace snapshots across checks and
+review, including noncurrent buffers. Missing freshness fields fail closed.</p>
+<p>pynvim is imported on the main thread before attachment (pynvim records the
+signal-owner thread at import time); connection creation, requests and close stay
+on one owning worker. Editor request timeout defaults to 120 seconds and is
+configurable from 0.1–660 seconds. Model and check timeouts have separate units.
+SCIP support is decoded JSON supplied by Rose, not raw protobuf decoding.
+No reverse <code>flow_run</code> calls are exposed.</p>
+<h3>MCP wire contract</h3>
+<p>One UTF-8 JSON-RPC 2.0 object per newline; not Content-Length framing.
+Protocol <code>2025-11-25</code>; compatible dates <code>2025-06-18</code> and <code>2025-03-26</code> are accepted.
+Send <code>initialize</code>, then <code>notifications/initialized</code>, before <code>tools/list</code> or
+<code>tools/call</code>. <code>ping</code> is available throughout.</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Arguments</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>flow_status</code></td>
+<td><code>{}</code></td>
+</tr>
+<tr>
+<td><code>flow_run</code></td>
+<td><code>{"task":"..."}</code></td>
+</tr>
+<tr>
+<td><code>flow_check</code></td>
+<td><code>{}</code> or <code>{"name":"configured-name"}</code></td>
+</tr>
+</tbody></table>
+<p>Tool responses contain <code>content=[{type:"text",text:"&lt;JSON report&gt;"}]</code>,
+<code>structuredContent=report</code>, and <code>isError</code> for non-ok outcomes. The MCP tool list
+is intentionally only these three tools. Stdout is <strong>protocol only</strong>; stderr
+is for diagnostics. Parse/method/parameter errors preserve JSON-RPC IDs where
+valid. Oversized frames close the session after an error.</p>
+<p>The server is deliberately sequential to fit on device. It does not process
+<code>notifications/cancelled</code> cooperatively during a running request. To cancel,
+terminate the Flow session (RoseStop): SIGTERM/KeyboardInterrupt unwind active
+check process-group cleanup and close the editor client; reconnect afterward.
+Already saved edits are not rolled back. EOF closes an idle session; a busy
+request finishes within its bounds unless the supervisor terminates it.
+This stdio transport needs a client supervisor, not stdout redirected to a
+systemd journal as a pretend network daemon.</p>
+<h2>Development and verification</h2>
+<pre><code class="language-sh">uv pip install --python .venv/bin/python -e '.[editor,dev]'
+.venv/bin/pytest -q
+.venv/bin/ruff check flow tests
+.venv/bin/python -m compileall -q flow
+.venv/bin/python -m build --wheel --no-isolation
+
+# Include real headless editor tests when Neovim is not on PATH:
+NVIM=/absolute/path/to/nvim .venv/bin/pytest -q
+</code></pre>
+<p>Tests use deterministic fake backends, a local fake HTTP Ollama endpoint, real
+CLI/MCP subprocesses, and optional real headless Neovim. They cover role separation,
+repair bounds, verification, tool IDs/errors, trust/config/path regressions,
+timeouts/process cleanup, buffer bridge and wheel resources loaded outside the
+checkout. Neovim-specific tests report skips if no executable is available.
+No live Ollama inference/GPU quality test is claimed. A real model may choose poor
+edits or exhaust its budget; inspect the resulting report and diff.</p>
+<p>The Nix expression is retained but was not built in this environment.</p>
+<h2>License</h2>
+<p>This project is licensed under the <a href="https://github.com/qompassai/phlow/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">Apache License, Version 2.0</a>.</p>

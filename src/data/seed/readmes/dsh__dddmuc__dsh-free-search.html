@@ -413,14 +413,30 @@ dsh plugin --profile web add /path/to/dsh-free-search
 </tr>
 </tbody></table>
 <p>作用于 <strong>Bing</strong>（<code>adlt</code>）、<strong>DuckDuckGo HTML</strong>（<code>adlt</code>）、<strong>DuckDuckGo Lite</strong>（<code>adlt</code>）；其它引擎没有对应参数，不受影响。设置页有下拉框，也可直接在 config 里写 <code>safeSearch: moderate</code>。</p>
+<h4>fetch provider 接管（与其它 fetch 插件冲突）</h4>
+<p>插件运行时会尝试接管 <code>web.fetchProvider</code>：</p>
+<ul>
+<li>未设置、或仍是出厂默认 <code>http</code> → 接管为 <code>fs-quality-fetch</code>（直连 → exa contents → firecrawl → crawl4ai）；</li>
+<li>已被<strong>显式指向其它 provider</strong>（例如 <code>playwright</code>）→ <strong>不抢占</strong>，只记一条日志（进程内只打一次）。</li>
+</ul>
+<p>如果你同时装了也会注册 fetch provider 的插件（例如 <code>dsh-web-fetch-playwright</code>、<code>dsh-chatgpt-subscription</code>），<strong>请在 profile 的 <code>cordis.patch.yml</code> 里明确让一方退出</strong>：</p>
+<pre><code class="language-yaml">- id: web
+  config:
+    fetchProvider: playwright   # 用别人的 fetch；本插件只接管 search
+</code></pre>
+<p>否则启动阶段可能出现「互相写 <code>web</code> config → web 服务重建 → 插件重复 apply」的循环（见 issue #82）。</p>
+<p>如果你<strong>特意</strong> pin 了 <code>fetchProvider: http</code>（只想要内置抓取），把 <code>fetchProviderTakeover</code> 设为 <code>false</code> 即可：本插件不再把 <code>http</code> 当成「出厂默认」去接管，但仍会在完全未设置时补上。</p>
+<p><code>searchProvider</code> 的规则相同：未设置或仍是 <code>deepseek-official</code> 时接管，显式指定其它 provider 时不抢占。</p>
 <h4>配置文件</h4>
 <p>DSH 0.1.7-rc.1 起，配置跟随 profile 的插件条目保存：设置页与 <code>/free-search-engine</code> 都会写入当前 profile 的 <code>cordis.patch.yml</code> 中 <code>web-search-free</code>（<code>dsh-free-search</code>）条目的 <code>config</code>。</p>
 <p>旧版 <code>~/.dsh/settings.yaml</code> 的 <code>free-search:</code> 段<strong>不会被 DSH 核心自动导入</strong>（核心的 <code>importLegacyDocument</code> 只为 <code>ui-developer-tools</code> / <code>ui-onboarding</code> / <code>shell</code> 三个段提供了映射），原文件在导入其它段后会被改名为 <code>settings.yaml.imported</code>，该段的值只留在那里。插件会在启动时检测 <code>settings.yaml.imported</code>（或仍存在的 <code>settings.yaml</code>）中的 <code>free-search:</code> 段，把可识别的字段<strong>一次性补种</strong>进当前 profile 的条目 <code>config</code>（写一次后不再重复，可在启动日志看到 <code>free-search: migrated N field(s)…</code>）。如果你想手动处理，也可以照着 <code>settings.yaml.imported</code> 里的值在插件页行配置中填一遍。</p>
 <pre><code class="language-yaml"># profiles/&lt;profile&gt;/cordis.patch.yml 中该条目的 config：
 provider: bing              # ddg / ddg-lite / bing / searxng / anysearch / exa / tavily / keenable / firecrawl / parallel / perplexity / serpbase / serply / deepseek-official / deepseek-tools / you / baidu / kimi / aliyun / doubao / zhihu_global / zhihu_site / openai / gemini / claude / auto / multi
 fallbackOn: [quota, auth, bot-wall, transient, invalid-response, unknown]   # 允许触发回退的失败类别；[] = 任何失败都立即中止（默认全部）
-lang: zh                    # 设置页界面语言（zh / en）
-bingMarket: zh-CN           # Bing 市场
+lang: zh                    # 搜索语言池/本地化（zh / en / ru …，不再被设置页强行改写）
+uiLang: zh                  # 设置页界面语言（zh / en）；留空则跟随 lang
+bingMarket: zh-CN           # Bing 市场；留空 = 自动（不发送 mkt）
+fetchProviderTakeover: true # false = 保留你显式 pin 的 fetchProvider: http
 region: cn-zh               # DuckDuckGo 区域（可选）
 searxngInstances:           # 自定义 SearXNG 实例（可选）
   - https://your-instance.example
@@ -715,7 +731,7 @@ deepseekApiKey: ...
 </ul>
 <p>切换后重启 <code>dsh web</code> 生效。</p>
 <h4>离线自检断言（tools/）</h4>
-<p>仓库自带 <strong>17 个</strong>零依赖断言脚本（合计 <strong>501 项</strong>），<strong>不需要 API key、不联网、不需要测试框架</strong>，Node ≥ 20 即可跑：</p>
+<p>仓库自带 <strong>17 个</strong>零依赖断言脚本（合计 <strong>507 项</strong>），<strong>不需要 API key、不联网、不需要测试框架</strong>，Node ≥ 20 即可跑：</p>
 <table>
 <thead>
 <tr>
@@ -806,8 +822,8 @@ deepseekApiKey: ...
 </tr>
 <tr>
 <td><code>assert-provider-takeover.mjs</code></td>
-<td>provider 接管：旧属性 API 与 rc.2 的 <code>config.*</code> ref 两套兼容、<code>settings.mutate(web)</code> 单批写入、显式指定的 provider 不被抢占</td>
-<td><code>node tools/assert-provider-takeover.mjs</code>（6）</td>
+<td>provider 接管：旧属性 API 与 rc.2 的 <code>config.*</code> ref 两套兼容、<code>settings.mutate(web)</code> 单批写入、显式指定的 provider 不被抢占、<code>fetchProviderTakeover: false</code> 时保留显式 <code>http</code>、apply 重入/重复注册不再中断、重复日志去重</td>
+<td><code>node tools/assert-provider-takeover.mjs</code>（12）</td>
 </tr>
 </tbody></table>
 <p>任何一个失败会以非 0 退出码结束并列出失败项；把某个旧版本文件路径作为参数传进去，可以看到修复前必红（用来证明断言不是空转）。改动发布相关逻辑后建议先跑一遍再发版。</p>
@@ -1240,14 +1256,30 @@ dsh plugin --profile web add /path/to/dsh-free-search
 </tr>
 </tbody></table>
 <p>It applies to <strong>Bing</strong> (<code>adlt</code>), <strong>DuckDuckGo HTML</strong> (<code>adlt</code>), and <strong>DuckDuckGo Lite</strong> (<code>adlt</code>). Other engines have no such parameter and are unaffected. There is a dropdown in the settings page; you can also write <code>safeSearch: moderate</code> in the config.</p>
+<h4>Fetch provider takeover (conflicts with other fetch plugins)</h4>
+<p>At runtime the plugin tries to take over <code>web.fetchProvider</code>:</p>
+<ul>
+<li>unset, or still the factory default <code>http</code> → taken over as <code>fs-quality-fetch</code> (direct → exa contents → firecrawl → crawl4ai);</li>
+<li><strong>explicitly pointed at another provider</strong> (e.g. <code>playwright</code>) → <strong>not stolen</strong>, one log line only (once per process).</li>
+</ul>
+<p>If you also run a plugin that registers a fetch provider (<code>dsh-web-fetch-playwright</code>, <code>dsh-chatgpt-subscription</code>, …), <strong>make one of them step aside</strong> in the profile's <code>cordis.patch.yml</code>:</p>
+<pre><code class="language-yaml">- id: web
+  config:
+    fetchProvider: playwright   # use theirs; this plugin only takes over search
+</code></pre>
+<p>Otherwise startup can loop on "write the <code>web</code> config → the web service rebuilds → the plugin re-applies" (see issue #82).</p>
+<p>If you deliberately pinned <code>fetchProvider: http</code> (you only want the built-in fetcher), set <code>fetchProviderTakeover: false</code>: <code>http</code> is no longer treated as the factory default, while a completely unset provider is still filled in.</p>
+<p><code>searchProvider</code> follows the same rule: taken over when unset or still <code>deepseek-official</code>, never when explicitly pointed elsewhere.</p>
 <h4>Configuration File</h4>
 <p>Since DSH 0.1.7-rc.1 the configuration is stored with the profile's plugin entry: the settings page and <code>/free-search-engine</code> both write the <code>config</code> of the <code>web-search-free</code> (<code>dsh-free-search</code>) entry in the active profile's <code>cordis.patch.yml</code>.</p>
 <p>The old <code>free-search:</code> section of <code>~/.dsh/settings.yaml</code> is <strong>not</strong> imported by the DSH core (<code>importLegacyDocument</code> only maps <code>ui-developer-tools</code> / <code>ui-onboarding</code> / <code>shell</code>); the file is renamed to <code>settings.yaml.imported</code> after the other sections are imported, and the section's values stay there. The plugin detects that section in <code>settings.yaml.imported</code> (or in a still-present <code>settings.yaml</code>) at startup and seeds the recognized fields into this entry's <code>config</code> <strong>once</strong> (watch for <code>free-search: migrated N field(s)…</code> in the startup log). You can also migrate manually by copying the values from <code>settings.yaml.imported</code> into the plugin row config.</p>
 <pre><code class="language-yaml"># config of that entry in profiles/&lt;profile&gt;/cordis.patch.yml:
 provider: bing              # ddg / ddg-lite / bing / searxng / anysearch / exa / tavily / keenable / firecrawl / parallel / perplexity / serpbase / serply / deepseek-official / deepseek-tools / you / baidu / kimi / aliyun / doubao / zhihu_global / zhihu_site / openai / gemini / claude / auto / multi
 fallbackOn: [quota, auth, bot-wall, transient, invalid-response, unknown]   # failure classes allowed to trigger fallback; [] = abort on any failure (default: all)
-lang: zh                    # settings UI language (zh / en)
-bingMarket: zh-CN           # Bing market
+lang: zh                    # search language pools / localization (zh / en / ru …; no longer rewritten by the settings page)
+uiLang: zh                  # settings UI language (zh / en); empty = follow lang
+bingMarket: zh-CN           # Bing market; empty = automatic (no mkt sent)
+fetchProviderTakeover: true # false = keep the fetchProvider: http you pinned yourself
 region: cn-zh               # DuckDuckGo region (optional)
 searxngInstances:           # Custom SearXNG instances (optional)
   - https://your-instance.example
@@ -1542,7 +1574,7 @@ deepseekApiKey: ...
 </ul>
 <p>Restart <code>dsh web</code> after switching to apply changes.</p>
 <h4>Offline self-check assertions (<code>tools/</code>)</h4>
-<p><strong>Seventeen</strong> zero-dependency assertion scripts ship with the repo (<strong>501 assertions</strong> total): <strong>no API keys, no network, no test framework</strong>, Node ≥ 20:</p>
+<p><strong>Seventeen</strong> zero-dependency assertion scripts ship with the repo (<strong>507 assertions</strong> total): <strong>no API keys, no network, no test framework</strong>, Node ≥ 20:</p>
 <table>
 <thead>
 <tr>
@@ -1633,8 +1665,8 @@ deepseekApiKey: ...
 </tr>
 <tr>
 <td><code>assert-provider-takeover.mjs</code></td>
-<td>provider takeover: both the legacy property API and the rc.2 <code>config.*</code> refs, a single batched <code>settings.mutate(web)</code>, and explicit foreign providers left untouched</td>
-<td><code>node tools/assert-provider-takeover.mjs</code> (6)</td>
+<td>provider takeover: both the legacy property API and the rc.2 <code>config.*</code> refs, a single batched <code>settings.mutate(web)</code>, explicit foreign providers left untouched, an explicit <code>http</code> kept when <code>fetchProviderTakeover</code> is off, apply re-entry / duplicate registrations tolerated, and repeated logs deduplicated</td>
+<td><code>node tools/assert-provider-takeover.mjs</code> (12)</td>
 </tr>
 </tbody></table>
 <p>Any failure exits non-zero with the failing items listed. Passing the path of an older file shows the pre-fix failures (proving the assertions are not vacuous). Worth running before a release.</p>

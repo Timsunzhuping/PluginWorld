@@ -1,0 +1,102 @@
+<h1>AIm Workout Journal</h1>
+<p>A workout tracker your AI assistant writes to. AIm is an <strong>MCP server</strong> plus a <strong>mobile web app
+(PWA)</strong>: you describe a session in Claude or ChatGPT in your own words, the assistant logs it
+through MCP, and the app shows the program, the history, records, estimated 1RM and per muscle
+load. The server hands the assistant your goal, injuries and logged weights as data, so it plans
+from your training instead of generic advice.</p>
+<p>Live at <a href="https://aim-journal.com" target="_blank" rel="noopener noreferrer">aim-journal.com</a>. Free, and it runs inside the AI subscription
+you already pay for rather than being a second one. Guides:
+<a href="https://aim-journal.com/guides/en/connect-workout-tracker-mcp/" target="_blank" rel="noopener noreferrer">connect a workout tracker over MCP</a>,
+<a href="https://aim-journal.com/guides/en/ai-personal-trainer/" target="_blank" rel="noopener noreferrer">AI personal trainer</a>,
+<a href="https://aim-journal.com/guides/en/one-rep-max-calculator/" target="_blank" rel="noopener noreferrer">1RM calculator</a>.</p>
+<h2>How it works</h2>
+<p>There are two ways in, on the same host, and both resolve to the same <code>user_id</code>:</p>
+<pre><code>https://&lt;app&gt;/mcp                OAuth 2.1 — add as a connector, approve in the browser
+https://&lt;app&gt;/{token}            mobile web app / installable PWA
+https://&lt;app&gt;/{token}/mcp        the original connector address, still supported
+https://&lt;app&gt;/{token}/api/*      read only JSON the UI consumes
+</code></pre>
+<p><strong>OAuth</strong> is what a connector uses now. The server is an OAuth 2.1 resource server: an
+unauthenticated call gets a <code>401</code> carrying RFC 9728 protected-resource metadata, the client
+discovers the authorization server from it, registers itself dynamically, and the user approves on
+a consent screen this app serves. Supabase Auth is the authorization server, so no authorization
+codes or access tokens are stored here; the access token's <code>sub</code> is mapped to an account through
+<code>users.supabase_user_id</code>. Nothing secret is pasted by hand.</p>
+<p><strong>The URL token</strong> predates it and still works, which is why every link already in someone's inbox
+kept working when OAuth landed. A token resolver middleware maps the leading path segment to a user
+and scopes every query by <code>user_id</code>; the OAuth path sets the same context variable from a verified
+token instead. Two doors, one scoping rule.</p>
+<h2>What the MCP server exposes</h2>
+<p>20 tools over stateless streamable HTTP (FastMCP):</p>
+<ul>
+<li><strong>Logging</strong>: <code>log_session</code>, <code>update_session</code>, <code>update_set</code>, <code>delete_session</code>, <code>import_document</code>
+(paste an export from another tracker or a photo of a notebook page).</li>
+<li><strong>Reading</strong>: <code>get_sessions</code>, <code>get_session</code>, <code>get_stats</code> (volume, progression, estimated 1RM via
+Epley), <code>get_program</code>, <code>get_goals</code>, <code>get_body_metrics</code>.</li>
+<li><strong>Catalogue</strong>: <code>search_exercise_pool</code> (a curated global pool with illustrations),
+<code>list_exercises</code>, <code>upsert_exercise</code>.</li>
+<li><strong>Coaching</strong>: <code>get_coaching_context</code> is the important one. It returns data only: this user's
+goal, experience, equipment, injuries (with the movement patterns that load them), recent
+working weights, goal-matched planning ranges and the intake state, for the task at hand (next
+workout, new program, weekly review), so the assistant plans from data rather than from
+nothing. How the assistant uses it lives in the server's MCP instructions. <code>review_program_draft</code>, <code>update_coach_profile</code>, <code>upsert_goal</code>, <code>log_coach_event</code>,
+<code>log_body_metric</code> keep that context current.</li>
+</ul>
+<h2>Repo layout</h2>
+<pre><code>api/index.py      Vercel entrypoint (must stay at repo root, see below). Imports backend/src.
+requirements.txt  Vercel's Python build reads this (must also stay at repo root).
+backend/          Python package, tests, scripts, DB migrations.
+web/              Vite + React SPA (own package.json, own dev server) and the static guide pages.
+</code></pre>
+<p><code>api/index.py</code> and <code>requirements.txt</code> cannot move: Vercel's zero config Python builder only
+auto detects functions under a root level <code>api/</code>, and only installs a root level
+<code>requirements.txt</code> alongside them. Everything else in <code>backend/</code> (pyproject.toml, uv.lock, tests,
+scripts, supabase/) is hidden from the Vercel build by <code>.vercelignore</code>, so Vercel treats the repo
+as a static SPA plus one Python function.</p>
+<p>One thing to know before you go reading: some code comments cite internal planning documents by
+path, such as <code>docs/COACHING_PLAN.md</code>, <code>docs/TEST_CASES.md</code> or <code>docs/DEPLOYMENT.md</code>. Those are
+product and research notes that are not published here, so the paths will not resolve. Nothing in
+the code depends on them; they are provenance for a decision, not a dependency. Everything you
+need to build, test and run what is in this repository is in this README.</p>
+<h2>Stack</h2>
+<ul>
+<li><strong>Backend</strong> (<code>backend/</code>): Python 3.12, FastMCP (stateless HTTP), psycopg3, Supabase Postgres
+(transaction pooler). MCP and the read API live in <code>backend/src/workout_storage/</code>, served by
+<code>api/index.py</code>.</li>
+<li><strong>Frontend</strong> (<code>web/</code>): Vite, React, Tailwind v4, shadcn/ui, recharts, React Query,
+vite-plugin-pwa. Data layer in <code>web/src/app/lib/</code> (token to api to adapter to hooks). The guide
+pages under <code>web/guides/</code> are generated to static HTML at build time and ship no bundle.</li>
+<li><strong>Hosting</strong>: one Vercel project. <code>vercel.json</code> routes mcp, api and cron to the function and
+everything else to the SPA.</li>
+</ul>
+<h2>Frontend dev</h2>
+<pre><code class="language-bash">cd web
+npm install
+echo 'VITE_API_ORIGIN=https://workout-storage.vercel.app' &gt; .env.local  # dev against prod API
+npm run dev              # http://localhost:5173/{token}
+npm run test             # vitest: pure function + component tests
+npx playwright install chromium   # one time, before the first test:e2e run
+npm run test:e2e         # Playwright, against /demo (no backend needed)
+</code></pre>
+<h2>Backend dev</h2>
+<pre><code class="language-bash">cd backend
+uv sync --extra dev           # install deps
+cp ../.env.example ../.env     # fill DATABASE_URL etc. (kept at repo root, shared by all tooling)
+uv run pytest                  # unit + integration + e2e
+uv run ruff check . &amp;&amp; uv run mypy .
+</code></pre>
+<p>Create a user (prints the token to open in the browser and to paste into an assistant):</p>
+<pre><code class="language-bash">cd backend
+uv run python scripts/create_user.py --name "Alex"
+</code></pre>
+<h2>Running your own</h2>
+<p>Everything needed is here, but this is the source of a hosted service rather than a turnkey self
+host kit: you supply a Supabase project (migrations in <code>backend/supabase/migrations/</code>), a Vercel
+project, and the environment variables listed in <code>.env.example</code>. Analytics, email and backup
+integrations are optional and stay dormant without their keys.</p>
+<h2>Attribution</h2>
+<p>Exercise illustrations are third party works under CC BY-SA, each credited in
+<a href="https://github.com/persistmcp/aim/blob/HEAD/web/ATTRIBUTIONS.md" target="_blank" rel="noopener noreferrer"><code>web/ATTRIBUTIONS.md</code></a>. They keep their own license regardless of the license
+on this repository.</p>
+<h2>License</h2>
+<p>MIT, see <a href="https://github.com/persistmcp/aim/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>. The exercise illustrations are the one exception, see Attribution above.</p>
