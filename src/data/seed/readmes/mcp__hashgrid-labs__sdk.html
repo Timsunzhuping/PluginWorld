@@ -1,0 +1,246 @@
+<h1>hashgrid</h1>
+<p>The Python client for <a href="https://dna.hashgrid.ai" target="_blank" rel="noopener noreferrer">Hashgrid DNA</a>, a search engine that learns from
+feedback. You add items and search them; you score the results; DNA learns from the scores, so the
+next searches rank better.</p>
+<p>DNA works on embeddings only and never sees your content. This package embeds text and images on
+your machine, sends DNA only the vectors, and keeps the content with you, in a local index.</p>
+<pre><code class="language-bash">pip install 'hashgrid[local]'
+</code></pre>
+<p><code>[local]</code> adds the local embedders, which run on your CPU with no account. To embed with OpenAI or
+Voyage instead, install plain <code>hashgrid</code> and use your own key.</p>
+<p>Each grid has its own API key (<code>hg-…</code>). Creating a grid needs no key:</p>
+<pre><code class="language-python">from hashgrid.dna import Grid
+
+grid = Grid.create("mine")
+print(grid.key.api_key)   # shown only now: keep it, e.g. as $HASHGRID_API_KEY
+</code></pre>
+<h2>Add, search, score</h2>
+<pre><code class="language-python">from hashgrid.dna import Grid
+
+grid = Grid()  # Index() and DNA(), from the environment: the key from $HASHGRID_API_KEY
+
+grid.add_many({
+    "/cities/lisbon": "Lisbon, a hilly coastal capital",
+    "/cities/oslo": "Oslo, between fjords and forest",
+})
+
+query, results = grid.ask("a capital by the sea", k=2, prefix="/cities/")
+results[0].content                    # "Lisbon, a hilly coastal capital"
+grid.score(query, results[0], 1.0)    # a good result
+grid.score(query, results[1], -0.5)   # a poor one
+</code></pre>
+<ul>
+<li><strong>Items</strong> have a <code>key</code>, a path unique in the grid. Only items are found by searches, and <code>prefix</code>
+narrows a search to keys that start with it. Without a key, an item is keyed by a hash of its
+content, so adding the same content again returns the same item.</li>
+<li><strong>Queries</strong> have no key. <code>grid.search(query, k)</code> gives the next <code>k</code> results not shown before.</li>
+<li><strong>Scores</strong> run from -1 (wrong) to 1 (perfect). You can score a result, or any pair you already know
+is good or bad. Only scores train DNA.</li>
+</ul>
+<p>Each <code>Result</code> has the item's <code>id</code>, <code>key</code>, <code>content</code> (from the index) and your <code>score</code>. <code>grid.results(query)</code>
+lists a query's results so far, and <code>grid.get</code> and <code>grid.delete</code> take an item or its id.
+<code>grid.delete_grid()</code> deletes the whole grid, for good, and its content in the index. <code>AsyncGrid</code> does
+the same with <code>await</code>.</p>
+<h2>Images</h2>
+<p>Content is text or an <code>Image</code>, from a file or from bytes. Images need an embedder that takes them:</p>
+<pre><code class="language-python">from hashgrid.dna import Grid
+from hashgrid.index import Image, Index
+
+grid = Grid(Index("fastembed:Qdrant/clip-ViT-B-32"))
+grid.add(Image("photos/beach.jpg"), key="/photos/beach")
+query, results = grid.ask("a sunny beach", k=5)      # text finds images
+query, results = grid.ask(Image("another.jpg"))      # and so do images
+</code></pre>
+<h2>The index</h2>
+<p><code>Index</code> is the local half of a grid. It embeds content, and keeps it in sqlite by DNA id, so results
+come back with their content. <code>Index()</code> uses the default embedder and <code>~/.hashgrid/index.sqlite</code>;
+<code>$HASHGRID_EMBEDDER</code> and <code>$HASHGRID_INDEX</code> change them, and so do its arguments:</p>
+<pre><code class="language-python">Index("voyage:voyage-multimodal-3")
+Index(OpenAI("text-embedding-3-small", dimensions=512), path="my-index.sqlite")
+Index(path=":memory:")   # keeps nothing
+</code></pre>
+<p>Use one embedder per grid. Vectors from different models do not compare. The index records each grid's
+embedder and refuses another, and a grid refuses vectors whose length differs from its own.</p>
+<table>
+<thead>
+<tr>
+<th>embedder</th>
+<th>takes</th>
+<th>runs</th>
+<th>needs</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>fastembed:BAAI/bge-small-en-v1.5</code> (default)</td>
+<td>text</td>
+<td>locally</td>
+<td><code>hashgrid[local]</code></td>
+</tr>
+<tr>
+<td><code>fastembed:Qdrant/clip-ViT-B-32</code>, <code>fastembed:jinaai/jina-clip-v1</code></td>
+<td>text, images</td>
+<td>locally</td>
+<td><code>hashgrid[local]</code></td>
+</tr>
+<tr>
+<td><code>openai:text-embedding-3-small</code></td>
+<td>text</td>
+<td>OpenAI</td>
+<td><code>OPENAI_API_KEY</code></td>
+</tr>
+<tr>
+<td><code>voyage:voyage-3.5</code></td>
+<td>text</td>
+<td>Voyage AI</td>
+<td><code>VOYAGE_API_KEY</code></td>
+</tr>
+<tr>
+<td><code>voyage:voyage-multimodal-3</code></td>
+<td>text, images</td>
+<td>Voyage AI</td>
+<td><code>VOYAGE_API_KEY</code></td>
+</tr>
+</tbody></table>
+<p>Other fastembed, OpenAI and Voyage models work too: <code>fastembed:&lt;model&gt;</code>, <code>openai:&lt;model&gt;</code>,
+<code>voyage:&lt;model&gt;</code>. DNA takes up to 2048 values, so <code>openai:text-embedding-3-large</code> is shortened to 2048
+(<code>openai:&lt;model&gt;@&lt;n&gt;</code> sets the length). With OpenAI or Voyage, your content goes to that provider under
+your own key, and still never to DNA. Your own embedder is any object with a <code>spec</code>, the <code>modalities</code> it
+takes (<code>{"text"}</code>, <code>{"text", "image"}</code>) and <code>embed(contents, kind)</code>, where <code>kind</code> is <code>"document"</code> or
+<code>"query"</code>.</p>
+<h2>The API, typed</h2>
+<p><code>DNA</code> and <code>AsyncDNA</code> have one method per route of the <a href="https://dna.hashgrid.ai/docs" target="_blank" rel="noopener noreferrer">HTTP API</a>,
+named after it.</p>
+<pre><code class="language-python">from hashgrid.dna import DNA
+
+dna = DNA("hg-…")
+item = dna.create_node([0.1, 0.2, 0.3], key="/items/1")
+query = dna.create_node([0.1, 0.2, 0.25])
+edge = dna.create_edge(query, prefix="/items/")   # the search; None when nothing is left
+dna.put_edge(query, edge, 1.0)                    # the score
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>method</th>
+<th>route</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>create_grid(name)</code>, <code>acreate_grid(name)</code> (functions, no key)</td>
+<td><code>POST /</code></td>
+</tr>
+<tr>
+<td><code>get_grid()</code></td>
+<td><code>GET /</code></td>
+</tr>
+<tr>
+<td><code>delete_grid()</code></td>
+<td><code>DELETE /</code></td>
+</tr>
+<tr>
+<td><code>list_nodes(cursor, limit)</code>, <code>iter_nodes()</code></td>
+<td><code>GET /nodes</code></td>
+</tr>
+<tr>
+<td><code>get_node(nid)</code></td>
+<td><code>GET /nodes/{nid}</code></td>
+</tr>
+<tr>
+<td><code>create_node(emb, key=None)</code></td>
+<td><code>POST /nodes</code></td>
+</tr>
+<tr>
+<td><code>update_node(nid, key=…, emb=…)</code></td>
+<td><code>PATCH /nodes/{nid}</code></td>
+</tr>
+<tr>
+<td><code>delete_node(nid)</code></td>
+<td><code>DELETE /nodes/{nid}</code></td>
+</tr>
+<tr>
+<td><code>list_edges(nid, cursor, limit)</code>, <code>iter_edges(nid)</code></td>
+<td><code>GET /nodes/{nid}/edges</code></td>
+</tr>
+<tr>
+<td><code>get_edge(nid, eid)</code></td>
+<td><code>GET /nodes/{nid}/edges/{eid}</code></td>
+</tr>
+<tr>
+<td><code>create_edge(nid, prefix="")</code>, alias <code>search</code></td>
+<td><code>POST /nodes/{nid}/edges</code></td>
+</tr>
+<tr>
+<td><code>put_edge(nid, eid, score)</code>, alias <code>score</code></td>
+<td><code>PUT /nodes/{nid}/edges/{eid}</code></td>
+</tr>
+<tr>
+<td><code>update_edge(nid, eid, score)</code></td>
+<td><code>PATCH /nodes/{nid}/edges/{eid}</code></td>
+</tr>
+<tr>
+<td><code>delete_edge(nid, eid)</code></td>
+<td><code>DELETE /nodes/{nid}/edges/{eid}</code></td>
+</tr>
+</tbody></table>
+<p>Ids are 16-character hex strings. A method also takes the <code>Node</code> or <code>Edge</code> itself. Errors are
+<code>Unauthorized</code> (401), <code>NotFound</code> (404), <code>Conflict</code> (409, the key is taken) and <code>Invalid</code> (422), all
+subclasses of <code>DNAError</code>.</p>
+<h2>MCP server</h2>
+<p><code>hashgrid-mcp</code> is a local MCP server, over stdio, for agents that work with text and images. It
+embeds on your machine, sends DNA only the vectors, and keeps the content in the local index.</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "hashgrid": {
+      "command": "uvx",
+      "args": ["--from", "hashgrid[local]", "hashgrid-mcp"],
+      "env": { "HASHGRID_API_KEY": "hg-…" }
+    }
+  }
+}
+</code></pre>
+<p>With Claude Code:</p>
+<pre><code class="language-bash">claude mcp add hashgrid -e HASHGRID_API_KEY=hg-… -- uvx --from 'hashgrid[local]' hashgrid-mcp
+</code></pre>
+<p>Without a key, the agent can call <code>create_grid</code>: the server makes a grid and saves its key in the
+local index, then uses it from then on.</p>
+<p>The tools:</p>
+<ul>
+<li><code>add_item(text | image, key?)</code>: add an item, text or the path of an image file.</li>
+<li><code>search(query | image, k, prefix)</code>: the best results, with their text or image path.</li>
+<li><code>more_results(query_id, k, prefix)</code>: the next ones.</li>
+<li><code>score(query_id, item_id, score)</code>: score a result.</li>
+<li><code>delete_item(item_id)</code>: delete an item.</li>
+<li><code>create_grid(name)</code>: make a grid when the server has no key.</li>
+<li><code>delete_grid(confirm)</code>: delete the grid, for good; <code>confirm</code> is its name.</li>
+</ul>
+<p>The first call downloads the local model, about 70 MB. For images, set
+<code>HASHGRID_EMBEDDER=fastembed:Qdrant/clip-ViT-B-32</code>.</p>
+<table>
+<thead>
+<tr>
+<th>variable</th>
+<th>default</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>HASHGRID_API_KEY</code></td>
+<td>the key <code>create_grid</code> saved in the index</td>
+</tr>
+<tr>
+<td><code>HASHGRID_EMBEDDER</code></td>
+<td><code>fastembed:BAAI/bge-small-en-v1.5</code>; with <code>openai:…</code> or <code>voyage:…</code>, plain <code>uvx --from hashgrid hashgrid-mcp</code> is enough</td>
+</tr>
+<tr>
+<td><code>HASHGRID_INDEX</code></td>
+<td><code>~/.hashgrid/index.sqlite</code></td>
+</tr>
+<tr>
+<td><code>HASHGRID_DNA_URL</code></td>
+<td><code>https://dna.hashgrid.ai/api/v1</code></td>
+</tr>
+</tbody></table>
+<p>The server records each grid's embedder in the index, and refuses another one for that grid.</p>
+<p>The hosted server at <code>https://dna.hashgrid.ai/mcp</code> takes vectors, not content. Use it if your agent
+makes its own embeddings.</p>
+<h2>License</h2>
+<p>MIT</p>

@@ -1,0 +1,327 @@
+<h1>@dan-ai-studio/dshopencodego</h1>
+<p>让 <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a> 正常使用 <a href="https://opencode.ai/docs/zh-cn/go/" target="_blank" rel="noopener noreferrer">OpenCode Go</a> 订阅：模型列表直接来自网关，且每个推理请求都携带网关要求的 <code>x-opencode-session</code>。</p>
+<p><a href="https://github.com/dan-ai-studio/dshopencodego/blob/HEAD/README.en.md" target="_blank" rel="noopener noreferrer">English</a></p>
+<h2>为什么需要它</h2>
+<p>原生 DSH 接 OpenCode Go 有两个缺口，都不是配置能补的：</p>
+<ol>
+<li><strong>模型列表是构建期快照</strong>。DSH 的 <code>llm-pi-ai</code> 用 pi-ai 打包时生成的目录；网关新增模型后，要么等 pi-ai 发版，要么手工声明。</li>
+<li><strong>没有会话头</strong>。Go 自 2026-09-05 起要求每个请求带稳定的 <code>x-opencode-session</code>，缺失即 <code>400 MissingSessionID</code>；<code>llm-pi-ai</code> 只发静态 profile headers，无法按会话取值。</li>
+</ol>
+<p>本插件为 <code>opencode-go</code> 路由提供自己的适配器，同时解决这两点。</p>
+<h2>安装</h2>
+<p>前提：DSH <code>0.2.0</code> 系列（<code>0.2.0-rc.1</code> 及之后，见「兼容性」）；Node <code>^22.19.0 || &gt;=24.0.0</code>；<code>dsh</code> 与 <code>pnpm</code> 可用。</p>
+<blockquote>
+<p><strong>路由互斥</strong>：同一个 profile 里 <code>opencode-go</code> 只能由一个适配器提供。装本插件前请先卸载旧插件（<code>dsh plugin --profile &lt;p&gt; remove @dan-ai-studio/dsh-opencode-go</code>），或清空 <code>llm-pi-ai</code> 配置里名为 <code>opencode-go</code> 的 provider。否则插件会记录一条明确的占用诊断，路由不会注册（其余功能照常）。</p>
+</blockquote>
+<blockquote>
+<p><strong>桌面端用户</strong>：DSH 桌面端不走命令行安装，安装、升级与卸载都在应用内 Plugins 页完成，见文末「桌面端（Electron 应用）」。</p>
+</blockquote>
+<h3>方式一：npm（推荐）</h3>
+<pre><code class="language-sh">dsh plugin --profile web add @dan-ai-studio/dshopencodego@&lt;版本&gt;
+</code></pre>
+<p><strong>安装后确认真实加载</strong>——<code>--dump-config</code> 证明不了这一点：</p>
+<ol>
+<li>启动输出里应出现插件自己的注册日志 <code>dshopencodego: route "opencode-go" registered as OpenCode Go</code>（<code>enabled: false</code> 时是 <code>dshopencodego: disabled by configuration; …</code>）。没有它就没加载——被版本门禁拒绝时，同一条输出流里会打印 <code>Plugin … is incompatible with dsh …</code>。</li>
+<li>没有 HMR 的 profile 安装后会回报 <code>restart-required</code>（<code>restartReason: no-hmr</code>）：<strong>重启 DSH</strong> 后插件才生效。</li>
+<li>日志位置：启动失败会把完整诊断写到 <code>$DSH_HOME/logs/startup-&lt;时间戳&gt;-&lt;uuid&gt;.log</code> 并打印该路径；<code>dsh plugin</code> 失败会打印 <code>dsh: plugin command failed; diagnostics: &lt;路径&gt;</code>（profile 下的 <code>.plugin-manager/logs/operation-*/pnpm.log</code>）。</li>
+<li>会话头是否真的发出去了：<code>node tools/verify/live-check.mjs --check-only</code> 是<strong>零成本</strong>本地预检，会打印本次将会携带的 <code>x-opencode-session</code> 与 <code>x-session-affinity</code>；去掉 <code>--check-only</code>、加 <code>--allow-live</code> 才会真发<strong>一次</strong>最小请求（花钱，规则见 <code>tools/verify/README.md</code>），脚本随后断言并打印 <code>OK x-opencode-session: &lt;会话 id&gt;</code>。</li>
+</ol>
+<blockquote>
+<p><code>dsh --profile web --dump-config | grep dshopencodego</code> <strong>不构成加载证据</strong>：被门禁拒绝的插件行同样会出现在 dump 里（<code>packages/boot/app-boot/README.md</code>）。它只能证明"这一行被写进了组合"。</p>
+</blockquote>
+<h3>方式二：GitHub Release</h3>
+<pre><code class="language-sh">dsh plugin --profile web add https://github.com/dan-ai-studio/dshopencodego/releases/download/v&lt;版本&gt;/dan-ai-studio-dshopencodego-&lt;版本&gt;.tgz
+</code></pre>
+<h3>方式三：本地构建</h3>
+<pre><code class="language-sh">npm ci
+npm run build
+npm pack
+dsh plugin --profile web add ./dan-ai-studio-dshopencodego-&lt;版本&gt;.tgz
+</code></pre>
+<blockquote>
+<p>用<strong>本地路径</strong>安装 tarball。把远程 tarball URL 装进一个已有缓存的 profile 会撞上 pnpm 的 <code>ERR_PNPM_MISSING_TARBALL_INTEGRITY</code>（见「故障排查」）。</p>
+</blockquote>
+<h3>升级与卸载</h3>
+<pre><code class="language-sh">dsh plugin --profile web add &lt;新版本 tarball 或包名&gt;   # 升级
+dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
+</code></pre>
+<blockquote>
+<p>pnpm 对<strong>同名本地 tarball</strong> 会静默复用旧内容（<code>added 0</code>）。升级本地构建时请改文件名再装。</p>
+</blockquote>
+<h3>桌面端（Electron 应用）</h3>
+<p>DSH 桌面端是 Electron 壳 + 完整的 dsh Web 应用，本插件对它同样适用：host 半边是标准 bundle patch，client 半边声明的平台就是 <code>web</code>——桌面端渲染的正是这套 Web 客户端，设置页分区与会话内用量按钮来自同一批客户端包。桌面端使用<strong>自己的 profile</strong> <code>$DSH_HOME/profiles/desktop</code>，与 <code>profiles/web</code> 互不共享：凭证、模型可见性与插件设置都要在桌面端重新配一次。</p>
+<p>安装<strong>必须</strong>走应用内界面，不要使用上面的 <code>dsh plugin</code> 命令：</p>
+<ol>
+<li>打开桌面端 → <strong>设置 → Plugins（插件）</strong> 页；</li>
+<li>安装规格填 <code>@dan-ai-studio/dshopencodego</code>（或指定版本，如 <code>@dan-ai-studio/dshopencodego@0.1.11</code>），确认安装；</li>
+<li>按提示<strong>重启应用</strong>，再到设置页填 API Key（引用名 <code>OPENCODE_GO_API_KEY</code>）。</li>
+</ol>
+<p>原因：桌面端 profile 由 Electron 自己拥有，<strong>CLI 不能启动也不能修改它</strong>（桌面端 README 原文：<em>The CLI cannot boot or mutate this profile.</em>）。插件管理由应用内插件页经认证 HTTP API 完成，使用应用自带的 pnpm，不依赖 PATH 里的 <code>pnpm</code>；升级与卸载同样在 Plugins 页操作。</p>
+<p>版本约束与 CLI 一致：桌面端内置的 DSH 要落在已声明并验证过的版本带内（<code>&gt;=0.2.0-rc.1 &lt;0.3.0</code>，见「兼容性」）。若插件导致启动失败，桌面端的原生恢复对话框可以一键<strong>禁用第三方插件、备份 <code>cordis.patch.yml</code> 后重启</strong>，不会把应用锁死。</p>
+<h2>配置</h2>
+<p>配置写在 profile 的 <code>cordis.patch.yml</code>：</p>
+<pre><code class="language-yaml">- id: dshopencodego
+  name: '@dan-ai-studio/dshopencodego'
+  config:
+    enabled: true                            # false 仅撤下路由，插件保持挂载
+    apiKeyEnv: OPENCODE_GO_API_KEY            # 默认值
+    baseURL: https://opencode.ai/inference/go/v1    # 默认值（OpenCode Go 端点）
+                                              # 只能是不带 query / fragment 的 http(s) 地址；写 ?x=1 会在保存配置时被拒
+                                              # 也可指定为 https://opencode.ai/inference/v1（Console 主端点，含按量/免费模型）
+    refreshMinutes: 60                        # 目录缓存时长，1 ~ 10080（7 天）
+    streamIdleTimeoutMs: 300000               # 流空闲超时：两次流事件之间的最长静默（毫秒）
+    maxRequestImageBytes: 6291456             # 整个请求的图片载荷上限（base64 之后，字节）
+    requestImagePixelBudget: 1440000          # 单张图的总像素预算
+    requestImageMaxBytes: 400000              # 单张图编码前的字节目标（base64 之前）
+    modelVisibility:                          # 逐模型开关；未写到的模型走默认规则（见「设置页里的模型列表」）
+      glm-5: true
+    modelLimits:                              # 逐模型容量覆盖
+      kimi-k3:
+        contextWindow: 262144
+        maxTokens: 32768                      # 可选：该模型的输出上限
+      some-legacy-model: null                 # 整条 null：该模型两个字段都显式回退到目录值
+    modelProtocols:                           # 最后兜底：逐模型协议覆盖
+      some-new-model: openai-responses        # 合法值只有 anthropic-messages / openai-completions / openai-responses
+    retryPolicy:                              # 可选：本路由的重试策略（由 dsh-llm-retry 执行）
+      mode: normal                            # 也可用 always（对所有失败重试，maxRetries 被忽略）
+      maxRetries: 2                           # 默认 5
+      retryableCodes: [RATE_LIMIT, TIMEOUT]   # 可选：只对这些错误码重试（默认 RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT / EMPTY_RESPONSE）
+      backoff:
+        initialDelayMs: 500                   # 默认 500
+        maxDelayMs: 10000                     # 默认 10000，上限 2147483647
+        jitterRatio: 0.1                      # 默认 0.1，取值 0 ~ 1
+</code></pre>
+<p><strong>保存即校验</strong>：上面这些约束在<strong>写入 profile 时</strong>就检查，不会拖到第一次请求——<code>baseURL</code> 必须是 http(s) 且不带 query/fragment；<code>refreshMinutes</code> 取值 1 ~ 10080；<code>modelLimits</code> 的每个字段都可以写 <code>null</code>，语义是"显式选回目录值"（<code>modelLimits.&lt;模型&gt;: null</code> 表示两个字段一起回退）；<code>modelProtocols</code> 只接受那三个合法值，写错会让该模型以"配置缺失"出现（开关关闭、不可选），而不是回退到猜测；<code>retryPolicy</code> 是联合类型（<code>normal</code> 读 <code>maxRetries</code>/<code>retryableCodes</code>/<code>backoff</code>，<code>always</code> 只读 <code>backoff</code>），未知字段会被拒绝。</p>
+<p>API Key 通过 Harness 凭证库提供（引用名 <code>OPENCODE_GO_API_KEY</code>），也可以直接 <code>export OPENCODE_GO_API_KEY=...</code>。</p>
+<p><strong>流超时</strong>：<code>streamIdleTimeoutMs</code> 约束的是<strong>两次流事件之间的最长静默</strong>，不是请求总时长——长思考模型只要持续产出事件就不会被误判。默认 5 分钟，上限为 <code>2147483647</code>（约 24.8 天）。超时抛出 <code>TIMEOUT</code>（可重试类）。</p>
+<p><strong>图片</strong>：三个字段各管一层，超限的图片会被明确拒绝，而不是静默降质或丢弃：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>约束对象</th>
+<th>默认</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>requestImageMaxBytes</code></td>
+<td>单张图，base64 <strong>之前</strong>的字节目标</td>
+<td>400 KB</td>
+</tr>
+<tr>
+<td><code>requestImagePixelBudget</code></td>
+<td>单张图的总像素（按宽×高限制分辨率）</td>
+<td>144 万像素</td>
+</tr>
+<tr>
+<td><code>maxRequestImageBytes</code></td>
+<td><strong>整个请求</strong>里图片载荷的总字节（base64 <strong>之后</strong>）</td>
+<td>6 MiB</td>
+</tr>
+</tbody></table>
+<p>模型自身不支持图片输入时，适配器会在发请求前就拒绝（<code>UNSUPPORTED_CONTENT</code>），不会把图发出去再等网关报错。</p>
+<p><strong>输出上限</strong>：调用方给了 <code>maxTokens</code> 就用它（仍受 <code>modelLimits</code> 的逐模型上限约束）；没给时由宿主按路由上限物化——该上限就是目录里的输出容量，或 <code>modelLimits</code> 覆盖后的值。</p>
+<p><strong>工具声明</strong>：每个请求都发送当前完整的工具列表。宿主提供的会话折叠历史（<code>toolHistory</code>）<strong>故意不投影</strong>：投影需要路由声明 <code>toolUpdate</code> 模式，而 models.dev 对本网关模型只声明"可调用工具"、没有声明该模式；凭空声明会让模型看到的东西悄悄改变。</p>
+<p><strong>重试</strong>：<code>retryPolicy</code> 是可选的，不写就用宿主默认。写了就由可选的 <code>dsh-llm-retry</code> 插件执行，配置错误在写入时报错而不是等到失败发生。</p>
+<h2>模型是怎么判定的</h2>
+<p>一个模型"怎么调"由四级证据决定，先命中先赢：</p>
+<ol>
+<li><strong>pi-ai 内置目录的精确条目</strong>——给出协议与线怪癖（如 DeepSeek 的 <code>thinkingFormat</code>）。该目录<strong>编译进插件产物</strong>，版本随插件发版更新，不会在运行时自行变化。</li>
+<li><strong>models.dev 的每模型 <code>provider.npm</code></strong>——<code>@ai-sdk/openai</code> → Responses，<code>@ai-sdk/anthropic</code> → Messages，缺省 → Chat Completions。</li>
+<li><strong>家族规则</strong>——<code>grok*</code>/<code>gpt*</code>/<code>muse-*</code> → Responses，其余 → Chat Completions。</li>
+<li><strong><code>modelProtocols</code> 覆盖</strong>——永远最高优先。</li>
+</ol>
+<p>网关的 <code>/v1/models</code> 只回答"有哪些模型"，不回答"怎么调"。被推断出来的模型会在设置页标注，判错时用 <code>modelProtocols</code> 覆盖即可。</p>
+<h2>一个常见疑问：官方增删模型后，需要等插件发版吗？</h2>
+<p><strong>不需要——模型列表是实时的。</strong> 网关 <code>/v1/models</code> 是成员资格的唯一来源，每次刷新目录（默认 60 分钟缓存，或点「重新检查」）都会以它为准：</p>
+<ul>
+<li>官方<strong>新增</strong>模型 → 下次刷新即出现，协议/容量若不在内置目录中则标为"推断"并可被 <code>modelProtocols</code> 覆盖；</li>
+<li>官方<strong>下线</strong>模型 → 下次刷新即消失；</li>
+<li>内置目录<strong>冻结</strong>在插件版本里，仅影响"怎么调"的推断质量，不影响"有哪些"。</li>
+</ul>
+<p>只有当 pi-ai 内置目录<strong>缺了某个模型的线怪癖</strong>（如 DeepSeek 的 <code>thinkingFormat</code>）时，才需要等插件同步 pi-ai 的新版本——而模型本身早已可用。</p>
+<h2>设置页里的模型列表</h2>
+<p>设置页的「OpenCode Go」分区展示网关实时目录（数量随网关发布变化），并对每个模型给出：</p>
+<ul>
+<li><strong>上下文 / 输入 / 输出</strong>（最大输入只有部分模型有官方数据）、<strong>发布时间</strong>、<strong>单价 /1M</strong>（来自 models.dev）、<strong>Go 额度</strong>；</li>
+<li><strong>Go 额度</strong>：运行时从 OpenCode 官方文档抓取「使用限制 / 预估请求数」两张表（数据源是官方仓库里的 markdown 文件，主源 GitHub、备用 jsDelivr），跟随目录每 60 分钟刷新一次；抓取失败时保留上次成功的数据，从未成功过则使用<strong>内置快照</strong>并在页面上标注其转写日期（<code>src/go-limits.ts</code>，已冻结、不再手工维护）。文档结构变化会被识别为抓取失败而不会清空显示。</li>
+<li><strong>输入模态</strong>：单独一行列出 models.dev 声明的输入方式（文本 / 图像 / 音频 / 视频 / PDF）。这是<strong>模型自身的元数据</strong>，不等于 DSH 能直传：DSH 的模型输入只原生支持文本与图像，音视频/PDF 走附件与工具读取路径；文档未声明时该行不显示。</li>
+<li>筛选（按名称/ID、仅已启用、显示已弃用——<strong>默认隐藏已弃用</strong>）、排序（新发布优先 / 每月预估次数 / 输入单价 / 上下文 / 名称 / 已启用优先）；列表是唯一视图，逐模型纵向排列。</li>
+</ul>
+<p><strong>默认开关规则</strong>：<code>modelVisibility</code> 是<strong>逐模型</strong>的——写了 <code>id: true</code>/<code>id: false</code> 的模型按显式值走，<strong>没写到的模型仍走默认规则</strong>：默认启用<strong>每月预估次数最高的 5 个</strong>（跳过已弃用、无法配置、以及"贡献者版"这类以数据换折扣的模型），其余关闭。这份 top5 名单每轮目录刷新都会无条件重算，与是否写过显式条目无关。同一规则同时作用于模型选择器与设置页，两处不会出现不同答案。<strong>后果</strong>：一旦写过显式配置，网关新增的模型若不在 top5 内，下次刷新<strong>不会自动可见</strong>，要显式加一条 <code>id: true</code>。</p>
+<h2>用量</h2>
+<ul>
+<li><strong>额度窗口</strong>：<code>GET /usage</code> 返回 5 小时 / 本周 / 本月三个百分比，含重置时间与限流状态；失败时保留上次读数并标注陈旧，账号或端点变化时不保留。</li>
+<li><strong>实际消耗</strong>：会话内按钮显示本进程自启动以来的调用次数与 token（输入/输出/缓存读），数据来自 provider 每次调用回传的 usage。网关不公布分模型 token，因此这里如实标注口径，不伪造分模型配额。</li>
+<li><strong>估算花费</strong>：按 models.dev 的每百万 token 单价乘 provider 回传的 token 估算，<strong>不是账单</strong>——订阅端点（Go）下仅供参考，只有按量端点（Console）才有对账意义。单价随每次调用一起记录，目录刷新不会用新价重算已经花掉的 token；目录未单独给出缓存单价时，缓存部分<strong>按输入价估算</strong>（上界）。<strong>没有单价的模型显示「未定价」并列出模型名，绝不以 0 冒充免费</strong>；极小金额显示为 <code>&lt;$0.0001</code>。</li>
+<li><strong>推理 token</strong>：provider 报告的思考 token 是 <code>outputTokens</code> 的<strong>子集</strong>，因此单独显示但<strong>不计入总量</strong>（否则同一批 token 会被算两次）。未上报该项的模型不显示该行——那是「没有数据」，不是 0。</li>
+</ul>
+<h2>兼容性</h2>
+<p><strong>支持</strong>：DSH <code>0.2.0</code> 系列（<code>0.2.0-rc.1</code> 及之后的正式版）与 <code>0.2.1</code> 系列。插件在 <code>engines.dsh</code> 与每个 <code>@deepseek-ai/dsh-*</code> 的 <code>peerDependencies</code> 上声明 <code>&gt;=0.2.0-rc.1 &lt;0.3.0-0</code>。</p>
+<p><strong>不再支持 <code>0.2.0</code> 之前</strong>：<code>0.1.7</code> 系列及更早的版本自 v0.1.36 起被移除支持——那段范围内的运行时接口与本插件当前依赖的接口已经不同，继续声明只会让门禁放行一个未经验证的组合。<code>0.1.8</code>、<code>0.1.9</code> 从未发布。</p>
+<p><strong>机制（不是写死）</strong>：DSH 在挂载插件前会读取插件 <code>package.json</code> 的声明，对<strong>运行时的 DSH 版本</strong>做 semver 判定（含预发布，即 <code>includePrerelease</code>）。判定分两级，先命中先赢：</p>
+<ol>
+<li><strong><code>engines.dsh</code> 优先且独占</strong>：插件只要声明了它，就<strong>只</strong>由它决定，<code>peerDependencies</code> 完全不参与判定（DSH 源码 <code>packages/boot/app-boot/src/plugin-compatibility.ts</code>：命中 <code>engines.dsh</code> 即返回）。</li>
+<li>插件<strong>没有</strong>声明 <code>engines.dsh</code> 时，才逐个检查 <code>@deepseek-ai/dsh</code> / <code>@deepseek-ai/dsh-*</code> 的 peer 范围。</li>
+</ol>
+<p>判定结果：</p>
+<ul>
+<li>满足 → 正常加载；</li>
+<li>不满足 → <strong>该插件行被禁用并打印原因</strong>（<code>Plugin … is incompatible with dsh …</code>），其他插件不受影响；</li>
+<li>需要冒险时可用<strong>精确版本豁免</strong>：<code>dsh plugin --profile &lt;profile&gt; allow-version &lt;包&gt;@&lt;版本&gt; --dsh-version &lt;精确版本&gt; --accept-risk</code>（只对该包与该精确版本生效）；<code>dsh plugin --profile &lt;profile&gt; version-exemptions</code> 可列出当前 profile 的豁免。</li>
+</ul>
+<p><strong>本插件声明了 <code>engines.dsh</code>，所以生效的门禁就是它</strong>；peer 范围是给读者与包管理器的声明，只在 <code>engines.dsh</code> 被删除之后才会接管判定。上界写成 <code>&lt;0.3.0-0</code> 而不是 <code>&lt;0.3.0</code>，正是因为判定含预发布：<code>&lt;0.3.0</code> 会把 <code>0.3.0-rc.1</code> 这类<strong>预发布版判为兼容</strong>并放行，<code>&lt;0.3.0-0</code> 才真正封住整条 <code>0.3.0</code> 线。<code>@deepseek-ai/cordis</code> 单独声明为 <code>4.0.4 || 4.0.5-alpha.1 || 4.0.5-alpha.2 || 4.0.5</code>——依次是 DSH <code>0.2.0-rc.1</code>/<code>rc.2</code>、<code>0.2.1-alpha.1</code>/<code>alpha.2</code>、<code>0.2.1-alpha.3</code>–<code>alpha.5</code>、以及 <code>0.2.1-rc.2</code> 所用的运行时（<code>4.0.2</code>/<code>4.0.3</code> 随 <code>0.2.0</code> 之前的支持一并移除）。</p>
+<p><strong>声明范围之外</strong>：<code>0.2.0-rc.1</code> 之前的所有版本、以及整条 <code>0.3.0</code> 线（含预发布）都会被拒绝加载。如果 DSH 侧接口兼容，可自行放宽或删除该插件的 <strong><code>engines.dsh</code></strong> 后重新构建（改 peer 范围是无效的——它不参与判定）；否则请等插件跟进发版。</p>
+<h3>版本绑定的注意事项</h3>
+<table>
+<thead>
+<tr>
+<th>绑定层</th>
+<th>声明</th>
+<th>谁在把关</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>engines.dsh</code></td>
+<td><code>&gt;=0.2.0-rc.1 &lt;0.3.0-0</code></td>
+<td><strong>DSH 加载时的真门禁；声明了它，peer 判定被整体跳过</strong></td>
+</tr>
+<tr>
+<td><code>peerDependencies</code>（17 个 <code>@deepseek-ai/dsh-*</code>）</td>
+<td>均为 <code>&gt;=0.2.0-rc.1 &lt;0.3.0-0</code></td>
+<td>仅当 <code>engines.dsh</code> 缺席时才接管；本插件声明了它，故当前不参与判定</td>
+</tr>
+<tr>
+<td><code>@deepseek-ai/cordis</code></td>
+<td><code>4.0.4 || 4.0.5-alpha.1 || 4.0.5-alpha.2 || 4.0.5</code></td>
+<td>同上（peer 通道）</td>
+</tr>
+<tr>
+<td><code>engines.node</code></td>
+<td><code>^22.19.0 || &gt;=24.0.0</code></td>
+<td>包管理器</td>
+</tr>
+<tr>
+<td>已打包依赖 <code>@earendil-works/pi-ai</code></td>
+<td><code>~1.3.0</code>（1.3.x 内），<strong>打进产物</strong>（devDependency）</td>
+<td>独立耦合：pi-ai 改请求构造即影响本插件的线上行为；其 opencode-go 内置目录同时是本插件的打底数据。打包后本插件<strong>没有任何运行时依赖</strong>，安装者不必再解析它</td>
+</tr>
+<tr>
+<td>已打包依赖 <code>@deepseek-ai/schemastery</code></td>
+<td><code>~3.18.5-alpha.2</code>，<strong>打进产物</strong>（devDependency）</td>
+<td>构建期依赖</td>
+</tr>
+</tbody></table>
+<p>维护时需要注意：</p>
+<ul>
+<li><strong>必选与可选之分</strong>：18 个 peer（17 个 <code>dsh-*</code> 加框架 <code>cordis</code>）中 6 个标了 <code>optional</code>（<code>dsh-api-remotes</code>、<code>dsh-client-locale</code>、<code>dsh-client-store</code>、<code>dsh-client-ui-model-selection</code>、<code>dsh-client-ui-settings</code>、<code>dsh-client-ui-slots</code>）；其余 12 个是运行时必需的——<code>cordis</code>、<code>dsh-attachment</code>、<code>dsh-brand</code>、<code>dsh-client-ui-conversation</code>、<code>dsh-client-ui-renderer</code>、<code>dsh-credentials</code>、<code>dsh-fs</code>、<code>dsh-launch-environment</code>、<code>dsh-llm</code>、<code>dsh-timeout</code>、<code>dsh-typert-protocol</code>、<code>dsh-typert-registry</code>。这 18 个当前都<strong>不参与加载判定</strong>（见上：<code>engines.dsh</code> 单独决定），它们的价值在于声明依赖并供包管理器与读者使用。其中 <code>dsh-llm</code> 是最重的一处耦合（源码 import 二十余处）。</li>
+<li><strong>名义范围 ≠ 实测范围</strong>：声明范围是 <code>&gt;=0.2.0-rc.1 &lt;0.3.0-0</code>，本项目实际验证过的基线依次是 <code>0.2.0-rc.1</code>（开发依赖基线：门禁判定 + typecheck + 全量用例）、<code>0.2.0-rc.2</code>（同上 + <code>prepareCall</code> 代次冻结）、<code>0.2.1-alpha.3</code>（首个目标版本）、<code>0.2.1-alpha.4</code>（T-24）、<code>0.2.1-alpha.5</code>（T-26）与 <code>0.2.1-rc.2</code>（T-31，运行时升到 cordis <code>4.0.5</code>；上游契约层源码零变更）。范围内的其他版本没有逐个验证过。</li>
+<li><strong>上界就是跟版线</strong>：<code>&lt;0.3.0-0</code> 意味着 DSH 一旦发布 <code>0.3.0-0</code>（<code>0.3.0</code> 线的第一个预发布版），本插件必须同批发新版，否则所有用户加载失败。<code>tests/peer-coverage.spec.ts</code> 会同时断言下界接受已安装版本、上界拒绝 <code>0.3.0-0</code>，所以这条线漂移会在本地测试里先失败，而不是等用户加载失败。调整范围后用 <code>npm test</code> 验证即可（本地 mock 网关，零网络零 token）——范围以接口声明为准，不要用线上探测来"测"出一个范围。</li>
+<li><strong>peer 覆盖已双向守住</strong>：<code>dsh-typert-registry</code>、<code>dsh-client-ui-conversation</code>、<code>dsh-client-ui-renderer</code> 曾被源码 import 却未声明、门禁管不到，现已补进 <code>peerDependencies</code>；<code>tests/peer-coverage.spec.ts</code> 双向断言——源码用到的必须声明，声明了却没人用的必须删（<code>dsh-settings</code> 就这样被移除：设置表单实际由 <code>dsh-client-ui-settings</code> 提供）。</li>
+<li><strong>豁免是按 profile 记的</strong>：只有显式执行过 <code>dsh plugin allow-version</code> 的 profile 才享有豁免；没有记录就代表必须落在声明范围内。用 <code>dsh plugin version-exemptions</code> 可查看当前 profile 的豁免。</li>
+</ul>
+<h2>故障排查</h2>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>原因与处置</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>日志出现 <code>another adapter already owns it</code>，模型列表里没有本插件的模型</td>
+<td><code>opencode-go</code> 路由被旧插件或 <code>llm-pi-ai</code> 配置占用。卸载占用者或清空其配置后重启。</td>
+</tr>
+<tr>
+<td>设置页显示「未配置」但请求可用</td>
+<td>旧于 v0.1.4 的构建有此缺陷（凭证结果未按信封解包），升级即可。</td>
+</tr>
+<tr>
+<td>装包时报 <code>ERR_PNPM_IGNORED_BUILDS</code>（依赖构建脚本未批准）</td>
+<td>新建 profile 的 <code>pnpm-workspace.yaml</code> 里 <code>allowBuilds</code> 是占位文本；把 <code>@google/genai</code>、<code>protobufjs</code> 显式设为 <code>false</code>（二者不需要构建）后重装。</td>
+</tr>
+<tr>
+<td>装远程 tarball 报 <code>ERR_PNPM_MISSING_TARBALL_INTEGRITY</code></td>
+<td>pnpm 对已有缓存的 profile 要求 lock 里有 integrity。把 tarball 下载到本地，用<strong>本地路径</strong>安装。</td>
+</tr>
+<tr>
+<td>升级本地 tarball 后行为没变</td>
+<td>pnpm 对同名本地 tarball 会复用旧内容。改文件名再装。</td>
+</tr>
+<tr>
+<td>设置页出现「设置写入被拒绝」</td>
+<td>通常是与另一个窗口/进程并发写同一 profile；插件会自动重试一次，仍失败时界面已重载最新状态，再点一次即可。</td>
+</tr>
+<tr>
+<td>用量按钮显示「不可用」</td>
+<td>端点或凭证变化导致旧读数作废；配置正确后点「重试」。数值不会以 0 冒充。</td>
+</tr>
+<tr>
+<td>npm 发布报 <code>ENEEDAUTH</code></td>
+<td>OIDC 没匹配上：核对包设置里 Trusted Publisher 的 <strong>workflow 文件名</strong>（必须恰为 <code>publish-npm.yml</code>、大小写敏感）与组织/仓库字段；确认跑在 GitHub 托管 runner 上且工作流带 <code>id-token: write</code>。<code>package.json</code> 的 <code>repository.url</code> 与仓库不符也会被拒。</td>
+</tr>
+<tr>
+<td>日志成片出现 <code>Accessing non-existent property 'Allow' of module exports inside circular dependency</code></td>
+<td>成因是 <code>pi-ai</code> 对 <code>partial-json</code> 的<strong>具名导入</strong>：Node 解析 CJS 的具名导出时会枚举其 exports，而该包内部 <code>index.js</code>/<code>options.js</code> 互相 require，读到尚未初始化的 <code>Allow</code> 就打印一次——<strong>插件重载会让它成片出现</strong>（重启后往往消失）。<strong>自 v0.1.38 起从机制上消除</strong>：<code>pi-ai</code> 与 <code>partial-json</code> 已<strong>打包进产物</strong>，Node 的 ESM→CJS 互操作不再参与，因此不存在"枚举读到未初始化属性"这一步（不是过滤，是让该路径不存在）。</td>
+</tr>
+<tr>
+<td>超长工具调用（多 MB 参数）期间整个 DSH 进程卡顿</td>
+<td>曾在 pi-ai <code>0.87.1</code> 上观测到逐 delta 重解析的固有开销（issue #9265 / PR #9461）。本插件不移植 DSH 的消费者侧补丁（ADR-0005）；当前自带依赖已是 <code>~1.3.0</code>，若仍复现则属上游行为，随其发版解决。</td>
+</tr>
+</tbody></table>
+<h2>开发</h2>
+<pre><code class="language-sh">npm ci
+npm run lint        # oxlint：静态检查（发布流程也会跑，失败即阻断）
+npm run typecheck   # host 与 client 两半
+npm run build       # 先构建：产出 lib/index.js 与 lib/client.js
+npm test            # 契约测试：真实 HTTP mock 网关，断言请求头/体、目录阶梯、用量
+</code></pre>
+<p><strong>顺序有讲究</strong>：<code>npm run build</code> 要排在 <code>npm test</code> 之前——<code>tests/pack-contents.spec.ts</code> 会遍历 <code>exports</code> 的每个目标，<code>lib/</code> 存在与否决定这条检查是执行还是被跳过（不报错，但会少一层保护）。<code>package.json</code> 已移除 <code>prepare</code>，因此 <code>npm ci</code> 不会再替你隐式构建；三个 CI workflow 都显式跑了 <code>npm run build</code>。</p>
+<p>测试覆盖配置校验、协议阶梯、网关与在线元数据、目录投影、适配器（三种协议的线上请求）、Remote 契约与服务、会话头不变量、用量窗口与计量、客户端控制器与用量组件、两半的挂载与登记、流空闲超时与中止的错误映射、验证脚本的退出码契约、以及几条<strong>结构性不变量</strong>（inject 声明与源码读取一致、peer 覆盖双向、README 与 manifest 一致）。共 <strong>43 个测试文件</strong>——这个数字由 <code>tests/readme-consistency.spec.ts</code> 对着 <code>tests/</code> 目录校验，不会漂移。</p>
+<h2>发布（维护者）</h2>
+<ol>
+<li><p><strong>版本</strong>：把 <code>package.json</code> 的 <code>version</code> 与即将打出的 tag 对齐（<code>v&lt;版本&gt;</code>）。CI 会校验资产名与 tag。</p>
+</li>
+<li><p><strong>GitHub Release</strong>：提交并推送 <code>main</code>，打 tag 推送。<code>release.yml</code> 会跑测试、<code>npm pack</code> 并把 tarball 作为 Release 资产上传。</p>
+</li>
+<li><p><strong>npm（Trusted Publishing / OIDC，无需令牌）</strong>：<code>.github/workflows/publish-npm.yml</code> 仅手动触发，认证走 GitHub Actions 的 OIDC——本仓库<strong>没有也不需要</strong> <code>NPM_TOKEN</code>。运行方式：</p>
+<pre><code class="language-sh">gh workflow run publish-npm --repo dan-ai-studio/dshopencodego -f tag=v&lt;版本&gt;
+</code></pre>
+<p>工作流会校验 tag 与版本一致、拒绝覆盖 npm 上已存在的版本，发布时<strong>自动生成 provenance 声明</strong>。它依赖 npm 包设置里的 <strong>Trusted Publisher</strong> 连接（字段一旦创建不可修改，要改只能删了重建）：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Publisher</td>
+<td><code>GitHub Actions</code></td>
+</tr>
+<tr>
+<td>Organization or user</td>
+<td><code>dan-ai-studio</code></td>
+</tr>
+<tr>
+<td>Repository</td>
+<td><code>dshopencodego</code></td>
+</tr>
+<tr>
+<td>Workflow filename</td>
+<td><code>publish-npm.yml</code>（完全一致、大小写敏感）</td>
+</tr>
+<tr>
+<td>Environment name</td>
+<td>留空</td>
+</tr>
+<tr>
+<td>Allowed actions</td>
+<td>勾选 <code>Allow npm publish</code>（不勾则只允许 staged publishing：每次发布需人工 2FA 批准后才公开）</td>
+</tr>
+</tbody></table>
+<p>另外：OIDC 发布要求 <strong>npm CLI ≥ 11.5.1 / Node ≥ 22.14</strong>（工作流用 Node 24 满足）；<code>package.json</code> 的 <code>repository.url</code> 必须与 GitHub 仓库匹配。启用 OIDC 后，建议到包设置 → <strong>Publishing access</strong> 选择「Require two-factor authentication and disallow tokens」，并撤销不再需要的旧令牌。</p>
+</li>
+</ol>
+<h2>许可证</h2>
+<p>MIT</p>

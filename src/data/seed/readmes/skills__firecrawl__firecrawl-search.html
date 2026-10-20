@@ -55,7 +55,8 @@ firecrawl scrape &lt;provider-id&gt;/&lt;capability-id&gt; --options '&lt;JSON m
 <li><strong><code>--highlights</code> on by default:</strong> results are query-relevant excerpts from the page. Use <code>--no-highlights</code> for the original snippets.</li>
 <li><strong><code>--scrape</code> fetches full content</strong> — reuse that content instead of re-scraping result URLs. This saves credits and avoids redundant fetches.</li>
 <li>For large results, use <code>-o</code> and bounded local reads when a filesystem is available. Do not dump the full response into context.</li>
-<li>Use <code>jq</code> to extract URLs or titles: <code>jq -r '.data.web[].url' .firecrawl/search.json</code></li>
+<li>Use <code>jq</code> to extract URLs <strong>with their source and 1-indexed position</strong> (you'll need both for feedback): <code>jq -r '.data | to_entries[] | select(.key as $k | ["web","images","news"] | index($k)) | .key as $s | .value | to_entries[] | "\($s):\(.key + 1)\t\(.value.url // "-")"' .firecrawl/search.json</code>
+Only those three groups are addressable by <code>--valuable-results</code>; <code>data.tools</code> and any other key are skipped, and an image or news result with no <code>url</code> prints <code>-</code> — address it by its position anyway.</li>
 <li>Naming convention: <code>.firecrawl/search-{query}.json</code> or <code>.firecrawl/search-{query}-scraped.json</code></li>
 </ul>
 <h2>Send feedback after every search (refunds 1 credit)</h2>
@@ -65,9 +66,10 @@ firecrawl scrape &lt;provider-id&gt;/&lt;capability-id&gt; --options '&lt;JSON m
 <ul>
 <li><strong>Time window:</strong> must be sent within ~2 minutes of the search. Late feedback is rejected.</li>
 <li><strong><code>--missing-content</code> is the most important field.</strong> It's a list of <em>specific pieces</em> of content you expected but did not find. One topic per entry, each in its own string. These aggregate across teams and tell us what to index next.</li>
+<li><strong><code>--valuable-results</code> marks which results were useful.</strong> Results come back grouped (<code>data.web</code>, <code>data.images</code>, <code>data.news</code>) and <strong>each group is numbered from 1 independently</strong>, so every entry is <code>source:position</code> — <code>web:1</code> and <code>news:1</code> are two different results. <strong>Be exhaustive</strong> — list every result that was actually useful; unlisted results are treated as not useful, so a partial list corrupts the signal. Reserve <code>--valuable-sources</code> for useful URLs that were NOT among the returned results (e.g. a page you found by following a result's link) — never report the same result in both.</li>
 <li><strong>Substantive content required</strong> (zero-effort feedback is rejected with HTTP 400):<ul>
-<li><code>good</code> → must include at least one <code>--valuable-sources</code> entry.</li>
-<li><code>partial</code> → must include <code>--valuable-sources</code> or <code>--missing-content</code>.</li>
+<li><code>good</code> → must include <code>--valuable-results</code> or at least one <code>--valuable-sources</code> entry.</li>
+<li><code>partial</code> → must include <code>--valuable-results</code>, <code>--valuable-sources</code>, or <code>--missing-content</code>.</li>
 <li><code>bad</code> → must include <code>--missing-content</code> or <code>--query-suggestions</code>.</li>
 </ul>
 </li>
@@ -76,13 +78,15 @@ firecrawl scrape &lt;provider-id&gt;/&lt;capability-id&gt; --options '&lt;JSON m
 <li><strong><code>--silent &amp;</code></strong> is the right pattern — exit code 0 even on failure, so a rejected/expired call never crashes your pipeline.</li>
 </ul>
 <p>Verify the search returned results before reading its <code>id</code>. Zero-result searches write no output file, so the file may be missing — or left over from an earlier search. The guard below skips feedback when the file is missing or has zero results; call <code>search-feedback</code> only inside it:</p>
-<pre><code class="language-bash"># Send once per search. Rate honestly and replace the placeholder with the
-# rating that matches what actually happened. The two fields shown
-# satisfy the substantive-content rule for every rating.
+<pre><code class="language-bash"># Send once per search. Replace BOTH placeholders: the rating that matches
+# what actually happened, and the exhaustive source:position list of the
+# results that were genuinely useful (from the jq above). Never send the
+# list below as-is -- marking results you did not use corrupts the signal.
+# The two fields shown satisfy the substantive-content rule for every rating.
 if SEARCH_ID=$(jq -er 'select(any(.data[]; length &gt; 0)) | .id' .firecrawl/search-react-hooks.json); then
   firecrawl search-feedback "$SEARCH_ID" \
     --rating "&lt;good|partial|bad&gt;" \
-    --valuable-sources '[{"url":"https://react.dev/reference/react/hooks","reason":"Most authoritative"}]' \
+    --valuable-results "&lt;source:position,... - every result you actually used&gt;" \
     --missing-content '[{"topic":"useDeferredValue","description":"No example of useDeferredValue with Suspense"}]' \
     --silent &amp;
 fi

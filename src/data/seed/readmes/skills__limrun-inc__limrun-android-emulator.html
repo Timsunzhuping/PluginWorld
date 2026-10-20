@@ -1,0 +1,349 @@
+<h1>Limrun Android Emulator</h1>
+<p>Interact with an app running on a Limrun cloud Android emulator, from any
+environment (Linux, Windows, macOS, VM, container). This skill is
+build-agnostic: it assumes the APK was already built, usually by
+<strong>limrun-gradle</strong>. Keep build concerns in that skill; this one is about
+driving the running emulator.</p>
+<p>Never use a local emulator, a local Android SDK, or Android Studio.</p>
+<h2>Auth and CLI</h2>
+<p>Install if needed: <code>npm install --global lim</code>. Auth is <code>lim login</code> or
+<code>LIM_API_KEY</code> (it may already be set in the user's environment even when <code>.env</code> and the shell do not show it; check before asking for it). The CLI is the source of truth:
+the commands in this skill are verified, but if a flag errors or you need one
+not shown here, check <code>lim android &lt;subcommand&gt; --help</code> instead of guessing.</p>
+<h2>Installing an app</h2>
+<p>You can build with Limrun's remote Gradle service and have the APK installed
+on a fresh emulator automatically, or install a pre-built local APK or a URL.
+One default to know first: <code>lim android create</code> opens an ADB tunnel
+(<code>--connect</code>) and a browser tab with the live stream (<code>--open</code>) unless told
+otherwise. As an agent, pass <code>--no-open</code> always, and <code>--no-connect</code> unless you
+need adb right away.</p>
+<h3>Build and install</h3>
+<p>Upload the APK built by <strong>limrun-gradle</strong> as a named asset, then create an
+emulator with it pre-installed:</p>
+<pre><code class="language-bash">lim gradle build . --upload myapp.apk
+lim android create --install-asset myapp.apk --no-open --no-connect
+</code></pre>
+<p>Create blocks until the instance is ready to drive; no boot wait is needed.
+The create output includes a signed stream URL; share it with the user as a
+Markdown link, like <code>[Live emulator](&lt;signed-stream-url&gt;)</code>. If you have a
+browser the user can see, open the URL there and tell them. Create also
+prints a console URL: it opens the same live view but requires a console
+login, so prefer the signed stream URL for sharing.</p>
+<p>Useful create flags: <code>--reuse-if-exists</code> (reuse a running instance with the
+same labels), <code>--rm</code> (delete when the CLI exits), <code>--jurisdiction us|eu|as</code>
+(where the instance runs; don't use <code>--region</code>, it is deprecated),
+<code>--inactivity-timeout</code> / <code>--hard-timeout</code>, <code>--display-name</code>, and <code>--label k=v</code>
+(find labeled instances later with <code>lim android list --label-selector k=v</code>).</p>
+<h3>Install app from local</h3>
+<p>Create a new emulator, then install a local file or a URL:</p>
+<pre><code class="language-bash">lim android create --no-open --no-connect
+lim android install-app ./app-debug.apk
+lim android install-app https://example.com/app.apk
+</code></pre>
+<p>A local path is uploaded to Limrun Asset Storage first; a URL is fetched by
+the instance itself, which is much faster for large APKs than uploading from
+your machine. <code>install-app</code> returns as soon as the app is sent; the install
+finishes in the background within seconds. Newly installed apps land in the
+app drawer, not the home screen, so don't look for their icon; just launch
+the app with <code>lim android launch-app &lt;package&gt; --detach</code> (without <code>--detach</code>
+it blocks watching the app until it exits), or confirm with
+<code>lim android adb-shell -- sh -c "pm list packages | grep &lt;name&gt;"</code>.</p>
+<p>Every time you need to install a new version of the APK, sync it instead of
+reinstalling:</p>
+<pre><code class="language-bash">lim android sync ./app-debug.apk
+</code></pre>
+<p>It sends only a delta against the APK already on the instance, then
+reinstalls. <code>--watch</code> keeps re-syncing on file changes, and
+<code>--launch-mode ForegroundIfRunning|RelaunchIfRunning</code> controls what happens to
+the running app after each install.</p>
+<h2>Targeting the right instance</h2>
+<p>Most <code>lim android</code> commands default to the last created instance and resolve
+the "current" one from the <strong>git repo / worktree</strong> of your cwd. In a different
+directory (or outside any git repo) a command can report that no recent
+instance was found even though one is running. The reliable recipe:</p>
+<pre><code class="language-bash">lim android list                          # shows all instances and their IDs
+lim android element-tree --id &lt;that-id&gt;   # pass --id to EVERY lim android command
+</code></pre>
+<p>Once you have the ID (format <code>android_&lt;region&gt;_&lt;ulid&gt;</code>), pass
+<code>--id &lt;android-instance-id&gt;</code> to all <code>lim android</code> calls for the rest of the
+session. Alternatively, <code>git init</code> the project so the workspace resolves on
+its own. When controlling multiple instances, always pass <code>--id</code>.</p>
+<h2>Launching the app</h2>
+<p>Launch and stop installed apps by package name:</p>
+<pre><code class="language-bash">lim android launch-app com.example.app --detach                  # launch and return
+lim android launch-app com.example.app                           # launch and watch until it exits
+lim android launch-app com.example.app --mode RelaunchIfRunning  # restart for a clean state
+lim android terminate-app com.example.app                        # stop it, e.g. to reset app state
+</code></pre>
+<p>Without <code>--detach</code>, <code>launch-app</code> blocks watching the app: when it crashes,
+ANRs, or is stopped, the command prints the exit reason, crash details with
+the stack trace, and a recent app log tail, then returns. That report is the
+way to see why an app died without adb; for logs while the app is running,
+use <code>lim android app-log</code> (below). There is no <code>list-apps</code>; discover package
+names with <code>lim android adb-shell -- pm list packages</code>, or take the
+application ID from the build.</p>
+<h2>App logs</h2>
+<p>One app's logs need no tunnel:</p>
+<pre><code class="language-bash">lim android app-log com.example.app --tail 100   # recent lines (app must be running)
+lim android app-log com.example.app --follow     # stream live lines until Ctrl+C; don't stream into context
+</code></pre>
+<h2>Shell and files</h2>
+<p>One-shot shell commands and file transfer need no tunnel either:</p>
+<pre><code class="language-bash">lim android adb-shell -- pm list packages -3                     # like adb shell; args go after --
+lim android adb-shell -- sh -c "dumpsys battery | grep level"    # pipes need an explicit shell
+lim android push-file ./fixture.json /sdcard/Download/fixture.json
+lim android pull-file /sdcard/Download/out.json ./out.json
+</code></pre>
+<p>They run with the same permissions the adb shell user has, and <code>adb-shell</code>
+exits with the command's exit code.</p>
+<h2>Full logcat and interactive adb over the tunnel</h2>
+<p>Full-device logcat and anything interactive (Android Studio, scrcpy,
+streaming) go through plain <code>adb</code> over the CLI's tunnel. Start the tunnel in
+a background shell and keep it alive:</p>
+<pre><code class="language-bash">lim android connect        # prints "Tunnel started on 127.0.0.1:&lt;port&gt;."
+</code></pre>
+<p><code>connect</code> runs <code>adb connect</code> for you (use <code>--adb-path</code> if adb isn't on PATH).
+The printed <code>127.0.0.1:&lt;port&gt;</code> is the device serial; pass it with <code>-s</code> to
+every adb call (<code>adb devices</code> also lists it):</p>
+<pre><code class="language-bash">SERIAL=127.0.0.1:&lt;port&gt;
+adb -s $SERIAL logcat -d | tail -100    # dump recent full-device logs, don't stream into context
+</code></pre>
+<p>The tunnel lives and dies with the process that started it: when that shell
+exits, <code>adb devices</code> shows the serial as <code>offline</code> while the instance keeps
+running. Just run <code>lim android connect</code> again to get a new tunnel (the port
+changes each time). Stale offline serials are harmless; <code>adb disconnect</code>
+clears them.</p>
+<h2>Testing changes</h2>
+<p>When emulator interaction is part of the task, test new or changed
+functionality with the interaction commands after each install or sync. Focus
+on what changed, plus a quick smoke test of core flows. Start by reading the
+element tree to see what's on screen before acting:</p>
+<pre><code class="language-bash">lim android element-tree
+</code></pre>
+<p>The output is the raw UIAutomator XML hierarchy on a single line, so a plain
+grep echoes the whole document. Split it into one node per line first, then
+grep for the <code>text</code>, <code>resource-id</code>, <code>content-desc</code>, or <code>bounds</code> you need
+rather than dumping the whole tree into context:</p>
+<pre><code class="language-bash">lim android element-tree | sed 's/&gt;&lt;/&gt;\n&lt;/g' | grep -i "save"
+</code></pre>
+<h2>Interacting with the app</h2>
+<p>Prefer tapping by resource id, then by visible text or content description,
+then coordinates as a last resort:</p>
+<pre><code class="language-bash">lim android tap-element --resource-id com.example.app:id/startButton
+lim android tap-element --text "Save"
+lim android tap-element --content-desc "Open menu"
+lim android tap 360 800
+</code></pre>
+<p>Selector values match <strong>exactly</strong>, not by substring: <code>--text "Save"</code> does not
+match a "Save draft" button. Copy the value verbatim from <code>element-tree</code>. A
+selector that matches nothing fails in a couple of seconds with
+<code>No element found for selector</code>. Other selectors: <code>--class-name</code>,
+<code>--package-name</code>, <code>--index</code>, <code>--clickable</code>, <code>--enabled</code>, <code>--focused</code>, and
+<code>--bounds-contains-x/y</code>; combine them to narrow a match. On web pages in the
+browser, resource ids are the page's own DOM ids (like <code>searchIcon</code>) and are
+often empty; select by <code>--text</code> plus <code>--class-name</code> there, or fall back to
+coordinates from the node's <code>bounds</code>. To inspect matches without tapping, use
+<code>find-element</code> with the same selectors:</p>
+<pre><code class="language-bash">lim android find-element --text "Save"   # table of matches with bounds
+</code></pre>
+<p>For text input, target the field directly; no prior focus tap is needed.
+<code>type</code> takes the same selectors as <code>tap-element</code> (<code>--class-name android.widget.EditText --focused</code> works for a field with no resource id):</p>
+<pre><code class="language-bash">lim android type "hello world" --resource-id com.example.app:id/searchBox
+lim android type "hello" --x 360 --y 400   # by coordinate
+lim android press-key enter
+lim android press-key backspace            # --modifier shift/control/alt/command to combine
+</code></pre>
+<p>For scrolling and navigation:</p>
+<pre><code class="language-bash">lim android scroll down --amount 600
+lim android scroll up --amount 300
+lim android press-key back
+lim android press-key home
+lim android open-url "https://example.com"   # opens in the default browser; also fires deep links
+</code></pre>
+<p>After every interaction, re-run <code>element-tree</code> to confirm the UI transitioned.
+No sleep is needed between a tap and <code>element-tree</code>; the tap blocks until
+done. A page load after <code>open-url</code> is asynchronous though: re-run
+<code>element-tree</code> until the node you expect appears. A present but childless
+<code>android.webkit.WebView</code> means the page is still loading, not a broken tree.</p>
+<pre><code class="language-bash">lim android element-tree
+</code></pre>
+<h3>When the element tree is empty</h3>
+<p>Some React Native and Expo apps expose no accessibility nodes at all, which
+leaves <code>element-tree</code>, <code>tap-element</code>, and <code>find-element</code> blind (system dialogs
+still expose nodes). Fall back to driving by pixels: take a screenshot, read
+the coordinates of the target, and use <code>tap x y</code> / <code>type --x --y</code>. Screenshot
+pixels map 1:1 to tap coordinates, so a button centered at (360, 1322) in the
+image is tapped with <code>lim android tap 360 1322</code>. Re-screenshot after each
+action to confirm the result.</p>
+<h2>Screenshots and video</h2>
+<p>Screenshot takes a <strong>positional path</strong> (not <code>-o</code>):</p>
+<pre><code class="language-bash">lim android screenshot screenshot.png
+lim android screenshot screenshot.png --id &lt;android-instance-id&gt;
+</code></pre>
+<p>Use the element tree for functional assertions (element existence, text, state
+changes) and screenshots only for visual properties. For anything involving
+motion (animations, gameplay, streaming UI), prefer video:</p>
+<pre><code class="language-bash">lim android record start                     # non-blocking
+lim android record stop -o /tmp/recording.mp4
+</code></pre>
+<p><code>record stop</code> accepts <code>--quality 5-10</code>. Recorded frames are half the
+screenshot resolution, so read tap coordinates from screenshots, never from
+video frames. For UI changes, include a demo video in the pull request so the
+user can see it.</p>
+<h2>Simulate the microphone with an audio file</h2>
+<p>For voice-driven flows (assistants, speech-to-text, audio calls), play a local
+audio file as the emulator's microphone. The app hears the audio through its
+normal capture pipeline:</p>
+<pre><code class="language-bash">lim android play-on-microphone ./fixtures/command.wav          # loops by default
+lim android play-on-microphone ./fixtures/command.mp3 --once
+</code></pre>
+<p>WAV and MP3 work. The file is pushed over adb, so this command needs a local
+<code>adb</code> binary (<code>--adb-path</code> if it's not on PATH) and opens its own short-lived
+tunnel. Camera injection is iOS-only; for camera-driven test flows use
+<strong>limrun-ios-simulator</strong>.</p>
+<h2>Shape network bandwidth</h2>
+<p>Test slow-network behavior by capping the instance's Wi-Fi bandwidth:</p>
+<pre><code class="language-bash">lim android set-wifi-bandwidth --down-kbps 1000 --up-kbps 500
+lim android set-wifi-bandwidth --down-kbps 0 --up-kbps 0       # 0 clears the limit
+</code></pre>
+<h2>Tunnel the app's traffic through your machine</h2>
+<p>When the app must reach a service only your machine can reach (a local dev
+server, a VPN-only staging API), or you need to see its HTTP traffic, start a
+destination tunnel. Only the destinations you select are rerouted through
+the machine running <code>lim</code>; everything else leaves the instance directly.</p>
+<pre><code class="language-bash">lim android tunnel --selector localhost:8080 --detach --id &lt;android-instance-id&gt;
+</code></pre>
+<ul>
+<li>An exact selector (<code>localhost:port</code> or <code>IP:port</code>, port &gt;= 1024) becomes a
+listener on the emulator, also reachable as <code>10.0.2.2:&lt;port&gt;</code>; the app's
+connections to it land on your machine and are dialed there.</li>
+<li>Domain selectors (<code>api.example.com</code>, <code>"*.corp.example"</code>) are intercepted
+on the emulator and dialed from your machine, so your DNS and VPN apply.
+Apps that resolve DNS themselves over HTTPS bypass domain interception.</li>
+<li>Start the tunnel <strong>before</strong> launching the app: connections opened earlier
+keep their original route. One tunnel per instance; a second start fails.</li>
+</ul>
+<p>As an agent, always pass <code>--detach</code>: it returns once the tunnel is READY and
+keeps it alive in a background process. Manage it with:</p>
+<pre><code class="language-bash">lim android tunnel status --id &lt;android-instance-id&gt;   # state, per-selector binds, last dial failure
+lim android tunnel stop --id &lt;android-instance-id&gt;
+</code></pre>
+<h3>Inspect HTTP traffic, capture HAR, persist a network log</h3>
+<p>Inspection is on by default: every HTTP and HTTPS request through the tunnel
+is decoded, printed as one summary line per request (in the tunnel log file
+when detached), and shown live in the console's network panel.</p>
+<pre><code class="language-bash">lim android tunnel --selector "*.api.example" --har ./traffic.har --detach   # write HAR 1.2 with bodies
+lim android tunnel --selector "*.api.example" --persist --detach             # network log survives the instance
+</code></pre>
+<p><code>--persist</code> uploads a body-inclusive network log as a session artifact when
+the tunnel stops or the instance terminates; it appears on the instance's
+session page in the console with a HAR download (default lifetime 3 days,
+<code>--ttl &lt;seconds&gt;</code> up to 30 days). HTTPS is decoded with an emulator-trusted
+CA, so <strong>apps with certificate pinning fail through inspected domain
+selectors</strong>: leave the pinned host out of the selectors or pass
+<code>--no-inspect</code> to relay bytes opaquely (no summaries, HAR, or persistence).</p>
+<h2>Reach services in a private network through a private tunnel</h2>
+<p>An organization can run a private tunnel: a connector inside its network,
+created by an admin with <code>lim tunnel create</code> or in the console (Network) and
+run with <code>lim tunnel run</code>, that serves every instance naming it. When the user names one, pass it at
+create time instead of starting a tunnel yourself:</p>
+<pre><code class="language-bash">lim android create --tunnel &lt;tunnel-name&gt;
+</code></pre>
+<p>The app reaches the tunnel's selectors at the addresses they name, and exact
+selectors are also reachable as <code>10.0.2.2:&lt;port&gt;</code>. Selectors resolve on the
+connector's machine, not on yours. Android instances attach only when every
+exact selector uses port 1024 or higher. The tunnel takes the instance's one
+destination tunnel, so do not start or stop <code>lim android tunnel</code> on it.</p>
+<p>Creation checks the tunnel and fails when it is not usable:</p>
+<ul>
+<li><code>tunnel &lt;name&gt; does not exist</code>: the name is wrong or the tunnel was not
+created. Ask the user for the right name.</li>
+<li><code>tunnel &lt;name&gt; is offline</code>: no connector is running. Ask the user to
+start it.</li>
+<li><code>did not attach within 30s</code>: the connector cannot attach the instance, or
+an exact selector uses a port below 1024. Ask the user to check the
+connector's output, or to move the service to a port of 1024 or higher.</li>
+</ul>
+<p>Retrying the create in a loop does not help in any of these cases.</p>
+<p>The tunnel's token belongs on the connector's machine. Never ask the user to
+paste it into the conversation.</p>
+<h2>Send all device traffic through a proxy</h2>
+<p>Tunnels carry only declared destinations; there is no catch-all selector. When
+the user wants all traffic to leave through their proxy (for example a
+recording proxy), point the emulator's global HTTP proxy at a proxy the tunnel
+reaches. Tunnel inspection passes requests meant for the proxy through as
+sent. Use a port other than 8080 for a <code>localhost</code> proxy; the
+emulator already uses 8080.</p>
+<pre><code class="language-bash">lim android tunnel --selector localhost:3128 --detach --id &lt;android-instance-id&gt;
+lim android proxy set localhost:3128 --id &lt;android-instance-id&gt;
+# later, before stopping the tunnel:
+lim android proxy clear --id &lt;android-instance-id&gt;
+</code></pre>
+<p>With a private tunnel whose selector is the proxy, only <code>lim android proxy set</code>
+is needed. A proxy elsewhere in the user's network works the same way:
+<code>--selector proxy.example.internal</code> and <code>lim android proxy set proxy.example.internal:3128</code>. While the proxy is set and the tunnel is down,
+Chrome's requests fail instead of going direct. To read HTTPS in the proxy,
+trust its CA (below).</p>
+<h2>Trust a CA certificate</h2>
+<p>Add a PEM CA certificate to the emulator's trust stores, for example the root
+of a private CA that signs the user's test servers:</p>
+<pre><code class="language-bash">lim android ca add ./my-ca.pem --id &lt;android-instance-id&gt;
+</code></pre>
+<p>Apps, WebViews, and Chrome trust it on their next connection, with no
+restart, for the life of the instance. Only one CA certificate per file;
+leaf certificates are rejected. Apps that pin certificates still reject it.
+To look at the app's HTTP and HTTPS traffic, use tunnel inspection (above)
+instead: it needs no CA of the user's own.</p>
+<h2>Preview URL for humans</h2>
+<p>Upload the APK to Limrun Asset Storage and return a preview URL for the user
+to open and test the app manually in the browser:</p>
+<pre><code class="language-bash">export ASSET_NAME=myapp.apk   # can be any name
+lim asset push ./app-debug.apk -n ${ASSET_NAME}
+
+echo "https://console.limrun.com/preview?asset=${ASSET_NAME}&amp;platform=android"
+</code></pre>
+<p>Opening the link in the Limrun console provisions an emulator and starts
+streaming while the console installs the APK. An <code>Installing &lt;asset name&gt;</code>
+overlay stays visible during installation. Add <code>openUrl</code> to open a URL or app deep link after launch, for
+example <code>&amp;openUrl=myapp%3A%2F%2Fcheckout</code>. Use
+<code>URLSearchParams.set("openUrl", url)</code> to encode the full URL and its query string.
+The stream stays visible while the app installs, launches, and opens the URL.
+The overlay disappears when the preview is ready.</p>
+<h2>Cleanup</h2>
+<p>When the work is completed, you can delete the emulator. <code>delete</code> takes a
+<strong>positional</strong> ID (<code>--id</code> is not a valid flag here, unlike other commands):</p>
+<pre><code class="language-bash">lim android delete &lt;android-instance-id&gt;
+</code></pre>
+<h2>Gotchas</h2>
+<ul>
+<li><strong>Ship one ABI, not a mix.</strong> Emulators are x86_64 hosts that report
+<code>x86_64,arm64-v8a</code> and run arm64 native libraries through translation. An
+APK with only <code>arm64-v8a</code> libs installs and runs; x86_64 libs run natively
+and fastest. An APK that mixes ABIs, some vendor SDK libs arm64-only and the
+rest x86_64, installs as x86_64 and then crashes with <code>UnsatisfiedLinkError</code>
+when the arm64-only code first loads. <code>armeabi-v7a</code>-only APKs are rejected
+with <code>INSTALL_FAILED_NO_MATCHING_ABIS</code>, and apps that exec their own bundled
+ARM command-line binaries are not supported under translation.</li>
+<li><strong>Selectors match exactly.</strong> <code>tap-element --text</code> and <code>find-element --text</code>
+need the full, exact string from <code>element-tree</code>; substrings match nothing.</li>
+<li><strong><code>install-app</code> returns before the install finishes.</strong> The app lands a few
+seconds later; verify with <code>find-element</code> or <code>pm list packages</code> before
+launching. Prefer <code>install-app &lt;URL&gt;</code> or <code>create --install-asset</code> over raw
+<code>adb install</code>: a big APK over <code>adb install</code> streams with zero progress
+output and looks hung for minutes, and killing it mid-stream corrupts the
+install.</li>
+<li><strong>The ADB tunnel is session-bound.</strong> It dies with the shell that started it
+while the instance keeps running; reconnect with <code>lim android connect</code> and
+re-read the port, it changes every time.</li>
+<li><strong>Failed create pipes can still leak an instance.</strong> If a <code>create</code> invocation
+errors client-side (broken pipe, JSON parse), check <code>lim android list</code>; the
+instance may exist anyway and should be deleted.</li>
+<li><strong>Empty element tree usually means a React Native app</strong>, not a broken
+instance. See "When the element tree is empty" above.</li>
+<li><strong><code>element-tree</code> can be large.</strong> Pipe through <code>grep</code> to extract what you
+need rather than dumping the whole tree into context.</li>
+<li><strong>Instance resolution can miss in a non-git dir.</strong> See "Targeting the right
+instance" above; pass <code>--id</code> when in doubt.</li>
+<li><strong>Build errors are the build skill's job.</strong> If the APK isn't building, the
+failure is upstream; go back to <strong>limrun-gradle</strong>.</li>
+</ul>

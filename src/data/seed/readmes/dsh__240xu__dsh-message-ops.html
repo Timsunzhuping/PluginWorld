@@ -1,0 +1,775 @@
+<h1>@240xu/dsh-message-ops</h1>
+<p>DSH web 插件：<strong>消息回滚 + 删除 + 恢复</strong>。只补 dsh 官方<strong>没有</strong>的能力。</p>
+<blockquote>
+<p><strong>0.9.0 是破坏性变更</strong>：移除了本插件的<strong>分支</strong>与 <strong>Markdown 导出</strong>。
+两者 dsh 官方都已有（<code>session/fork</code> 与 <code>/api/session.export</code>），详见下方「为什么不重复造轮子」。</p>
+</blockquote>
+<h2>官方没有、本插件提供的</h2>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>官方 dsh 0.2.0-rc.2</th>
+<th>本插件</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>消息回滚</strong>（遮蔽该条及其后全部内容）</td>
+<td>❌ 没有。<code>SurfaceOp</code> 只有 <code>append|replace</code>，<strong>没有解除遮蔽的操作</strong>；<code>undo</code> 仅指草稿编辑器的 Ctrl+Z</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>单条删除</strong></td>
+<td>❌ 没有。官方 README 明文 <em>"sessions can be archived but never deleted"</em></td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>恢复</strong>（撤销一次回滚/删除）</td>
+<td>❌ 没有</td>
+<td>✅</td>
+</tr>
+</tbody></table>
+<h2>为什么不重复造轮子（0.9.0 的取舍）</h2>
+<ul>
+<li><strong>分支</strong> → 官方有完整实现：RPC <code>session/fork</code>（<code>atSeq</code> 任意）+ <code>SessionStore.fork()</code><ul>
+<li>UI 消息级按钮 + 官方埋点就叫 <code>branch_session_click</code>。
+本插件原先还有一个磁盘实现（<code>applyBranch</code>）作为「官方失败时的回落」，但它语义是错的：
+删掉了 <code>isSeeded</code>（官方 fork 设 <code>true</code>）、不写 <code>inheritedEventCount</code>、
+也不补 fork closers → 产出的子会话边界可能悬空。<strong>已删除</strong>，失败时直接提示停止运行中的会话。</li>
+</ul>
+</li>
+<li><strong>Markdown 导出</strong> → 官方 <code>/api/session.export</code> 提供 ZIP 归档（原始 JSONL + 附件，面向迁移/复现）。
+格式确实不重叠，但本插件的导出<strong>零 UI 入口</strong>（实测路由可用但前端从不调用），等于死代码。<strong>已删除</strong>。</li>
+</ul>
+<h2>用法</h2>
+<ul>
+<li><strong>会话头部</strong>的 <code>Message ops (revert / delete / branch)</code> 按钮 → 统一对话框</li>
+<li><strong>助手消息</strong> hover 行的 <code>Revert to here</code> / <code>Quote to composer</code></li>
+<li><strong>用户消息</strong> hover 行的 <code>Revert to here</code></li>
+<li><strong>输入框上方的回撤贴条</strong>：展开后可逐条 <code>Restore</code>（这是恢复的唯一入口）</li>
+<li><strong>侧栏会话行</strong>的 <code>...</code> 菜单</li>
+</ul>
+<p>对话框流程：<strong>先在列表里选一条消息 → 上方出现三个操作 → 破坏性操作需勾选确认</strong>。</p>
+<h2>安装</h2>
+<p>零 npm 依赖（只用 <code>node:fs</code> / <code>node:zlib</code> / <code>node:path</code> / <code>node:url</code>；zstd 压缩走
+Node 内建 <code>zlib.zstdCompressSync</code>，需 <strong>Node ≥ 23.5</strong>，Termux 与 Windows 通用）。</p>
+<pre><code class="language-sh"># Termux / Linux
+dsh plugin --profile web add @240xu/dsh-message-ops
+
+# Windows
+dsh plugin --profile web add @240xu/dsh-message-ops
+# 或本地目录：
+dsh plugin --profile web add file:C:/path/to/dsh-message-ops
+</code></pre>
+<p>重启 DSH web 实例后生效。</p>
+<h2>安全设计</h2>
+<ul>
+<li>回滚/删除不重写日志：通过一条承载 <code>surfaceOp: replace</code> 的 system 事件实现，
+约束由 DSH 引擎 <code>assertProvenance</code> 校验，违规如实上报（HTTP 409）。</li>
+<li>回滚/删除前必须勾选风险确认；运行中的会话一律拒绝（提示先停止）。</li>
+<li>分支先写临时文件再原子 rename，半写日志不会被会话扫描读到。</li>
+</ul>
+<h2>端点</h2>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>路径</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GET</td>
+<td><code>/api/message-ops/messages?sessionId=&lt;id&gt;</code></td>
+<td>消息级列表（磁盘真相 + 可见性标注 + running 状态）</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/message-ops/revert</code></td>
+<td><code>{sessionId, seq}</code> 回滚到该条（含）</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/message-ops/delete</code></td>
+<td><code>{sessionId, seq}</code> 仅遮蔽该条</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/message-ops/branch</code></td>
+<td><code>{sessionId, upToSeq}</code> 分支新会话，返回 <code>{newId, dir, keptEvents}</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/message-ops/export?sessionId=&lt;id&gt;&amp;seq=&lt;可选&gt;</code></td>
+<td>导出 Markdown（seq ≤ 上界，缺省全部），附件下载</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/message-ops/restore</code></td>
+<td><code>{sessionId, seq}</code> 回滚恢复：seq 为某次 revert/delete 标记事件的 seq</td>
+</tr>
+</tbody></table>
+<h2>0.2.4 UI GAP（ux-scout dsh-ui-spec G-M1）</h2>
+<ul>
+<li><strong>S6 违规修复</strong>：回滚/删除成功后不再 900ms 裸 <code>location.reload()</code>——改为
+devkit 标准 toast（<code>window.__dshDevkit.toast</code> 探测，无 devkit 时降级为对话框
+内完成文案）+ done 态新增「刷新页面」按钮由用户手动刷新；与 branch 路径
+（refreshList 不刷新页面）行为拉齐。</li>
+</ul>
+<h2>0.2.3 格式兼容（compat-audit + 用户实测紧急修复）</h2>
+<ul>
+<li><strong>P0 旧单帧 <code>session.jsonl.zstd</code> 读取必崩</strong>：<code>readSessionFile</code> 旧实现把帧 0
+整段 <code>JSON.parse</code>——旧单帧格式整个文件是一帧、解压出多行 NDJSON，直接抛异常，
+与「旧格式兼容」声明矛盾。现改为<strong>逐行扫描统一路径</strong>：全部帧解压后按行扫描，
+首个 <code>type:"session"</code> 行作 header、其余行作事件，v3 多帧 / v4 多帧 / 旧单帧
+三种格式一条代码路径（撕裂行仍按完整前缀语义跳过）。</li>
+<li><strong>P0 v4 会话格式（用户实测 3080 服务暴露）</strong>：DSH 已升级 v4 持久化
+（<code>session.v4.jsonl.zstd</code>，结构同 v3，仅文件名与 <code>version</code> 数字不同）。
+<code>findSessionDirs</code> 探测序列改为 <strong>v4 → v3 → 旧单帧</strong>（此前只找 v3，最新会话
+全部 "session log not found"）；<code>readSessionFile</code> 不做 version 硬校验；
+<code>applyBranch</code> 分支写回沿用读到的原格式版本（<code>session.v&lt;version&gt;.jsonl.zstd</code>），
+不再写死 v3。</li>
+<li><strong>dedup</strong>：<code>listMessages</code> 内联文本提取收敛到 <code>session-file.messageText</code>
+单点（ops-core 转出保持导入面兼容），消除双实现漂移面。</li>
+<li>回归：40 项测试全绿，含旧单帧/ v4 fixture 往返、listMessages、
+findSessionDirs 三格式发现与 v4 分支写回；真实 v4 会话日志已实测通过。</li>
+</ul>
+<h2>0.2.2 前端收尾（评审 M1/M2）</h2>
+<ul>
+<li><strong>M2 观察范围收窄</strong>：侧栏行菜单注入的 <code>MutationObserver</code> 仍观察
+<code>document.body</code>（菜单由宿主 React 动态渲染，安装期无稳定锚点），但回调改为
+精确过滤——只有新增节点本身是（或包含）<code>[role=menu]</code> 时才调度探测；聊天流
+渲染、流式 chunk 等海量 mutation 零探测成本；同帧多次命中合并为一次探测。</li>
+<li><strong>M1 分批渲染</strong>：消息列表先渲 50 条，顶部「显示更多（剩余 N 条）」按钮每次
+渐进展开 50 条（上限仍为最近 200 条），避免 200 行单选列表一次性进 DOM；
+打开新会话时分页重置。</li>
+</ul>
+<h2>0.2.1 评审修复（架构评审 arch-review）</h2>
+<ul>
+<li><strong>P0 信任围栏</strong>：全部 6 条 <code>/api/message-ops/*</code> 路由接入三层信任判定
+（回环 Host 挡 DNS rebinding + <code>sec-fetch-site: cross-site</code> 拒绝 + Origin
+同源校验），非回环/跨站请求一律 403。写操作（revert/delete/branch/restore）
+另要求 <code>Content-Type: application/json</code>（text/plain 绕预检的洞 → 415）。
+<strong>为何不引入一次性 CSRF token</strong>：浏览器对所有 POST（含 text/plain）都附带
+Origin 头，Origin 同源校验已覆盖跨站 POST；自定义头天然触发预检、与 Origin
+校验等价——token 只增加握手复杂度而不增加安全性，围栏已足够（论证见
+<code>src/ops-core.js</code> 的 <code>isJsonContentType</code> 注释）。</li>
+<li><strong>P1 写端 replace 拼写前向兼容</strong>：<code>applySurfaceReplace</code> 写入时先按当前
+运行时 <code>{startSeq,endSeq}</code> 形状写；若引擎报 <code>invalid replace surfaceOp</code>
+（validateNext 在事件入 log 前抛出，无半写风险）自动降级 <code>{start,end}</code>
+重试并记住拼写。当前与未来 dsh cohort 都不炸；读端双拼写兼容已统一收敛到
+<code>session-file.readReplaceOp</code> 单点（computeShadowed / planRestore 共用）。</li>
+<li><strong>P1 大日志让出</strong>：新增 <code>readSessionFileAsync</code>，逐帧解压每 8 帧
+<code>setImmediate</code> 让出事件循环；messages/export/restore 路由改走该路径。
+帧数超过 500 阈值的 export 在 Markdown 末尾追加耗时提示（partial 语义，
+内容完整无截断）。</li>
+<li><strong>P2</strong>：<code>readJsonBody</code> 加 1MB 上限（超限 413）；<code>findSessionDirs</code> 多
+project slug 命中同一 id 时显式报 409 歧义而非静默取第一个；branch 产物
+不进会话注册表——需刷新会话列表后才可见（此为宿主扫描行为，见 branch 命令
+返回后请刷新列表）。</li>
+</ul>
+<h2>0.2.0 新增</h2>
+<h3>Agent 工具 <code>message_ops</code></h3>
+<p>模型侧可直接调用五操作：<code>action: list | revert | delete | branch | restore | export</code>，参数
+<code>sessionId</code>（必填）、<code>seq</code>、<code>upToSeq</code>。工具与 HTTP 路由共用同一套核心逻辑
+（<code>src/ops-core.js</code>），行为与错误语义完全一致；失败以文本形式返回，不中断回合。</p>
+<p>工具注册是<strong>容错</strong>的：本插件 <code>inject</code> 保持为空（tools 是可选增强而非硬依赖，
+cordis 的 inject 是硬依赖声明，缺服务会让整个插件永不加载）。apply 时探测
+<code>ctx.get('tools')</code>，有则注册；没有则通过 <code>ctx.inject(['tools'], …)</code> 等它出现；
+<code>@deepseek-ai/dsh-tools</code> 包不可解析时静默跳过工具，HTTP 面完全不受影响。
+因此 <code>@deepseek-ai/dsh-tools</code> 以 peerDependencies 形式声明（<code>^0.1.0-rc.6</code>）。</p>
+<h3>导出 Markdown</h3>
+<p><code>GET /api/message-ops/export?sessionId=&lt;id&gt;&amp;seq=&lt;可选上界（含）&gt;</code>，<code>Content-Disposition</code>
+附件下载。user/assistant/system 消息按角色小节展开（<code>## [seq N] role</code>），工具调用折叠为
+单行引用（含 80 字符参数摘要）；带 <code>parentSession</code> 的分支会话在头部标注来源。</p>
+<h3>回滚恢复（restore，重放语义）</h3>
+<p><code>POST /api/message-ops/restore</code> 传 <code>{sessionId, seq}</code>，seq 指向一次 revert/delete 落定的
+标记事件（<code>surfaceOp: replace</code>、携带 <code>sourceEventSeqs</code>）。</p>
+<p><strong>引擎能力查证结论</strong>（见 <code>src/ops-core.js</code> 头部注释）：安装的运行时
+<code>@deepseek-ai/dsh-session</code> 的 SurfaceOp 只有 <code>append</code> 与 <code>replace</code> 两个变体，
+<strong>不存在「解除遮蔽」操作</strong>——surface replace 是 append-only 的永久遮蔽。因此恢复实现为
+<strong>重放（replay）而非解除遮蔽</strong>：把被遮蔽区间的 user/assistant 消息文本重新 append 为新
+事件，文本加 <code>[恢复]</code> 前缀，并先 append 一条 system 说明；tool/call 等不可安全重放的事件
+跳过并在结果中计数。原遮蔽区间保持不可见（磁盘日志原样保留）。</p>
+<p><strong>语义差异须知</strong>：恢复出来的消息 seq 是新的、时间戳是新的、措辞带 <code>[恢复]</code> 标记，且不是
+「回到当时」——后续上下文（中间隔着的其他对话）不会被抹掉。若想「干净地回到某点」，
+请用 branch 从该 seq 分叉。</p>
+<p><strong>兼容性备注</strong>：运行时引擎当前 replace 形状为 <code>{op:'replace', startSeq, endSeq}</code>；
+dsh-src 仓库较新副本已改名为 <code>start</code>/<code>end</code>。本插件写入用 <code>startSeq/endSeq</code>（对齐安装的
+运行时），restore 读取端两种拼写都兼容，前向迁移无需改动。</p>
+<h3>开发</h3>
+<pre><code class="language-sh">npm test            # 20 个零依赖测试（node --test，Node 26 起目录参数已弃用，改用 glob）
+node --check src/*.js
+</code></pre>
+<p>格式兼容性已对真实会话日志验证（多帧 v3 格式；旧单帧 <code>session.jsonl.zstd</code> 读取走同一帧扫描路径）。</p>
+<h2>License</h2>
+<p>MIT</p>
+<h2>0.3.0 · 用户 UI 回撤体系（官方槽集成）</h2>
+<p>针对 dsh 0.2.0-rc.2 的用户级操作面（agent 工具保留，但 UI 为主推入口）：</p>
+<ul>
+<li><strong>每条 AI 消息旁的原生回撤按钮</strong>：注入官方 <code>conversation.chat.assistant-actions</code>
+槽（0.2.0 正式扩展点，条目收持久化 messageId）——「回滚到此 / 删除此条 /
+从此分支」直接出现在消息操作行，与官方点赞/点踩并列；0.1.x 无此槽自动 no-op。
+messageId→seq 反查经 <code>/api/message-ops/messages</code>（每会话索引缓存）。</li>
+<li><strong>分支双路径</strong>：0.2.0+ 优先官方 <code>sessions.fork({sessionId, atSeq, increaseTitle})</code>
+（子会话自动进宿主列表，成功后可一键 <code>uiWorkspace.openSession</code> 打开）；
+官方 fork 失败或 0.1.x 回退磁盘级 applyBranch（原路径保留）。</li>
+<li><strong>恢复（restore）补完</strong>：选中 revert/delete 落定的 replace 标记行时，对话框
+提供「恢复」操作（重放语义：新 seq + <code>[恢复]</code> 前缀，不可重放事件计数跳过），
+确认弹窗内联语义说明（评审缺口销账）。</li>
+<li>官方已有但易混淆的：0.2.0 原生分支按钮（仅限已完成轮次最后一条消息）与
+本插件的「任意位置分支/回滚」互补不冲突。</li>
+</ul>
+<h3>0.3.1 · 槽按钮重构（opencode 式一键 + 去重）</h3>
+<ul>
+<li><strong>一键立即执行</strong>：回滚/删除点击即生效（无对话框），devkit toast 反馈；宿主
+0.2.0 chat store 原生响应 surface replace——遮蔽即时呈现，无需刷新页面。</li>
+<li><strong>与官方去重</strong>：槽内移除分支按钮——官方 0.2.0 已在消息操作行自带分支
+（限已完成轮次最后一条）；任意位置分支保留在对话框（官方没有的能力）。</li>
+<li><strong>原生观感</strong>：按钮改用官方 primitives 图标（IconClockOutline/IconTrashOutline，
+require 失败回退内联 SVG）；S3 命中区 ≥44px；S11 双提交防护（busy 互斥）。</li>
+</ul>
+<h3>0.3.2 · 图标规范化</h3>
+<ul>
+<li>槽按钮去掉文字 emoji——0.2.0+ 直接用官方 primitives 图标（与原生操作行 1:1 同款）；
+回退路径的 SVG 也改为官方 IconClockOutline/IconTrashOutline 的精确 path 数据
+（1px stroke，与 Regular 变体一致），不再手绘。</li>
+<li>字典文案去 emoji（label 仅用于 tooltip/aria，不参与渲染）。</li>
+</ul>
+<h3>0.4.0 · opencode 式回撤深化（composer 回填 + 回撤 dock）</h3>
+<ul>
+<li><strong>Composer 回填</strong>：回滚<strong>用户消息</strong>后，原文经官方 <code>InputActions.setDraft</code>
+自动回填输入框——「编辑重发」零按钮（opencode 招牌交互）。</li>
+<li><strong>结构化回撤 dock</strong>：注入官方 <code>conversation.input.dock</code> 槽（composer 卡片上方
+全宽条目）——「已回撤 N 条（可恢复）」折叠面板，展开列出每个回撤/删除标记，
+逐条「恢复」（restoring 中间态禁用，S11）；无标记时 dock 不渲染。</li>
+<li>数据链：messages 端点为 user 消息新增 <code>fullText</code> 字段（回填原文）。</li>
+<li>0.1.x 宿主两个槽均不存在，inject 自动 no-op。</li>
+</ul>
+<h3>0.4.1 · dock 修复：统计口径 + 原生观感</h3>
+<ul>
+<li><strong>统计修复</strong>：旧版把历史累积的被遮蔽消息全算进「已回撤 N 条」（多次恢复重放后
+虚高到数百）。现在 dock 只列<strong>手工回撤/删除标记</strong>（排除 compaction checkpoint），
+每条标记显示其 range 内<strong>当前不可见</strong>的消息数；头部为标记计数。</li>
+<li><strong>原生观感</strong>：样式改为官方 GoalDock/TodoDock 同款——36px 高毛玻璃条
+（<code>--dsw-specific-menu</code> + <code>--dsw-elevation-panel</code> + <code>--dsw-radius-md</code>）、
+composer 卡片对齐宽度（<code>--dsh-composer-dock-inset</code> 系列）、13px/500 label、
+28px 圆形切换钮——与目标/计划 dock 视觉完全一致。</li>
+</ul>
+<h3>0.4.2 · dock 像素级对齐 opencode + 回撤生命周期修正</h3>
+<ul>
+<li><strong>回撤生命周期</strong>（对齐 opencode clear 语义）：restore 的 notice 事件现携带
+<code>restoresSeq</code> 引用被恢复的标记——dock 只显示<strong>活跃</strong>标记，已恢复项自动消失
+（此前恢复过的标记永远挂在列表里，计数随之虚高）。</li>
+<li><strong>像素级对齐 opencode SessionRevertDock</strong>（读其 dev 分支源码逐项落地）：
+42px 头部（reset 图标 + 13px/500 label + 折叠时第一条预览文本 + 180° 旋转
+chevron）、rounded-xl + 0.5px 边框 + bg-layer-01 容器、24px 行高 + neutral
+小按钮（非文字链）、items 变化自动折叠、Enter/Space 键盘切换、18px
+sacrificial 空间。</li>
+</ul>
+<h3>0.4.3 · dock 崩溃修复（Hooks 规则违规）</h3>
+<ul>
+<li>0.4.1 的自动折叠 useEffect 位于「无标记早退」之后——标记从 0 变非 0 时多出
+第 4 个 hook，React 抛出 hooks 顺序错误并卸载整个槽（dock 永远不可见，
+Playwright 抓到 React #310）。已把该 effect 移到早退之前（无条件 hook）。</li>
+</ul>
+<h2>0.5.0 · 「按钮没有用」根因修复 + 消息引用</h2>
+<ul>
+<li><strong>根因</strong>：宿主 live 投影只处理 compaction 类 surface replace——插件标记落盘后
+打开的会话视图不会收起，所以回撤/删除按钮点了「没反应」（0.3.x 引入的回归）。</li>
+<li><strong>修复</strong>：回撤成功后经官方 <code>uiWorkspace.openSession(sessionId)</code> 重建会话视图，
+遮蔽立即呈现（无需刷新页面）；dock 的恢复同样触发视图重建。</li>
+<li><strong>消息引用（新）</strong>：AI 消息操作行新增「引用到输入框」——经官方
+<code>InputActions.captureInsertion + insertText</code> 把消息全文以 markdown 引用块
+（<code>&gt; </code> 前缀）插入输入框，零 DOM hack。</li>
+<li>槽按钮收敛为两个：<strong>⏱ 回撤到此</strong> 与 <strong>❝ 引用</strong>；删除/分支保留在对话框
+（官方分支按钮已覆盖最后一条消息场景）。</li>
+</ul>
+<h3>0.5.1 · 修复 0.5.0 客户端激活失败</h3>
+<ul>
+<li>0.4.2 的 dock 重写误删了 <code>INPUT_DOCK_SLOT/ID</code> 常量声明——apply() 引用未定义
+标识符导致<strong>整个客户端激活失败</strong>（页面横幅 Failed to load plugins）。
+已恢复常量；新增 vm 冒烟自测路径（见 .e2e/）。</li>
+</ul>
+<h2>0.5.2 · Bug 猎场第一轮修复（P0×1 + P1×3 + P2×6）</h2>
+<ul>
+<li><strong>[P0] activeMarkers 被 0.5.0 误删</strong>（与 INPUT_DOCK 同一 commit，0.5.1 只找回常量）：
+dock 100% 静默失效（ReferenceError 被 .catch 吞掉）。已恢复函数 + vm 冒烟守卫。</li>
+<li><strong>[P1] 工具层未 await async ops</strong>（0.2.1 改 async 后漏同步化）：list/restore 必抛
+TypeError、export 渲出空 text。switch 全部 await + 回归测试（异步桩）。</li>
+<li><strong>[P1] 引用空块</strong>：assistant 消息 fullText 恒 null，回退 <code>''</code> 通过 null 检查 →
+插入空 <code>&gt; </code> 块并报成功。改为按 seq 走新端点 <code>GET /text</code> 取单条全文，空串按不可用处理。</li>
+<li><strong>[P1] 侧栏菜单卡死</strong>：dispatch 缺 sessionId → 对话框永久「正在读取…」。
+从 data-row-key 提取 sessionId 一并派发。</li>
+<li><strong>[P2] seq 索引缓存投毒</strong>：失败必须 <code>delete</code>，否则该会话按钮/dock 到刷新前全失效。</li>
+<li><strong>[P2] 索引口径</strong>：同 id 取最早 seq（对齐服务端 buildSeqIndex，不再内联取最大）。</li>
+<li><strong>[P2] branch 工具渲染</strong>：读 keptEvents/parentSession（原读不存在的 kept/parentId）。</li>
+<li><strong>[P2] dock 标题口径</strong>：改报标记 range 内被遮蔽消息数（原报标记数，严重低报）。</li>
+<li><strong>[P2] busy 卡死</strong>：runRevert/restoreRow/对话框 run 全部 <code>Promise.resolve()</code> 包裹——
+同步抛出也落进 finally；restoreRow 补 finally 双保险。</li>
+<li><strong>[P2] dock 陈旧</strong>：新增 <code>dsh-message-ops:changed</code> 广播，回滚/恢复成功后 dock 自动重拉。</li>
+<li><strong>[P3] 删 en 独有死键 dock.shadowedN；GET 端点补 405 方法校验。</strong></li>
+</ul>
+<h3>0.5.3 · 「打开即 Running」误报修复（实机 P0 级）</h3>
+<ul>
+<li>isRunning 原查 agents 注册表——会话<strong>在视图中打开</strong>即有条目 → 打开即报
+running → 回撤/删除/分支全部 409 锁死（「按钮没有用」的又一层根因，Playwright
+闭环 e2e 实机抓到：curl 未打开时 false、UI 打开后恒 true）。</li>
+<li>改读 <code>sessions.list.getSnapshot().byId[].running</code>（host-asserted，与官方侧栏
+spinner、官方分支按钮 disabled 同源）；老宿主回退 agents 注册表。</li>
+</ul>
+<h3>0.5.4 · 「点回撤打死整个 dsh」P0 修复（包装实测 exit=1 定位）</h3>
+<ul>
+<li><strong>根因</strong>：dsh 0.2.0 收紧 v4 行准入（<code>assertV4SystemMessageFields</code>）——每个
+<code>system/message</code> 的 <code>data</code> 必须带<strong>正整数 <code>turn</code>/<code>step</code></strong>。回滚/删除/恢复的通知
+事件没带 → 持久层 <code>encodeEventBatch</code> 抛出的 SessionFormatError <strong>没有任何层捕获
+→ 整个 dsh 进程退出</strong>（浏览器端表现为「Failed to fetch」，一切 revert 都静默失败；
+此前多次「实例无故死亡」全部是它）。</li>
+<li><strong>修复</strong>：新增 <code>deriveTurnStep(events)</code>（尾部回溯最近正坐标，兜底 1/1）；
+revert/delete 通知与 restore 通知全部附带坐标；<code>opsCommit</code> 改 async 读日志派生，
+HTTP/tool 调用点已 await。回归测试断言三处 append 的 data.turn/step 均为正整数。</li>
+<li>教训：宿主持久层对未知字段的编码失败会杀进程（记录于 hub——上游应给
+encodeEventBatch 加错误边界），插件侧必须严格遵守 v4 行结构。</li>
+</ul>
+<h3>0.5.5 · v4 准入第 3 关：<code>message.id</code> 非空字符串</h3>
+<ul>
+<li>0.5.4 补 turn/step 后实机复测仍崩：<code>assertV4SystemMessageFields</code> 继续要求
+<code>message.id</code> 为非空 string（<code>string(x, name, nonempty=true)</code>）。两处 notice
+append 的 message.id 现用 <code>randomUUID()</code>；回归测试断言三段（turn/step/id）。</li>
+<li>行准入全貌（本轮实测三连击）：① <code>data.turn/step</code> 正整数 → ② <code>message.id</code>
+非空字符串 → ③ role=system + content 数组 + block 文本串。</li>
+</ul>
+<h3>0.5.6 · dock 死按钮修复：空可重放区间改优雅停用</h3>
+<ul>
+<li>实机闭环：dock 上标记若遮蔽区间只含 tool/system 事件（或遮蔽了另一个标记），
+恢复请求恒 409「no replayable user/assistant messages」——按钮永久死、dock
+计数永远清不掉（Playwright 8 连 409 复现）。</li>
+<li>改为：planRestore 对空可重放返回空计划；applyRestore 追加<strong>停用 notice</strong>
+（含 restoresSeq → dock 移除该行）+ 如实文案「区间无可重放内容」。
+非标记/越界/非法 seq 仍按原语义 404/409/400。</li>
+</ul>
+<h3>0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径</h3>
+<ul>
+<li><strong>实机链</strong>：lazy-view 让会话只在磁盘渲染、不进对象层（视图开着 dock 已渲染，
+但 <code>sessions.get(id)</code> 双变体 miss、<code>list()</code> 里只有别的会话）→ 变更操作 404。
+官方服务端<strong>没有</strong> retain/using 面（那是浏览器侧 ClientSessions 的）。</li>
+<li><strong>修复</strong>：store-miss 时改为<strong>直接向日志追加 zstd 帧</strong>（等价持久层
+<code>appendLines</code>：encode → open('a') → write+sync+按 size 回滚），事件字段逐项
+镜像引擎金标准（根键序 <code>type/seq/time/data/sourceEventSeqs/surfaceOp</code>；
+restore notice <code>restoresSeq</code> + <code>surfaceOp:"append"</code>；重放无 id）。
+磁盘会话的视图/搜索/dock 全部按帧重读 → 追加即可见；成功后客户端
+openSession 强制重建视图（磁盘追加无 live 投影事件）。</li>
+<li>live 会话（对象层在册）仍走引擎路径；两条路径共用 turn/step/id 派生与
+空区间停用语义。新回归测试断言可见节点/计划语义/字段镜像（44/44）。</li>
+</ul>
+<h2>0.6.0 · opencode 对齐：回滚长在「我的消息」上 + 贴条化恢复 UI</h2>
+<p>用户定调「回滚信息怎么可能回滚的是 AI 的信息」——此前唯一一键入口挂在官方
+<code>conversation.chat.assistant-actions</code> 槽（只渲染在助手消息上），方向整个反了。
+Playwright 实测 opencode web（127.0.0.1:4096）后四项改造：</p>
+<ol>
+<li><strong>用户消息 hover 注入「回滚」按钮</strong>（核心）：官方无用户消息动作槽 →
+受控 DOM 注入，靶点用官方 <code>[data-chat-flow-kind="user"]</code> 属性。点击即回滚
+「这条及其之后」（范围语义与 opencode 实测一致，未动）。<strong>防错锁</strong>：DOM 块 ↔
+API 可见 user 行按序配对 + 文本归一化前缀互验，点击时复验一次，对不上拒绝
+执行（宁可不回滚，不回滚错消息）。</li>
+<li><strong>恢复条贴合输入框</strong>（opencode 实测规格：条→输入框 1px、同宽同列、折叠 42px）：
+<code>.mopsRd</code> 锁 <code>max-width:var(--dsh-composer-card-max-width)</code>（与 <code>uV2eYG_card</code>
+同源变量）+ <code>margin-inline:auto</code> + <code>margin-bottom:-5px</code> 把宿主 composerStack 的
+6px gap 压成 <strong>1px</strong>；实测 bar rect [468,751,776,42]、card top 794/前轮 772 →
+<strong>gap=1、dx=-1、dw=2</strong>；展开时列表向上涨（底边钉住，1px 不丢）。删 18px
+spacer hack。EN 文案改 <code>{n} rolled back messages</code>（opencode 语序）。</li>
+<li><strong>对话框删「恢复」模式</strong>：恢复唯一入口 = 贴条逐行按钮；对话框只留
+回滚/删除/分支（实测 modeCount=3、无恢复项）。顺手防呆：pick 列表排除
+<code>role=system</code>（引擎 node0 守卫本就 500 拒绝——不该给用户一个必然失败的选项）。</li>
+<li><strong>恢复去 <code>[恢复]</code> 前缀</strong>：重放干净文本（opencode 实测恢复无任何标记）；
+机制说明保留在 system notice。引擎 append-only 无法真正反遮蔽，重放语义不变。</li>
+</ol>
+<ul>
+<li>附带修复：注入器成功/失败回调误用组件级 <code>t()</code>（模块作用域未定义 → ReferenceError
+吃掉刷新链：回滚 200 而贴条不出现）→ 改模块级 <code>__t</code>。</li>
+<li>验证：单测 44/44；Playwright 全环（发消息 → hover 回滚 200 → 贴条 gap=1 →
+展开 → 恢复 → 条清空 + 消息回 + 无前缀）两条路径（注入器 / 对话框）各一遍。</li>
+<li>已知观察：宿主 <code>dsh-client-ui-open-in-app</code> 的 event feed 订阅在<strong>无 id 重放事件</strong>
+（引擎原生 compaction 重放同形）上抛 <code>operation.kind</code> 读取错误——客户端已捕获、
+功能无损，属宿主脆读，不在本插件范围。</li>
+</ul>
+<h2>0.7.0 · 用户消息回滚按钮回归「官方动作行」（修布局乱/点不了）</h2>
+<p>用户实测反馈（0.6.0 的三处真问题，全部根因修复，非症状掩盖）：</p>
+<ol>
+<li><strong>按钮压在消息文字上</strong> → 0.6.0 用 <code>position:absolute; top/right</code> 覆盖气泡。
+官方用户消息的动作行是 <code>.xzv4MW_actions</code>（height28、消息下方 16px、
+<code>hWmORq_actions{margin-top:16px;margin-left:-6px}</code>，内含 Copy 按钮）。
+0.7.0 把按钮 <strong>append 进该行</strong>，与 Copy 同级同层（实测 <code>parentCls=xzv4MW_actions</code>、
+与 Copy 中心 y 差 ≤6px、与气泡矩形不相交）。</li>
+<li><strong>触屏点不了</strong> → 0.6.0 用 <code>opacity:0 + :hover</code> 显形。改由宿主动作行自身
+<code>[data-actions-reveal]</code> 统一控制（按钮作为其子元素天然继承），并加
+<code>@media (hover:none)</code> 兜底常显。</li>
+<li><strong>点了没反应 / 有时没按钮</strong> → 两个根因：<ul>
+<li>锚点不稳：改为从 <code>.xzv4MW_actions</code> 反查最近消息容器（回退
+<code>[data-chat-flow-kind="user"]</code>），并用 MutationObserver + 滚动扫描覆盖
+虚拟列表动态追加（DOM 里没渲染的块本就无从注入）。</li>
+<li><strong>宿主把 <code>&lt;system-reminder&gt;</code> / runtime context 也记为 role=user</strong>，
+按序配对被这些"假用户消息"带偏（配对错位 / seq 打不上）。已过滤。</li>
+<li>打标是异步的：点击时先 <code>await</code> 完成配对再执行（早先点在未打标按钮上静默失败）。</li>
+</ul>
+</li>
+</ol>
+<ul>
+<li>沿用并保持：防错锁（文本互验、对不上拒绝执行）、范围语义（含目标到末尾）、
+贴条 gap=1、恢复干净无前缀、运行中 409 守卫（实测点运行中的会话返回
+409 "session is running; stop it first"，符合设计）。</li>
+<li>验证：单测 44/44；Playwright 失败用例先红后绿（<code>inOfficialRow &amp;&amp; sameRowAsCopy &amp;&amp; !overlapsBubble</code> 全真 + <code>POST /revert 200</code> + 贴条出现）；对话框路径全环
+（回滚→贴条→展开→恢复→条清空+无前缀）复跑通过。</li>
+</ul>
+<h2>0.8.0 · 按轮步进恢复（对齐 opencode 展开行语义）</h2>
+<p>opencode 实测：展开行 = 每条被遮蔽消息一行，点行<strong>只恢复该消息及其同轮回复</strong>，
+后续保持遮蔽。0.8.0 把"按标记整段恢复"升级为"按轮步进"：</p>
+<ul>
+<li><strong>服务端</strong>：<ul>
+<li><code>planRestore(events, seq, upToSeq?, excludeSeqs?)</code>：<code>upToSeq</code> 截断重放区间；
+<code>excludeSeqs</code> 排除已重放源 seq（<strong>B1 修复</strong>：此前每轮从区间头重放 →
+消息副本成倍刷屏，实测 seq8 被重放 5 次）。</li>
+<li>恢复 notice 新增 <code>restoredSourceSeqs</code>（本次重放的源 seq 列表）——
+引擎准入<strong>不拒绝</strong> data 未知字段（研究册 01 §8），且实测磁盘原样持久化。</li>
+<li><code>restoreProgress()</code>：标记的恢复进度（restored/pending/complete/legacy）；
+<code>pendingRestoreTurns()</code>：未重放轮切分（一个 user 及其后继 assistant 为一轮）。</li>
+<li><code>GET /messages</code> 为每个标记附 <code>restoreComplete</code> + <code>pendingTurns</code>
+（含 preview，一次建 seq→text 索引，避免每标记全量扫）。</li>
+<li><code>POST /restore</code> 接受可选 <code>upToSeq</code>（live 与磁盘两路径一致）。</li>
+</ul>
+</li>
+<li><strong>客户端</strong>：<ul>
+<li>贴条行 = 待恢复轮（<code>#markerSeq · 首条预览 (+N)</code>），点击只回该轮；</li>
+<li>标记活跃判定收敛到服务端权威 <code>restoreComplete</code>（删除客户端 restoresSeq
+集合旧判——按轮下部分恢复的标记也带 restoresSeq，旧逻辑会误杀，
+实测：第一轮恢复后整条消失）；</li>
+<li>全部轮恢复完 → 标记不活跃 → 贴条消失；兼容旧 notice（视为整段已恢复）。</li>
+</ul>
+</li>
+<li><strong>验证</strong>：单测 <strong>49/49</strong>（新增 5 条：upToSeq 截断 / notice 字段 / 进度推进 /
+旧通知兼容 / B1 排除）；Playwright <code>v080.cjs</code> 全环 <strong>GREEN</strong>：
+5 行=5 轮 → 点第一行（S1 副本=1、余 4 轮、贴条保持）→ 逐轮清空 →
+<code>markerActive=false</code>、无前缀、贴条消失；0.7.0 布局用例复跑 GREEN；
+对话框路径复跑通过（恢复亦按轮）。</li>
+</ul>
+<h2>0.8.1 · discard 停用面 + 用户会话实查结论</h2>
+<ul>
+<li>新增 <code>POST /restore {discard:true}</code>：不重放内容、仅停用标记（notice 带
+<code>discarded:true</code>，进度判定视为完成）。适用场景：清掉"没有可重放内容/不希望
+重放"的惰性标记。</li>
+<li>用户主会话（4e10c1a2）实查：8 个测试标记在 0.8.0 语义下全部 complete=True
+（区间无可重放消息内容——链式遮蔽的是其他标记），贴条不再显示，<strong>无需丢弃</strong>；
+hidden≈2710 的大头是 compact-checkpoint（引擎自身历史压缩设计），非测试污染
+（修正 0.8.0 时代"2709 条测试污染"的误判）。清理前已备份日志
+（~/.dsh/backups/session-4e10c1a2.*.zstd.bak，9.2MB）。</li>
+<li>单测 50/50（+1 discard 语义）。</li>
+</ul>
+<hr />
+<h2>0.9.0 变更清单</h2>
+<h3>移除（与官方重复或无入口）</h3>
+<ul>
+<li><code>src/branch.js</code> 整个删除；<code>/api/message-ops/branch</code> 路由、tool 的 <code>branch</code> 动作、
+客户端的磁盘回落（<code>diskBranch</code>）与 <code>fork.disk</code> 文案全部移除。<strong>分支现在只走官方 <code>sessions.fork()</code></strong>，
+失败时提示「官方分支不可用，通常是会话正在运行」。</li>
+<li><code>/api/message-ops/export</code> 路由、<code>exportMarkdown()</code>、tool 的 <code>export</code> 动作移除。
+<strong>导出一律用官方 <code>/api/session.export</code></strong>（ZIP 归档）。</li>
+<li>死代码清理：<code>IconTrash</code>/<code>TrashFallback</code>（零渲染点）、对话框内永不可达的 restore 分支、
+4 组 restore locale 文案（dock 用自己的 <code>dock.*</code> 键）。</li>
+</ul>
+<h3>修复（均为浏览器实测发现，静态审查无法发现）</h3>
+<ol>
+<li><strong>用户消息回滚按钮恒定失效</strong>。四个 bug 叠在一起：<ul>
+<li><code>userAnchors()</code> 匹配 CSS-module 生成的前缀 <code>Sixlwa_*</code>，而 dsh 0.2.0-rc.2 的哈希已变为
+<code>EvIC1a_*</code> → 锚点集为空；</li>
+<li>过滤了 <code>m.visible !== false</code>，但宿主聊天视图<strong>不施加</strong>遮蔽模型、照常渲染被回滚的消息
+→ 配对候选与 DOM 块零交集；</li>
+<li><code>injected()</code> 的 <code>current\s+runtime\s+context</code> 跑在 <code>norm()</code>（<code>replace(/\s+/g,'')</code>，删掉<strong>全部</strong>空白）
+之后的串上 → 永远匹配不上，伪 user 行漏进配对；</li>
+<li>按钮可用性在 fetch 回调里做事后全局扫描，与 DOM 注入/重排竞态
+→ 块已打上 seq 而按钮仍禁用。
+现在实测 <code>data-mops-seq=["8","54"]</code>、按钮可用；配不上的块会被<strong>禁用并说明原因</strong>，
+而不是留一个点了才报错的装饰按钮。</li>
+</ul>
+</li>
+<li><strong>对话区硬编码 <code>_flowItem</code> 会误收官方 <code>turn-tail</code></strong>（官方 branch 按钮所在行）→ 收紧为
+<code>data-chat-flow-kind="user"</code> + <code>_userRow|_userStack|_bubble</code>。</li>
+<li><code>defineTool</code> 注册失败原先 <code>catch(() =&gt; {})</code> 静默吞掉，无法诊断 → 改为 <code>console.warn</code>。</li>
+</ol>
+<h3>契约测试</h3>
+<p>新增 <code>test/revert-contract.test.js</code>：把 <strong>dsh 官方三层闸</strong>接进测试 ——
+① 格式层 <code>assertV4RowAdmission</code> + <code>restoreReleasedV4Artifact</code>、
+② 运行时层（role 匹配 / <code>source.kind</code> 非空 / <code>system/message</code> 必须 <code>system-prompt</code>）、
+③ <strong>UI 装配层</strong>（<code>turn/end.data.reason</code> 必填）。
+只��第 ① 层会得到「全绿但 UI 崩」的假象（0.8.x 实机踩过：<code>dsh-client-ui-trajectory</code>
+的装配器无防护读 <code>reason.kind</code>，缺字段直接白屏）。</p>
+<h2>事件形状的三条硬规则（写错就是整份日志报废）</h2>
+<ol>
+<li><strong><code>system/message</code> 的 <code>source.kind</code> 必须严格是 <code>"system-prompt"</code></strong> ——
+Session 运行时层（<code>dsh-session/lib/index.js:1206</code>）比格式闸更严。</li>
+<li><strong><code>turn/end.data.reason</code> 必填</strong>（<code>types.d.ts:271-276</code>）——UI 装配器直接读 <code>reason.kind</code>。</li>
+<li><strong>空闲会话要写 notice，必须自带一个合成 turn</strong>（<code>turn/start</code>+<code>step/start</code>+notice+<code>step/end</code>+<code>turn/end</code>，
+带 <code>reason:{kind:"interrupted"}</code>）——v4 要求 <code>system/message</code> 匹配<strong>打开的</strong> turn/step，
+而正常会话都以 <code>turn/end</code> 收尾（实测 340/364 空闲时是关闭的）。引擎 append-only 插不进已有 step，
+但合成一整个 turn 合法。dsh 自己的崩溃恢复（<code>openTurnClosers</code>）用同一手法。</li>
+</ol>
+<p><code>surfaceOp: replace</code> 的 notice <strong>不会</strong>渲染成对话行（<code>dsh-client-ui-chat/lib/client.js:9370</code>
+只渲染 <code>surfaceOp==="append"</code>），这是设计如此 —— 回撤提示由输入框上方的贴条负责。</p>
+<hr />
+<h2>0.9.1 / 0.9.2 · 回滚「真的生效了」</h2>
+<h3>问题：回滚对用户是无效的（0.9.0 及以前）</h3>
+<p>浏览器实测发现：点回滚后 <strong>dock 计数变了，但消息在界面上���行没变</strong>。</p>
+<p>根因（源码 + 实测双重证实）：<strong>dsh 刻意把「模型可见」和「人类 transcript」分成两套</strong>。
+<code>surface.d.ts:51-63</code> 明写：</p>
+<blockquote>
+<p><em>Append-origin events are that transcript's durable source material; <strong>replacement copies stay model-only</strong>.</em></p>
+</blockquote>
+<p>即 <code>surfaceOp: {op:'replace'}</code> 只折叠<strong>模型 surface</strong>（实测 393→13 节点，模型侧确实生效），
+但前端 transcript <strong>不施加遮蔽</strong>，被遮蔽消息照常渲染且完全可见 —— 连我们的 replace
+marker 自身都不渲染（<code>systemMessageDefinition.buildViewNode</code> 对 <code>surfaceOp !== 'append'</code>
+直接 <code>return null</code>，<code>dsh-client-ui-chat/lib/client.js:9370</code>）。</p>
+<p>所以之前那句「回滚已完成」是<strong>误判</strong>：只验了日志写入与 dock 计数，没验用户眼���。</p>
+<h3>解法：渲染层按 node-key 精确映射</h3>
+<p>每一行渲染节点带 <code>data-chat-node-key</code>，形态 <code>&lt;len&gt;:&lt;kind&gt;&lt;id&gt;</code>，而 <code>&lt;id&gt;</code> 就是日志事件的字段：</p>
+<table>
+<thead>
+<tr>
+<th>行 kind</th>
+<th><code>&lt;id&gt;</code></th>
+<th>查表</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>user</code> / <code>steering</code></td>
+<td>messageId</td>
+<td><code>byMessageId</code></td>
+</tr>
+<tr>
+<td><code>assistant-step</code></td>
+<td><code>&lt;turn&gt;:&lt;step&gt;</code></td>
+<td><code>byTurnStep</code></td>
+</tr>
+<tr>
+<td><code>tool-call</code></td>
+<td>callId</td>
+<td><code>byCallId</code></td>
+</tr>
+<tr>
+<td><code>turn-tail</code> / <code>turn-process</code> / <code>turn-error</code></td>
+<td>turn 号</td>
+<td><code>byTurn</code> ← <strong>turn/end 的 seq</strong></td>
+</tr>
+<tr>
+<td><code>developer-message</code></td>
+<td>messageId</td>
+<td><code>byMessageId</code></td>
+</tr>
+</tbody></table>
+<p>配合服务端的 <code>revertFences</code> / <code>turnEndSeq</code>，客户端做<strong>精确查表 + fence 比较</strong>，
+命中则 <code>row.setAttribute('hidden', 'until-found')</code>。</p>
+<p><code>hidden="until-found"</code> 与宿主 <code>useSearchableHidden</code> 同款：Ctrl+F 仍能搜到，
+且宿主的分页锚点选择器 <code>[data-chat-paging-anchor]:not(:empty):not([hidden])</code>
+会自动跳过，滚动恢复不受影响。</p>
+<h3>三个踩过的坑（都有回归测试锁住）</h3>
+<ol>
+<li><strong>不能用 <code>visible</code> 当隐藏判据</strong>。<code>visible</code> 是「是否在模型 surface 上」，而
+<code>tool/call</code> / <code>turn/*</code> / <code>model/*</code> <strong>根本不是 surface 节点</strong>，它们永远 <code>visible=false</code>
+—— 照抄会把<strong>所有</strong>工具调用行永久藏掉（实测 3/3 全被误藏）。
+正确口径是 <code>reverted</code>（= opencode 的「边界及其后」：<code>messages.slice(0, boundaryIndex)</code>）。</li>
+<li><strong>回合页脚不是消息</strong>，锚到 <code>turn/end</code> 的 seq，永远不在 <code>reverted</code> 集合里，
+所以判据必须<strong>直接对 fence 数组比较</strong>。
+且要用 <code>turn/end</code> 而非 <code>turn/start</code> —— 回撤边界常落在某个 turn <strong>内部</strong>。</li>
+<li><strong>旧的 40 字符前缀包含匹配</strong>实测 4 条错 2 条（「继续」命中「继续，…」），
+已整体删除，改为 node-key 查表。</li>
+</ol>
+<h3>实测结果</h3>
+<pre><code>回滚后： hidden 5（user + turn-process×2 + turn-tail×2）
+        被回滚消息 disappears from DOM ✅
+        该轮之后的助手回答也消失 ✅
+        更早的消息完好 ✅
+恢复后： hidden 0，dock 消失，消息全部回来 ✅
+查表命中率： unresolved 0 / mismatch 0 / hiddenButNotReverted 0 ✅
+</code></pre>
+<h3>已知限制</h3>
+<ul>
+<li><strong>restore 是「重放」语义</strong>（dsh 无 unshadow 原语，见 README 上文的机制说明），
+所以「恢复后再回滚」的复合场景下，重放副本的行可能不被识别为 user 行。</li>
+<li><code>restore</code> 后界面需要触发刷新才更新（已接 <code>__refreshSurface</code> 钩子 + MutationObserver，
+但极少数情况下仍需重载页面）。</li>
+</ul>
+<hr />
+<h2>0.9.3 · <code>/undo</code> —— 复刻 opencode 的招牌交互</h2>
+<p>「我说的那句话不对」→ 打 <code>/undo</code> → 消息从 transcript 消失 + <strong>原文回填输入框</strong>。</p>
+<p>走<strong>官方斜杠管线</strong>（<code>ctx.inputTriggers.registerSource</code>），不自己劫持键盘，
+所以菜单分组、搜索、Enter 裁决、composer 状态机全由宿主负责。</p>
+<pre><code class="language-js">ctx.inject(['inputTriggers'], (sub) =&gt; {
+  doRegisterUndoSlash(ctx, sub.inputTriggers || sub)   // ⚠️ 见下方坑 2
+})
+</code></pre>
+<h3>注册路径踩过的四个坑</h3>
+<ol>
+<li><strong><code>candidates</code> 必须返回 Promise</strong>。宿主在 <code>InputTriggerController.fetchCandidates</code>
+里直接 <code>source.candidates(...).then(...)</code>，同步返回数���会抛
+<code>source.candidates(...).then is not a function</code>，<strong>整个菜单静默失效</strong>。</li>
+<li><strong>cordis <code>inject</code> 回调收到的是「注入命名空间」，服务在其同名字段下</strong>
+（与本文件 <code>sub.uiWorkspace || sub</code> 同模式）。把 <code>sub</code> 直接当服务用会抛
+<code>cannot get property "registerSource" without inject</code>。</li>
+<li><strong><code>rowsCache</code> 是注入器闭包私有的</strong>（<code>installUserRevertInjector()</code> 内）。
+<code>/undo</code> 的 <code>onPick</code> 在模块级作用域，直接引用会 ReferenceError，
+表现为「点菜单毫无反应」。需要 <code>__peekRowsCache()</code> 出口。</li>
+<li><strong><code>__currentSessionId</code> 来自 DOM dataset，可能带 <code>session-</code> 前缀</strong>，
+而 API 只要裸 uuid → 请求静默失败。</li>
+</ol>
+<h3>目标必须挑 surface 上的那条</h3>
+<p><code>restore</code> 是「重放」语义 → 原件被遮蔽、副本带<strong>新 seq</strong> 落在日志尾部。
+无脑取最后一条会挑到副本，而副本不在模型 surface 上，服务端以
+<code>surface replace: start seq N not found in surface</code> 拒绝（实测）。
+回滚的前提就是「目标在 surface 上」，所以先筛 <code>visible</code>。</p>
+<h3>实测</h3>
+<pre><code>composer 输入 /und → 官方菜单出现「回滚上一条消息 undo 移除最后一条用户消息，原文回填输入框」
+点击 → 目标 = seq 8（surface 上的那条，不是重放副本）
+      → 转��成功，dock 计数 13
+      → 原文「分配几个子代理把模型广场的模型价格什么的做好…」回填进 composer ✅
+      → transcript：24 行中 22 行 hidden，被回滚消息从正文消失 ✅
+</code></pre>
+<hr />
+<h2>0.9.4 · 修「正文几乎空白」</h2>
+<h3>症状</h3>
+<p>用户截图里 133 轮的会话正文几乎全空，只露出零星几个「工具已更新」标记。</p>
+<h3>根因</h3>
+<p>19 个 marker 是<strong>离散区间</strong>（<code>[9,9]</code>、<code>[10,4368]</code>、<code>[6830,8573]</code> …），
+服务端把它们塌缩成 <code>revertFences = range.start 列表 = [10, 6830, 9829, 11429]</code>，
+客户端判据 <code>seq &gt;= fence</code>（任一命中）等价于 <strong><code>seq &gt;= min(fences)</code> = <code>seq &gt;= 10</code></strong>。</p>
+<p>于是 <strong>4792/4793 条被判为已回滚</strong> → 全部 hidden → 正文空白。</p>
+<h3>量化验证（两条真实会话）</h3>
+<table>
+<thead>
+<tr>
+<th>判据</th>
+<th>隐藏数</th>
+<th>与宿主 <code>visibleCount</code> 吻合？</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>seq &gt;= min(fence)</code>（事故判据）</td>
+<td>4792 / 4793</td>
+<td>✗ 只剩 1 条可见</td>
+</tr>
+<tr>
+<td>未恢复 marker 区间并集</td>
+<td>2707</td>
+<td>部分吻合</td>
+</tr>
+<tr>
+<td><strong><code>!visible</code>（模型 surface）</strong></td>
+<td><strong>2710 / 4574</strong></td>
+<td>✓ <strong>2083 / 464，精确吻合</strong></td>
+</tr>
+</tbody></table>
+<p>顺带纠正一处旧断言：<code>tool/call</code> <strong>并非</strong>永远不在 surface 上
+—— 实测 957 条 <code>tool/call</code> 是 visible 的，<code>visible</code> 对它同样有意义。</p>
+<h3>修复</h3>
+<ul>
+<li><strong>消息类行</strong>：<code>hide = !visible.has(seq)</code>（直接问模型 surface）</li>
+<li><strong>回合 chrome</strong>（<code>turn-tail</code> / <code>turn-process</code> / <code>turn-error</code> / <code>model-retry</code>）：
+<code>hide = !visibleTurns.has(turn)</code> —— 该 turn 还有可见消息就露出，
+因为 <code>turn/end</code> 本身多半不在 surface 上</li>
+<li>删除 <code>revertFences</code> / <code>m.reverted</code> 两个<strong>编码了错误判据</strong>的字段（已无消费者）</li>
+</ul>
+<h3>实测</h3>
+<pre><code>修复前：  正文几乎空白（截图）
+修复后：  113 行 → 可见 67 / 隐藏 46，可见字符 36,851
+</code></pre>
+<hr />
+<h2>历史事故记录（从源码迁移）</h2>
+<p>一次性事故复盘 / 已过时的实现说明，从 <code>src/*.js</code> 搬到这里。行号 = <strong>基线 <code>cff530a</code>（0.10.0）的原行号</strong>；源码处只留一行指针。</p>
+<p><strong>未搬（仍是当前约束，留在源码）</strong>：<code>ops-core.js</code> 信任围栏三层论证、<code>buildReplayEvent</code> 的 turnStep 教训、<code>diskSurfaceNodes</code> vs <code>diskVisibleNodes</code>、<code>replaceShape</code> 写端拼写探测；<code>index.js</code> 的 <code>turnEndSeq</code> 定位注释（解释紧邻代码为何锚 turn/end 而非 turn/start，README「三个踩过的坑 #2」只有结论摘要）；<code>client.js</code> 的 <code>inputTriggers.registerSource</code> PickOutcome 契约、<code>afterWrite(rawSid)</code> 必须带 <code>session-</code> 前缀、<code>applySurfaceVisibility</code> 的 <code>seq == null ⇒ 移除 hidden</code>、不要把 <code>_flowItem</code> 当兜底、<code>injected</code> 正则「id 后必须跟得上具体形态 / 没证据就不猜」、<code>setDraft</code> 与藏行红线；<code>mcp-skill-hub</code> 的 <code>exports</code> / <code>return module.exports</code>。</p>
+<h3>#1 <code>src/client.js:2-14</code> · 客户端模块头（含已过时的「整页刷新」）</h3>
+<pre><code>dsh-message-ops 客户端：会话头部按钮 + 共享操作对话框 + 侧栏行菜单项。
+
+一个对话框承载三种操作（回滚 / 删除 / 分支）：
+  - 拉取 GET /api/message-ops/messages 展示消息级列表（可见性已标注）
+  - 回滚/删除为破坏性操作：需勾选风险确认（回滚仍可通过再次发送恢复，
+    删除为遮蔽语义；日志永远 append-only，原事件保留）
+  - 分支为唯一非破坏操作：无需确认，成功后提示新会话 id 并刷新列表
+回滚/删除成功后整页刷新（surface 变化需要会话重渲染）。
+
+结构照抄 @huanlin/dsh-plugin-session-delete 的成熟模式：slots.inject
+延迟注册（宿主晚声明也不白屏）、locale 服务 zh/en、DOM 注入侧栏菜单。
+</code></pre>
+<blockquote>
+<p>⚠️ 「整页刷新」这句<strong>已经过时</strong>：0.5.7 起成功路径是
+<code>notifyDone</code> + <code>emitChanged()</code> + <code>openSession()</code> + <code>150/700/1600ms</code> 三连
+<code>__refreshSurface</code>，不再 <code>location.reload</code>。</p>
+</blockquote>
+<h3>#2 <code>src/client.js:1024-1025</code> · 0.6.0「absolute 覆盖压字」教训</h3>
+<pre><code>0.6.0 的教训（用户实测反馈）：absolute 覆盖在气泡上 = 压住文字、布局乱；
+且 opacity:0 + :hover 在触屏上永远不显形（点不了）。
+</code></pre>
+<p>→ 0.7.0 的解法是把按钮 append 进官方动作行 <code>.xzv4MW_actions</code>，可见性继承宿主。</p>
+<h3>#3 <code>src/client.js:1074-1097</code> · <code>injected</code> 正则两轮事故 + 120 份日志普查</h3>
+<p><strong>0.9.0 两个实机 bug</strong>（浏览器实测：4 个按钮 <code>data-mops-seq</code> 全为 <code>null</code>，点击必失败）：</p>
+<pre><code>① 正则跑在 norm() 之后的串上，而 norm 是 replace(/\s+/g,'') —— 删掉**全部**空白，
+   `current\s+runtime\s+context` 永远匹配不上 → runtime-context 伪行漏进配对。
+   修法：injected() 改判**原始 snippet**。
+② 过滤了 `m.visible !== false`，但宿主聊天视图**不施加**遮蔽模型，照常渲染
+   被回滚遮蔽的消息 → 配对候选与 DOM 块零交集。
+   修法：DOM 配对必须覆盖全部 user 行（含遮蔽态）。
+   注意：对话框的「可回滚目标」列表仍应过滤 visible（那是另一套语义）。
+</code></pre>
+<p><strong>0.9.6 通知行污染</strong>：</p>
+<pre><code>原先只排 system-reminder / runtime context 两种，但宿主把 `background job …`、
+`Agent … sent a message:`、`Background subagent … finished`、`[model changed: …]`
+也记成 role=user，于是 /undo 会把**通知行**当目标 —— 回滚范围与回填文本都变成
+通知内容（378 会话普查：38 个 10% 命中；实测 2188f4ac 目标是
+"Background subagent f09a18f6… finished…"，而用户那句在 seq829）。
+稳妥做法本该在服务端打 injected 标志，先在客户端补齐正则。
+</code></pre>
+<p><strong>120 份日志普查样本</strong>（正则按真实样本收紧，不靠猜）：</p>
+<pre><code> 256 × &lt;system-reminder&gt;…        128 × background job bash-358 (…
+  38 × [model changed: …         26 × Background subagent &lt;uuid&gt;
+  21 × Agent &lt;uuid&gt; sent a message:
+</code></pre>
+<h3>#4 <code>src/client.js:1250-1256</code> · 隐藏判据「revertFences → visible → shadowed」演进史</h3>
+<pre><code>演进：revertFences 塌缩（离散区间→min，全藏）→ visible（模型 surface，
+live 路径下 tool/call 全藏）→ 现在的 shadowed（恒定、与会话活跃无关）。
+
+0.9.4 判据（当时）：**模型 surface**。此前用 revertFences 塌缩成
+`seq &gt;= min(fences)`，在一个有 19 个**离散** marker 的会话里
+min fence=10 → seq&gt;=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空白
+（截图复现）。改用 visible 后与宿主 visibleCount 精确吻合。
+</code></pre>
+<p>结论（留在源码的一行）：<strong>0.9.6 起藏行判据 = <code>shadowed</code>（replace 区间）</strong>。</p>
+<h3>#5 <code>src/client.js:1753-1755</code> · 「5 个入口只有 2 个回填」</h3>
+<pre><code>0.9.6 统一出口 —— 此前 5 个回滚/恢复入口里只有 2 个回填
+（对话框 :403 与 /undo :1495），悬停回滚按钮、AI 时钟按钮、dock Restore、
+/redo **全部不回填**，表现正是「回滚成功了但消息框是空的」。
+</code></pre>
+<h3>已在本 README 其它章节（源码同步压缩成指针，未新增重复内容）</h3>
+<table>
+<thead>
+<tr>
+<th>源码位置（原行号）</th>
+<th>已有章节</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>src/client.js:404-408</code> 分支磁盘回落语义错误</td>
+<td>「为什么不重复造轮子（0.9.0 的取舍）」</td>
+</tr>
+<tr>
+<td><code>src/client.js:1116-1131</code> node-key 映射背景长文（<code>surface.d.ts:51-63</code>、40 字符前缀事故）</td>
+<td>「0.9.1 / 0.9.2 · 回滚「真的生效了」」</td>
+</tr>
+<tr>
+<td><code>src/index.js:1-23</code> 模块头里的 0.9.0 分支/导出移除段</td>
+<td>「为什么不重复造轮子（0.9.0 的取舍）」</td>
+</tr>
+<tr>
+<td><code>src/index.js:336-340</code> <code>revertFences</code> 塌缩复盘</td>
+<td>「0.9.4 · 修「正文几乎空白」」</td>
+</tr>
+<tr>
+<td><code>src/ops-core.js:551-557</code> 0.5.7 磁盘路径复盘</td>
+<td>「0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径」</td>
+</tr>
+</tbody></table>

@@ -1,0 +1,570 @@
+<h1>电机AI辅助设计软件插件</h1>
+<p><code>dsh-motor-ai-l0</code> · DSH 插件（bundle） · 纯 JS，零求解器依赖</p>
+<blockquote>
+<p><strong>不装 RMxprt / Motor-CAD / Python / license，把 120 个候选在十几毫秒内压成 Top5，
+只把求解器时间花在最值得的那几个上。</strong></p>
+</blockquote>
+<p>📁 <strong><a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/examples/README.md" target="_blank" rel="noopener noreferrer">算例集：3 个真实算例（含反例）→ examples/</a></strong> · <a href="#%E5%B7%B2%E7%9F%A5%E7%B2%BE%E5%BA%A6%E8%BE%B9%E7%95%8C" target="_blank" rel="noopener noreferrer">能力边界</a></p>
+<p>覆盖电机设计全流程：需求解析 → 参数识别 → 候选矩阵 → L0/L1/L2 解算 → Top10 与校验 → 完整方案。
+L0 用代理模型与经验公式毫秒级广筛候选；L1 RMxprt、L2 Motor-CAD 为<strong>可选</strong>精算工具。
+装完即用 —— 无需预装 RMxprt / Motor-CAD / Python，无需 license。</p>
+<h2>快速开始</h2>
+<pre><code class="language-bash"># 安装（dsh 未进 PATH 时用 npx）
+npx -y @deepseek-ai/dsh plugin --profile web add dsh-motor-ai-l0
+
+# 离线自检（无需 DSH Runtime，裸 Node 即可）
+node scripts/verify.mjs
+</code></pre>
+<p><strong>标准流水线（顺序很重要）</strong></p>
+<ol>
+<li><code>motor_param_matrix</code> —— 由功率 / 转速 / 电压生成候选参数矩阵</li>
+<li><code>motor_design_validate</code> —— 批量物理校验，剔除 <code>failed</code></li>
+<li><code>motor_l0_estimate</code> —— 对剩余候选排序，输出 TopN 与 L1 交接载荷</li>
+</ol>
+<blockquote>
+<p>⚠️ <strong>推荐用聚合工具 <code>motor_l0_pipeline</code> 一步跑完上述三步链</strong>。DSH 对话上下文有 <strong>2000 行读取上限</strong>：
+当 <code>count=120</code> 时，单 <code>motor_param_matrix</code> 就回显 4000+ 行，模型静默丢行后计数对不上 120 还<strong>无报错</strong>——
+这是「让模型亲手编排三步链」的结构性风险（三案例实战全中）。聚合工具在插件进程内跑完三步链，
+只回吐紧凑摘要（计数自检 + Top10 + 交接载荷 + 文件交接路径），上下文恒 &lt; 2000 行，从根上绕开截断。
+只有在单独调试某一步（查完整校验报告、手调 failed 阈值）时才拆开用三个独立工具。</p>
+</blockquote>
+<blockquote>
+<p>⚠️ <code>motor_l0_estimate</code> 只接受 <code>params_list</code>（每项含 16 个 L1 顶层字段），<strong>不接受</strong> <code>power_kw</code> / <code>speed_rpm</code> 这类散装命名参数 —— 请先用第 1 步生成矩阵再传入。
+L0 结果只用于<strong>排序与相对比较</strong>，不用于绝对值交付；输出恒带 <code>solve_mode='l0'</code> 标记，最终结论须由 L1/L2 给出。</p>
+<p><strong>两条通道的分工（v0.2.2）</strong></p>
+<table>
+<thead>
+<tr>
+<th>通道</th>
+<th>触发</th>
+<th>输出</th>
+<th>适用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>公式通道</strong>（默认）</td>
+<td><code>l0Mode: 'auto'</code> / <code>'formula'</code></td>
+<td>效率 + 温升 + 损耗拆分 + 齿/轭磁密 + 功率因数 + 可行判定 —— 字段完整</td>
+<td>日常排序与相对比较</td>
+</tr>
+<tr>
+<td><strong>代理通道</strong>（可选增强）</td>
+<td><code>l0Mode: 'surrogate'</code></td>
+<td><strong>仅效率</strong>（温升/损耗/磁密不输出）</td>
+<td>异步机效率排序的交叉参考</td>
+</tr>
+</tbody></table>
+<p>代理模型 v2.3.0-fixseg（在 v2.2.0 基础上用全量 6029 条真实 RMxprt 结果重训，特征扩为含 <code>poles</code> 的 5 维；<code>designs.db.l0_residuals</code>，<code>fault=0</code>，效率 ∈ [50,99]），按机座外径分三段：</p>
+<table>
+<thead>
+<tr>
+<th>机种</th>
+<th>样本 OD 覆盖</th>
+<th>样本数</th>
+<th>5 折 CV R²</th>
+<th>MAE</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>异步 small / medium / large</td>
+<td>150.6–756.5 / 151.3–1085.4 / 1196–2651 mm</td>
+<td>1291 / 2578 / 1276</td>
+<td>0.652 / 0.438 / 0.670</td>
+<td>1.44 / 3.29 / 4.53 pp</td>
+</tr>
+<tr>
+<td>PMSM small / medium / large</td>
+<td>612–1178 mm（均为大机座）</td>
+<td>367 / 745 / 355</td>
+<td>≤ 0.31 → <strong>自动降级公式通道</strong></td>
+<td>—</td>
+</tr>
+</tbody></table>
+<p>因此 <strong>PMSM 与段外样本始终走公式通道</strong>；<code>auto</code> 默认走字段完整的公式通道。启用代理时输出带 <code>surrogate_experimental: true</code>，且置信度低于阈值（<code>surrogateConfidenceThreshold</code>，默认 0.4）自动降级 —— 不会硬给一个数。</p>
+</blockquote>
+<blockquote>
+<p>⚠️ <strong>代理通道可能离线 / 覆盖率 0</strong>：部分部署环境代理模型文件缺失或加载失败时，会静默降级到<strong>公式通道</strong>（字段完整、始终可用）。公式通道是「未标定默认通道」（见「已知精度边界」），其输出 <code>confidence</code> 现为 <strong>0.5 的明确标记值</strong>（v0.2.7 前恒为 1.0，会误导下游采信绝对值），仅代表「未标定、可排序不可绝对值采信」，<strong>不等于高置信预测</strong>；代理通道输出带逐预测 <code>confidence</code>（低于阈值自动降级）。经验回灌闭环（<code>tools/feedback/experience-hub.mjs</code>）的 <code>shadow</code> 若给出显著更优的影子模型，即视为<strong>触发正式重训</strong>的信号——请勿把 <code>confidence: 0.5</code> 的公式结果当终值。</p>
+</blockquote>
+<h2>能力边界</h2>
+<table>
+<thead>
+<tr>
+<th>层级</th>
+<th>引擎</th>
+<th>速度</th>
+<th>范围</th>
+<th>付费</th>
+<th>本版本状态</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>L0</strong></td>
+<td>代理模型 + 经验公式</td>
+<td>毫秒级</td>
+<td>全部方案</td>
+<td>free</td>
+<td>✅ 已交付核心</td>
+</tr>
+<tr>
+<td>L1</td>
+<td>RMxprt 磁路法（可选）</td>
+<td>1–3s/方案</td>
+<td>TopN</td>
+<td>vip</td>
+<td>⛔ 预留（接口已留）</td>
+</tr>
+<tr>
+<td>L2</td>
+<td>Motor-CAD 有限元（可选）</td>
+<td>~200s/方案</td>
+<td>Top3</td>
+<td>flagship</td>
+<td>⛔ 预留（接口已留）</td>
+</tr>
+</tbody></table>
+<p>本版本做参数矩阵生成、物理校验、L0 估算排序、TopN 交接与回归质量门；不做 RMxprt / Motor-CAD 调用、MCP Server、Python 桥接、多目标优化。</p>
+<h2>工具</h2>
+<table>
+<thead>
+<tr>
+<th>工具</th>
+<th>作用</th>
+<th>关键入参</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>motor_l0_pipeline</code></td>
+<td><strong>推荐入口</strong>：三步链聚合，只回紧凑摘要 + 文件交接，根治 2000 行截断</td>
+<td><code>power_kw</code> <code>speed_rpm</code> <code>count</code> <code>top_n</code> <code>write_handoff</code></td>
+</tr>
+<tr>
+<td><code>motor_param_matrix</code></td>
+<td>生成候选参数矩阵（聚焦扫描，非笛卡尔积）</td>
+<td><code>power_kw</code> <code>speed_rpm</code> <code>voltage_v</code> <code>poles</code> <code>count</code></td>
+</tr>
+<tr>
+<td><code>motor_l0_estimate</code></td>
+<td>毫秒级估算 + 排序 + L1 交接载荷（默认 Top10）</td>
+<td><code>params_list</code> <code>top_n</code> <code>sort_by</code></td>
+</tr>
+<tr>
+<td><code>motor_design_validate</code></td>
+<td>17 条物理一致性校验，返回 <code>passed</code>/<code>warning</code>/<code>failed</code></td>
+<td><code>params_list</code> <code>escalate</code> <code>bg_caliber</code></td>
+</tr>
+</tbody></table>
+<p>入参别名：<code>power</code>→<code>power_kw</code>、<code>rpm</code>→<code>speed_rpm</code>、<code>volt</code>→<code>voltage_v</code>。
+<code>sort_by</code> 白名单：<code>efficiency</code> <code>torque_density</code> <code>temp_rise</code> <code>total_loss</code> <code>power</code>（<code>temp_rise</code>、<code>total_loss</code> 升序，越小越好）。</p>
+<h2>示例（15kW / 1460rpm / 380V 异步，实跑 16 ms）</h2>
+<pre><code class="language-text">$ motor_param_matrix       { power_kw: 15, speed_rpm: 1460, voltage_v: 380, motor_type: 'induction', count: 120 }  →  120 候选
+$ motor_design_validate    17 条物理校验  →  0 passed / 80 warning / 40 failed
+$ motor_l0_estimate        sort_by: 'efficiency'  →  Top5，OD310 / 6 极 / η=95.17%
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>OD (mm)</th>
+<th>L (mm)</th>
+<th>极数</th>
+<th>槽数</th>
+<th>效率 (%)</th>
+<th>温升 (K)</th>
+<th>轭磁密 (T)</th>
+<th>总损耗 (W)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>310</td>
+<td>226.4</td>
+<td>6</td>
+<td>72</td>
+<td>95.17</td>
+<td>14.6</td>
+<td>1.39</td>
+<td>604</td>
+</tr>
+<tr>
+<td>2</td>
+<td>327</td>
+<td>216.6</td>
+<td>6</td>
+<td>72</td>
+<td>95.02</td>
+<td>14.6</td>
+<td>1.38</td>
+<td>628</td>
+</tr>
+<tr>
+<td>3</td>
+<td>278</td>
+<td>187.1</td>
+<td>6</td>
+<td>72</td>
+<td>94.94</td>
+<td>20.5</td>
+<td>1.38</td>
+<td>642</td>
+</tr>
+<tr>
+<td>4</td>
+<td>343</td>
+<td>206.7</td>
+<td>6</td>
+<td>72</td>
+<td>94.89</td>
+<td>14.7</td>
+<td>1.38</td>
+<td>650</td>
+</tr>
+<tr>
+<td>5</td>
+<td>294</td>
+<td>177.2</td>
+<td>6</td>
+<td>72</td>
+<td>94.81</td>
+<td>20.5</td>
+<td>1.38</td>
+<td>663</td>
+</tr>
+</tbody></table>
+<p>→ 这 5 个方案直接作为 L1（RMxprt）的入参，而不是把 120 个全丢给求解器。
+完整算例、复现命令与另外两个工况（75kW 异步、200kW 高速 PMSM <strong>反例</strong>）见 <strong><a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/examples/README.md" target="_blank" rel="noopener noreferrer"><code>examples/</code></a></strong>。</p>
+<h2>配置</h2>
+<p>配置位于 <code>cordis.patch.yml</code>（查看：<code>npx -y @deepseek-ai/dsh --profile web --dump-config</code>）。最常用四项：</p>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>level</code></td>
+<td><code>'l0'</code></td>
+<td>层级总闸。设为 <code>l1</code>/<code>l2</code> 立即抛错（快速失败，杜绝静默降级）</td>
+</tr>
+<tr>
+<td><code>l0Mode</code></td>
+<td><code>'auto'</code></td>
+<td><code>formula</code> 纯公式（字段完整）/ <code>surrogate</code> 代理模型（<strong>仅输出效率</strong>）/ <code>auto</code> = 公式通道，段外与低置信度自动降级</td>
+</tr>
+<tr>
+<td><code>surrogatePath</code></td>
+<td><code>'models/l0_surrogate_family.json'</code></td>
+<td>代理模型路径（v2.3.0-fixseg）</td>
+</tr>
+<tr>
+<td><code>surrogateConfidenceThreshold</code></td>
+<td><code>0.4</code></td>
+<td>代理置信度门限，低于此值降级公式</td>
+</tr>
+<tr>
+<td><code>efficiencyCap</code></td>
+<td><code>96</code></td>
+<td>效率封顶（与 L1 同口径，避免两层排序跳变）。v0.2.4 起仅钳<strong>展示值</strong> <code>efficiency</code>，排序按 <code>efficiency_raw</code>（未封顶真值）</td>
+</tr>
+<tr>
+<td><code>insulationClass</code></td>
+<td><code>'F'</code></td>
+<td>绝缘等级，决定温升限值（B=80K / F=105K / H=125K）。<strong>v0.2.5</strong>：行内 <code>insulation_class</code> 优先于本项</td>
+</tr>
+<tr>
+<td><code>line_freq_hz</code></td>
+<td><code>50</code></td>
+<td>电源频率 (Hz)，合法区间 20~400Hz。<strong>60Hz 电网与 VFD 变频工况必须设置</strong>，否则 V16 按 50Hz 判超同步（4极@1500rpm 会形成假断崖）。非法值判 V18 failed，不静默回落</td>
+</tr>
+</tbody></table>
+<p>其余配置项（本地统计 <code>usageLog</code>；L0 运行 <code>surrogatePath</code> / <code>surrogateConfidenceThreshold</code> / <code>maxMatrixSize</code> / <code>topNPreview</code> / <code>tempRiseRange</code> / <code>airGapFluxT</code> / <code>highSpeedRpm</code>；脱敏回传 <code>telemetryEnabled</code> / <code>telemetryEndpoint</code> / <code>telemetryBatchSize</code> / <code>telemetryIntervalSec</code> / <code>sessionTelemetry</code>）见 <a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/docs/ENGINEERING.md#%E5%85%AB%E9%85%8D%E7%BD%AE%E5%85%A8%E8%A1%A8" target="_blank" rel="noopener noreferrer"><code>docs/ENGINEERING.md</code></a> 与本文「脱敏聚合指标回传」节。</p>
+<blockquote>
+<p>⚠️ <code>tempRiseRange</code> 命名待议：它对齐 L1 <code>max_temp</code> 的钳位区间（°C），不是 L0 温升（K），拟改 <code>maxTempClamp</code>。</p>
+</blockquote>
+<h2>用量统计（本地，隐私安全）</h2>
+<p>每次工具调用向 <code>~/.dsh/storages/dsh-motor-ai-l0/usage.jsonl</code> 追加一行<strong>元数据</strong>：</p>
+<pre><code class="language-json">{"ts":"2026-09-22T06:40:12.345Z","tool":"motor_l0_estimate","ok":true,"elapsed_ms":2,"n":20,"failed":0,"sort_by":"efficiency","top_n":10}
+</code></pre>
+<ul>
+<li>只记次数 / 耗时 / 规模 / 成败，<strong>不记设计参数与结果内容</strong> —— 行业 Know-how 不落盘</li>
+<li>开关：配置项 <code>usageLog</code>（默认开）；所有写入静默降级，绝不影响工具调用</li>
+<li>数据可自行聚合（周期 / 命中率 / 失败率），也可作为社区统计面板
+（<code>dsh-usage-statistics-panel</code>、<code>dsh-usage-unified</code> 等 DSH 社区插件）的本地数据源搭配使用</li>
+<li>累积的真实工况分布后续直接服务公式系数标定与代理模型训练</li>
+</ul>
+<h2>脱敏聚合指标回传（显式可选，默认关闭）</h2>
+<p>在本地 <code>usage.jsonl</code> 之上，<strong>可选</strong>地把「按工具聚合的统计量」回传到你指定的端点
+（如管理端 <code>/api/admin/dsh-plugins/&lt;id&gt;/usage-report</code>）。这是<strong>显式 opt-in</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>telemetryEnabled</code></td>
+<td><code>false</code></td>
+<td>回传总开关。<strong>须为 <code>true</code> 且 <code>telemetryEndpoint</code> 非空才生效</strong></td>
+</tr>
+<tr>
+<td><code>telemetryEndpoint</code></td>
+<td><code>''</code></td>
+<td>回传目标 URL（POST JSON）；空 = 不外发</td>
+</tr>
+<tr>
+<td><code>telemetryBatchSize</code></td>
+<td><code>50</code></td>
+<td>单批最多携带的用量记录条数（分批推进，失败不推进、下批重报）</td>
+</tr>
+<tr>
+<td><code>telemetryIntervalSec</code></td>
+<td><code>300</code></td>
+<td>回传周期（秒）；<code>0</code> = 仅进程退出时 flush 一次</td>
+</tr>
+<tr>
+<td><code>sessionTelemetry</code></td>
+<td><code>'auto'</code></td>
+<td>是否顺带挂 DSH Runtime <code>sessionTelemetry</code> 瀑布（运行时探测，不静态 inject）</td>
+</tr>
+</tbody></table>
+<p><strong>合规底线（与 DSH 生态遥测规范一致）：</strong></p>
+<ul>
+<li>默认全关，不配置 = 零外发（本地 <code>usage.jsonl</code> 照记，行为与 0.1.4 逐字节一致）</li>
+<li>只回传<strong>白名单聚合统计量</strong>（调用次数 / 成败 / 耗时分布 / 规模总和 / 成功速率 / 来源版本 /
+平台 OS）；<strong>绝不包含</strong>设计参数正文、结果明细（效率/温升/损耗）、提示词、工作目录、密钥</li>
+<li>逐条明细只保留在本机；<code>error</code> 字段截断到 80 字并去换行/路径，避免夹带参数/密钥</li>
+<li>回传是 fire-and-forget：网络/超时/拒绝都静默降级，<strong>绝不影响</strong>工具主流程</li>
+</ul>
+<p>启用示例（<code>cordis.patch.yml</code>）：</p>
+<pre><code class="language-yaml">telemetryEnabled: true
+telemetryEndpoint: 'http://127.0.0.1:5000/api/admin/dsh-plugins/motor-ai-l0/usage-report'
+telemetryIntervalSec: 300
+</code></pre>
+<h2>免费额度与联网行为（默认开启，与遥测相互独立）</h2>
+<blockquote>
+<p>⚠️ <strong>本插件有两条相互独立的「对外」通道，默认状态不同，请分别看待：</strong></p>
+<ul>
+<li><strong>遥测回传</strong>（<code>telemetryEnabled</code> / <code>designExperienceUpload</code>）：默认 <strong>关闭</strong>，不配置 = 零外发（见上节）。</li>
+<li><strong>每日免费额度</strong>（<code>freeQuotaEnabled</code>，本节）：默认 <strong>开启</strong>，但<strong>计数与放行完全在本地完成</strong>，
+后端不可达也不影响使用。</li>
+</ul>
+</blockquote>
+<h3>v0.5.0 语义升级（important）</h3>
+<p>闸门从「后端决定 + 断网放行」改为 <strong>「本地为准的硬闸 + 非阻塞旁路遥测」</strong>。原因是一条实测到的事故级缺陷：</p>
+<blockquote>
+<p>旧实现 <code>checkFreeQuota</code> 里是 <code>await fetch(...)</code> + 4s 超时。一旦 <code>commerceBackendUrl</code> 指向一个
+<strong>在中国大陆不可达</strong>的地址（实测 <code>*.workers.dev</code> 被 DNS 污染、TCP 443 直连超时），
+国内用户<strong>每次工具调用都要白等 4 秒</strong>才拿到放行 —— 限流没生效，延迟先炸了。</p>
+</blockquote>
+<p><strong>现在的行为：</strong></p>
+<ul>
+<li><strong>每日 10 次硬闸（本地计数，fail-closed）</strong>：默认 10 次/天，按<strong>本地自然日</strong>重置。
+计数只认本地 <code>free-quota.json</code>，<strong>断网也拦</strong>——否则「分发出去即失联」时闸门形同虚设。</li>
+<li><strong>非阻塞旁路遥测</strong>：若 <code>config.commerceBackendUrl</code> / <code>config.backendUrl</code> / <code>env.DSH_BACKEND_URL</code>
+<strong>已显式配置</strong>，插件会顺手 <code>POST /api/dsh/free-call</code>（载荷 <code>{ plugin_id, device_id }</code>）做旁路计数，
+但这是 <strong>fire-and-forget，调用链不等待</strong>（实测后端挂死时闸门 1ms 返回）。
+<strong>未配置地址 ⇒ 一个网络请求都不发</strong>，不再向 <code>http://127.0.0.1:5000</code> 打无意义请求。</li>
+<li><strong>后端不再决定放行</strong>：即使后端返回 <code>allowed: false</code>，本地未超限就照常放行（旧版会拦）。</li>
+<li><strong>与完整版共用一本账</strong>：配额文件路径 <code>$DSH_HOME/storages/dsh-motor-ai/free-quota.json</code>
+（与完整版 <code>lib/license.mjs:52</code> 的激活态同目录同文件），同机上 l0 与完整版不会分裂成两本。</li>
+<li><code>device_id = sha256(hostname|platform|arch).slice(0, 16)</code>——以<strong>主机名 + 平台 + 架构</strong>派生的设备指纹，
+与完整版逐字节一致，用于后端归并同一台机器的额度账。</li>
+</ul>
+<blockquote>
+<p>💡 <strong>「出厂即孤岛」已不再是问题</strong>：每日 10 次闸门现在<strong>完全不依赖后端</strong>，装完即生效。
+是否部署接收端只影响两件事——① 匿名使用数据（次数/成败/耗时）是否回流；② 换机后额度能否归并。</p>
+</blockquote>
+<h3>v0.5.2 P0-门1'修复：同步批量脱闸（important）</h3>
+<p>v0.5.1 的「同链只扣 1 次」用「<code>_consumed</code> WeakSet（key = config 对象）+ <code>queueMicrotask</code>
+复位」实现，实测有致命盲区（<code>scripts/_repro_syncbatch.mjs</code>）：</p>
+<table>
+<thead>
+<tr>
+<th>调用形态</th>
+<th>v0.5.1 实测</th>
+<th>v0.5.2 实测</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>同一 config 引用 + <strong>同步循环</strong> ×12（CI/压测典型写法）</td>
+<td><strong>12 次全放行，整批只扣 1 次</strong> ❌</td>
+<td>10 放行 + 2 拦，<code>free=10</code> ✅</td>
+</tr>
+<tr>
+<td>每次新建 config 字面量 ×12</td>
+<td>10 放行 + 2 拦 ✅</td>
+<td>10 放行 + 2 拦 ✅</td>
+</tr>
+<tr>
+<td>同一 config + 每次 <code>await</code> 微任务 ×12</td>
+<td>10 放行 + 2 拦 ✅</td>
+<td>10 放行 + 2 拦 ✅</td>
+</tr>
+<tr>
+<td><code>freeQuotaEnabled: false</code></td>
+<td>放行且不计数 ✅</td>
+<td>放行且不计数 ✅</td>
+</tr>
+<tr>
+<td>一次 <code>runL0Pipeline</code> 三步链</td>
+<td>扣 1 次 ✅</td>
+<td>扣 1 次 ✅</td>
+</tr>
+</tbody></table>
+<p>v0.5.2 起「同链」判据改为<strong>显式调用链令牌</strong>（<code>newQuotaChain()</code> / <code>withQuotaChain()</code>）：
+聚合入口每次调用新建唯一令牌并透传给三个子纯函数 ⇒ 整链仍只扣 1 次，而循环调用因令牌
+互不相同 ⇒ <strong>各计一次</strong>。</p>
+<h3>v0.5.1 P0-门1修复（important）</h3>
+<p>v0.5.0 的闸门只装在四个工具的 <code>execute</code> 上，<code>quota_probe</code> 实测复现了一个脱闸路径：
+<strong>import 直调纯函数 <code>runL0Pipeline</code> ×12 次，本地 <code>free-quota.json</code> 的 <code>free</code> 恒 = 0</strong>——
+脚本/CI 可零限制跑完三步链。v0.5.1 起：</p>
+<ul>
+<li><strong>四个纯函数入口全部过闸</strong>：<code>runL0Pipeline</code> / <code>buildParamMatrix</code> / <code>runDesignValidate</code> /
+<code>runL0Estimate</code> 首行即 <code>assertFreeQuota(...)</code>，靠一次性消费标记保证<strong>整链只扣 1 次</strong>
+（探针防回归断言：一次 pipeline 调用 = +1）。
+⚠️ v0.5.1 版的「一次性消费标记」以 config 对象引用为判据，同步批量循环会脱闸；
+<strong>v0.5.2 起改为调用链令牌</strong>（见上节），本节其余结论不变。</li>
+<li><strong>执行侧不再 <code>await enforceQuota</code></strong>：<code>await</code> 边界会放跑消费标记造成每次调用扣 2 次，
+改为 execute 捕获 <code>QuotaExceededError</code> 直接回引导文案。</li>
+<li><strong>内部离线批量工具显式 bypass</strong>：<code>experience-hub capture</code>（作者侧 2000 次迭代采样）与
+<code>case-feedback</code>（社区反馈聚合）传 <code>freeQuotaEnabled: false</code>，不计用户额度。</li>
+</ul>
+<p><strong>额度用尽时的提示</strong>（同时发给模型与用户）包含联系与升级两条路：</p>
+<pre><code>今日免费额度已用尽（10/10 次/天，按本地自然日重置）。
+
+📮 联系插件制作者（使用反馈 / 问题排查 / 购买授权 / 定制开发）：
+   邮箱：13546196530@163.com
+
+📦 下载完整版 dsh-motor-ai（解锁无限次调用与完整能力）：
+   1) DSH 插件市场（dshhub-market 口令市场，搜 dsh-motor-ai）
+   2) npm：npm install dsh-motor-ai@next
+
+或者：
+1) 明天再用（免费额度按本地自然日自动重置）；
+2) 安装完整版 dsh-motor-ai 解锁无限调用；
+3) 购买授权或反馈请联系 13546196530@163.com。
+</code></pre>
+<p><strong>如何调整：</strong></p>
+<ol>
+<li>换每日上限（本地闸门）：<pre><code class="language-bash">DSH_FREE_DAILY_LIMIT=50      # 环境变量覆盖，默认 10
+</code></pre>
+</li>
+<li>完全关闭闸门与联网（照常使用、不限次）—— 打开 <code>cordis.patch.yml</code>：<pre><code class="language-yaml">freeQuotaEnabled: false   # 关闭每日免费额度闸门（不限次、不发任何计请求）
+</code></pre>
+（v0.4.3 起该开关已暴露到配置；此前用户无法关闭。）</li>
+</ol>
+<h2>接收端部署（可选，只影响数据回流与跨机额度归并）</h2>
+<blockquote>
+<p>v0.5.0 起免费额度闸门已在本地闭环，<strong>不部署接收端功能完全不受影响</strong>。
+部署的收益：匿名使用数据回流 + 换机后额度归并。</p>
+</blockquote>
+<ol>
+<li><strong>官方接收端（已上线，开箱即用）</strong>：<code>https://dsh-motor-ai-receiver.wangxuewangxue98.deno.net</code>
+（Deno Deploy 2 + Deno KV，零服务器成本）。端点契约与 <code>lib/quota.mjs</code> 注释逐字一致：<ul>
+<li><code>POST /api/dsh/free-call</code> —— 免费额度旁路计数（设备级）。v0.5.1 起插件随载荷上报
+本地自然日 <code>day</code> 与本地限额 <code>limit</code>，接收端按同一把尺计数（缺省回落接收端默认值）；
+响应 <code>{ allowed, used, remaining, limit, day }</code>。</li>
+<li><code>GET /api/dsh/stats</code> —— <strong>只读聚合统计</strong>（v0.5.1 新增）：各端点事件总数/当日数/
+当日独立设备数，不含任何设备指纹或载荷明细，供运营观测。</li>
+<li><code>POST /api/dsh/telemetry</code> / <code>POST /api/dsh/experience</code> —— <strong>契约预留，暂无插件客户端接线</strong>
+（l0 与完整版仓库均无 POST 代码；活的流量只有 free-call 旁路）。为将来接入保留。
+<code>cordis.patch.yml</code> 默认已配置该地址；不想回传改空串即可。</li>
+</ul>
+</li>
+<li><strong>自建</strong>：参考实现在 <code>dsh-motor-ai-receiver-deno</code>（Deno Deploy + KV，境内可达）与
+<code>dsh-motor-ai-receiver</code>（Cloudflare Worker + D1，境外可达），部署后把地址改成你的域名。</li>
+</ol>
+<blockquote>
+<p>🔴 <strong>中国大陆部署者请注意</strong>：<code>*.workers.dev</code> 域名在境内<strong>被 DNS 污染</strong>，实测解析到 <code>103.252.115.49</code>
+/ <code>199.59.149.236</code> 等黑洞 IP、TCP 443 直连超时（同网络下 <code>registry.npmjs.org</code> 正常）；
+<code>*.vercel.app</code> 同样被污染。
+<strong>官方接收端已部署在 Deno Deploy 2</strong>：<code>https://dsh-motor-ai-receiver.wangxuewangxue98.deno.net</code>
+（<code>*.deno.net</code> 域名本机直连实测 200 / 1.3s，IP <code>69.67.170.170</code> 未被污染；线上闸门 10+2 拒实测通过），
+<code>cordis.patch.yml</code> 默认已指向该地址。实测可达的其它平台：<code>*.deno.dev</code>、<code>render.com</code>、
+<code>onrender.com</code>、<code>fly.io</code>、<code>railway.app</code>。若你的用户在国内，<strong>不要</strong>把地址指向 workers.dev。
+所幸 v0.5.0 起闸门已本地闭环，选不到可达后端也不会拖慢调用（旁路遥测非阻塞）。</p>
+</blockquote>
+<ol>
+<li>接收端无鉴权（npm pack 即可读走任何内嵌 key），故按「统计信道」标准设计（append-only + 限流 + 白名单校验）。</li>
+</ol>
+<h2>社区反馈（结论式，永不自动提交）</h2>
+<p><strong>遇到「我的工况跑不出方案 / 结果明显不合理」时，可以把结论反馈给作者。</strong>
+插件提供 <code>tools/feedback/case-feedback.mjs</code>，在你自己的机器上生成一份可直接粘贴的 issue 草稿：</p>
+<pre><code class="language-js">import { buildCaseFeedbackDraft } from 'dsh-motor-ai-l0/tools/feedback/case-feedback.mjs'
+
+const draft = buildCaseFeedbackDraft({
+  pluginVersion: '0.2.5',
+  cases: [{ label: '工况A', spec: { power_kw: 450, voltage_v: 690, speed_rpm: 985, poles: 6 } }],
+})
+// 粘贴到 https://github.com/wangxuewangxue98/dsh-motor-ai-l0/issues/new?template=case-feedback.yml
+</code></pre>
+<p>草稿只含三类内容：</p>
+<table>
+<thead>
+<tr>
+<th>层次</th>
+<th>例子</th>
+<th>是否回传</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>L1 明细</strong></td>
+<td><code>stator_od=425, l0_eff=93.73</code></td>
+<td>❌ <strong>永不</strong></td>
+</tr>
+<tr>
+<td><strong>L2 结论</strong></td>
+<td><code>1400~1500rpm 可行率 66.7% → 1500~3000rpm 33.3%</code></td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>L3 元统计</strong></td>
+<td><code>V16 failed×40</code></td>
+<td>✅</td>
+</tr>
+</tbody></table>
+<p><strong>三条硬约束：</strong></p>
+<ol>
+<li><strong>工具只返回草稿字符串</strong>，不导出 <code>params</code> / <code>matrix</code> —— 脱敏不靠过滤，靠不产出。</li>
+<li>草稿生成后强制过 <strong>10 项脱敏自检</strong>（几何/槽数/匝数/电流/效率/客户名/绝对路径/UNC/哈希/邮箱），
+命中任一项即抛错、拒绝输出。</li>
+<li><strong>永不实现自动提交</strong>。自动上报是信任的重灾区，作者需要收到有人愿意署名的东西。</li>
+</ol>
+<p><strong>闭环承诺</strong>：反馈修复后，该工况会被匿名化纳入 <code>benchmarks/</code> 回归用例，由 CI 永久保护。</p>
+<p>提交前请看 <a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/.github/ISSUE_TEMPLATE/" target="_blank" rel="noopener noreferrer">.github/ISSUE_TEMPLATE/</a> —— 有问题反馈、案例反馈、
+标定数据贡献三套模板。</p>
+<h2>已知精度边界</h2>
+<p>L0 物理通道目前是 <strong>v0.1 未标定版</strong>（回归质量门判定 DEBT）：6 个标定案例效率低于参考带 0.35~2.96pt，温升偏保守。根因是损耗模型尚未用 RMxprt 批量结果标定（铁损未分齿/轭、铜损缺电路约束、机械损未标定、散热筋未计）。
+因此 L0 的正确用法是<strong>排序与相对比较</strong>，不是绝对值采信 —— <strong>排序稳定性优于绝对精度</strong>。完整实算数据与标定计划见 <a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/docs/QUALITY-GATE.md" target="_blank" rel="noopener noreferrer"><code>docs/QUALITY-GATE.md</code></a>。</p>
+<p><strong>明确不适用的工况</strong>（实测，见 <a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/examples/03-pmsm-200kw-22000rpm.md" target="_blank" rel="noopener noreferrer"><code>examples/03</code></a>）：</p>
+<table>
+<thead>
+<tr>
+<th>工况</th>
+<th>表现</th>
+<th>建议</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>高速 PMSM（&gt;10000rpm）</td>
+<td>轭部磁路模型外推失真（轭磁密算得 &gt;5 T，物理不可能）、温升 300 K+；门控会拒绝输出任何可行方案（<code>recommended = null</code>）</td>
+<td>直接进 L1 / L2</td>
+</tr>
+<tr>
+<td>效率绝对值交付</td>
+<td>本版未标定，6 个标定案例偏差 0.35~2.96 pt</td>
+<td>仅排序，绝对值由 L1 复核</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>门控"宁可交白卷，也不给假答案"是刻意设计：<code>level</code> 设为 <code>l1</code>/<code>l2</code> 时插件立即抛错，绝不静默降级成 L0 结果。</p>
+</blockquote>
+<h2>文档与许可</h2>
+<ul>
+<li><a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/docs/ENGINEERING.md" target="_blank" rel="noopener noreferrer"><code>docs/ENGINEERING.md</code></a> —— 目录结构、字段契约 Param 锁、17 条校验规则、与 Python 体系差异、工程复盘、配置全表、路线图</li>
+<li><a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/docs/QUALITY-GATE.md" target="_blank" rel="noopener noreferrer"><code>docs/QUALITY-GATE.md</code></a> —— 回归质量门（两道门 + divergence）、实算对照、待校准清单</li>
+<li><a href="https://github.com/wangxuewangxue98/dsh-motor-ai-l0/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a> © Motor-AI</li>
+</ul>

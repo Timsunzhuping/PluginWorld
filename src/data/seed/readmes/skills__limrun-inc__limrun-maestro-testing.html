@@ -1,0 +1,119 @@
+<h1>Maestro on Limrun iOS</h1>
+<p>Run the stock upstream Maestro CLI against a remote Limrun iOS simulator.
+<code>lim ios maestro</code> wires <code>maestro test</code> to the instance transparently: it
+installs and launches the Maestro XCTest runner on the simulator when needed,
+then routes the driver traffic to it. No fork of Maestro, no local simulator,
+no local Xcode.</p>
+<h2>Prerequisites</h2>
+<ul>
+<li><code>lim</code> CLI 0.22.0 or newer: <code>npm install --global lim</code>. Auth is <code>lim login</code> or
+<code>LIM_API_KEY</code> (it may already be set in the user's environment even when <code>.env</code> and the shell do not show it; check before asking for it).</li>
+<li>Maestro CLI on PATH: <code>curl -fsSL https://get.maestro.mobile.dev | bash</code>.
+Maestro needs Java 17+ (<code>java -version</code> to check). Both Maestro 2.5.x and
+2.6+ work; <code>lim</code> adapts to the installed version automatically.</li>
+</ul>
+<p>The CLI is the source of truth: if a flag errors or you need one not shown
+here, check <code>lim ios &lt;subcommand&gt; --help</code> instead of guessing.</p>
+<h2>Verify the setup</h2>
+<p>Before touching the user's app, prove the whole pipeline with a flow against
+the built-in Settings app; it needs no app install, tunnel, or build:</p>
+<pre><code class="language-bash">ID=$(lim ios create --install-asset appstore/maestro-ios-runner-2.5.1.tar.gz \
+  --no-open --quiet --json | jq -r .metadata.id)
+
+cat &gt; hello-flow.yaml &lt;&lt;'EOF'
+appId: com.apple.Preferences
+---
+- launchApp
+- assertVisible: General
+- takeScreenshot: settings-check
+EOF
+
+lim ios maestro --id "$ID" test hello-flow.yaml
+</code></pre>
+<p>All three steps reporting <code>COMPLETED</code> means Maestro, the runner, and the
+remote wiring all work; anything failing after this point is about the app or
+the flow, not the setup.</p>
+<h2>Run a flow</h2>
+<pre><code class="language-bash">lim ios maestro test flow.yaml
+lim ios maestro test flows/
+lim ios maestro --id &lt;ios-id&gt; test flow.yaml
+</code></pre>
+<p>Without <code>--id</code> this targets the most recently created iOS instance in the
+current workspace (workspaces follow the git repo or worktree you run from);
+pass <code>--id &lt;ios-id&gt;</code> (before <code>test</code>) in scripts, agents, or when running from
+a different directory. The first run on an instance takes a few extra seconds
+to launch the runner (plus the install when it wasn't preinstalled); later
+runs skip that. Extra Maestro flags go after
+<code>--</code>:</p>
+<pre><code class="language-bash">lim ios maestro -- test flow.yaml --include-tags smoke --test-output-dir artifacts
+</code></pre>
+<p>Do not pass <code>--platform</code>, <code>--device</code>, <code>--udid</code>, <code>--no-reinstall-driver</code>, or
+<code>--driver-host-port</code>; <code>lim</code> sets those itself and rejects duplicates.
+Real Maestro exit codes and reports are preserved, so CI wiring works as with
+local Maestro.</p>
+<h2>Instance setup</h2>
+<p>Any running iOS instance works; the runner is installed on first use. Creating
+the instance with the runner preinstalled skips that step:</p>
+<pre><code class="language-bash">lim ios create --install-asset appstore/maestro-ios-runner-2.5.1.tar.gz --no-open
+</code></pre>
+<p><code>--no-open</code> skips opening the stream URL in a browser (important on headless
+and CI machines). The runner asset name above is the only published one and it
+is version-agnostic: the same runner serves Maestro 2.5.x through 2.7.x, so do
+not look for an asset matching your Maestro version.</p>
+<p>Install the app under test as usual (<code>lim ios create --install app.ipa</code>,
+<code>lim ios install-app</code>, or a build skill), then reference its bundle id via
+<code>appId:</code> in the flow. For Expo Go testing, also preinstall
+<code>appstore/Expo-Go-54.0.6.tar.gz</code> and open the project URL with <code>openLink</code>
+(env vars must be prefixed <code>MAESTRO_</code> to be visible in flows):</p>
+<pre><code class="language-bash">MAESTRO_EXPO_URL='exp://&lt;tunnel-host&gt;' lim ios maestro test flow.yaml
+</code></pre>
+<h2>Expo dev-client builds</h2>
+<p>Expo Go is the quickest path, but a dev-client build works too. <code>launchApp</code>
+lands on the dev launcher rather than your app, so open the dev-client URL
+instead: <code>- stopApp</code> followed by
+<code>- openLink: &lt;scheme&gt;://expo-development-client/?url=&lt;url-encoded-metro-url&gt;</code>.
+Use <code>limrun-expo-development</code> for building the dev client, starting Metro, and
+deriving that URL.</p>
+<h2>Flow gotchas on Limrun</h2>
+<ul>
+<li><code>startRecording</code>/<code>stopRecording</code> YAML commands are not supported (the
+simulator is remote). Record around the run instead: <code>lim ios record start --id &lt;ios-id&gt;</code> returns immediately (recording happens on the instance), and
+after the flow <code>lim ios record stop --id &lt;ios-id&gt; -o video.mp4</code> downloads
+the video to the local path.</li>
+<li><code>takeScreenshot</code> works and saves the PNG locally into the working
+directory (or <code>--test-output-dir</code>), like stock Maestro.</li>
+<li><code>addMedia</code> and flow commands that reference local simulator file paths are
+not supported.</li>
+<li>HTTP calls from <code>runScript</code>/<code>evalScript</code> must use <code>https://</code> URLs. Plain
+<code>http://</code> calls are refused (except to the driver itself), because Maestro's
+plain-HTTP traffic is routed through a local bridge that only forwards to
+the remote simulator.</li>
+<li>When a flow re-runs against an app that is already open (for example Expo
+Go), start it with <code>- stopApp</code> before <code>openLink</code>/<code>launchApp</code>; deep links
+can be dropped by an app that is mid-foreground, and stale screens fail
+early assertions.</li>
+<li>Fleet variance: anchor assertions on stable accessibility identifiers and
+text, not on timing. Use <code>extendedWaitUntil</code> with a generous timeout for
+first app load.</li>
+<li>Text selectors match the element's accessibility label, and on iOS a label
+often folds in sibling content (icon names, adjacent text) or non-breaking
+spaces. Read the exact label with <code>lim ios element-tree</code> before writing the
+selector instead of guessing from what the screen shows.</li>
+</ul>
+<h2>Validation signals</h2>
+<ul>
+<li><code>Running maestro &lt;version&gt; against &lt;ios-id&gt;...</code> then
+<code>Running on Limrun iPhone - iOS ...</code>: the driver is connected end to end.</li>
+<li><code>Launching the Maestro runner...</code>: first use on this instance.
+<code>Installing the Maestro runner...</code> additionally appears only when the
+instance was created without the runner asset. Subsequent runs skip both.</li>
+<li>Maestro itself prints several JDK <code>WARNING</code> lines (reflection, native
+access) on every run; they are benign upstream noise, not Limrun errors.</li>
+<li>Flow failures print Maestro's own debug output directory with screenshots
+and the UI hierarchy; <code>lim ios element-tree --id &lt;ios-id&gt;</code> shows the live
+screen when debugging selectors.</li>
+</ul>
+<h2>Cleanup</h2>
+<p>Delete the instance when done: <code>lim ios delete &lt;ios-id&gt;</code> (<code>--id</code> is not valid
+for delete). The wiring <code>lim ios maestro</code> starts is torn down when the command
+exits.</p>

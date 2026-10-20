@@ -1,0 +1,186 @@
+<h1>Kaiva Postgres MCP</h1>
+<p>The Postgres MCP server that stays read-only. A drop-in replacement for the archived
+<code>@modelcontextprotocol/server-postgres</code>.</p>
+<h2>Switch in one line</h2>
+<p>Where your AI client starts the archived server today:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"]
+    }
+  }
+}
+</code></pre>
+<p>change the package name:</p>
+<pre><code class="language-json">      "args": ["-y", "@kaiva/postgres-mcp", "postgresql://localhost/mydb"]
+</code></pre>
+<p>In Claude Code:</p>
+<pre><code class="language-sh">claude mcp add postgres -- npx -y @kaiva/postgres-mcp postgresql://localhost/mydb
+</code></pre>
+<p>The <code>query</code> tool, its <code>sql</code> input and the table schema resources are the same, so nothing else
+changes.</p>
+<p>Other ways in, with <code>DATABASE_URL</code> set in your environment:</p>
+<ul>
+<li>Claude Code plugin: <code>/plugin install postgres-mcp --marketplace ai-kaiva/postgres-mcp</code></li>
+<li>Gemini CLI extension: <code>gemini extensions install https://github.com/ai-kaiva/postgres-mcp</code>, then
+<code>gemini extensions config kaiva-postgres-mcp</code> to enter the database URL</li>
+<li>Docker: <code>docker run -i --rm -e DATABASE_URL ghcr.io/ai-kaiva/postgres-mcp</code> once the image is published</li>
+</ul>
+<h2>Why switch</h2>
+<p>The archived server is no longer maintained: Anthropic archived it in 2025 as a reference example
+rather than production software, and npm marks it "Package no longer supported". It runs whatever
+text it is given inside <code>BEGIN TRANSACTION READ ONLY</code>, and that is not enough:</p>
+<ul>
+<li><code>COMMIT; DROP SCHEMA public CASCADE</code> ends the read-only transaction and drops the schema
+(reported by Datadog Security Labs in August 2025; the fix never reached npm, where 0.6.2 is
+still the latest version).</li>
+<li>With a superuser login, which is what most local and Docker installs start with, one statement
+can run a shell command on the database server: PostgreSQL runs <code>COPY ... TO PROGRAM</code> inside a
+read-only transaction.</li>
+</ul>
+<p>We checked both against version 0.6.2 on PostgreSQL 14: both ran. Kaiva Postgres MCP refuses both.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Archived 0.6.2</th>
+<th>Kaiva Postgres MCP</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>A second statement after <code>COMMIT</code></td>
+<td>Runs</td>
+<td>Refused: one statement per call, and PostgreSQL itself refuses a second</td>
+</tr>
+<tr>
+<td><code>COPY ... TO PROGRAM</code>, server file reads, <code>dblink</code></td>
+<td>Run, if the login allows</td>
+<td>Refused</td>
+</tr>
+<tr>
+<td>Time limit</td>
+<td>None</td>
+<td>15 seconds per statement, 3 seconds waiting for a lock</td>
+</tr>
+<tr>
+<td>Rows returned</td>
+<td>All of them</td>
+<td>The first 1,000, and it says so</td>
+</tr>
+<tr>
+<td>Superuser login</td>
+<td>Used as given</td>
+<td>Warning on this machine; refused for a database on another machine unless you allow it</td>
+</tr>
+<tr>
+<td>Tables listed</td>
+<td><code>public</code> schema only</td>
+<td>Every schema</td>
+</tr>
+<tr>
+<td>Dates and timestamps</td>
+<td>Turned into JavaScript dates, which can shift a date to the day before</td>
+<td>Exactly as PostgreSQL prints them</td>
+</tr>
+<tr>
+<td>Errors</td>
+<td>Returned as protocol errors</td>
+<td>Returned to the AI with what to fix</td>
+</tr>
+<tr>
+<td>Maintained</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+</tbody></table>
+<h2>Tools</h2>
+<ul>
+<li><code>query</code>: run one read-only SQL statement (<code>SELECT</code>, <code>WITH</code>, <code>VALUES</code>, <code>TABLE</code>, <code>SHOW</code> or
+<code>EXPLAIN</code>) and get the rows as JSON.</li>
+<li><code>list_tables</code>: the tables and views this login can read, with type, estimated row count and
+comment.</li>
+<li><code>describe_table</code>: one table's columns, primary key, unique and foreign keys, the tables that
+reference it, and its indexes.</li>
+</ul>
+<p>Resources: each table's columns, as the archived server listed them.</p>
+<h2>How read-only is enforced</h2>
+<p>On every call:</p>
+<ol>
+<li>The SQL is checked before it is sent: one statement, starting with <code>SELECT</code>, <code>WITH</code>, <code>VALUES</code>,
+<code>TABLE</code>, <code>SHOW</code> or <code>EXPLAIN</code>, calling no function that reaches past the transaction (<code>dblink</code>,
+server file functions, <code>lo_import</code> and <code>lo_export</code>, <code>pg_terminate_backend</code>, advisory locks, and
+functions that run SQL given to them as text).</li>
+<li>It runs alone, through PostgreSQL's extended query protocol, which refuses a second statement,
+inside a <code>READ ONLY</code> transaction with a statement time limit and a lock time limit.</li>
+<li>The transaction is always rolled back, and <code>DISCARD ALL</code> resets the session, so nothing a
+statement sets up outlives it.</li>
+</ol>
+<p>Only the first 1,000 rows are fetched from the database (one more is read, to know whether more
+exist), so a query over a large table returns quickly.</p>
+<h2>Use a login that can only read</h2>
+<p>The strongest guard is a login that cannot write. Run this once as an administrator, then put
+<code>mcp_readonly</code> in the connection URL:</p>
+<pre><code class="language-sql">CREATE ROLE mcp_readonly LOGIN PASSWORD 'choose-a-password';
+GRANT CONNECT ON DATABASE mydb TO mcp_readonly;
+GRANT pg_read_all_data TO mcp_readonly;  -- PostgreSQL 14 and later
+ALTER ROLE mcp_readonly SET default_transaction_read_only = on;
+</code></pre>
+<p>To see what a login can do:</p>
+<pre><code class="language-sh">npx -y @kaiva/postgres-mcp postgresql://mcp_readonly:...@localhost/mydb --check
+</code></pre>
+<h2>Options</h2>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--max-rows &lt;n&gt;</code></td>
+<td>1000</td>
+<td>Rows returned per query, 1 to 10000</td>
+</tr>
+<tr>
+<td><code>--timeout &lt;seconds&gt;</code></td>
+<td>15</td>
+<td>Time limit per statement, 1 to 300</td>
+</tr>
+<tr>
+<td><code>--allow-superuser</code></td>
+<td>off</td>
+<td>Allow a superuser login on a database on another machine. In Docker Compose the database is another container, so this applies there too; a read-only login is the better answer</td>
+</tr>
+<tr>
+<td><code>--check</code></td>
+<td></td>
+<td>Connect once, report what the login can do, and exit</td>
+</tr>
+</tbody></table>
+<p>Give the connection URL as the first argument, or set <code>DATABASE_URL</code>. TLS settings go in the URL
+(<code>sslmode</code>, <code>sslrootcert</code>), as with <code>psql</code>.</p>
+<h2>What it does not protect</h2>
+<ul>
+<li>Anything the login can read, the AI can read: tables, views and foreign tables, and with a
+superuser the system catalogs too (<code>pg_authid</code> holds password hashes). Use a login that sees only
+the tables you mean to share.</li>
+<li>The refused-function list is a second guard, not a sandbox. It sees the SQL the AI sends, not what
+a view, a foreign table (<code>file_fdw</code>) or a function already defined in your database does when it
+is read. With a superuser login such an object can still read a file on the database server. With
+a login that can only read, PostgreSQL itself refuses (checked: a view over <code>pg_read_file</code> reads
+the file as a superuser and is refused as a read-only login).</li>
+<li>"This machine" means localhost, 127.x, ::1, a Unix socket, <code>*.localhost</code> and
+<code>host.docker.internal</code> (the Docker host). Anywhere else, Docker Compose service names and private
+network addresses included, a superuser is refused unless <code>--allow-superuser</code> is given.</li>
+</ul>
+<h2>In Claude.ai, ChatGPT or for your team</h2>
+<p>This package runs on your machine. To use the same database from Claude.ai or ChatGPT, or share it
+with your team behind sign-in, Kaiva Bridge serves it as a managed MCP server. In a project folder
+whose <code>.env</code> holds <code>DATABASE_URL</code>:</p>
+<pre><code class="language-sh">npx @kaiva/bridge push mydb --db
+</code></pre>
+<p>Your database must be reachable from the internet. <a href="https://kaiv.ai/bridge?utm_source=postgres-mcp&amp;utm_medium=readme" target="_blank" rel="noopener noreferrer">https://kaiv.ai/bridge?utm_source=postgres-mcp&amp;utm_medium=readme</a></p>
+<h2>License</h2>
+<p>MIT</p>

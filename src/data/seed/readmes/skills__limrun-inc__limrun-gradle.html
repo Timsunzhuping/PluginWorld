@@ -1,0 +1,209 @@
+<h1>Remote Gradle build</h1>
+<p>Build Android projects on Limrun's remote Gradle sandboxes, from any
+environment (Linux, Windows, macOS, VM, container). <code>lim gradle build</code> syncs
+your sources to a remote instance, runs the project's own Gradle wrapper
+there, and streams the build output. This workflow builds on the remote instance; local Gradle, a local Android
+SDK, and local emulators are not part of it. A finished run has the app
+running on a Limrun emulator or the artifact delivered.</p>
+<p>For iOS builds, use <strong><code>limrun-xcode</code></strong> instead of this skill. For the Expo
+dev-client loop (Metro, hot reload) on either platform, use
+<strong><code>limrun-expo-development</code></strong>; it comes back here for the Android Debug
+build.</p>
+<h2>Auth and CLI</h2>
+<p>Install if needed: <code>npm install --global lim</code>. Auth is <code>lim login</code> or
+<code>LIM_API_KEY</code> (it may already be set in the user's environment even when <code>.env</code> and the shell do not show it; check before asking for it). The CLI is the source of truth:
+the commands in this skill are verified, but if a flag errors or you need one
+not shown here, check <code>--help</code> instead of guessing:</p>
+<pre><code class="language-bash">lim gradle --help
+lim gradle build --help
+</code></pre>
+<h2>Build an APK</h2>
+<p>Instead of <code>./gradlew</code>, build with:</p>
+<pre><code class="language-bash">lim gradle build .
+</code></pre>
+<p>This creates or reuses the remembered Gradle instance, syncs the current
+directory, and runs <code>assembleDebug</code> by default. Pick tasks explicitly with
+<code>--task</code> (repeatable):</p>
+<pre><code class="language-bash">lim gradle build . --task :app:assembleRelease
+</code></pre>
+<p>Use <code>--project-path</code> when the Gradle root is nested and auto-discovery is
+ambiguous (for example a bare React Native repo where Gradle lives in
+<code>android/</code>; the server usually finds it on its own):</p>
+<pre><code class="language-bash">lim gradle build . --project-path android
+</code></pre>
+<p>Expo managed-workflow projects (no <code>android/</code> directory) are detected
+automatically: the sandbox installs dependencies and runs <code>expo prebuild</code>
+before Gradle. Setting <code>--expo-app-dir</code> (monorepos) or <code>--abi</code> forces that
+pipeline and errors when no Expo app is detected:</p>
+<pre><code class="language-bash">lim gradle build ./my-monorepo --expo-app-dir apps/mobile
+</code></pre>
+<p>For iterating on an Expo app with Metro and hot reload rather than plain
+builds, use <strong><code>limrun-expo-development</code></strong>.</p>
+<h2>Private dependency credentials</h2>
+<p>Copy existing credential files with <code>--additional-file</code>, also supported by <code>sync</code>:</p>
+<pre><code class="language-bash">lim gradle build . \
+  --additional-file "$HOME/.npmrc=~/.npmrc" \
+  --additional-file "$HOME/.netrc=~/.netrc"
+</code></pre>
+<p>Remote <code>~/</code> targets the sandbox home; other destinations are workspace-relative.
+Repeat the flags on later syncs to retain the files. Pass <code>--env</code> for environment
+variables referenced by the configuration.</p>
+<h2>Detached builds and logs</h2>
+<p>Use <code>--detach</code> to return once the build is accepted; a webhook is optional.
+<code>logs</code> reads the latest build without an exec ID, including persisted logs after
+instance deletion; add <code>--follow</code> to wait for completion.</p>
+<pre><code class="language-bash">lim gradle build . --detach
+lim gradle logs
+lim gradle logs --follow
+</code></pre>
+<h2>Tool versions and shell commands</h2>
+<p>After syncing, <code>lim gradle use</code> selects tools in the sandbox and installs missing versions.
+Run <code>lim gradle tools install</code> for synced project tool selections (<a href="https://docs.limrun.com/docs/android/build-with-gradle" target="_blank" rel="noopener noreferrer">details</a>). Builds keep the project's <code>gradlew</code>; Android SDK/NDK/CMake use <code>sdkmanager</code>.</p>
+<pre><code class="language-bash">lim gradle tools
+# Node includes npm/npx.
+lim gradle use node@24 pnpm@10 yarn@4 bun@1 java@temurin-17 bundletool@1
+lim gradle tools install
+lim gradle run -- mise use --pin node@24.5.0
+lim gradle run --env APP_ENV=staging -- npm run generate
+lim gradle build . --env APP_ENV=staging
+</code></pre>
+<h2>Run it on an emulator</h2>
+<p>Upload the built APK as a named asset, then install it on an Android instance:</p>
+<pre><code class="language-bash">lim gradle build . --upload myapp.apk
+lim android create --install-asset=myapp.apk
+</code></pre>
+<p>Build uploads default to a 14-day TTL: each build pushes the asset's expiry
+to 14 days from that upload. Pass <code>--upload-ttl</code> with a Go duration (e.g.
+<code>720h</code>; <code>1d</code> is invalid) to change it.</p>
+<p>Share the signed stream URL from the create output with the user as a
+Markdown link, such as <code>[Live emulator](&lt;signed-stream-url&gt;)</code>. For rebuild
+iterations, patch the installed APK in place instead of recreating the
+instance:</p>
+<pre><code class="language-bash">lim android sync ./path/to/app-debug.apk
+</code></pre>
+<p>For everything else on the device (tapping, typing, element tree, screenshots,
+video, logcat over adb), use <strong>limrun-android-emulator</strong>.</p>
+<h2>Sign a release AAB</h2>
+<p>The default signing path needs NO credentials from the user:</p>
+<pre><code class="language-bash">lim gradle build . --sign --upload myapp.aab
+</code></pre>
+<p>On first use, Limrun generates an upload keystore, escrows it as the
+organization's signing key for this app, and signs with it. Every later
+<code>--sign</code> build of the same app, from any machine or CI, uses the same key, so
+Play Store uploads keep matching. The key is named by the Android application
+ID, detected from <code>app.json</code> (Expo) or <code>app/build.gradle(.kts)</code>; pass
+<code>--application-id &lt;id&gt;</code> when detection fails or picks the wrong flavor.</p>
+<p><code>--sign</code> makes <code>bundleRelease</code> the default task and the build fails before
+starting if an explicit <code>--task</code> list contains no bundle task. A SUCCEEDED
+build means the AAB carries the signature (the server verifies it before
+upload), so don't re-verify the artifact unless the user asks.</p>
+<p>Expect one of these lines before the build starts and relay its meaning:</p>
+<ul>
+<li><code>Signing with the organization's upload key for &lt;app&gt; (newly generated).</code>:
+first build of this app; the key now exists for the whole organization.</li>
+<li><code>Signing with the organization's upload key for &lt;app&gt; (existing).</code>: reusing
+the escrowed key, as intended.</li>
+</ul>
+<h2>Bring your own upload key</h2>
+<p>When the app already has a registered upload key (an existing Play listing),
+the user can sign with their own keystore instead. The keystore path, key alias
+and both passwords are supplied by the user on their own machine, as the
+<code>--keystore</code>, <code>--key-alias</code>, <code>--keystore-password</code> and <code>--key-password</code> flags or
+the <code>LIM_KEYSTORE_PASSWORD</code> and <code>LIM_KEY_PASSWORD</code> environment variables
+(<code>lim gradle build --help</code> lists them). Never ask for or handle these values in
+the conversation; if one is missing, name the flag or variable to set. All four
+travel together. Add
+<code>--save-key</code> to escrow the provided key so later builds can drop the flags and
+use plain <code>--sign</code>. <code>--save-key</code> refuses to overwrite: if a DIFFERENT key is
+already escrowed for the app it fails before any instance is created.</p>
+<p>The keystore file itself stays on the user's machine: never commit it or paste
+its bytes into files. <code>keytool -list -keystore &lt;file&gt;</code> shows the alias when the
+user does not know it.</p>
+<p>Failure strings to recognize on the bring-your-own path:</p>
+<ul>
+<li><code>The organization already has a different upload key escrowed for &lt;app&gt;</code>:
+<code>--save-key</code> conflict. Builds with <code>--sign</code> use the escrowed key; drop
+<code>--save-key</code> to sign with the provided keystore for this build only, or ask
+the user which key is the real upload key.</li>
+<li><code>Signing with your own key requires ... as well</code>: the BYO flag group is
+incomplete; the message lists exactly the missing flags.</li>
+<li><code>signing &lt;field&gt; contains an unsupported character</code>: the password or alias
+has characters outside ISO-8859-1. Change it in place with keytool
+(<code>-storepasswd</code>, <code>-keypasswd</code>, or <code>-changealias</code>) to a Latin-1 value. Never
+regenerate the key itself: that changes the upload key.</li>
+</ul>
+<h2>Publish to Play Store</h2>
+<p>When the user has Play credentials configured on their own machine (a
+service-account JSON file or an access token, passed through the
+<code>--playstore-service-account</code> or <code>--playstore-access-token</code> flag), the build
+publishes the signed release AAB directly, no browser involved. Never ask for
+these credentials in the conversation:</p>
+<pre><code class="language-bash">lim gradle build . --sign --upload-to-playstore --playstore-service-account sa.json --auto-version-code
+</code></pre>
+<p><code>--auto-version-code</code> makes the server resolve the next free versionCode from
+Google Play before the build and stamp it into the workspace copy
+(<code>expo.android.versionCode</code> in app.json for Expo projects, the single literal
+<code>versionCode</code> in the conventional <code>app/</code> module build script for native
+Gradle projects), so repeat publishes never collide. Without it, or on
+projects with computed or flavor-split versionCodes (which it rejects at
+request time), manage the versionCode yourself as below. Without Play
+credentials you cannot run the publish itself: it is a browser flow with a
+Google sign-in. Prepare the artifact, upload it as an asset, and hand off:</p>
+<pre><code class="language-bash">lim gradle build . --sign --upload &lt;app&gt;-v&lt;versionCode&gt;.aab
+</code></pre>
+<p>Tell the user to open <a href="https://console.limrun.com" target="_blank" rel="noopener noreferrer">https://console.limrun.com</a> and, on the <strong>Secrets</strong> page,
+click <strong>Connect Play Console</strong> to sign in with a Google account that has
+release access to the app (the session lives in the browser only; nothing is
+stored). Then on the <strong>Registry</strong> page they click <strong>Publish to Play Store</strong> on
+the uploaded AAB and enter the package name (the application ID). The app
+listing must already exist in Play Console. Google Play requires a versionCode
+it has never seen: <code>--auto-version-code</code> handles that on publish builds;
+without it, bump <code>versionCode</code> in <code>app/build.gradle(.kts)</code> (Expo:
+<code>expo.android.versionCode</code> in app.json) before the build.</p>
+<p>Failure strings to recognize on the <code>--sign</code> path:</p>
+<ul>
+<li><code>Cannot determine the Android application ID for signing</code>: detection found
+no <code>app.json</code> android.package and no <code>applicationId</code> in
+<code>app/build.gradle(.kts)</code>; pass <code>--application-id &lt;id&gt;</code>.</li>
+<li><code>--sign produces a Play-ready signed AAB; include a bundle task</code>: the
+explicit <code>--task</code> list has no bundle task; add <code>bundleRelease</code> or drop
+<code>--task</code>.</li>
+<li><code>the built AAB carries no signature</code>: the server's post-build check found an
+unsigned bundle; the signing config was not applied. Not a problem in the
+user's code; retry, and report it if it persists.</li>
+</ul>
+<h2>Android previews on pull requests</h2>
+<p>For repeatable previews on pull requests, prefer the packaged
+<a href="https://github.com/limrun-inc/android-preview-action" target="_blank" rel="noopener noreferrer">Android preview action</a>.
+It builds and uploads the app, updates the PR preview comment, and cleans up the
+builder; see the repository for inputs and workflow examples.</p>
+<h2>Gotchas</h2>
+<ul>
+<li><strong>Build errors are part of the job.</strong> If a build fails, read the error output, fix the code, and rebuild before reporting back.</li>
+<li><strong>A project mise file installs tools the build never uses.</strong> The first
+build or run in a sandbox runs <code>mise install</code> for every <code>[tools]</code> entry in the
+synced mise files, so a monorepo's root <code>mise.toml</code> full of databases and
+cloud CLIs slows it down or fails it. Keep using the project file when it
+works. If it doesn't, add a <code>mise.limrun.toml</code> beside it listing only the
+build's tools (for example node and pnpm); in that directory Limrun reads it
+instead of the other mise files.</li>
+<li><strong>Instance reuse is per git worktree.</strong> Commands resolve the remembered
+instance from the worktree of your cwd; pass <code>--id &lt;gradle-instance-id&gt;</code>
+(from <code>lim gradle list</code>) to target a specific one.</li>
+<li><strong>versionCode must increase for every Play upload.</strong> Prefer
+<code>--auto-version-code</code> on publish builds. A rejected publish
+saying the version code already exists means bump, rebuild, republish. If a
+publish RETRY reports it, the earlier attempt already succeeded; don't
+publish again.</li>
+<li><strong>Application ID detection reads the first uncommented <code>applicationId</code>.</strong>
+Flavor-specific IDs and dynamic Gradle logic are out of its scope; use
+<code>--application-id</code> there.</li>
+<li><strong>Keystore passwords must be non-empty and ISO-8859-1.</strong> Empty passwords and
+characters outside Latin-1 are rejected at request time instead of failing
+minutes into the build.</li>
+<li><strong>Keep synced files small and out of build dirs.</strong> Root-level <code>build/</code>,
+<code>.gradle</code>, <code>.kotlin</code> and any <code>local.properties</code> never sync, and <code>.gitignore</code>
+files (including nested ones) are honored. Use <code>--ignore &lt;regex&gt;</code> for other
+large local artifacts and <code>--include &lt;regex&gt;</code> to force-sync gitignored
+inputs the build needs.</li>
+</ul>

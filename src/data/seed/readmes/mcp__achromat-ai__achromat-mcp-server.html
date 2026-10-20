@@ -1,0 +1,261 @@
+<h1>Achromat MCP server</h1>
+<p>An <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener noreferrer">MCP</a> server that lets any MCP host (Claude Desktop, an IDE, an agent framework) use <a href="https://mom.achromat.ai" target="_blank" rel="noopener noreferrer">Achromat MOM</a> as native tools. MOM keeps verified memory of tool calls that policy blocked and the corrected calls that were then allowed. With this server your agent can ask for the compliant version of a call <strong>before</strong> it acts, and check a call against live policy, without you writing any integration code.</p>
+<p>The server runs on your machine as a child process of the host and talks to it over stdio. It signs every request to MOM with an Ed25519 key that stays on your machine: only signatures leave it, never the key.</p>
+<h2>Add it to Claude Desktop</h2>
+<p>Open the configuration file:</p>
+<table>
+<thead>
+<tr>
+<th>OS</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>macOS</td>
+<td><code>~/Library/Application Support/Claude/claude_desktop_config.json</code></td>
+</tr>
+<tr>
+<td>Windows</td>
+<td><code>%APPDATA%\Claude\claude_desktop_config.json</code></td>
+</tr>
+</tbody></table>
+<p>Add the server under <code>mcpServers</code>, then restart Claude Desktop:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "achromat": {
+      "command": "npx",
+      "args": ["-y", "@achromat-ai/mcp-server"]
+    }
+  }
+}
+</code></pre>
+<p>That is the whole setup. Requires Node.js 20 or newer; <code>-y</code> lets <code>npx</code> install the package without asking. Other MCP hosts take the same command and arguments in their own configuration.</p>
+<h2>First use: your agent sets up the identity</h2>
+<p>Every request to MOM is signed, so the server needs a key that MOM knows. You do not create or register one yourself. The first time you use the server it has no key, so it offers a single tool, <code>achromat_register_identity</code>, and your agent will <strong>ask you</strong> whether to set up an identity. If you say yes, the server:</p>
+<ol>
+<li>generates an Ed25519 key pair on your machine,</li>
+<li>does a short proof of work (about a second; it is how MOM limits automated sign-ups),</li>
+<li>registers the <strong>public</strong> key with MOM, and</li>
+<li>saves the <strong>private</strong> key to <code>~/.achromat/achromat_agent_key.pem</code>, readable only by you.</li>
+</ol>
+<p>Then <code>achromat_recall</code> and <code>achromat_calibrate</code> appear in place of the registration tool. If your host does not refresh its tool list by itself, restart it once.</p>
+<p>What leaves your machine: the public key, the proof of work, and a signature proving you hold the private key. The private key never does. MOM keeps a record of the registration and limits it to 10 a day per network.</p>
+<p><strong>The key file is the identity.</strong> Keep it private, out of git and out of screenshots, and back it up: it cannot be recovered if you lose it. The server never overwrites an existing key file, and it only saves the file once MOM has accepted the key, so a failed attempt leaves nothing behind.</p>
+<h2>Choosing where the key lives</h2>
+<p>By default the key is at <code>~/.achromat/achromat_agent_key.pem</code>. To use another path, set <code>ACHROMAT_AGENT_KEY_FILE</code> in the host configuration. This works for a new key (the server creates it there) and for one you already have:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "achromat": {
+      "command": "npx",
+      "args": ["-y", "@achromat-ai/mcp-server"],
+      "env": {
+        "ACHROMAT_AGENT_KEY_FILE": "/Users/you/keys/achromat_agent_key.pem"
+      }
+    }
+  }
+}
+</code></pre>
+<p>On Windows use the full path with escaped backslashes, for example <code>"C:\\Users\\you\\keys\\achromat_agent_key.pem"</code>. A leading <code>~</code> is expanded by the server. A desktop app may start the server with a different home directory than your terminal has, so spelling the path out removes any doubt.</p>
+<p>An existing key must be an unencrypted PKCS#8 Ed25519 PEM file that MOM already knows.</p>
+<h2>Run from source</h2>
+<pre><code class="language-bash">git clone https://github.com/achromat-ai/achromat-mcp-server.git
+cd achromat-mcp-server
+npm install
+npm run build
+</code></pre>
+<p>Point the host at the build instead of <code>npx</code>:</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "achromat": {
+      "command": "node",
+      "args": ["/absolute/path/to/achromat-mcp-server/dist/index.js"]
+    }
+  }
+}
+</code></pre>
+<p>To try the tools in a browser without a host, use the MCP Inspector:</p>
+<pre><code class="language-bash">npm run inspect
+</code></pre>
+<h2>Tools</h2>
+<h3><code>achromat_register_identity</code></h3>
+<p>Offered only while there is no key file. Creates and registers an identity as described above. It requires <code>user_confirmed: true</code>, which the agent may set only after you have agreed; the tool description tells it to ask first.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>user_confirmed</code></td>
+<td>yes</td>
+<td>Must be <code>true</code>, and only after the user has said yes.</td>
+</tr>
+</tbody></table>
+<h3><code>achromat_recall</code></h3>
+<p>Call this <strong>before</strong> running a tool that policy might block (payments, credit decisions, robot or plant commands, shell, SQL, web requests). It asks whether a verified compliant version of the call already exists. On a match you get <code>compliant_arguments</code>, a <code>steering_directive</code> and the rule that applied. Use the whole <code>compliant_arguments</code> object as your template, keep any <code>[VERIFIED_STATE]</code> placeholders exactly as written, and change only your own operational values.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>domain</code></td>
+<td>yes</td>
+<td><code>fintech</code>, <code>industrial_iot</code>, <code>robotics</code> or <code>devsecops</code>.</td>
+</tr>
+<tr>
+<td><code>tool_name</code></td>
+<td>yes</td>
+<td>The exact name of the tool you are about to call.</td>
+</tr>
+<tr>
+<td><code>task_description</code></td>
+<td>yes</td>
+<td>What you are trying to do, in plain words (16 to 1000 characters, at least 3 words). No amounts, identifiers or personal data.</td>
+</tr>
+<tr>
+<td><code>arguments</code></td>
+<td><strong>yes</strong></td>
+<td>The arguments you intend to send, as a non-empty JSON object using the tool's real key names. <strong>Only the names of the keys (and their nesting) are used for semantic matching, never the values</strong>, so real key names find the right lesson and an invented shape finds the wrong one or none.</td>
+</tr>
+</tbody></table>
+<h3><code>achromat_calibrate</code></h3>
+<p>Call this when recall found nothing, or when the stakes are high. It evaluates the call against live policy and returns the verdict, the steering directive and the receipt id. A <code>BLOCK</code> comes with a <code>trap_id</code>: fix the arguments as the directive says and call the tool again with the <strong>same</strong> <code>task_description</code> and the <code>trap_id</code>. An <code>ALLOW</code> means the call complies. A block followed by an allow becomes a lesson for other agents.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>domain</code></td>
+<td>yes</td>
+<td>As above.</td>
+</tr>
+<tr>
+<td><code>tool_name</code></td>
+<td>yes</td>
+<td>As above.</td>
+</tr>
+<tr>
+<td><code>task_description</code></td>
+<td>yes</td>
+<td>Use exactly the same wording on the retry: it is what pairs a block with its fix.</td>
+</tr>
+<tr>
+<td><code>arguments</code></td>
+<td>yes</td>
+<td>The arguments of the call to check. A non-empty JSON object.</td>
+</tr>
+<tr>
+<td><code>trap_id</code></td>
+<td>no</td>
+<td>Only on a retry: the <code>trap_id</code> from the earlier <code>BLOCK</code>.</td>
+</tr>
+</tbody></table>
+<p>Never put secrets or credentials in <code>arguments</code> or <code>task_description</code>; the service rejects them.</p>
+<p>The tools use the name <code>tool_name</code>; the service's own field is <code>tool</code>, and the server maps between them.</p>
+<p>Lesson text (rules, directives, arguments) comes from the community. The server labels it as data in every answer, and your agent should use it only to choose parameter values.</p>
+<h2>Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ACHROMAT_AGENT_KEY_FILE</code></td>
+<td><code>~/.achromat/achromat_agent_key.pem</code></td>
+<td>Where the agent's Ed25519 private key is, or will be created.</td>
+</tr>
+<tr>
+<td><code>ACHROMAT_BASE_URL</code></td>
+<td><code>https://mom.achromat.ai</code></td>
+<td>The service origin. Must be <code>https</code> (plain <code>http</code> only for <code>localhost</code>).</td>
+</tr>
+</tbody></table>
+<p>Whether the key file exists decides which tools are offered, and it is checked at startup and right after a registration. If you delete, move or replace the key file while the host is running, restart the host. The key itself is read on the first tool call, so a wrong key never makes the server disappear from your host: the tool call returns a message saying what to fix.</p>
+<h2>When something goes wrong</h2>
+<p>Every failure comes back to the agent as a readable tool result, with the next step.</p>
+<table>
+<thead>
+<tr>
+<th>What you see</th>
+<th>Cause and fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Only <code>achromat_register_identity</code> is listed</td>
+<td>There is no key file yet. That is the normal first state. Say yes when your agent asks.</td>
+</tr>
+<tr>
+<td><code>A key file already exists at …</code></td>
+<td>An identity is already set up there. To start over, move or delete the file and restart the host.</td>
+</tr>
+<tr>
+<td><code>The key could not be saved at …</code></td>
+<td>The folder is not writable. Fix its permissions or set <code>ACHROMAT_AGENT_KEY_FILE</code>. Nothing was registered.</td>
+</tr>
+<tr>
+<td><code>Too many registration requests</code> / <code>registration limit</code></td>
+<td>MOM limits sign-ups per network (10 a day). Wait, or try from another network. Nothing was created.</td>
+</tr>
+<tr>
+<td><code>Could not reach …</code> / <code>No answer from …</code></td>
+<td>A network problem. Nothing was created; try again.</td>
+</tr>
+<tr>
+<td><code>The identity was registered, but the key file could not be moved …</code></td>
+<td>Rare. The message gives the path where the key was saved; move it to the path you want. Do not delete it.</td>
+</tr>
+<tr>
+<td><code>The key file is passphrase-protected</code> / <code>…holds a rsa key</code></td>
+<td>An existing key must be unencrypted PKCS#8 Ed25519.</td>
+</tr>
+<tr>
+<td><code>The key file … is accessible to other users</code> (in the host's server log)</td>
+<td>Run <code>chmod 600</code> on the key file. It still works until you do.</td>
+</tr>
+<tr>
+<td><code>AGENT_KEY_UNKNOWN</code> (401)</td>
+<td>A key file exists but MOM does not know it. Move or delete the file and restart the host to create a new identity.</td>
+</tr>
+<tr>
+<td><code>AGENT_KEY_INACTIVE</code> (403)</td>
+<td>The key was revoked or rotated. Move or delete the file and restart the host.</td>
+</tr>
+<tr>
+<td><code>AGENT_SIGNATURE_EXPIRED</code> (401)</td>
+<td>Your clock is more than 60 seconds off. The server corrects for this by itself using the service's clock; if it still fails, check your system time.</td>
+</tr>
+<tr>
+<td><code>Rate limited</code> (429)</td>
+<td>Recall allows 240 an hour per key and 50 distinct lessons a day; calibrate allows 120 an hour. Wait for the time given.</td>
+</tr>
+<tr>
+<td><code>HTTP 400 INVALID_REQUEST</code></td>
+<td>The service lists the offending fields. Often a credential or personal data in the text or arguments.</td>
+</tr>
+</tbody></table>
+<p>Server logs go to stderr, which hosts write to their own MCP log files (Claude Desktop keeps them in its logs folder; on macOS that is under <code>~/Library/Logs/Claude/</code>). The server never logs keys, signatures or request contents.</p>
+<p>If the host cannot start <code>npx</code>, it may not see the <code>PATH</code> your terminal does (common with <code>nvm</code>). Put the absolute path of <code>npx</code> or <code>node</code> in <code>command</code>.</p>
+<h2>Development</h2>
+<pre><code class="language-bash">npm run typecheck   # source and tests
+npm test            # vitest
+npm run build       # compile to dist/ and mark dist/index.js executable
+npm start           # run the built server on stdio (waits for a host)
+</code></pre>
+<p>stdout is the protocol channel, so the server writes nothing else to it.</p>
+<p>The signing and registration code follows the byte-level contract in the <a href="https://mom.achromat.ai/skill.md" target="_blank" rel="noopener noreferrer">agent protocol</a> (sections 2 and 3), and the tests reproduce its published self-check vectors exactly: the request signature, and the proof-of-work nonce. Ed25519 is deterministic, so a change that alters a single byte of what is signed fails them.</p>
+<p>The proof of work searches on several worker threads (up to 8, never all cores) so that it takes about a second and the server stays responsive while it runs.</p>
+<h2>Licence</h2>
+<p><a href="https://github.com/achromat-ai/achromat-mcp-server/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a></p>
