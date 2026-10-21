@@ -23,6 +23,7 @@
 <li><strong>多引擎可选</strong>：DuckDuckGo（html/lite）、Bing、SearXNG（元搜索，支持自定义实例）、AnySearch、Exa、Tavily、Keenable、Firecrawl、Parallel、Perplexity、SerpBase、Serply、DeepSeek 官方、DeepSeek 原生搜索 API、You.com、百度千帆、Kimi、阿里云百炼、火山联网搜索（豆包搜索）、知乎全网/站内（<code>zhihu_global</code>/<code>zhihu_site</code>，经知乎开放平台 MCP）、OpenAI / Gemini / Claude 模型内置搜索</li>
 <li><strong>网页设置页</strong> —— 引擎切换 + API key 配置（UI 中 key 脱敏显示"已配置"）+ 中英文切换；入口在左侧「插件」页的组件行配置（<code>plugins.row.config</code>，DSH 0.1.7-rc.1+）。远程访问（VPS / 反向代理 / 自定义域名）下也能用：桥接接口沿用宿主的 Host 围栏，<code>--trusted-host</code> 与 <code>--public-url</code> 声明的地址会放行（#84）</li>
 <li><strong>右侧浮动目录</strong> —— 卡片右侧的页面留白里浮出「引擎 / 回退 / 语言池 / 搜索行为 / 抓取 / 性能」六个快捷跳转，滚动自动高亮当前项、点击平滑跳转；不占用正文宽度（正文布局与 0.9.6 一致），右侧留白不足时自动隐藏</li>
+<li><strong>多 key 轮换</strong> —— 任何 key 字段（或对应环境变量）都可以用逗号 / 分号 / 换行分隔多把 key；遇到 401/402/429（鉴权失败、额度耗尽）先轮换同一引擎的下一把，再走引擎回退</li>
 <li><strong>弹出式切换命令</strong> —— 聊天框输入 <code>/free-search-engine</code>，弹出引擎选择窗口，点选即切换（等效设置页 + 保存）</li>
 <li><strong>引擎测试</strong> —— <code>free_search_test</code> 工具让 agent 一键测试所有引擎；设置页也有"测试引擎"按钮（直测当前引擎，不走回退链，付费引擎无 key 会明确报错）</li>
 <li><strong>全局引擎开关与回退优先级</strong> —— 设置页可勾选/取消引擎（取消后全局生效：普通搜索 / Auto / <code>advanced_search</code> / <code>multi_search</code> / 引擎测试都不再用它），并可用 ↑↓ 调整全局回退顺序（一键恢复默认）</li>
@@ -112,7 +113,7 @@
 <td><code>firecrawl</code></td>
 <td>Firecrawl</td>
 <td>免费</td>
-<td><strong>无 key 也可用</strong>（官方免 key 匿名额度），配 key 提升限额</td>
+<td><strong>无 key 也可用</strong>（官方免 key 匿名额度），配 key 提升限额。注意：keyless 档按<strong>出口 IP</strong> 判定，VPN/代理出口会被 403 拒绝；插件会冷却 6 小时并说明原因（有 key 不受影响）</td>
 </tr>
 <tr>
 <td><code>parallel</code></td>
@@ -299,29 +300,51 @@ dsh plugin --profile web add /path/to/dsh-free-search
 <pre><code class="language-sh">dsh web
 </code></pre>
 <h4>接管行为与验证</h4>
-<p>插件加载后<strong>自动接管搜索</strong>（运行时接管，不改配置层）：</p>
+<p>插件加载后<strong>自动接管搜索</strong>：</p>
 <ul>
 <li><code>web.searchProvider</code> 未设置，或仍是 DSH 出厂默认的官方搜索 <code>deepseek-official</code> 时，自动切换为本插件的 provider（id 固定为 <code>ddg</code>）；</li>
 <li>如果（你或别的插件）已显式选择其他 provider，本插件不抢占，只在启动日志输出 WARN 与切换用的 YAML。</li>
 </ul>
-<p><strong>不再往配置里写 <code>searchProvider: ddg</code></strong>：静态覆盖曾导致"悬空引用"——patch 是整段覆盖 config，一旦插件那一行被<strong>停用或跳过</strong>（比如在插件管理器里关掉），配置仍指向 <code>ddg</code> 而没有任何东西注册它，于是每次搜索都失败：</p>
-<pre><code>Error: configured web provider "ddg" is not registered
-</code></pre>
-<p>现在没有这层覆盖：插件被停用时 <code>web.searchProvider</code> 保持官方默认（<code>deepseek-official</code>），搜索至少还能走官方通道；插件启用时由上面的运行时接管切到 <code>ddg</code>。</p>
-<blockquote>
-<p>如果你曾按旧文档手动在 <code>profiles/&lt;profile&gt;/cordis.patch.yml</code> 里加过下面这段，而插件没有启用，就会看到上面那条错误——<strong>删掉这段即可</strong>（或重新启用插件）：</p>
-</blockquote>
-<pre><code class="language-yaml"># 可选，通常不需要：只有你想强制指定时才加。
-# DSH 0.1.2+ 的 patch 是"整段覆盖 config"，必须保留 fetchProvider。
-- id: web
+<p><strong>接管会写进 profile（DSH 0.2.x）</strong>：从 <code>0.2.0-rc.2</code> 起 provider 选择存放在 config 的 volatile ref 里，只能经 <code>settings.mutate("web", …)</code> 写入，落盘结果就是 <code>profiles/&lt;profile&gt;/cordis.patch.yml</code> 多出：</p>
+<pre><code class="language-yaml">- id: web
   config:
     searchProvider: ddg
-    fetchProvider: http
+    fetchProvider: fs-quality-fetch
 </code></pre>
+<p>所以<strong>停用或卸载本插件之前，请先删掉 <code>- id: web</code> 这两行</strong>（或整行删掉让 DSH 回到出厂默认）。否则配置仍指向 <code>ddg</code> 而没有任何东西注册它，每次搜索都会失败：</p>
+<pre><code>Error: configured web provider "ddg" is not registered
+</code></pre>
+<p>更早的 DSH（0.1.x）由 patch 静态覆盖 config，不需要也更不该手写这段，这里不再赘述。</p>
+<h4>DSH 的「DeepSeek 搜索 API」开关</h4>
+<p>DSH 0.2.1 设置 → 网页搜索 → <strong>DeepSeek 搜索 API</strong> 开关会和本插件互相影响，行为如下：</p>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>打开开关</td>
+<td><code>web.searchProvider</code> 写成 <code>deepseek-search-api</code>（属于「显式选择其他 provider」），<strong>本插件主动让路</strong>，搜索走官方直连 API；抓取同时变成 <code>deepseek-fetch-api</code></td>
+</tr>
+<tr>
+<td>关闭开关</td>
+<td>DSH 会把整行 <code>- id: web</code> 删掉，provider 回到出厂默认 <code>deepseek-official</code> —— 这是<strong>模型搜索</strong>（一次完整 aux 请求，实测 ~12s、按 token 计费），不是免费引擎</td>
+</tr>
+<tr>
+<td>关闭后</td>
+<td><strong>0.9.8 起</strong>：插件检测到 <code>deepseek-official</code> 会在运行时补一次接管（日志 <code>DSH's search switch put the web providers back to the official defaults — re-took …</code>），通常几秒内恢复免费链路；若没恢复，完整重启 DSH</td>
+</tr>
+</tbody></table>
+<p>想换引擎请用 <code>/free-search-engine</code> 或本插件设置页，<strong>不要动那个开关</strong>。打开开关再关掉，官方直连会退回模型搜索，直到插件重新接管或重启。</p>
+<blockquote>
+<p>如果你在 0.1.x 时代按旧文档手写过 <code>- id: web</code>，现在可以删掉：0.2.x 由运行时接管写入。手写时注意 <code>fetchProvider</code> 应该是 <code>fs-quality-fetch</code>（本插件注册的抓取 provider），不是 <code>http</code>。</p>
+</blockquote>
 <ul>
 <li><code>searchProvider: ddg</code> —— 本插件的 <strong>provider id（固定值）</strong>，不是"使用 DuckDuckGo 引擎"；用哪个引擎由设置页的 <code>provider</code> 字段决定（<code>bing</code>/<code>baidu</code>/<code>auto</code>/…）。</li>
-<li><code>fetchProvider: http</code> —— 官方网页抓取（web-fetch-http），手动声明时必须保留。</li>
-<li>想改用官方搜索：在插件管理器里停用本插件条目即可，不需要改配置。</li>
+<li><code>fetchProvider: fs-quality-fetch</code> —— 本插件的抓取 provider（直接 → exa contents → firecrawl → crawl4ai）。</li>
+<li>想改用官方搜索：<strong>先删掉 <code>- id: web</code> 的两行，再在插件管理器里停用本插件</strong>。</li>
 </ul>
 <h4>姊妹插件：dsh-preset-workbench（预设工作台）</h4>
 <p>同作者的<strong>姊妹插件</strong>：在设置页里可视化创建/编辑 Agent 预设——分段提示词、15 项能力开关、内置「鲸鱼娘 / 梁神模式」模板，不用手写 YAML。两者搭配：<strong>free-search 解决"AI 联网搜索"、preset-workbench 解决"AI 人设能力编排"</strong>，都是纯免费、开箱即用。</p>
@@ -604,6 +627,17 @@ deepseekApiKey: ...
 <li><p>⚠️ 注：多源并发会消耗更多 API 配额，建议在需要多角度核验时按需使用。</p>
 </li>
 </ul>
+<h4>输出契约（meta.uncertainty）</h4>
+<p><code>advanced_search</code> 与 <code>multi_search</code> 的输出多了一个可选字段 <code>meta.uncertainty</code>，用来告诉 agent「这次结果有多可信」，不影响原有 <code>provider</code> / <code>content</code> / <code>sources</code>：</p>
+<pre><code class="language-json">{ "provider": "multi", "sources": [ ... ],
+  "meta": { "uncertainty": { "level": "medium", "notes": ["只有 2 个来源"] } } }
+</code></pre>
+<ul>
+<li><code>level</code>：<code>high</code> / <code>medium</code> / <code>low</code>，按来源数量、站点是否同一家、带时间过滤却无发布时间、是否包含聚合站、是否有引擎失败等启发式判定；</li>
+<li><code>notes</code>：具体原因（中文）；<code>high</code> 时通常为空；</li>
+<li>渲染文本在非 <code>high</code> 时会追加一行 <code>Confidence: …</code>。</li>
+</ul>
+<p>这是<strong>小步版</strong>：只新增字段，旧解析不受影响。</p>
 <h4>抓取网页内容（web_fetch）</h4>
 <p>搜索到 URL 后，可以让 agent <strong>读取网页全文</strong>（如"打开第一个链接看看内容"）。<code>web_fetch</code> 工具已启用（官方 <code>dsh-web-fetch-http</code> provider）：</p>
 <ul>
@@ -732,7 +766,7 @@ deepseekApiKey: ...
 </ul>
 <p>切换后重启 <code>dsh web</code> 生效。</p>
 <h4>离线自检断言（tools/）</h4>
-<p>仓库自带 <strong>18 个</strong>零依赖断言脚本（合计 <strong>520 项</strong>），<strong>不需要 API key、不联网、不需要测试框架</strong>，Node ≥ 20 即可跑：</p>
+<p>仓库自带 <strong>23 个</strong>零依赖断言脚本（合计 <strong>550 项</strong>），<strong>不需要 API key、不联网、不需要测试框架</strong>，Node ≥ 20 即可跑：</p>
 <table>
 <thead>
 <tr>
@@ -822,14 +856,39 @@ deepseekApiKey: ...
 <td><code>node tools/assert-parallel-mcp.mjs</code>（15）</td>
 </tr>
 <tr>
+<td><code>assert-uncertainty.mjs</code></td>
+<td>输出契约：0/1 源为 low、2 源与同站为 medium、3 个不同域为 high、时间过滤无日期、失败备注、聚合站提示</td>
+<td><code>node tools/assert-uncertainty.mjs</code>（8）</td>
+</tr>
+<tr>
+<td><code>assert-multikey.mjs</code></td>
+<td>多 key 字段：单 key 不变、逗号/分号/换行分隔、空白项丢弃、空输入为空数组</td>
+<td><code>node tools/assert-multikey.mjs</code>（3）</td>
+</tr>
+<tr>
+<td><code>assert-firecrawl-keyless.mjs</code></td>
+<td>Firecrawl keyless 出口判定：403 + VPN/proxy 文案才算拒绝、普通 403 与 401/429/500 不算、冷却初始未触发</td>
+<td><code>node tools/assert-firecrawl-keyless.mjs</code>（5）</td>
+</tr>
+<tr>
+<td><code>assert-fetch-charset.mjs</code></td>
+<td>抓取编码（#88）：<code>charset=gbk</code> / <code>gb2312</code> 按声明解码、无声明时嗅探 <code>&lt;meta charset&gt;</code> 与 http-equiv 形式、默认 UTF-8、未知 label 兜底 UTF-8 不抛错</td>
+<td><code>node tools/assert-fetch-charset.mjs</code>（6）</td>
+</tr>
+<tr>
+<td><code>assert-fetch-abort.mjs</code></td>
+<td>抓取中断（#87）：压缩响应中途断连必须 reject（不再永久 pending）、明文断连同样 reject、abort 能打断停滞的 gzip 流、complete 响应与重定向仍正常</td>
+<td><code>node tools/assert-fetch-abort.mjs</code>（6）</td>
+</tr>
+<tr>
 <td><code>assert-bridge-access.mjs</code></td>
 <td>桥接 Host 围栏（#84）：loopback 放行、remote peer 打 loopback Host 拒绝、<code>--trusted-host</code>（无端口匹配任意端口 / 带端口精确匹配）、<code>--public-url</code>、绑定地址、跨站与异源拒绝</td>
 <td><code>node tools/assert-bridge-access.mjs</code>（11）</td>
 </tr>
 <tr>
 <td><code>assert-provider-takeover.mjs</code></td>
-<td>provider 接管：旧属性 API 与 rc.2 的 <code>config.*</code> ref 两套兼容、<code>settings.mutate(web)</code> 单批写入、显式指定的 provider 不被抢占、<code>fetchProviderTakeover: false</code> 时保留显式 <code>http</code>、describe 噪声不误报、嵌套 config 变化与 web 重建分别成行、apply 重入/重复注册不再中断、重复日志去重</td>
-<td><code>node tools/assert-provider-takeover.mjs</code>（14）</td>
+<td>provider 接管：旧属性 API 与 rc.2 的 <code>config.*</code> ref 两套兼容、<code>settings.mutate(web)</code> 单批写入、显式指定的 provider 不被抢占、<code>fetchProviderTakeover: false</code> 时保留显式 <code>http</code>、describe 噪声不误报、嵌套 config 变化与 web 重建分别成行、关闭 DSH 搜索开关后重新接管且不抢 <code>deepseek-search-api</code>、apply 重入/重复注册不再中断、重复日志去重</td>
+<td><code>node tools/assert-provider-takeover.mjs</code>（16）</td>
 </tr>
 </tbody></table>
 <p>任何一个失败会以非 0 退出码结束并列出失败项；把某个旧版本文件路径作为参数传进去，可以看到修复前必红（用来证明断言不是空转）。改动发布相关逻辑后建议先跑一遍再发版。</p>
@@ -871,6 +930,7 @@ export HTTP_PROXY=http://127.0.0.1:7897
 <li><strong>Multi-Engine Support</strong> — DuckDuckGo (HTML / Lite), Bing, AnySearch AI, SearXNG (meta-search with custom instances), Exa, Tavily, Keenable, Firecrawl, Parallel, Perplexity, SerpBase, Serply, DeepSeek Official, You.com, Baidu Qianfan, Kimi, Aliyun Bailian, Volcano Doubao, Zhihu web-wide/site search (<code>zhihu_global</code>/<code>zhihu_site</code>, via the Zhihu open-platform MCP), and the model-based OpenAI / Gemini / Claude searches</li>
 <li><strong>Web Settings UI</strong> — Engine switching, API key configuration (keys masked as "configured" in the UI), and a Chinese/English toggle; the entry is the component-row config (<code>plugins.row.config</code>) on the sidebar Plugins page (DSH 0.1.7-rc.1+). Remote access (VPS, reverse proxy, custom domain) works too: the bridge reuses the host's own Host fence, so addresses declared with <code>--trusted-host</code> or <code>--public-url</code> are accepted (#84)</li>
 <li><strong>Right-hand section rail</strong> — A floating list (Engines / Fallback / Language pools / Search behaviour / Fetch / Performance) sits in the page margin to the right of the card: it highlights the section you are in while scrolling and jumps smoothly on click. It is rendered in a portal and never narrows the card, so the body layout is unchanged; it hides itself when the margin is too tight.</li>
+<li><strong>Multi-key rotation</strong> — Any key field (or its env var) accepts several keys separated by commas, semicolons or newlines; on 401/402/429 (bad key, quota exhausted) the same engine retries with the next key before the engine-level fallback runs</li>
 <li><strong>Popup Switch Command</strong> — Type <code>/free-search-engine</code> in the chat: a picker opens with all engines; click one to switch (equivalent to the settings page + save)</li>
 <li><strong>Engine Testing</strong> — <code>free_search_test</code> for the agent to check all engines in one call; the settings UI also has a "Test engine" button that tests the selected engine directly (no fallback chain; paid engines without a key report an explicit error)</li>
 <li><strong>Global engine enable/disable &amp; fallback priority</strong> — uncheck engines you never want (applies everywhere: web_search fallback, Auto routing, advanced_search, multi_search, engine tests) and reorder the global fallback chain with ↑↓ (one-click reset)</li>
@@ -960,7 +1020,7 @@ export HTTP_PROXY=http://127.0.0.1:7897
 <td><code>firecrawl</code></td>
 <td>Firecrawl</td>
 <td>Free</td>
-<td><strong>Usable without a key</strong> (official keyless anonymous quota); configure a key for higher limits</td>
+<td><strong>Usable without a key</strong> (official keyless anonymous quota); a key adds higher limits. Note: the keyless tier is judged by <strong>egress IP</strong> — VPN/proxy egress gets a 403, in which case the plugin cools it down for 6 hours and says why (a key is unaffected)</td>
 </tr>
 <tr>
 <td><code>parallel</code></td>
@@ -1148,29 +1208,51 @@ dsh plugin --profile web add /path/to/dsh-free-search
 <pre><code class="language-sh">dsh web
 </code></pre>
 <h4>Takeover behavior and verification</h4>
-<p>The plugin <strong>takes over search at runtime</strong> once loaded (it does not touch the config layer):</p>
+<p>The plugin <strong>takes over search</strong> once loaded:</p>
 <ul>
 <li>When <code>web.searchProvider</code> is unset, or still the shipped default <code>deepseek-official</code>, it switches to this plugin's provider (id: <code>ddg</code>);</li>
 <li>If you (or another plugin) explicitly selected a different provider, it does not steal it — it only logs a WARN with a copy-pasteable YAML snippet.</li>
 </ul>
-<p><strong>It no longer writes <code>searchProvider: ddg</code> into the config layer.</strong> A static override used to create a dangling reference: a patch replaces the whole row config, so when the plugin's row was <strong>disabled or skipped</strong> (e.g. switched off in the plugin manager) the config still said <code>ddg</code> while nothing registered it, and every search failed with:</p>
-<pre><code>Error: configured web provider "ddg" is not registered
-</code></pre>
-<p>Without that override, a disabled plugin leaves <code>web.searchProvider</code> at the shipped default (<code>deepseek-official</code>) so search still works through the official provider; when the plugin is enabled the runtime takeover above points it at <code>ddg</code>.</p>
-<blockquote>
-<p>If you previously added the snippet below by hand to <code>profiles/&lt;profile&gt;/cordis.patch.yml</code> <em>and</em> the plugin is not enabled, you will see that error — <strong>just remove the snippet</strong> (or re-enable the plugin):</p>
-</blockquote>
-<pre><code class="language-yaml"># Optional; normally unnecessary — only to force a specific provider.
-# Since DSH 0.1.2 a patch REPLACES the whole entry config: keep fetchProvider.
-- id: web
+<p><strong>The takeover is persisted into the profile (DSH 0.2.x).</strong> Since <code>0.2.0-rc.2</code> the provider selection lives in volatile config refs and can only be written through <code>settings.mutate("web", …)</code>, which lands in <code>profiles/&lt;profile&gt;/cordis.patch.yml</code> as:</p>
+<pre><code class="language-yaml">- id: web
   config:
     searchProvider: ddg
-    fetchProvider: http
+    fetchProvider: fs-quality-fetch
 </code></pre>
+<p>So <strong>remove those <code>- id: web</code> lines before disabling or uninstalling this plugin</strong> (or delete the whole row and let DSH fall back to its defaults). Otherwise the config still points at <code>ddg</code> while nothing registers it, and every search fails with:</p>
+<pre><code>Error: configured web provider "ddg" is not registered
+</code></pre>
+<p>Older DSH (0.1.x) used a static patch layer for this; writing that row by hand there is neither needed nor recommended.</p>
+<h4>DSH's "DeepSeek search API" switch</h4>
+<p>DSH 0.2.1 has Settings → Web search → <strong>DeepSeek search API</strong>, which interacts with this plugin:</p>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Turn the switch on</td>
+<td><code>web.searchProvider</code> becomes <code>deepseek-search-api</code> (an explicit choice), so <strong>this plugin steps aside</strong> and search goes through the official direct API; fetch becomes <code>deepseek-fetch-api</code> as well</td>
+</tr>
+<tr>
+<td>Turn the switch off</td>
+<td>DSH deletes the whole <code>- id: web</code> row, so the provider falls back to the shipped default <code>deepseek-official</code> — that is <strong>model search</strong> (a full auxiliary request, ~12 s in practice, billed per token), not the free engines</td>
+</tr>
+<tr>
+<td>After turning it off</td>
+<td><strong>Since 0.9.8</strong>: the plugin notices <code>deepseek-official</code> and re-takes at runtime (log line <code>DSH's search switch put the web providers back to the official defaults — re-took …</code>), normally within seconds; if it does not, restart DSH</td>
+</tr>
+</tbody></table>
+<p>Use <code>/free-search-engine</code> or this plugin's settings page to change engines, <strong>not that switch</strong>. Turning it on and then off drops you from the official direct API back to model search until the plugin re-takes over or DSH restarts.</p>
+<blockquote>
+<p>If you hand-wrote <code>- id: web</code> back in the 0.1.x era, you can drop it now: 0.2.x writes it at runtime. If you do declare it by hand, <code>fetchProvider</code> should be <code>fs-quality-fetch</code> (the fetch provider this plugin registers), not <code>http</code>.</p>
+</blockquote>
 <ul>
 <li><code>searchProvider: ddg</code> — this plugin's <strong>fixed provider id</strong>, not "use the DuckDuckGo engine"; the engine is chosen by the <code>provider</code> field in settings (<code>bing</code> / <code>baidu</code> / <code>auto</code> / …).</li>
-<li><code>fetchProvider: http</code> — the official web-fetch provider; keep it when declaring the row by hand.</li>
-<li>To go back to official search: disable this plugin's entry in the plugin manager — no config edit needed.</li>
+<li><code>fetchProvider: fs-quality-fetch</code> — this plugin's fetch provider (direct → exa contents → firecrawl → crawl4ai).</li>
+<li>To go back to official search: <strong>remove those <code>- id: web</code> lines first, then disable this plugin</strong> in the plugin manager.</li>
 </ul>
 <h4>Sister Plugin: dsh-preset-workbench</h4>
 <p>A <strong>sister plugin</strong> by the same author: a <strong>visual workbench for creating/editing agent presets</strong> right inside Settings — sectioned prompts, 15 capability toggles, and built-in "Whale Girl / Liangshen Mode" templates, no YAML needed. Pair them up: <strong>free-search gives your AI web search, preset-workbench shapes its persona &amp; capabilities</strong> — both free and zero-config.</p>
@@ -1453,6 +1535,17 @@ deepseekApiKey: ...
 <li><p>⚠️ Note: Running multiple engines in parallel consumes more search quota; use on demand when high source diversity is needed.</p>
 </li>
 </ul>
+<h4>Output contract (meta.uncertainty)</h4>
+<p><code>advanced_search</code> and <code>multi_search</code> now return an optional <code>meta.uncertainty</code> field describing how much the result should be trusted; the existing <code>provider</code> / <code>content</code> / <code>sources</code> shape is unchanged:</p>
+<pre><code class="language-json">{ "provider": "multi", "sources": [ ... ],
+  "meta": { "uncertainty": { "level": "medium", "notes": ["only two sources"] } } }
+</code></pre>
+<ul>
+<li><code>level</code>: <code>high</code> / <code>medium</code> / <code>low</code>, derived from the number of sources, whether they all come from one site, a time filter without publish dates, aggregator hosts, and whether any engine failed;</li>
+<li><code>notes</code>: readable reasons; usually empty at <code>high</code>;</li>
+<li>the rendered text appends a <code>Confidence: …</code> line whenever the level is not <code>high</code>.</li>
+</ul>
+<p>This is the <strong>small step</strong>: additive fields only, existing parsers keep working.</p>
 <h4>Fetch Webpage Content (<code>web_fetch</code>)</h4>
 <p>After searching, the agent can <strong>read full webpage content</strong> (e.g., <em>"Open the first link and summarize it"</em>). The <code>web_fetch</code> tool is enabled by default (official <code>dsh-web-fetch-http</code> provider):</p>
 <ul>
@@ -1581,7 +1674,7 @@ deepseekApiKey: ...
 </ul>
 <p>Restart <code>dsh web</code> after switching to apply changes.</p>
 <h4>Offline self-check assertions (<code>tools/</code>)</h4>
-<p><strong>Eighteen</strong> zero-dependency assertion scripts ship with the repo (<strong>520 assertions</strong> total): <strong>no API keys, no network, no test framework</strong>, Node ≥ 20:</p>
+<p><strong>Twenty-three</strong> zero-dependency assertion scripts ship with the repo (<strong>550 assertions</strong> total): <strong>no API keys, no network, no test framework</strong>, Node ≥ 20:</p>
 <table>
 <thead>
 <tr>
@@ -1671,14 +1764,39 @@ deepseekApiKey: ...
 <td><code>node tools/assert-parallel-mcp.mjs</code> (15)</td>
 </tr>
 <tr>
+<td><code>assert-uncertainty.mjs</code></td>
+<td>output contract: 0/1 source is low, two sources or a single site is medium, three distinct domains is high, time filter without dates, failure notes, aggregator caveat</td>
+<td><code>node tools/assert-uncertainty.mjs</code> (8)</td>
+</tr>
+<tr>
+<td><code>assert-multikey.mjs</code></td>
+<td>multi-key fields: a single key is unchanged, comma/semicolon/newline separate keys, blank entries are dropped, empty input yields none</td>
+<td><code>node tools/assert-multikey.mjs</code> (3)</td>
+</tr>
+<tr>
+<td><code>assert-firecrawl-keyless.mjs</code></td>
+<td>Firecrawl keyless egress refusal: only a 403 with the VPN/proxy wording counts, plain 403 and 401/429/500 do not, and the cooldown starts inactive</td>
+<td><code>node tools/assert-firecrawl-keyless.mjs</code> (5)</td>
+</tr>
+<tr>
+<td><code>assert-fetch-charset.mjs</code></td>
+<td>fetch encoding (#88): <code>charset=gbk</code> / <code>gb2312</code> decoded as declared, <code>&lt;meta charset&gt;</code> and the http-equiv form sniffed when the header omits it, UTF-8 by default, and an unknown label falls back to UTF-8 instead of throwing</td>
+<td><code>node tools/assert-fetch-charset.mjs</code> (6)</td>
+</tr>
+<tr>
+<td><code>assert-fetch-abort.mjs</code></td>
+<td>fetch interruption (#87): a compressed response cut mid-body rejects instead of hanging forever, identity truncation rejects too, abort breaks a stalled gzip stream, and complete responses plus redirects still work</td>
+<td><code>node tools/assert-fetch-abort.mjs</code> (6)</td>
+</tr>
+<tr>
 <td><code>assert-bridge-access.mjs</code></td>
 <td>bridge Host fence (#84): loopback allowed, a remote peer behind a loopback Host refused, <code>--trusted-host</code> (port-less matches any port, explicit port matches exactly), <code>--public-url</code>, the bind address, cross-site and foreign-Origin refused</td>
 <td><code>node tools/assert-bridge-access.mjs</code> (11)</td>
 </tr>
 <tr>
 <td><code>assert-provider-takeover.mjs</code></td>
-<td>provider takeover: both the legacy property API and the rc.2 <code>config.*</code> refs, a single batched <code>settings.mutate(web)</code>, explicit foreign providers left untouched, an explicit <code>http</code> kept when <code>fetchProviderTakeover</code> is off, describe()-triggered events ignored when nothing changed, nested config changes and web rebuilds reported separately, apply re-entry / duplicate registrations tolerated, and repeated logs deduplicated</td>
-<td><code>node tools/assert-provider-takeover.mjs</code> (14)</td>
+<td>provider takeover: both the legacy property API and the rc.2 <code>config.*</code> refs, a single batched <code>settings.mutate(web)</code>, explicit foreign providers left untouched, an explicit <code>http</code> kept when <code>fetchProviderTakeover</code> is off, describe()-triggered events ignored when nothing changed, nested config changes and web rebuilds reported separately, re-takeover after DSH's search switch is turned off without fighting an explicit <code>deepseek-search-api</code>, apply re-entry / duplicate registrations tolerated, and repeated logs deduplicated</td>
+<td><code>node tools/assert-provider-takeover.mjs</code> (16)</td>
 </tr>
 </tbody></table>
 <p>Any failure exits non-zero with the failing items listed. Passing the path of an older file shows the pre-fix failures (proving the assertions are not vacuous). Worth running before a release.</p>

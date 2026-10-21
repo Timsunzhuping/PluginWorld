@@ -1,0 +1,1110 @@
+<h1>dsh-providers-hub</h1>
+<blockquote>
+<p><strong>本包原名 <code>dsh-codearts-auth</code></strong>（<code>0.2.0-rc.11</code> 起改名）。老用户的 DSH profile 里
+还锁着旧名时，<strong>插件会加载失败并被自动禁用</strong>（宿主报 <code>N entry did not activate</code>，
+界面里也就看不到它）—— 升级前先看
+<a href="#%EF%B8%8F-%E4%BB%8E%E6%97%A7%E5%8C%85%E5%90%8D-dsh-codearts-auth-%E5%8D%87%E7%BA%A7" target="_blank" rel="noopener noreferrer">⚠️ 从旧包名 <code>dsh-codearts-auth</code> 升级</a>。</p>
+</blockquote>
+<blockquote>
+<p><strong>使用声明</strong>：本项目仅供学习研究使用，请遵守各服务提供方的服务条款。</p>
+</blockquote>
+<p>deepseek-harness 插件：统一管理多个 AI 编程服务的账号，并把它们的模型接进 DSH
+的模型选择器。支持<strong>多账号池</strong>（同一服务登录多个账号，按可用性自动选号）与
+<strong>凭据静默续期</strong>（到期前自动刷新，无需再次打开浏览器）。</p>
+<ul>
+<li><strong>17 个 provider 路由</strong>，外加 1 个<strong>聚合</strong>路由（见下）</li>
+<li>登录、状态、续期、积分领取<strong>全部在 Jet Hub 设置页完成</strong>，不注册任何斜杠命令</li>
+<li>附带一个<strong>本机 OpenAI 兼容网关</strong>，供其它客户端复用已登录账号</li>
+</ul>
+<blockquote>
+<p>📌 <strong>本 README 只写「怎么用」。</strong> 各 provider 的协议、端点、登录流程、请求头
+构造、实测数据与事故史等<strong>实现细节</strong>，统一记录在不入库的内部文档
+<code>docs/implementation-notes.md</code> 中。需要改动实现或排查协议问题时读它。</p>
+<p>⚠️ <strong>accio 的章节该文件里还没有</strong>（<code>implementation-notes.md</code> 目前零处 accio）——
+读它时<strong>不要</strong>以为 accio 没有实现笔记。accio 的实测结论与坑点当前登记在
+<code>docs/agent-notes/providers-accio.md</code>（含三条与参考实现相反的结论、两个真缺陷、
+区域选择与接线陷阱），补写 <code>implementation-notes.md</code> 的 accio 章节是<strong>独立任务</strong>。</p>
+</blockquote>
+<hr />
+<h2>目录</h2>
+<ul>
+<li><a href="#%E5%AE%89%E8%A3%85" target="_blank" rel="noopener noreferrer">安装</a></li>
+<li><a href="#%E7%94%A8%E6%B3%95" target="_blank" rel="noopener noreferrer">用法</a></li>
+<li><a href="#%E6%94%AF%E6%8C%81%E7%9A%84%E6%B8%A0%E9%81%93" target="_blank" rel="noopener noreferrer">支持的渠道</a></li>
+<li><a href="#%E8%81%9A%E5%90%88%E8%B7%AF%E7%94%B1aggregate" target="_blank" rel="noopener noreferrer">聚合路由</a></li>
+<li><a href="#%E6%9C%AC%E6%9C%BA-openai-%E7%BD%91%E5%85%B3" target="_blank" rel="noopener noreferrer">本机 OpenAI 网关</a></li>
+<li><a href="#%E7%94%A8%E9%87%8F%E5%BE%BD%E6%A0%87%E4%B8%8E-token-%E7%94%A8%E9%87%8F" target="_blank" rel="noopener noreferrer">用量徽标与 Token 用量</a></li>
+<li><a href="#%E9%85%8D%E7%BD%AE%E9%A1%B9" target="_blank" rel="noopener noreferrer">配置项</a></li>
+<li><a href="#%E5%BC%80%E5%8F%91" target="_blank" rel="noopener noreferrer">开发</a></li>
+</ul>
+<hr />
+<h2>安装</h2>
+<p>该包尚未发布到 npm registry。提供两种安装方式。</p>
+<h3>⚠️ 从旧包名 <code>dsh-codearts-auth</code> 升级</h3>
+<p>本包在 <code>0.2.0-rc.11</code> 把包名从 <code>dsh-codearts-auth</code> 改成了 <code>dsh-providers-hub</code>。
+<strong>仓库里改完了不代表你的机器上改完了</strong> —— DSH 是在 <strong>profile</strong> 里按<strong>包名字符串</strong>
+寻址 bundle 的，而老 profile 两处都还写着旧名：</p>
+<pre><code class="language-jsonc">// ~/.dsh/profiles/&lt;name&gt;/package.json
+{
+  "dependencies": { "dsh-codearts-auth": "link:…" },   // ← 旧键
+  "dsh": { "profile": { "bundles": [ …, "dsh-codearts-auth" ] } }  // ← 旧项
+}
+</code></pre>
+<p><strong>两处必须一起改</strong>，缺一处就是静默失效 —— 而且**「两处都不改」同样会坏**，
+只是坏的位置不同：</p>
+<table>
+<thead>
+<tr>
+<th>profile 里的状态</th>
+<th>后果</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>两处都是旧名</strong>（老 profile 的现状）</td>
+<td>bundle 目录<strong>解析得到</strong>（<code>node_modules/dsh-codearts-auth</code> 这个旧名别名还在），但包里 patch 的加载行写的是<strong>新包名</strong>，而宿主把加载行的解析基准设成 <strong>profile 目录</strong> ⇒ 新名在那里解析不到（本机实测 <code>MODULE_NOT_FOUND</code>）⇒ <strong>该加载行 import 失败</strong> ⇒ 宿主报 <code>N entry did not activate</code>，桌面端落进恢复模式并把插件<strong>自动禁用</strong>（Jet Hub 界面自然也不出现，即 issue IKLUME 的症状）</td>
+</tr>
+<tr>
+<td><strong>只改 <code>dependencies</code></strong></td>
+<td><code>dsh.profile.bundles[]</code> 里的旧名在 profile 里解析不到 ⇒ <code>resolveBundleDir()</code> 抛错 ⇒ 该 bundle 进 <code>skippedBundles</code> ⇒ <strong>整个插件（连宿主侧）都不加载</strong>，只在 stderr 留一行：无异常、无 UI 提示</td>
+</tr>
+<tr>
+<td><strong>只改 <code>dsh.profile.bundles</code></strong></td>
+<td>与上一格同因：<code>node_modules/</code> 里只有旧名，<code>bundles[]</code> 里的新名解析不到 ⇒ 同样进 <code>skippedBundles</code></td>
+</tr>
+</tbody></table>
+<blockquote>
+<p><strong>实测</strong>（本机 <code>~/.dsh/profiles/web</code>）：<code>require.resolve('dsh-codearts-auth/package.json')</code>
+成功解析到仓库根，而 <code>require.resolve('dsh-providers-hub/package.json')</code> 报
+<code>MODULE_NOT_FOUND</code>。宿主把加载行的解析基准设成 <strong>profile 目录</strong>
+（<code>dsh-app-boot</code> 对 patch 行调 <code>prepareProfilePatches(…, pathToFileURL(dirname(absoluteConfigPath))…)</code>，
+同一个值也是 <code>boot()</code> 里 <code>ctx.baseUrl</code> 的来源），所以「旧名能解析」与「新名解析不到」
+会<strong>同时</strong>成立 —— 这正是第一格的判断依据是<strong>按名字解析</strong>、而不是「目录在不在」的原因。</p>
+<p>⚠️ 第一格的落点<strong>不在客户端</strong>：宿主<strong>不会</strong>替用户把这种行摘掉 —— <code>preflight()</code>
+只在「兼容性冲突」时 deny 一行，其余失败<strong>保留 cordis Loader 自己的诊断</strong>
+（源码注释：<em>every other failure keeps the Loader's own diagnosis</em>），于是该行走进
+Loader 并<strong>在宿主这一侧导入失败</strong>。所以排障的第一现场是宿主日志里的
+<code>N entry did not activate</code> 与「插件已被禁用」，不是「宿主一切照常、只是客户端
+entry 没建立」——后者会让排查方向整个偏到前端产物上去。</p>
+</blockquote>
+<p>推荐做法是<strong>不要手改</strong>，直接用 <code>dsh plugin --profile &lt;name&gt;</code> 的 <code>remove</code> / <code>add</code>
+各走一遍，让工具自己写这两处：</p>
+<pre><code class="language-sh">dsh plugin --profile &lt;name&gt; remove dsh-codearts-auth
+dsh plugin --profile &lt;name&gt; add "https://gitee.com/iJetLi/deepseek-harness-codearts.git"
+</code></pre>
+<p>⚠️ <code>&lt;name&gt;</code> 要<strong>逐个 profile 走一遍</strong>：本机 <code>~/.dsh/profiles/</code> 下的 <code>desktop</code> /
+<code>headless</code> / <code>tui</code> / <code>web</code> 四个 profile 的 <code>package.json</code> <strong>都</strong>还锁着旧名，且
+<code>dsh.profile.bundles</code> 里也都有它。只有既无依赖项也无 <code>node_modules</code> 的 profile
+（如 <code>default</code> / <code>rescue</code>）可以跳过。</p>
+<p>⚠️ 老版本可能残留 <code>node_modules/dsh-codearts-auth</code> 与 <code>pnpm-lock.yaml</code> 里的同名
+依赖项；<code>add</code> 之后确认 profile 里不再有旧名的依赖键。</p>
+<h3>方式一：从 git 仓库安装（推荐）</h3>
+<p><code>add</code> 以 git 仓库方式安装（pnpm 内部走 <code>git+https:</code> 协议），会运行本包的 <code>prepare</code>
+脚本自动构建 <code>lib/</code>，无需手动 <code>pnpm build</code>。</p>
+<p>⚠️ pnpm 10 起会拦截依赖的构建脚本，必须先在 profile 的 <code>pnpm-workspace.yaml</code>
+（路径形如 <code>~/.dsh/profiles/&lt;name&gt;/pnpm-workspace.yaml</code>）里放行；而<strong>放行键的写法
+在 pnpm 10 与 pnpm 11 之间互不兼容</strong>，写错就装不上。</p>
+<p><strong>1. 先跑一次安装</strong>（这一次必然失败，为的是让 pnpm 打印它期望的键）：</p>
+<pre><code class="language-sh">dsh plugin --profile &lt;name&gt; add "https://gitee.com/iJetLi/deepseek-harness-codearts.git"
+</code></pre>
+<p><strong>2. 按第 1 步的报错选一种写法，写进 profile 的 <code>pnpm-workspace.yaml</code>。</strong></p>
+<p>报 <strong><code>ERR_PNPM_INVALID_VERSION_UNION</code></strong> 的（<strong>pnpm 10.x</strong>）—— 只认<strong>纯包名</strong>键：</p>
+<pre><code class="language-yaml">allowBuilds:
+  dsh-providers-hub: true
+</code></pre>
+<p>报 <strong><code>ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED</code></strong> 的（<strong>pnpm 11.x</strong>）—— git 托管包
+<strong>不认</strong>纯包名键，必须用第 1 步 pnpm 打印的<strong>完整键（含 <code>#&lt;commit&gt;</code>）</strong>：</p>
+<pre><code class="language-yaml">allowBuilds:
+  dsh-providers-hub@git+https://gitee.com/iJetLi/deepseek-harness-codearts.git#&lt;第 1 步打印的 commit&gt;: true
+</code></pre>
+<p><strong>两代通用（省事，但放宽了权限）</strong>：</p>
+<pre><code class="language-yaml">dangerouslyAllowAllBuilds: true
+</code></pre>
+<p>它会放行该 profile 里<strong>所有</strong>依赖的构建脚本（不止本插件）。</p>
+<p><strong>3. 重跑第 1 步的命令</strong>：这次会拉取、构建并安装成功。之后每次升级重新 <code>add</code> 即可。</p>
+<p>⚠️ <strong>不要</strong>写 <code>dsh-providers-hub@git+https://gitee.com/…</code>（不带 <code>#&lt;commit&gt;</code>）——
+这个"看起来最自然"的键在两代 pnpm 上都不工作。</p>
+<p>⚠️ pnpm 11.x 的精确键里带 commit，因此<strong>升级（重新 <code>add</code> 拉到新 commit）后该键
+失效</strong>，按新报错里的键替换即可；用 <code>dangerouslyAllowAllBuilds</code> 则不必改。</p>
+<h3>方式二：从源码目录安装（本地开发）</h3>
+<p>先在本仓库中构建 <code>lib/</code>，再安装为 pnpm <code>link:</code> 依赖：</p>
+<pre><code class="language-sh">pnpm build:all
+dsh plugin --profile &lt;name&gt; install &lt;path-to-this-repo&gt;
+</code></pre>
+<blockquote>
+<p><code>dsh plugin install</code> 以 <code>link:</code> 方式安装，pnpm 不会为 <code>link:</code> 依赖运行
+<code>prepare</code> 脚本，因此必须先手动执行 <code>pnpm build:all</code> 生成 <code>lib/</code>。
+注意必须用 <code>build:all</code> 而非 <code>build</code>：后者只编译宿主侧，不产出
+<code>lib/client/jet-hub.js</code>。</p>
+</blockquote>
+<p>每次修改 <code>src/</code> 或 <code>plugin-src/</code> 后都需要重新执行 <code>pnpm build:all</code> —— dsh 启动时
+不会自动重建。</p>
+<h3>通用说明</h3>
+<p>该包声明了 <code>dsh.bundle</code> 补丁（<code>cordis.patch.yml</code>），因此 profile 的 layer 栈会
+自动拾取 <code>codearts-auth</code> 行。插件注入由 dsh base 提供的 <code>credentials</code>、
+<code>commands</code> 和 <code>llm</code> 服务。</p>
+<hr />
+<h2>用法</h2>
+<p><strong>登录入口：Jet Hub 设置页的对应 provider 面板。</strong></p>
+<p>⚠️ <strong>不注册任何斜杠命令</strong> —— 登录、状态查看、续期与积分领取统一在 Jet Hub 完成。</p>
+<p>基本流程：</p>
+<ol>
+<li>打开 Jet Hub 设置页（侧边 rail 选择要用的渠道）；</li>
+<li>点「<strong>+ 新建账号</strong>」→ 浏览器打开授权页 → 完成登录；</li>
+<li>需要多个账号时重复第 2 步（账号池会自动选号）；</li>
+<li>回到 dsh 的模型选择器，选中该渠道的模型即可开始对话。</li>
+</ol>
+<p>「+ 新建账号」是<strong>两步式</strong>的：先返回 <code>loginUrl</code> 由前端弹窗打开，后台再轮询换取
+令牌 —— 这样不会阻塞浏览器手势窗口，弹窗不会被拦截。</p>
+<p>账号卡片支持：<strong>测试 / 重测 / 重置 / 停用 / 代理 / 指纹 / 删除</strong>，以及拖拽排序
+（<strong>顺序即选号优先级</strong>）。停用只影响自动选号，<strong>不影响凭据续期与积分领取</strong>。</p>
+<p>⚠️ 「<strong>代理</strong>」按钮目前只对 <code>opencode</code> 与 <code>gemini</code> 渲染（两者语义不同，见
+「出不去墙外服务」一节）；其余渠道的账号卡片上没有这个按钮。</p>
+<hr />
+<h2>支持的渠道</h2>
+<p>17 个 provider 路由，互不覆盖，可同时使用。</p>
+<table>
+<thead>
+<tr>
+<th>id</th>
+<th>渠道</th>
+<th>登录方式</th>
+<th>积分能力</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>codearts</code></td>
+<td>CodeArts（华为云）</td>
+<td>浏览器回调</td>
+<td>余额 + 每日签到</td>
+</tr>
+<tr>
+<td><code>buddy</code></td>
+<td>CodeBuddy（腾讯）</td>
+<td>浏览器授权 + 轮询</td>
+<td>余额 + 每日签到 + 成长任务 + 锁定永久积分</td>
+</tr>
+<tr>
+<td><code>workbuddy</code></td>
+<td>WorkBuddy（国际版）</td>
+<td>同上</td>
+<td>余额 + 锁定永久积分（<strong>无签到</strong>）</td>
+</tr>
+<tr>
+<td><code>lobsterai</code></td>
+<td>LobsterAI（有道）</td>
+<td>浏览器回调</td>
+<td>余额 + 每日签到</td>
+</tr>
+<tr>
+<td><code>qoder</code></td>
+<td>Qoder（阿里系）</td>
+<td>设备码轮询</td>
+<td>余额 + 每日领取</td>
+</tr>
+<tr>
+<td><code>qodercn</code></td>
+<td>Qoder 中国版</td>
+<td>同上（共用实现）</td>
+<td>余额 + 每日领取</td>
+</tr>
+<tr>
+<td><code>trae</code></td>
+<td>TRAE（字节跳动）</td>
+<td>浏览器回调</td>
+<td>余额 + 签到</td>
+</tr>
+<tr>
+<td><code>cline</code></td>
+<td>Cline</td>
+<td>WorkOS 设备码轮询</td>
+<td>余额</td>
+</tr>
+<tr>
+<td><code>loomy</code></td>
+<td>Loomy（讯飞）</td>
+<td>短信验证码</td>
+<td>余额（两个池）+ 每日额度 + 新手任务</td>
+</tr>
+<tr>
+<td><code>raccoon</code></td>
+<td>Raccoon Work（商汤）</td>
+<td>微信扫码 / 短信</td>
+<td>余额 + 一次性登录奖励</td>
+</tr>
+<tr>
+<td><code>minimax</code></td>
+<td>MiniMax Code (中国版)</td>
+<td>OAuth 设备码 + PKCE</td>
+<td>余额 + 每日签到</td>
+</tr>
+<tr>
+<td><code>minimaxintl</code></td>
+<td>MiniMax Code (国际版)</td>
+<td>同上（共用实现）</td>
+<td>余额 + 每日签到</td>
+</tr>
+<tr>
+<td><code>zcode</code></td>
+<td>ZCode（智谱 z.ai）</td>
+<td>OAuth 设备码</td>
+<td>余额 + 每日领取</td>
+</tr>
+<tr>
+<td><code>opencode</code></td>
+<td>OpenCode</td>
+<td>—</td>
+<td>余额</td>
+</tr>
+<tr>
+<td><code>gemini</code></td>
+<td>Gemini Code Assist</td>
+<td>浏览器回调</td>
+<td>余额</td>
+</tr>
+<tr>
+<td><code>officeace</code></td>
+<td>OfficeAce（华为 MaaS / 果办）</td>
+<td>华为云 OAuth PKCE</td>
+<td>余额 + 自动领取（<strong>无手动签到入口</strong>）</td>
+</tr>
+<tr>
+<td><code>accio</code></td>
+<td>Accio（阿里）</td>
+<td>浏览器回调</td>
+<td>余额（三类桶；<strong>无签到</strong>）</td>
+</tr>
+</tbody></table>
+<p>各渠道的能力与限制要点：</p>
+<ul>
+<li><strong>图片输入</strong>：<code>buddy</code> / <code>workbuddy</code> / <code>trae</code>（逐模型）/ <code>minimax</code> / <code>minimaxintl</code>（部分模型）/
+<code>accio</code>（逐模型）支持；<code>lobsterai</code>、<code>zcode</code> <strong>不支持</strong>；其余以模型声明为准。
+⚠️ <code>accio</code> 的图片通路<strong>已于 2026-10-14 实测接通</strong>（issue IKLR7V，上游原生收图
+<code>parts[].inline_data</code>，四色全对）；但它的 <code>multimodal: false</code> 模型<strong>不报错、而是静默
+忽略图片</strong>（会把答案<strong>幻觉</strong>出来），插件因此按<strong>逐模型</strong>声明模态（<code>false</code> 写 <code>['text']</code>），
+把这类模型挡在选择器之外。</li>
+<li><strong>思考档位</strong>：多数渠道支持，档位名按各渠道自己的定义下发；未声明的渠道不发送该字段。</li>
+<li><strong><code>loomy</code></strong> 是唯一用<strong>短信验证码</strong>登录、且<strong>不能自动续期</strong>的渠道。</li>
+<li><strong><code>zcode</code></strong> 的领取路径需要一次性验证参数，由本机浏览器环境产出（web 版需要
+chromium，桌面版用自带内核）。
+⚠ <strong>推理（对话）路径是否也要它，由服务端开关决定</strong>：官方 3.14.5 起
+<code>GET /api/v1/client/configs</code> 会下发 <code>captcha.skip_model_request</code>
+—— 当前实测是 <code>true</code>（<strong>不校验</strong>，故按最省的方式「先探后取」：
+不带验证头先发一发，被 <code>3007</code> 拒了才产）；一旦服务端翻成 <code>false</code>，
+插件会<strong>自动改为首发直接带上</strong>，不再白吃那发注定失败的往返
+（判据是三态：缺席 = 不知道 = 保持先探，见 <code>requiresCaptchaUpfront</code>）。</li>
+<li><strong><code>qoder</code> / <code>qodercn</code></strong> 共用同一套实现，差异仅在产品配置。</li>
+<li><strong><code>minimax</code> / <code>minimaxintl</code></strong> 共用同一套实现（<strong>唯一</strong>的 Anthropic Messages
+协议族渠道），差异仅在产品配置。⚠️ 两站的<strong>账号不互通、API 主机也不同</strong>，
+故它们是<strong>两个独立面板</strong> —— 各自在自己的面板里点「+ 新建账号」即可，
+<strong>无需选择站点</strong>（<code>minimax</code> → <code>agent.minimax.cn</code>，<code>minimaxintl</code> → <code>agent.minimax.io</code>）。
+✅ <strong>国际版已完成真机验证</strong>（2026-10-15）：登录、账号管理、模型目录、<strong>推理</strong>、
+<strong>每日签到</strong>、<strong>积分查询</strong>全部实测可用 —— 与国内站<strong>协议同形</strong>（认证同样只需
+<code>Authorization: Bearer</code>）。核验入口见 <code>tests/e2e/README.md</code> 的
+<code>test:e2e:minimaxintl</code>。
+⚠️ 国际站的<strong>目录端点当前是公开的</strong>（无 token、垃圾 token 都 200）⇒
+「能看到模型列表」<strong>不代表</strong>凭据有效（凭据证据看签到 / 积分 / 推理）。
+⚠️ 若国际站各端点<strong>同时</strong>报 <code>token is required</code> / <code>invalid signature</code>，
+请先怀疑<strong>上游故障</strong>而不是配置 —— 此时<strong>官方 mcode 客户端也会同样失败</strong>。</li>
+<li><strong><code>gemini</code>（必须过墙，见「出不去墙外服务」一节）</strong>：Google 的登录与接口全部
+在墙外。⚠️ 症状极具误导性：<strong>浏览器能打开授权页并点「同意」，面板里账号却一直
+不出现</strong> —— 因为<strong>浏览器读系统代理、插件进程不读</strong>。这不是 <code>client_secret</code> 或
+<code>redirect_uri</code> 配错（那个 bug 已被修掉，token 端点强制校验客户端身份）。</li>
+<li><strong><code>accio</code></strong> 登录走浏览器回调。⚠️ <strong>新建账号时必须先选登录区域</strong>（中国版  <code>www.accio-ai.com</code> / 国际版 <code>zh.accio.com</code>）：两个区域的<strong>登录页域名不同</strong>，
+而区域由服务端按账号下发、<strong>登录前无法自动判断</strong> ⇒ 选错会打开打不开的登录页，
+<strong>登录不会成功</strong>。区域会写进凭据，续期与推理按它选域名。
+⚠️ <strong>它没有签到按钮</strong> —— 每日积分由服务端在<strong>登录时</strong>发放（24 小时有效、
+<strong>不累积</strong>，未登录的那天不补），没有可调用的领取接口。面板上的积分按服务端下发的
+<strong>三类桶</strong>（每日 / 每月 / 推荐）分列显示，并给出每日额度的重置倒计时。
+⚠️ <strong>「刷新每日额度」入口尚未实现</strong>：它本质是<strong>重新登录既有账号</strong>，
+需要宿主侧新增一条 RPC（现有的「+ 新建账号」每次都会新造账号，拿它重登只会
+多出一个空账号而原账号额度不变）。<strong>当前要刷新请删除该账号后重新登录一次。</strong>
+⚠️ 模型<strong>倍率跨度极大</strong>（0.013 ~ 2.8，<strong>215 倍</strong>），故倍率直接写进模型展示名
+（<code>模型名 · x倍率</code>），选型时看名字即可。
+⚠️ <strong>图片输入未实测</strong>，面板会明确报「暂不支持图片输入」而不是静默丢掉。
+⚠️ <strong>该渠道不产生限流标记</strong>（也不会被限流探针测出东西），故「重测 / 重置」这组
+按钮对它<strong>整组不渲染</strong> —— 渲染出来只会是点不动的死控件。</li>
+</ul>
+<h3>一键领取积分</h3>
+<p>在对应面板标题栏点「<strong>一键领取积分</strong>」，插件会<strong>顺序</strong>处理该面板下的所有账号
+（顺序执行以避免并发请求），并<strong>逐账号显示结果与原因</strong>。</p>
+<p>⚠️ 汇总<strong>按单位分列</strong>，不跨量纲求和 —— <code>ZCode</code> 的额度单位是 <strong>token</strong>、其余渠道是
+<strong>积分</strong>，两者不可折算，因此显示成 <code>+100.00MToken, +100积分</code> 而不是加成一个数。</p>
+<h3>模型列表开关</h3>
+<p>每个 provider 的面板都有「<strong>显示列表</strong>」按钮，可逐个开关模型，控制它是否出现在
+对话框的模型选择器里（<strong>黑名单制</strong>，默认全部显示）。开关按 provider 隔离。</p>
+<h3>锁定永久积分</h3>
+<p><code>buddy</code> / <code>workbuddy</code> / <code>loomy</code> 提供「<strong>锁定永久积分</strong>」按钮，用来保住不会马上
+作废的积分。判定规则：距扣费截止不足 15 天的算<strong>临时</strong>（优先消耗），其余算永久。
+锁定后只消耗临时积分，用完则明确报错而不是偷偷烧掉永久积分。</p>
+<h3>出不去墙外服务（<code>gemini</code>，以及任何需要代理的环境）</h3>
+<p><code>gemini</code> 是本插件里<strong>必须过墙</strong>的渠道：令牌端点（<code>oauth2.googleapis.com/token</code>）、
+userinfo、Cloud Code 的配额与推理端点（<code>cloudcode-pa.googleapis.com</code>）全部在墙外。</p>
+<p><strong>典型症状</strong>：浏览器<strong>能</strong>打开授权页并点「同意」，回到面板却一直失败、账号列表里
+始终没有这个号；或账号在、但积分与对话全部失败。</p>
+<p><strong>为什么浏览器能用、插件不能用</strong>：浏览器读 <strong>Windows 系统代理（WinINET）</strong>，
+而插件跑在 Node 的 <code>fetch</code>（undici）上，它<strong>既不读系统代理、也不读
+<code>HTTP(S)_PROXY</code></strong>。这条差异是全部症状的根源。</p>
+<h4>两种配法（任选其一）</h4>
+<p><strong>① 给单个账号配出口代理（推荐）</strong></p>
+<p>在 Gemini 面板的账号卡片上点「<strong>代理</strong>」→ 填地址（<code>http://127.0.0.1:7897</code> /
+<code>socks5://…</code> / 带认证的 <code>http://user:pass@host:port</code>）→「测试连接」→ 保存。</p>
+<ul>
+<li>「测试连接」<strong>打的是 Google 自己的端点</strong>（不是通用的出口 IP 查询服务）：
+代理能通 <code>ip-api</code> 却被 Google 拒的情况很常见，用后者会产生<strong>假阳性</strong>。</li>
+<li>配好后该账号的<strong>登录、续期、积分、对话</strong>全部走这条出口，且<strong>每个账号可以
+配不同的代理</strong>。</li>
+<li>⚠️ 该配置只作用于 Gemini（与 <code>opencode</code> 的「代理」是<strong>两份独立配置</strong>，
+清掉互不影响）。</li>
+</ul>
+<p><strong>② 启动 dsh 之前导出环境变量</strong></p>
+<pre><code class="language-powershell"># PowerShell
+$env:HTTPS_PROXY = 'http://127.0.0.1:7897'
+$env:HTTP_PROXY  = 'http://127.0.0.1:7897'
+$env:NO_PROXY    = 'localhost,127.0.0.1,::1'
+dsh
+</code></pre>
+<p>⚠️ <strong>必须「导出为环境变量」</strong>。只打开系统代理开关（Windows 设置里的「使用代理
+服务器」）<strong>无效</strong> —— 那正是浏览器能用、插件不能用的原因。</p>
+<p>宿主 dsh 会在<strong>第一个插件加载前</strong>装一个全局代理分发器，所以这种配法对<strong>插件的全部
+请求</strong>生效（不只 Gemini），也<strong>不需要</strong>额外设置 <code>NODE_USE_ENV_PROXY</code>。</p>
+<h4>Node 版本差异（2026-10-18 本机实测）</h4>
+<p>若走 ①（账号代理）不受此表影响 —— 它走插件自己的分发器，与 Node 版本无关。
+下表说的是「裸 <code>fetch</code> 读环境变量」那条路：</p>
+<table>
+<thead>
+<tr>
+<th>Node</th>
+<th>仅设 <code>HTTPS_PROXY</code></th>
+<th>再加 <code>NODE_USE_ENV_PROXY=1</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>22.19</td>
+<td>❌ 不读</td>
+<td>❌ 不读</td>
+</tr>
+<tr>
+<td>24.21</td>
+<td>❌ 不读</td>
+<td>⚠️ 读，但失败后会反复重试，界面长时间无响应</td>
+</tr>
+<tr>
+<td>26.10</td>
+<td>❌ 不读</td>
+<td>✅ 可用</td>
+</tr>
+</tbody></table>
+<p>⇒ <strong>结论</strong>：这条「绕过」的路只在较新的 Node 上干净。优先用 ①。</p>
+<h4>报错文案</h4>
+<p>连不上时，插件会明确提示「疑似需要代理」并带上根因码（如
+<code>UND_ERR_CONNECT_TIMEOUT</code>），登录失败、续期失败、积分查询失败与对话失败四条腿
+都会给同一句指路文案 —— 不再是一句无信息量的 <code>fetch failed</code>。</p>
+<p>⚠️ 代理恢复后<strong>无需重登</strong>：凭据没被标成失效，后台续期会照常在下一轮把它接上。</p>
+<hr />
+<h2>聚合路由（<code>aggregate</code>）</h2>
+<p>同一个真实模型往往在<strong>多个渠道</strong>都能用（例如 DeepSeek V4.1 Flash 在 buddy、
+codearts、cline 等都有）。聚合路由把「同一个真实模型」在各渠道的条目<strong>归到一个
+规范名下</strong>，请求时自动挑一个渠道发出去。</p>
+<p><strong>解决什么</strong>：各家渠道送的免费额度<strong>有到期时间</strong>，用不完就作废。聚合层按
+「<strong>最快作废的额度优先用</strong>」自动排序，把临期积分先烧掉。</p>
+<p><strong>怎么用</strong>：</p>
+<ol>
+<li>在模型选择器里选 <strong><code>aggregate</code></strong> 分组；</li>
+<li>想<strong>不挑模型</strong>就选该分组下的 <strong><code>auto</code></strong> —— 它用<strong>所有参与轮换的渠道</strong>的全部模型当
+候选池（哪些渠道参与见下面「参与轮换的渠道」）；</li>
+<li>想<strong>指定模型</strong>就选该分组下的<strong>具体规范名</strong>（如 <code>Deepseek-V4.1-Flash</code>）。</li>
+</ol>
+<p>选中后模型名旁会附一个 <strong><code>· &lt;渠道&gt;</code></strong> 后缀，那是<strong>首选渠道</strong>（临期最早的那个）。
+⚠️ 它<strong>不是「本次实际发往的渠道」</strong> —— 真实历史由<strong>用量徽标</strong>显示。</p>
+<p><strong>自动切换</strong>：某个渠道失败时会换下一个候选重试，但只在<strong>还没吐出任何可见内容</strong>
+时才切换（已输出的内容收不回来，拼接会产生畸形回答）。</p>
+<p><strong>参与轮换的渠道</strong>：<code>buddy</code> / <code>workbuddy</code> / <code>loomy</code> / <code>codearts</code> / <code>zcode</code> /
+<code>lobsterai</code> / <code>trae</code> / <code>accio</code> / <code>officeace</code> 九家。其余渠道<strong>暂不参与</strong>（插件对
+它们的额度到期时刻没有可靠信息，宁可少一个候选，不可把未知当可用）—— 它们仍可
+<strong>直连</strong>正常使用。</p>
+<p>⚠️ <strong>真正决定「某渠道在不在轮换里」的是一张编译期清单</strong>
+（<code>src/aggregate-expiry.ts</code> 的 <code>WIRED_EXPIRY_PROVIDERS</code>），<strong>不是</strong>
+<code>src/aggregate-adapter.ts</code> 的 <code>AGGREGATE_CHANNELS</code>。上面这份名单就是按前者列的。
+只加 <code>AGGREGATE_CHANNELS</code> 是<strong>无效接线</strong>，且症状<strong>完全静默</strong>（零报错、零日志）。
+后果分两种，别只记住第一种：</p>
+<table>
+<thead>
+<tr>
+<th>该渠道的模型</th>
+<th>会发生什么</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>与已接入渠道<strong>共用规范名</strong></td>
+<td>它的候选<strong>出现在聚合面板里</strong>，但<strong>默认不参与轮换</strong>（标着「无临期积分 · 未参与」）⇒ 需要你<strong>逐条手工打开</strong></td>
+</tr>
+<tr>
+<td>是<strong>独有</strong>模型</td>
+<td>虚拟模型<strong>也在目录里</strong>（可被选中），同样默认不参与轮换、可逐条手工打开</td>
+</tr>
+</tbody></table>
+<p>⚠️ 上面第二行是 <strong>2026-10-15 的行为变更</strong>：升级前这类模型会被过滤掉、<strong>连聚合目录都进不去</strong>，
+于是「手工打开候选」之后你在模型选择器里<strong>仍然看不到它</strong>（打开白做）。
+现在改为<strong>目录身份与你的开关无关</strong>：模型始终在目录里，参不参与由每条候选自己的状态决定。
+若你选了一个「没有任何候选在轮换」的模型，报错会<strong>如实</strong>告诉你这一点（并给出面板路径），
+而不是把它藏起来。</p>
+<p>（真正拦下<strong>轮换候选</strong>的是 <code>src/aggregate-expiry.ts</code> 里那句「未接入 ⇒ <code>UNUSABLE</code>」
+短路，<strong>不是</strong>适配器自己那几处过滤 —— 后者管的是面板与元数据面。）</p>
+<h3>没有临期信息的渠道：默认不参与，可逐条打开</h3>
+<p>对那 7 家<strong>没有可靠到期时刻</strong>的渠道（<code>qoder</code> / <code>qodercn</code> / <code>cline</code> / <code>raccoon</code> /
+<code>minimax</code> / <code>gemini</code> / <code>opencode</code>），2026-10-15 起你可以在聚合面板里<strong>逐条手工打开</strong>
+它们的候选，打开后它们<strong>真的参与轮换</strong>（排在所有能算出临期的候选<strong>之后</strong> ——
+它们之间没有可比较的到期时间，那种混合顺序是<strong>正常</strong>的，不是缺陷）。</p>
+<ul>
+<li><strong>默认态是「不参与」</strong>：插件对它们的配额一无所知，默认放行会把失败留给你；</li>
+<li>顶部有 <strong>「拒绝非临期」</strong> 一键按钮，把所有没有临期折算的渠道<strong>恢复成默认不参与</strong>
+（已接入的九家<strong>不受影响</strong> —— 它们的手工打开是有意义的）；</li>
+<li>⚠️ <strong>没有「一键全部放行」</strong>：配额未知的渠道被批量放行会把失败留给你，
+故只提供逐条打开 + 一键恢复默认这一对操作。</li>
+</ul>
+<p>⚠️ 同一个账号的额度到期信息<strong>不会因为手工打开而变得可知</strong> —— 打开只是允许插件去<strong>尝试</strong>它。</p>
+<h3>候选顺序：按临期排序 / 按手工排序</h3>
+<p>面板顶部有一个两段式开关：</p>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>意思</th>
+<th>会自动刷新吗</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>排序：按临期</strong></td>
+<td>按「积分最快作废」的顺序（默认）</td>
+<td>✅ 面板打开期间<strong>每 2 分钟</strong>自动重查一次；该模式也是探测按钮，点它立即重查</td>
+</tr>
+<tr>
+<td><strong>排序：按手工</strong></td>
+<td>按你拖出来的顺序</td>
+<td>❌ 不自动重查（顺序由你决定）</td>
+</tr>
+</tbody></table>
+<ul>
+<li>两种顺序<strong>分别保存</strong>：切到手工拖好、再切回临期，切回手工时你排的顺序<strong>还在</strong>；</li>
+<li>手工模式下可<strong>拖动</strong>候选调整顺序（鼠标拖动手柄，<strong>松手即保存</strong> —— 不需要再点按钮）；</li>
+<li>手工序是<strong>严格序</strong>：你拖过的候选排在<strong>全部</strong>没拖过的之前，<strong>即使它临期更晚</strong> ——
+否则你的拖动会被临期值静默覆盖；</li>
+<li>没拖过的候选按「临期 ↑ → 倍率 ↑」追加在<strong>后面</strong>（新增的候选因此不会消失）。</li>
+</ul>
+<p>⚠️ <strong>「按临期」不是后台常驻定时刷新</strong>：它只在<strong>面板打开且处于该模式</strong>时每 2 分钟查一次
+（且标签页在后台时跳过）。关掉面板就不再查询 —— 插件没有为「排序展示」常驻的定时器。
+若你在渠道侧改了配置想立刻看到，点一次「排序：按临期」即可。</p>
+<p>同类陷阱已<strong>多次</strong>发生（<code>cline</code> 只进过 <code>AGGREGATE_CHANNELS</code>、<strong>从未</strong>进过白名单；
+<code>accio</code>、<code>officeace</code> 是先进行、后补白名单）。接新渠道时<strong>两处必须同改</strong>，
+另有第三处 <code>src/provider-expiry.ts</code> 的 <code>createProviderExpiry()</code> 一并跟进 ——
+后两者的运行期一致性由 <code>tests/unit/expiry-runtime-parity.spec.ts</code> 锁住。</p>
+<p>⚠️ <strong><code>zcode</code> 的额度是「按模型」分桶的</strong>，故它的可用性是<strong>逐模型</strong>判定的：
+赠送的 8M 实测分成 <code>GLM-5.3</code> 3M 与 <code>GLM-5.3-Flash</code> 5M 两个<strong>专属桶</strong>
+（上游在余额接口里下发 <code>capabilities: ["model:&lt;模型&gt;"]</code>）。某个模型烧光而另一个
+还有额度时，只会把<strong>烧光的那个模型</strong>在该账号上标记为当日用尽 ——
+另一个模型照常可用，不会因为「账号整体还有额度」而误派发到已尽的模型上。
+若账号另有<strong>不限定模型</strong>的通用赠送额度（如 1 亿 token），且它还有余额，
+则两个模型都仍可用（通用额度能承接它们）。</p>
+<p><strong>上下文窗口</strong>：聚合模型声明的是<strong>候选渠道里的最大值</strong>。同一个模型在 buddy /
+codearts 上都是 1M，那么 <code>aggregate</code> 下选它也声明 1M（与直连一致）。⚠️ 若某次
+请求恰好被路由到窗口更小的候选，由<strong>失败切换</strong>兜住（上游报超长 ⇒ 换下一个候选）。</p>
+<p><strong>思考档位</strong>：声明各渠道档位的<strong>并集</strong>（官方中文名），默认 <code>high</code> —— 与你选的
+档位会<strong>逐候选翻译</strong>到目标渠道（精确命中就原样下发，写法不同就就近落到同族，
+目标没有这一族就<strong>不下发</strong>该字段让它走自己的默认）。</p>
+<p>聚合有<strong>自己的</strong>设置面板（Jet Hub 左侧 rail 的「聚合」项），可逐条控制候选
+「是否参与轮换」（三态：参与 / 已拒绝 / 无临期积分·默认不参与），并提供
+「排序：按临期 / 按手工」开关与「拒绝非临期」一键恢复。它没有账号与凭据（复用各渠道的账号）。</p>
+<h3>⚠️ 模型选择器里为什么有<strong>两个</strong>「Auto」</h3>
+<p>选到「不挑模型」这一档时，选择器里会出现<strong>两条</strong>看起来同义的项：</p>
+<table>
+<thead>
+<tr>
+<th>选择器里显示为</th>
+<th>真实路由</th>
+<th>代码</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong><code>聚合（跨渠道临期优先）</code></strong> 组下的 <code>Auto（聚合 · 跨渠道）</code></td>
+<td><code>aggregate</code> / <code>auto</code></td>
+<td><code>src/aggregate-adapter.ts</code></td>
+</tr>
+<tr>
+<td><strong><code>Jet Hub 自动（临期优先）</code></strong> 组下的 <code>Auto（临期优先 · 整池）</code></td>
+<td><code>jet-hub-auto</code> / <code>auto</code></td>
+<td><code>src/auto-adapter.ts</code></td>
+</tr>
+</tbody></table>
+<p>后者是<strong>上一代实现</strong>（2026-10-06），前者是随后的重写（2026-10-07，<code>ba10f4f</code>）
+并<strong>泛化</strong>成「规范模型名 + 渠道候选 + auto」三者共用一套排序
+（<code>aggregate-core.ts</code>）。⚠️ 旧 auto 的<strong>路由注册从未下线</strong> —— <code>registerAutoLlm</code>
+在 <code>ba10f4f</code> 前后都在 <code>src/index.ts</code> 里；<code>ba10f4f</code> 删掉的是它的<strong>用量徽标接线</strong>
+（<code>lastDispatch</code> / <code>lastExpiryAt</code> 等字段与 <code>usage.badge</code> 改写），由 <code>2b8867c</code>
+（2026-10-08「恢复旧 auto 的用量徽标」）补回，<strong>两代因此并存至今</strong>。
+<code>src/index.ts</code> 的接线注释里直接称它为「<strong>旧 auto</strong>」。</p>
+<p>⚠️ <strong>日常请优先用 <code>聚合（跨渠道临期优先）</code></strong> —— 它是活跃维护线，两者<strong>至少有四处</strong>实质差异：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>aggregate/auto</code></th>
+<th><code>jet-hub-auto/auto</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>候选渠道</td>
+<td><strong>9 家</strong>（<code>WIRED_EXPIRY_PROVIDERS</code>）</td>
+<td><strong>5 家</strong>（<code>AUTO_PROVIDERS</code> 硬编码：<code>codearts</code> / <code>loomy</code> / <code>zcode</code> / <code>buddy</code> / <code>workbuddy</code>）</td>
+</tr>
+<tr>
+<td>尊重「拒绝轮换」开关</td>
+<td>✅</td>
+<td>❌ 不读拒绝表</td>
+</tr>
+<tr>
+<td>「收下请求却零输出」目标级冷却</td>
+<td>❌ 无</td>
+<td>✅ 有（<code>zero-output-guard.ts</code>，issue IKJW31）</td>
+</tr>
+<tr>
+<td><strong>候选级失败切换</strong></td>
+<td>✅ 某渠道失败时按候选序<strong>换下一个重试</strong></td>
+<td>❌ <strong>不换</strong>：上游报错即整轮失败（只对「零输出」这一种情形改道）</td>
+</tr>
+</tbody></table>
+<p>⚠️ <strong>模型黑名单关不掉旧 auto</strong>：它的 <code>listModels()</code> 无条件返回这一个模型、不套用户黑名单
+（黑名单针对的是各渠道的真实模型），且 <code>jet-hub-auto</code> <strong>不在</strong> <code>provider-registry.ts</code>
+里 ⇒ 设置页里连它的面板都没有。<strong>忽略它即可</strong>，选聚合那条。</p>
+<p>⚠️⚠️ 但这<strong>不等于「无法隐藏」</strong>：<code>jet-hub-auto</code> 的 <code>ctx.llm</code> 注册路由<strong>参与「已失效模型
+剔除」</strong>（<code>auto-adapter.ts</code> 注册时没传 <code>pruning</code>，而缺省即参与 —— 见
+<code>llm-register-compat.ts</code> / <code>dead-model-store.ts</code>；对照 <code>src/index.ts</code> 对 <code>aggregate</code>
+与对 <code>jet-hub-auto</code> 的<strong>设置页表项</strong>都是显式 <code>{ enabled: false }</code>）。
+一旦 <code>dead-models.json</code> 里出现 <code>jet-hub-auto/auto</code> 记录，它就会从模型选择器消失，
+而清除入口 <code>model.clearDead</code> 位于<strong>它没有的那个面板</strong>里 ⇒ <strong>没有界面能恢复</strong>
+（只能手改 <code>dead-models.json</code> 或等 TTL 过期）。
+⚠️ 生产可达性<strong>未证实</strong>：已知写入口需在该路由迭代中抛出「模型已下架」类错误，
+而 auto 自身不走那条路径（真实用户盘里也只有一条 <code>aggregate/m1</code> 历史记录）。
+⇒ 机制真实、当下<strong>侥幸</strong>未触发，按「<strong>脆弱的绿</strong>」对待。</p>
+<p>（<code>src/aggregate-adapter.ts</code> 模块头的分工表里，「渠道内选模型 = 按倍率挑最便宜」与
+「用途 = 不挑模型，谁临期烧谁」两格写的是「同左」；⚠️ 但**「候选来源」那格并不相同**
+—— 旧 auto 是「5 个渠道的所有模型」，聚合是「所有渠道的所有模型」。
+上表列的是<strong>最要紧</strong>的四处，不是穷举：上下文窗口的声明口径、用量徽标的数据源、
+候选粒度（聚合按 <code>(渠道, realId)</code> 且同渠道内可回落下一个模型，旧 auto 每渠道只挑一个）
+也都不同。是否合并/下线旧 auto 涉及把 <code>zero-output-guard.ts</code> 移植过去，
+<strong>属行为变更</strong>，留待维护者定夺。）</p>
+<hr />
+<h2>本机 OpenAI 网关</h2>
+<p>插件启动后会在 <code>127.0.0.1:8326</code> 提供<strong>两套</strong>标准 OpenAI 接口，供 Pi、Continue、
+Cline、OpenCode、Codex 或其他兼容客户端使用。网关复用 Jet Hub 已登录账号和现有
+provider 适配器，不把上游凭据复制到客户端。</p>
+<pre><code>GET  http://127.0.0.1:8326/v1/models
+GET  http://127.0.0.1:8326/v1/reasoning-efforts   ← 思考档位对照表
+POST http://127.0.0.1:8326/v1/chat/completions    ← OpenAI Chat Completions
+POST http://127.0.0.1:8326/v1/responses           ← OpenAI Responses API
+</code></pre>
+<p>⚠️ <strong>两个端点同时可用，没有「格式开关」</strong>：客户端用哪一套协议，由它自己请求的
+路径决定。</p>
+<p>⚠️ 上面那两个地址里的 <strong>host 与端口都可被环境变量改掉</strong>
+（<code>DSH_OPENAI_GATEWAY_HOST</code> / <code>DSH_OPENAI_GATEWAY_PORT</code>）；设置页里的
+「API 请求地址」显示的是<strong>实际监听地址</strong>，照它抄即可。</p>
+<h3>容器化部署（Docker / Compose）</h3>
+<p>默认只绑 <code>127.0.0.1</code>，因此<strong>端口映射对网关无效</strong>：容器里 <code>curl 127.0.0.1:8326</code>
+能通只是假象，docker-proxy 与同网络的其它容器走的是容器桥接 IP（<code>eth0</code>），
+那个地址上没有监听，于是宿主侧看到 <code>Connection reset by peer</code>
+（对照：Web 端口绑的是容器 IP，所以映射可用）。</p>
+<p>修法是让网关绑<strong>容器自身的接口地址</strong>：</p>
+<pre><code class="language-yaml">environment:
+  - DSH_OPENAI_GATEWAY_ENABLED=1
+  - DSH_OPENAI_GATEWAY_HOST=172.21.0.8   # 容器自身 IP：hostname -i 或 ip -4 addr show eth0
+  - DSH_OPENAI_GATEWAY_PORT=8326
+</code></pre>
+<pre><code class="language-console">$ docker exec dsh ss -tlnp | grep 8326
+LISTEN  172.21.0.8:8326     # 绑上桥接 IP 后，端口映射才可达
+</code></pre>
+<p>⚠️ <strong>不许填 <code>0.0.0.0</code> / <code>::</code> 这类通配地址</strong>：会被显式拒绝并在启动前报错
+（dsh 本体的 <code>--host</code> 也是同一姿态）。绑通配等于把网关暴露给整个网络，
+真正的隔离只剩 API Key —— 而本网关承担的是「用你已登录的账号发请求」。
+容器场景填容器自身 IP 即可。</p>
+<p>⚠️ <strong>暴露面不止「同一容器网络内的其它容器」，还包括宿主</strong>：经端口映射（<code>-p</code>）
+或 bridge 网关，宿主本身就能连到该端口。跨 bridge 网络的容器才被隔离。
+设置页里绑了非回环地址时会显示这条提示；不打算对外提供时请保持默认
+<code>127.0.0.1</code>（或删除该环境变量）。</p>
+<h3>拿到地址与密钥</h3>
+<p>鉴权使用 <code>Authorization: Bearer &lt;网关 API Key&gt;</code>。</p>
+<p>⚠️ 因此<strong>在浏览器地址栏直接打开这些地址会返回 401</strong>（没有带 Bearer 头）——
+这是预期行为，不是网关没启动。请用客户端或 <code>curl</code> 带上传头访问。</p>
+<p>优先从 <code>DSH_OPENAI_GATEWAY_API_KEY</code> 读取；未设置时，插件首次启动会在 DSH home 的
+<code>openai-gateway/api-key</code> 生成并持久化随机密钥，重启后保持不变。</p>
+<p>设置页里的开关状态存在 <code>$DSH_HOME/jet-hub/state.json</code> 的 <code>gatewayEnabled</code> 字段
+（缺省为启用）。它<strong>不进</strong>账号备份/恢复。</p>
+<h3>关闭网关</h3>
+<p>网关是<strong>旁路功能</strong>：它启动失败或被关闭，都不影响插件其余功能（登录、积分、模型
+目录照常）。三种关闭方式：</p>
+<table>
+<thead>
+<tr>
+<th>方式</th>
+<th>做法</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>环境变量</td>
+<td><code>DSH_OPENAI_GATEWAY_ENABLED=0</code>（<strong>完全不启动</strong>，连 API Key 文件都不生成）</td>
+</tr>
+<tr>
+<td>设置页开关</td>
+<td>关掉后不再监听</td>
+</tr>
+<tr>
+<td>改端口</td>
+<td><code>DSH_OPENAI_GATEWAY_PORT</code> 填非法值会记录错误并跳过启动，<strong>不会</strong>静默改用其它端口</td>
+</tr>
+<tr>
+<td>改地址</td>
+<td><code>DSH_OPENAI_GATEWAY_HOST</code> 填通配地址（<code>0.0.0.0</code> / <code>::</code>）同样记录错误并跳过启动 —— <strong>不会</strong>静默绑到全部网卡</td>
+</tr>
+</tbody></table>
+<h3>请求体上限与 keep-alive</h3>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>值</th>
+<th>超限时的行为</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>请求体</td>
+<td><strong>300 MiB</strong></td>
+<td><code>HTTP 413</code> + <code>invalid_request_error</code> / <code>request_too_large</code>，响应体里带上限值</td>
+</tr>
+<tr>
+<td>空闲连接（keep-alive）</td>
+<td><strong>120 秒</strong></td>
+<td>服务端发 FIN；此后复用该连接会得到 <code>Connection reset</code></td>
+</tr>
+</tbody></table>
+<p>⚠️ 每轮把全量历史重新回传的客户端（Codex 等），历史里并入大截图后可能撞上 413：
+新建会话、或删掉那条带大图的回合即可恢复。</p>
+<h3>安全边界</h3>
+<ul>
+<li><strong>默认</strong>只绑定 <code>127.0.0.1</code>，且<strong>拒绝</strong>通配地址（<code>0.0.0.0</code> / <code>::</code>）。
+只有容器/端口映射这类「客户端不在同一网络命名空间」的场景才需要改
+<code>DSH_OPENAI_GATEWAY_HOST</code>，且应填<strong>具体接口地址</strong>（如容器自身 IP）而不是通配。
+⚠️ 改了之后暴露面<strong>包含宿主</strong>（端口映射/bridge 网关都能连到），
+同机与同容器网络的其它用户或进程也能连到该端口 —— 真正的隔离靠 API Key，
+不要把它配置进任何浏览器端工具或扩展。</li>
+<li>密钥以明文写在 <code>$DSH_HOME/openai-gateway/api-key</code>。POSIX 下的 <code>0600</code> 权限在
+<strong>Windows 上不生效</strong>，多用户机器请改用 <code>DSH_OPENAI_GATEWAY_API_KEY</code> 环境变量。</li>
+</ul>
+<hr />
+<h2>用量徽标与 Token 用量</h2>
+<h3>用量徽标</h3>
+<p>会话输入区右侧、模型选择器左边有一枚薄胶囊，显示<strong>当前渠道一共有多少可用额度</strong>；
+点开是完整浮层（逐账号明细 / 订阅窗口 / 刷新 / 签到 / 显示偏好）。
+只在选中本插件渠道的模型时渲染，非本插件的模型<strong>不渲染、不发请求</strong>。</p>
+<p>折叠态按 <strong><code>渠道 • 读数</code></strong> 两段显示，例如：</p>
+<pre><code>CodeBuddy (腾讯) • 2434.96积分
+CodeArts (华为云) • 9499.84积分
+ZCode (智谱) • 94.54MToken
+</code></pre>
+<ul>
+<li><strong>默认显示余额</strong>（一共能用的额度）；可在浮层里切换成「优先订阅」或「只看积分」。</li>
+<li><strong>多账号只显示一个数字</strong>（所有启用账号的余额合计），不会变成一长串。</li>
+<li>账号读不到时合计会<strong>静默少报</strong>，故胶囊会挂一个<strong>警示角标</strong>（<code>441.78积分 ⚠</code>）。</li>
+<li>浮层里逐账号列表<strong>按余额降序</strong>，超过 5 个折叠成「展开其余 N 个」。</li>
+</ul>
+<h3>Token 用量</h3>
+<p>点 Jet Hub 页头的「<strong>Token 用量</strong>」按钮查看。数据分两份：</p>
+<table>
+<thead>
+<tr>
+<th>数据</th>
+<th>位置</th>
+<th>回答的问题</th>
+<th>重启后</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>实时明细 + 汇总树</td>
+<td>进程内存（上限 500 条）</td>
+<td>每一笔长什么样、这次会话花了多少</td>
+<td>清空</td>
+</tr>
+<tr>
+<td>历史日聚合</td>
+<td><code>~/.dsh/jet-hub/token-ledger.json</code></td>
+<td>本周 / 本月用了多少</td>
+<td><strong>保留</strong>（按 UTC+8 日界，90 天）</td>
+</tr>
+</tbody></table>
+<p>在历史图表中点选某一天并展开，可删除该日的历史累计。删除前会二次确认，只移除该日聚合，不影响实时明细、其他日期或账号设置；之后该日的新请求会重新累计。</p>
+<ul>
+<li><strong>计数是 wire 口径</strong>：上游 usage 报什么记什么，不做本地估算。</li>
+<li><strong>总处理量</strong> = 未命中缓存输入 + 缓存命中输入 + 输出；输出已含思考 token，缓存写入另列且不重复计入。不同渠道价格不同，因此这里不把 token 数冒充账单金额。</li>
+<li>没收到 usage（失败 / 中断）显示 <code>—</code>，与真实的 <code>0</code> <strong>严格区分</strong>。</li>
+<li>输出速率（tok/s）的分子含思考 token；汇总显示算术均值及完整样本的 P50/P90 估值。</li>
+<li>日聚合文件升级到 schema v2 增加 TPS 对数直方图；旧 v1 数据照常读取（计数全保留）。⚠️ <strong>升级前已累计过「输出速率样本」的日期不会显示 P50/P90</strong> —— 判据要求「直方图样本数 = 累计样本数」，而旧桶的 <code>tpsCount</code> 在升级前就已累加、直方图为空，两者之差恒定 ⇒ 该日期在 90 天保留期内一直无分位数（<code>avgTps</code> 均值仍照常显示）。完全在 v2 之后累计满样本的日期正常显示；升级前存在但<strong>从未有过速率样本</strong>的日期（如当天全是失败请求）也会正常显示。</li>
+</ul>
+<hr />
+<h2>配置项</h2>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>位置</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>账号池</td>
+<td><code>$DSH_HOME/jet-hub/state.json</code></td>
+<td>账号、有效期、限流标记、模型黑名单、provider 顺序</td>
+</tr>
+<tr>
+<td>网关开关</td>
+<td>同上，<code>gatewayEnabled</code></td>
+<td>缺省启用</td>
+</tr>
+<tr>
+<td>供应商显示顺序</td>
+<td>同上，<code>providerOrder</code></td>
+<td>纯展示偏好，拖动行调整</td>
+</tr>
+<tr>
+<td>永久积分锁定</td>
+<td><code>$DSH_HOME/jet-hub/*.json</code>（独立文档）</td>
+<td><strong>不与账号池同放</strong> —— 避免多 profile 互相覆盖</td>
+</tr>
+<tr>
+<td>Token 账本</td>
+<td><code>~/.dsh/jet-hub/token-ledger.json</code></td>
+<td>历史日聚合</td>
+</tr>
+</tbody></table>
+<h3>常见环境变量</h3>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>DSH_HIDE_MODELS_WITHOUT_ACCOUNT</code></td>
+<td>关闭</td>
+<td>设为真值时，<strong>没有已登录账号的渠道</strong>在模型选择器里整体隐藏</td>
+</tr>
+<tr>
+<td><code>DSH_OPENAI_GATEWAY_ENABLED</code></td>
+<td><code>1</code></td>
+<td>设为 <code>0</code> / <code>false</code> / <code>off</code> / <code>no</code> 时完全不启动网关</td>
+</tr>
+<tr>
+<td><code>DSH_OPENAI_GATEWAY_HOST</code></td>
+<td><code>127.0.0.1</code></td>
+<td>网关监听地址。容器/端口映射场景填<strong>容器自身 IP</strong>（<code>hostname -i</code>）；填 <code>0.0.0.0</code> / <code>::</code> 等通配地址会被拒绝并跳过启动</td>
+</tr>
+<tr>
+<td><code>DSH_OPENAI_GATEWAY_PORT</code></td>
+<td><code>8326</code></td>
+<td>网关监听端口</td>
+</tr>
+<tr>
+<td><code>DSH_OPENAI_GATEWAY_API_KEY</code></td>
+<td>自动生成</td>
+<td>网关 Bearer 密钥</td>
+</tr>
+<tr>
+<td><code>DSH_REASONING_LOOP_GUARD</code></td>
+<td>开启</td>
+<td>思考死循环守卫总开关</td>
+</tr>
+<tr>
+<td><code>DSH_REASONING_LOOP_AUTO_RESUME</code></td>
+<td>开启</td>
+<td>中止后是否自动补一句「继续」并重跑</td>
+</tr>
+<tr>
+<td><code>DSH_REASONING_LOOP_AUTO_RESUME_MAX</code></td>
+<td><code>2</code></td>
+<td>连续自动续跑上限（最大 <code>10</code>）</td>
+</tr>
+<tr>
+<td><code>DSH_TRAE_MAX_COMPLETION_TOKENS</code></td>
+<td><code>64000</code></td>
+<td>TRAE 单次输出上限（设 <code>0</code> 关闭收敛）</td>
+</tr>
+</tbody></table>
+<p>更多 provider 专属变量（如 <code>DSH_ZCODE_INTERNAL_CARRIER</code>、
+<code>DSH_TRAE_ROTATE_MACHINE_ID</code> 等）见内部文档。</p>
+<hr />
+<h2>账号备份与迁移</h2>
+<p>Jet Hub 设置页底部的<strong>备份</strong>区提供导出 / 导入，用于两种情况：<strong>换 DSH 版本时整体迁移</strong>，
+以及<strong>从别处单独搬一个账号进来</strong>。</p>
+<p>备份文件是<strong>自包含</strong>的 JSON（账号索引 + 凭据原文 + 模型黑名单 + 永久积分锁定表），
+与 DSH 版本无关 —— 导入时按<strong>当前版本</strong>的存储契约重建，因此天然跨版本。</p>
+<ul>
+<li><strong>加密在浏览器侧完成</strong>（PBKDF2 + AES-GCM），RPC 只收发明文载荷，明文与口令
+都不经过宿主持久化与日志。可选加密，不勾选即导出明文。</li>
+<li>账号凭据、<code>refresh_token</code> 都在文件里，<strong>等同于明文密钥</strong>，请自行妥善保管。</li>
+<li>⚠️ <strong>不含的就是本机偏好</strong>：备份只搬账号与凭据，<strong>不搬</strong>本机 OpenAI 网关开关、
+用量徽标偏好、自动签到记账等本机状态（导入时它们保持当前值，不会被备份覆盖）。
+账号条目上的字段（含 OpenCode 的 <code>opencodeProxy</code> / 指纹代次，以及 Gemini 的
+<code>geminiProxy</code>）则原样随快照往返。</li>
+</ul>
+<h3>导出：可以只导出选中的账号</h3>
+<p>导出弹窗列出当前账号池并可<strong>逐个勾选</strong>（<code>backup.export</code> 的 <code>accountIds</code>），
+默认「全部账号」。只导一个账号时文件名会带上该账号 id（<code>dsh-codearts-backup-buddy-xxxx-日期.json</code>），
+避免被误当成整份备份收着。</p>
+<p>⚠️ <strong>过滤只作用于 <code>accounts</code> 与 <code>credentials</code> 两个字段</strong>：模型黑名单与永久积分锁定表
+仍按<strong>全量</strong>写出。这样「只导一个账号」的产物依旧是<strong>一份可整体还原的自包含快照</strong> ——
+让过滤只承担一种语义，两条路径就不会互相污染。</p>
+<h3>导入：两种模式（<code>replace</code> / <code>merge</code>）</h3>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>语义</th>
+<th>用于</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>replace</code>（默认）</td>
+<td><strong>整体替换</strong>账号池与模型黑名单，还原快照</td>
+<td>「恢复」按钮、换 DSH 版本后整体迁移</td>
+</tr>
+<tr>
+<td><code>merge</code></td>
+<td><strong>只追加</strong>：已存在的账号一律跳过，<strong>不碰</strong>模型黑名单与锁定表</td>
+<td>「单独导入一个账号」、从别人的备份里挑账号</td>
+</tr>
+</tbody></table>
+<p>导入弹窗可勾选要落地哪些账号，并选择模式。</p>
+<p>⚠️ <strong><code>merge</code> 下裁剪发生在发请求之前</strong>（<code>plugin-src/client/backup-payload.js</code>）。
+判重虽然在后端，但后端只知道「这份载荷里有哪些账号」，不知道用户勾了哪几个；
+不先裁剪的话，从整份备份里只勾一个账号，其余账号仍会被追加，更糟的是备份里那些
+<strong>不在勾选范围内</strong>的 <code>credentialRef</code> 可能已被本机现有账号占用，写进去等于
+<strong>覆盖现有账号的凭据</strong>，与「只增加不覆盖」的承诺相反。故裁剪必须同时裁掉
+<code>accounts</code>、<code>credentials</code> 与 <code>disabledModels</code> 三处。</p>
+<h3>⚠️ 合并导入判重的三层口径（缺一层就会堆出重复账号）</h3>
+<p><code>src/backup.ts</code> 的 <code>importBackup({ mode: 'merge' })</code> 依次判：</p>
+<ol>
+<li><strong>池里已有的 <code>id</code></strong> —— 账号的唯一键；</li>
+<li><strong>池里已有的身份</strong>（<code>provider:</code> + 凭据里的身份字段，见下表）；</li>
+<li><strong>备份文件内部重复的 <code>id</code></strong> —— 同一份文件手工编辑后可能出现两条同 id。</li>
+</ol>
+<p>⚠️ <strong>只按 <code>id</code> 判重是不够的，第 2 层才是关键</strong>：插件自己登录时 <code>id</code> 由 <code>shortId()</code>
+<strong>随机</strong>生成（<code>buddy-a1b2c3d4</code>），而从第三方文件转换来的 id 是<strong>确定性哈希</strong>
+（见下节）。同一个人因此有两套 id，只比 id 会把他重复加进池里 —— 而用户在
+「从别人的备份里挑账号」时，最常见的情形恰恰是「这个号我已经手登过了」。</p>
+<p>⚠️ <strong>身份字段逐 provider 对齐</strong>（漏一个字段，那个 provider 的「同一个号我已手登过」
+场景就<strong>必然</strong>多一条重复账号）：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>哪些 provider 的凭据里有</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>user_id</code></td>
+<td>CodeBuddy / WorkBuddy / LobsterAI / Raccoon / ZCode</td>
+</tr>
+<tr>
+<td><code>uid</code></td>
+<td>Qoder（含中国版）/ TRAE</td>
+</tr>
+<tr>
+<td><code>userid</code></td>
+<td>Loomy</td>
+</tr>
+<tr>
+<td><code>account_id</code></td>
+<td>Cline / MiniMax</td>
+</tr>
+<tr>
+<td><code>sub</code></td>
+<td>Gemini（OIDC <code>sub</code>；<strong>不取 <code>email</code></strong> —— 它会随改邮箱而变）</td>
+</tr>
+<tr>
+<td><code>api_key</code></td>
+<td>OpenCode（<strong>仅账号槽</strong>）</td>
+</tr>
+</tbody></table>
+<p>⚠️ <strong>Gemini 只认 <code>sub</code>，不认 <code>email</code></strong>：两者都在它的凭据里，但 <code>sub</code> 是 OIDC 的
+<strong>稳定主体标识</strong>（换邮箱、改昵称都不变，上游就拿它当账号 id），而 <code>email</code> 会随用户
+改邮箱而变 —— 拿它判重会让同一个账号在改邮箱后多出一条重复账号。</p>
+<p>⚠️ <strong>OpenCode 的匿名通道要排除</strong>：它的凭据只有 <code>api_key</code>，而匿名通道的 <code>api_key</code>
+恒为字面量 <code>public</code> —— 全部匿名槽共用一个值。若拿它当身份，用户刻意添加的
+<strong>第二条匿名通道会被判成「已存在」而拒绝导入</strong>（「多条匿名通道各走各的出口」
+是上游明确提供的能力）。故匿名槽不产生身份，退回按 <code>id</code> 判重。</p>
+<p>⚠️ <strong>轮换令牌（<code>access_token</code> / <code>refresh_token</code>）不能当身份</strong>：它们每次续期都会变，
+拿来判重会让续期后的同一账号被判成新账号。</p>
+<p>⚠️ <strong><code>id</code> 与身份都可能判不出来</strong>：凭据缺失/损坏时按「无法判断」跳过该条，
+不让一次判重失败阻断整体导入。</p>
+<h3>⚠️ 第三方账号列表可以直接导入（自动转换）</h3>
+<p>很多用户手上的是<strong>别的工具</strong>（账号池 / 卡号池脚本、IDE 本地缓存导出）产生的
+CodeBuddy 账号列表，而不是本插件备份。两者结构完全不同：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>第三方账号列表</th>
+<th>本插件备份</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>顶层</td>
+<td><strong>裸数组</strong> <code>[ {...} ]</code>（或 <code>{ accounts / data / items / list: [...] }</code>）</td>
+<td>对象 <code>{ format, version, ... }</code></td>
+</tr>
+<tr>
+<td>格式标记</td>
+<td>无</td>
+<td><code>format: 'dsh-codearts-auth/backup'</code></td>
+</tr>
+<tr>
+<td>凭据</td>
+<td>账号对象里<strong>直接带</strong> <code>access_token</code> / <code>refresh_token</code></td>
+<td>独立 <code>credentials</code> 字典（ref → 凭据 JSON <strong>原文字符串</strong>）</td>
+</tr>
+<tr>
+<td>账号索引</td>
+<td><code>id</code> 是 uid 或工具自己的编号</td>
+<td><code>accounts[]</code>，<code>id</code> 形如 <code>buddy-a1b2c3d4</code></td>
+</tr>
+</tbody></table>
+<p>直接把它丢给「恢复」只会得到「该备份文件里没有账号」—— 因为取不到 <code>accounts</code>。
+故选中这类文件时会<strong>自动识别并转换</strong>（<code>plugin-src/client/backup-convert.js</code>），
+转换结果显示在弹窗里供核对，并<strong>默认落到 <code>merge</code> 模式</strong>（别人的新号，避免误覆盖本机账号）。</p>
+<p>⚠️ <strong>转换只改结构，不改写令牌</strong>：<code>access_token</code> / <code>refresh_token</code> 原样搬运。
+其余字段以「本机一个真实可用的 CodeBuddy 凭据」为基准对齐：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>来源</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>expires_at</code></td>
+<td>原值（<strong>毫秒</strong>时间戳），统一成字符串毫秒</td>
+</tr>
+<tr>
+<td><code>refresh_expires_at</code></td>
+<td>优先 <code>auth_raw</code> 的 <code>refreshExpiresIn - expiresIn</code> 差值补算，退回 refresh_token 的 JWT <code>exp</code></td>
+</tr>
+<tr>
+<td><code>domain</code></td>
+<td><strong>access_token 的 JWT <code>iss</code> 主机名</strong>（它会被当作 <code>X-Domain</code> 头发出去）</td>
+</tr>
+<tr>
+<td><code>user_id</code></td>
+<td>access_token 的 JWT <code>sub</code></td>
+</tr>
+<tr>
+<td><code>token_type</code> / <code>account_type</code></td>
+<td>原值，缺省 <code>Bearer</code> / <code>personal</code></td>
+</tr>
+<tr>
+<td><code>enterprise_id</code></td>
+<td>缺省 <code>''</code>（个人版为空串，与真实凭据一致）</td>
+</tr>
+</tbody></table>
+<p>⚠️ <strong>provider 按 JWT <code>iss</code> 的主机名分派</strong>：含 <code>workbuddy</code> → 国际版，否则 → <code>buddy</code>。
+两套 provider 是<strong>不同路由</strong>，认错会让凭据发到错误的端点。</p>
+<p>⚠️ <strong>账号 id 由 uid 经 FNV-1a 哈希确定性生成</strong>（<code>stableShortId</code>），与插件自己登录
+生成的形式一致。这样<strong>同一份文件导入两次，第二次会全部被判为「已存在」而跳过</strong>，
+而不是堆出两份账号。但 id 判重挡不住「同一个人的账号已用随机 id 登录在本机」——
+那正是靠上文第 2 层的身份字段判重。</p>
+<p>⚠️ <strong>不写 <code>scope</code></strong>：真实凭据里有它，但插件<strong>从不读取</strong> <code>scope</code> 发请求
+（只在续期时原样带回），而第三方文件里也没有 —— 与其猜一个可能不准的值，不如省略。</p>
+<h3>⚠️ 合并导入只写「真正要新增的账号」的凭据</h3>
+<p><code>merge</code> 模式下<strong>绝不回写备份里其余凭据</strong>（含各 provider 的默认单凭据 ref）。
+<code>replace</code> 模式才按字典逐条写入 —— 备份文件里可能含账号池之外的独立凭据 ref，
+导出时一并纳入，导入时同样还原。</p>
+<p>⚠️ 写入顺序是<strong>先凭据、后账号池</strong>：账号池写入成功后门控（<code>hasLoggedInAccount</code>）
+与黑名单立即反映新状态；凭据写入中途失败（非法 ref 等）只跳过该条、不中断整体。</p>
+<p>⚠️ <strong>模式必须取白名单</strong>（<code>req?.mode === 'merge' ? 'merge' : 'replace'</code>），
+不能把请求里的任意字符串透传下去：未知值会被 <code>?? 'replace'</code> 静默当成整体替换 ——
+那时用户以为只是「加一个账号」，实际账号池被清空，属于<strong>不可逆的数据损失</strong>。</p>
+<h3>测试</h3>
+<ul>
+<li><code>tests/unit/backup.spec.ts</code>（44 条）—— 选择性导出、合并导入三层判重、
+<code>merge</code> 不回写其余凭据、<code>replace</code> 兼容旧行为、各 provider 的身份字段覆盖度；</li>
+<li><code>tests/unit/backup-payload.spec.ts</code>（13 条）—— 载荷裁剪与账号摘要；</li>
+<li><code>tests/unit/backup-convert.spec.ts</code>（28 条）—— 第三方列表识别与转换；</li>
+<li><code>tests/unit/account-pool.spec.ts</code> 的 <code>mergeAccounts</code> 段（6 条）—— 只追加、
+不改黑名单与锁定、坏条目归一化、文件内重复 id。</li>
+</ul>
+<h3>⚠️ 与上游同步（2026-10-02）</h3>
+<p>本章功能已随上游 62 个提交（新增 OpenCode provider、本机 OpenAI 网关、用量徽标、
+自动签到、供应商开关）重新落地：只有 <code>plugin-src/client/jet-hub.js</code> 的 import 块
+需要手工合并，<code>BackupPanel</code> 与 <code>src/backup.ts</code> 上游未改动。唯一的适配点是
+<strong>OpenCode 的身份字段</strong>（见上表与匿名槽说明）。细节与反向验证记录见 <code>AGENTS.md</code>
+的「上游同步记录」一节。</p>
+<p>⚠️ 已做<strong>反向验证</strong>（2026-09-30）：禁用身份判重 → 1 条变红；让 <code>merge</code> 回写全部
+凭据 → 3 条变红；<code>mergeAccounts</code> 去掉文件内去重 → 1 条变红。</p>
+<h2>开发</h2>
+<pre><code class="language-sh">pnpm test          # 单元测试（快速，无网络，全部 mock）
+pnpm typecheck     # 只做类型检查
+pnpm build:all     # 完整构建（宿主 tsc + 资源拷贝 + 客户端 esbuild）
+</code></pre>
+<h3>构建</h3>
+<ul>
+<li><code>pnpm build</code> — 用 tsc 将 <code>src/</code> 编译到 <code>lib/</code>。插件<strong>宿主侧</strong>入口是 <code>lib/index.js</code>。</li>
+<li><code>pnpm build:client</code> — 用 esbuild 将 <code>plugin-src/client/</code> 打包为
+<code>lib/client/jet-hub.js</code>（Jet Hub 设置页的客户端 bundle）。</li>
+<li><code>pnpm build:all</code> — 依次执行上述步骤，是完整的构建。</li>
+<li><code>pnpm typecheck</code> — 只做类型检查，不产出文件。</li>
+</ul>
+<p><code>lib/</code> 已被 gitignore，因此构建是安装或运行前的必需步骤。</p>
+<h3>E2E 测试</h3>
+<p>E2E 探针<strong>按 provider 分列</strong>（如 <code>pnpm test:e2e:codearts</code>、<code>pnpm test:e2e:buddy</code>、
+<code>pnpm test:e2e:loomy</code>），<strong>均有闸门、默认全部跳过</strong> —— 需要显式设置对应环境变量
+（部分还需 <code>..._CONFIRM=yes</code>）才会真正发出请求。详见 <code>tests/e2e/README.md</code>。</p>
+<p>⚠️ 带 <code>-claim</code> / <code>-chat</code> / <code>-tools</code> 后缀的探针会<strong>真实消耗额度或领取机会</strong>；
+带 <code>-refresh</code> 后缀的会<strong>真实轮换一次凭据</strong>（如 <code>accio-refresh</code>）。运行前请确认。</p>
+<h3>项目结构</h3>
+<table>
+<thead>
+<tr>
+<th>路径</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>src/</code></td>
+<td>TypeScript 源码（宿主侧）</td>
+</tr>
+<tr>
+<td><code>plugin-src/client/</code></td>
+<td>Jet Hub 客户端源码（esbuild 打包）</td>
+</tr>
+<tr>
+<td><code>lib/</code></td>
+<td>编译产物（已 gitignore）</td>
+</tr>
+<tr>
+<td><code>tests/unit/</code></td>
+<td>单元测试</td>
+</tr>
+<tr>
+<td><code>tests/e2e/</code></td>
+<td>端到端测试（默认跳过）</td>
+</tr>
+<tr>
+<td><code>docs/agent-notes/</code></td>
+<td>逐 provider 的事故史与约定（开发向）</td>
+</tr>
+<tr>
+<td><code>docs/implementation-notes.md</code></td>
+<td><strong>全部实现细节与协议笔记（不入库）</strong>。⚠️ <strong>目前没有 accio 章节</strong> —— accio 的实测笔记在 <code>docs/agent-notes/providers-accio.md</code>，补写该章节是独立任务</td>
+</tr>
+<tr>
+<td><code>cordis.patch.yml</code></td>
+<td>DSH bundle 补丁</td>
+</tr>
+</tbody></table>

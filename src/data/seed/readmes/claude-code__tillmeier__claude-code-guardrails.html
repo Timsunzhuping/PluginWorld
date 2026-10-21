@@ -6,7 +6,8 @@ from my private config.</p>
 <ul>
 <li><strong>Hooks</strong> — run outside the model's judgment: block bulk <code>git add</code> / <code>git commit -a</code> and
 WHERE-less SQL before the Bash call executes, record the session-start commit, snapshot work
-state before context compaction, run the project's own formatter after edits.</li>
+state before context compaction and feed it back in right after, run the project's own formatter
+after edits.</li>
 <li><strong>Commands</strong> — a delivery loop (<code>/plan</code> → <code>/implement</code> → <code>/verify</code> → <code>/critical-review</code> →
 <code>/crosscheck</code>) and doc-maintenance commands (<code>/save-learnings-to-docs</code>, <code>/cleanup-docs</code>,
 <code>/refactor-claude-md</code>, <code>/init-local-md</code>).</li>
@@ -33,7 +34,10 @@ cp ~/claude-code-guardrails/output-styles/*.md ~/.claude/output-styles/
 script at <code>~/claude-code-guardrails/scripts/review-backend.sh</code>; for a checkout elsewhere, export
 <code>REVIEW_BACKEND=&lt;checkout&gt;/scripts/review-backend.sh</code>. Wire the hooks:</p>
 <pre><code class="language-json">"hooks": {
-  "SessionStart": [{"hooks": [{"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/session-start.sh\""}]}],
+  "SessionStart": [
+    {"hooks": [{"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/session-start.sh\""}]},
+    {"matcher": "compact", "hooks": [{"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/compact-handoff-inject.sh\""}]}
+  ],
   "PreToolUse": [{"matcher": "Bash", "hooks": [
     {"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/sql-guard.sh\"", "timeout": 10},
     {"type": "command", "command": "bash \"$HOME/claude-code-guardrails/hooks/git-staging-guard.sh\"", "timeout": 10}
@@ -74,6 +78,11 @@ own (see <a href="#reviewer-backend" target="_blank" rel="noopener noreferrer">R
 <td><code>precompact-handoff.sh</code></td>
 <td>PreCompact</td>
 <td>Appends branch, last commits, dirty files and the newest plan file to <code>~/.claude/handoffs/&lt;session&gt;.md</code> (override dir with <code>CLAUDE_HANDOFF_DIR</code>); GC after 14 days</td>
+</tr>
+<tr>
+<td><code>compact-handoff-inject.sh</code></td>
+<td>SessionStart (<code>compact</code>)</td>
+<td>Feeds the last section of that handoff file back into the context right after the compaction (<code>additionalContext</code>, capped at 2500 characters); silent for any other start</td>
 </tr>
 <tr>
 <td><code>format-file.sh</code></td>
@@ -192,6 +201,14 @@ the real file is gitignored): a vendor default can be deprecated or unavailable 
 without warning. The codex reasoning effort is pinned the same way (<code>CODEX_REVIEW_EFFORT</code>, default
 <code>high</code>): the built-in reviewer takes no effort flag and the flagship's own default is low.
 Prompt-mode output follows <code>scripts/review-findings.schema.json</code>.</p>
+<p>Three helpers sit next to it, all plain bash/python3 and tested in <code>tests/review-tools.bats</code>:
+<code>scope-delta.sh</code> tells <code>/critical-review</code> which lines of each changed file are this session's (one
+verdict per file — <code>FULL</code>, <code>DELTA</code>, <code>UNCHANGED</code> or <code>LIKELY</code> — so a failed lookup lands in the
+"scope unverifiable" bucket instead of silently dropping findings); <code>review-log.py</code> appends the
+review log as immutable events (<code>run</code>, <code>finding</code>, <code>decision</code>, <code>resolution</code>, <code>brief_drop</code>,
+<code>brief_drop_overruled</code>, joined by run id) to <code>~/.claude/logs/critical-review.jsonl</code>
+(<code>CLAUDE_REVIEW_LOG_DIR</code> overrides); <code>critical-review-stats.py</code> reads it — distinct ids, undecided
+findings reported as unresolved, never guessed.</p>
 <p>The reviewer is deliberately given no way to receive the task brief: framing a change as intended or
 bug-free collapses a reviewer's true-positive rate (arXiv 2603.18740). <code>/critical-review</code> writes the
 brief for itself and applies it only after the review, behind a mandatory re-read of the source.</p>
@@ -211,7 +228,7 @@ of servers over SSH/rsync and can activate an output style remotely. Hosts and f
 configured file against each server (POSIX cksum) and reports MISSING / DRIFT / unmanaged files,
 exit 2 on findings; <code>--dry-run</code> shows what would transfer.</p>
 <h2>Tests</h2>
-<pre><code class="language-bash">bats tests/        # 58 tests: guard patterns, SQL guard, formatter, session marker, handoff, reviewer backend, wiring
+<pre><code class="language-bash">bats tests/        # 77 tests: guard patterns, SQL guard, formatter, session marker, handoff + read-back, reviewer backend, review helpers, wiring
 </code></pre>
 <p>CI runs the same suite on ubuntu; macOS bash 3.2 is the primary target. The backend tests run
 against fake <code>codex</code>/<code>claude</code> executables that record their arguments — no model is ever called.</p>
@@ -239,8 +256,12 @@ command; it now checks every line and has the same prefilter as the git guard.</
 <li><code>session-start.sh</code> keys the marker file by session id (<code>${CLAUDE_SESSION_ID}</code>) instead of an
 undocumented env-file export, and adds the dirty-file / blob snapshot.</li>
 <li><code>critical-review.md</code> calls <code>scripts/review-backend.sh</code> instead of the Codex plugin's companion
-script (my copy is pinned to Codex), logs with python3 instead of node, and stops instead of
-reviewing its own diff when no reviewer is available.</li>
+script (my copy is pinned to Codex), logs through <code>scripts/review-log.py</code> instead of an inline node
+logger, classifies the session's lines with <code>scripts/scope-delta.sh</code> instead of inline awk (a
+broken snapshot lookup goes to "scope unverifiable" rather than to the full diff), and stops
+instead of reviewing its own diff when no reviewer is available.</li>
+<li><code>compact-handoff-inject.sh</code> refuses session ids that are not <code>[A-Za-z0-9._-]</code> before building a
+path from them.</li>
 <li><code>format-file.sh</code> reads the file path from the hook JSON itself, no <code>jq</code> wrapper needed.</li>
 <li><code>sync-commands.sh</code> config moved to <code>sync-commands.conf</code>; <code>--help</code> works without one; empty
 <code>SERVERS</code> is an error, not a silent no-op.</li>

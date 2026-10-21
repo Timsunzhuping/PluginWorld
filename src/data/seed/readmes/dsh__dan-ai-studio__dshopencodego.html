@@ -2,12 +2,40 @@
 <p>让 <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a> 正常使用 <a href="https://opencode.ai/docs/zh-cn/go/" target="_blank" rel="noopener noreferrer">OpenCode Go</a> 订阅：模型列表直接来自网关，且每个推理请求都携带网关要求的 <code>x-opencode-session</code>。</p>
 <p><a href="https://github.com/dan-ai-studio/dshopencodego/blob/HEAD/README.en.md" target="_blank" rel="noopener noreferrer">English</a></p>
 <h2>为什么需要它</h2>
-<p>原生 DSH 接 OpenCode Go 有两个缺口，都不是配置能补的：</p>
-<ol>
-<li><strong>模型列表是构建期快照</strong>。DSH 的 <code>llm-pi-ai</code> 用 pi-ai 打包时生成的目录；网关新增模型后，要么等 pi-ai 发版，要么手工声明。</li>
-<li><strong>没有会话头</strong>。Go 自 2026-09-05 起要求每个请求带稳定的 <code>x-opencode-session</code>，缺失即 <code>400 MissingSessionID</code>；<code>llm-pi-ai</code> 只发静态 profile headers，无法按会话取值。</li>
-</ol>
-<p>本插件为 <code>opencode-go</code> 路由提供自己的适配器，同时解决这两点。</p>
+<p>原生 DSH 已经能连 OpenCode Go（<code>llm-pi-ai</code> 内置该 provider）。本插件补的是它<strong>不提供</strong>的那几件事：</p>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>原生 DSH</th>
+<th>本插件</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>实时模型目录</strong></td>
+<td>构建期快照：pi-ai 打包时生成的固定表，网关新增模型要等 pi-ai 发版</td>
+<td>实时读取网关目录，多级回退 + TTL 缓存</td>
+</tr>
+<tr>
+<td><strong>额度窗口</strong>（5 小时 / 本周 / 本月）</td>
+<td>无</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>花费估算</strong></td>
+<td>无</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>逐模型开关</strong> <code>modelVisibility</code></td>
+<td>无</td>
+<td>✅</td>
+</tr>
+</tbody></table>
+<p>本插件为 <code>opencode-go</code> 路由提供自己的适配器，并提供用量与设置界面。</p>
+<blockquote>
+<p><strong>关于会话头</strong>：Go 要求每个请求带稳定的 <code>x-opencode-session</code>，缺失即 <code>400 MissingSessionID</code>。这一项曾是本插件的原始存在理由，但 pi-ai 已于 2026-09-09（<code>561a2e06</code>）实现注入、<code>llm-pi-ai</code> 自动携带，因此<strong>原生 DSH 现在也不会缺会话头</strong>。本插件当前仍保留自己的实现（为缺失会话 id 的请求提供一次性 UUID 兜底），待该兜底进入上游后再收缩——评估过程见 <a href="https://github.com/dan-ai-studio/dshopencodego/blob/HEAD/docs/scope-review-2026-10.md" target="_blank" rel="noopener noreferrer"><code>docs/scope-review-2026-10.md</code></a>。</p>
+</blockquote>
 <h2>安装</h2>
 <p>前提：DSH <code>0.2.0</code> 系列（<code>0.2.0-rc.1</code> 及之后，见「兼容性」）；Node <code>^22.19.0 || &gt;=24.0.0</code>；<code>dsh</code> 与 <code>pnpm</code> 可用。</p>
 <blockquote>
@@ -82,6 +110,8 @@ dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
       some-legacy-model: null                 # 整条 null：该模型两个字段都显式回退到目录值
     modelProtocols:                           # 最后兜底：逐模型协议覆盖
       some-new-model: openai-responses        # 合法值只有 anthropic-messages / openai-completions / openai-responses
+    pinnedAddresses:                           # 固定 IP：域名 → 地址（只对网关域名生效）
+      opencode.ai: 104.18.32.47              # 可写 IPv4 或 IPv6；不合法或未设置时走系统 DNS
     retryPolicy:                              # 可选：本路由的重试策略（由 dsh-llm-retry 执行）
       mode: normal                            # 也可用 always（对所有失败重试，maxRetries 被忽略）
       maxRetries: 2                           # 默认 5
@@ -123,6 +153,16 @@ dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
 <p><strong>输出上限</strong>：调用方给了 <code>maxTokens</code> 就用它（仍受 <code>modelLimits</code> 的逐模型上限约束）；没给时由宿主按路由上限物化——该上限就是目录里的输出容量，或 <code>modelLimits</code> 覆盖后的值。</p>
 <p><strong>工具声明</strong>：每个请求都发送当前完整的工具列表。宿主提供的会话折叠历史（<code>toolHistory</code>）<strong>故意不投影</strong>：投影需要路由声明 <code>toolUpdate</code> 模式，而 models.dev 对本网关模型只声明"可调用工具"、没有声明该模式；凭空声明会让模型看到的东西悄悄改变。</p>
 <p><strong>重试</strong>：<code>retryPolicy</code> 是可选的，不写就用宿主默认。写了就由可选的 <code>dsh-llm-retry</code> 插件执行，配置错误在写入时报错而不是等到失败发生。</p>
+<p><strong>固定 IP</strong>：<code>pinnedAddresses</code> 把网关域名固定到一个地址，用来接入更近的边缘节点（系统解析到的边缘有时离得很远，而每个请求都要为那段距离付费）。</p>
+<ul>
+<li><strong>只改解析，不改域名</strong>：请求里的域名、Host 头、TLS 的 SNI 与证书校验全部照旧，只有 socket 连到哪个地址被换掉。因此该地址必须能服务这个域名——证书是发给 <code>opencode.ai</code> 的。</li>
+<li><strong>只对网关域名生效</strong>：键必须等于 <code>baseURL</code> 的域名（默认 <code>opencode.ai</code>）。其它名字不在本插件的请求路径上，写了不生效。<code>models.dev</code> 与厂商文档始终走系统 DNS。</li>
+<li><strong>作用范围</strong>：模型 API 请求、网关 listing（<code>/models</code>）、<code>/usage</code> 读取——这三类都是发往网关的请求。</li>
+<li><strong>地址失效自动回退</strong>：固定地址连不上时（连接被拒、路由不可达、TLS 握手失败），请求会用系统 DNS <strong>重试一次</strong>，并把这个地址记为失效，之后的请求直接走系统 DNS。<strong>填错 IP 不会比不填更糟</strong>：只有"请求还没发出去"才重试，已经送达的请求不会发第二遍。</li>
+<li><strong>不设置就是原样</strong>：<code>pinnedAddresses</code> 为空时，插件用的就是系统自己的 fetch，不加任何东西。</li>
+<li><strong>非法地址被忽略</strong>：写错的 IP（<code>1.2.3.256</code>、<code>010.1.1.1</code> 等）不会让请求失败，只是被忽略并回退系统 DNS。</li>
+</ul>
+<p>设置页（<strong>OpenCode Go → 固定 IP</strong>）里可以直接填地址：填的是网关域名当前对应的那个键，非法地址当场拒绝，地址失效后页面会显示"已回退系统 DNS"。</p>
 <h2>模型是怎么判定的</h2>
 <p>一个模型"怎么调"由四级证据决定，先命中先赢：</p>
 <ol>
@@ -139,6 +179,7 @@ dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
 <li>官方<strong>下线</strong>模型 → 下次刷新即消失；</li>
 <li>内置目录<strong>冻结</strong>在插件版本里，仅影响"怎么调"的推断质量，不影响"有哪些"。</li>
 </ul>
+<p>网关<strong>临时不可用</strong>时，插件保留上次成功获取的列表并在页面上标注陈旧，同时在后台重试：重试由<strong>5 分钟的退避</strong>控制，而不是等满一个 TTL，所以网关恢复后 5 分钟内列表就会更新；网关持续不可用时，它只被问一次，不会每次模型请求都去问一遍。设置页的「重新检查」随时可以强制重验，不受这个退避限制。</p>
 <p>只有当 pi-ai 内置目录<strong>缺了某个模型的线怪癖</strong>（如 DeepSeek 的 <code>thinkingFormat</code>）时，才需要等插件同步 pi-ai 的新版本——而模型本身早已可用。</p>
 <h2>设置页里的模型列表</h2>
 <p>设置页的「OpenCode Go」分区展示网关实时目录（数量随网关发布变化），并对每个模型给出：</p>
@@ -277,7 +318,7 @@ npm run build       # 先构建：产出 lib/index.js 与 lib/client.js
 npm test            # 契约测试：真实 HTTP mock 网关，断言请求头/体、目录阶梯、用量
 </code></pre>
 <p><strong>顺序有讲究</strong>：<code>npm run build</code> 要排在 <code>npm test</code> 之前——<code>tests/pack-contents.spec.ts</code> 会遍历 <code>exports</code> 的每个目标，<code>lib/</code> 存在与否决定这条检查是执行还是被跳过（不报错，但会少一层保护）。<code>package.json</code> 已移除 <code>prepare</code>，因此 <code>npm ci</code> 不会再替你隐式构建；三个 CI workflow 都显式跑了 <code>npm run build</code>。</p>
-<p>测试覆盖配置校验、协议阶梯、网关与在线元数据、目录投影、适配器（三种协议的线上请求）、Remote 契约与服务、会话头不变量、用量窗口与计量、客户端控制器与用量组件、两半的挂载与登记、流空闲超时与中止的错误映射、验证脚本的退出码契约、以及几条<strong>结构性不变量</strong>（inject 声明与源码读取一致、peer 覆盖双向、README 与 manifest 一致）。共 <strong>43 个测试文件</strong>——这个数字由 <code>tests/readme-consistency.spec.ts</code> 对着 <code>tests/</code> 目录校验，不会漂移。</p>
+<p>测试覆盖配置校验、协议阶梯、网关与在线元数据、目录投影、适配器（三种协议的线上请求）、Remote 契约与服务、会话头不变量、用量窗口与计量、客户端控制器与用量组件、两半的挂载与登记、流空闲超时与中止的错误映射、验证脚本的退出码契约、以及几条<strong>结构性不变量</strong>（inject 声明与源码读取一致、peer 覆盖双向、README 与 manifest 一致、README 对上游的断言与实装的上游一致）。共 <strong>57 个测试文件</strong>——这个数字由 <code>tests/readme-consistency.spec.ts</code> 对着 <code>tests/</code> 目录校验，不会漂移。</p>
 <h2>发布（维护者）</h2>
 <ol>
 <li><p><strong>版本</strong>：把 <code>package.json</code> 的 <code>version</code> 与即将打出的 tag 对齐（<code>v&lt;版本&gt;</code>）。CI 会校验资产名与 tag。</p>

@@ -1,0 +1,161 @@
+<h1>Periscope</h1>
+<p>An MCP server that brokers to a real Neovim running your actual diver
+config, so MCP clients (agents) query the same language servers,
+formatter registry, linter registry, and DAP module tree you edit
+with — one configuration source of truth, no duplicate servers, no
+translated config files.</p>
+<p>Periscope is a single Rust binary. It speaks MCP over stdio
+(NDJSON JSON-RPC) to the client and msgpack-RPC to Neovim.</p>
+<h2>How it runs</h2>
+<ul>
+<li><strong>Managed mode</strong> (default): spawns its own
+<code>nvim --headless --listen &lt;tmp socket&gt;</code> with cwd set to the
+workspace. Your config loads exactly as it does for you; the
+broker never touches your interactive editor. Project-local config
+execution is refused (<code>--cmd "set noexrc"</code>).</li>
+<li><strong>Attach mode</strong> (<code>--attach &lt;socket&gt;</code>): connects to a Neovim you
+already have running (anything started with <code>--listen</code>). The
+broker never signals or closes an editor it did not spawn.</li>
+</ul>
+<p>Tools are small Lua programs executed inside the editor via
+<code>nvim_exec_lua</code>. They use native APIs only (<code>vim.lsp</code>, <code>vim.diagnostic</code>,
+runtime files) and inherit every per-server setting in your <code>lsp/*.lua</code>
+files — including deliberate choices like rust-analyzer's native
+diagnostics being disabled in favour of bacon-ls.</p>
+<h2>Tools</h2>
+<p>Read-only intelligence (<code>broker_status</code>, <code>get_*</code>, <code>list_*</code>) plus two
+execution tools (<code>run_format</code>, <code>run_lint</code>) that run the config's own
+pipelines inside the editor. Formatting is applied to the brokered
+editor's buffer and returned as text — the file on disk is never
+written (<code>written</code> is always <code>false</code>; write-to-disk tools are a
+later phase behind an explicit enable flag). Linting only reads.
+Four <code>attention_*</code> tools serve a joint-attention coordination board
+held in the server process (the MATE protocol, vendored from
+phlow-attention): agents publish an ordered focus, read each other's,
+and ask for an alignment score or a coordination decision. The board
+never touches the editor or the filesystem, and a publish is bound to
+the identity the client presented at <code>initialize</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>What it returns</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>attention_alignment</code></td>
+<td>Alignment between your published focus and a partner agent's, measured only inside one saliency snapshot frame (Jaccard overlap, shared targets, shared top); refused across frames</td>
+</tr>
+<tr>
+<td><code>attention_decide</code></td>
+<td>Coordination decision against a partner agent's focus: parallel (no contention), serialize (same top target — the named holder proceeds, you defer), or reject (stale frame or invalid focus — re-snapshot, never guess)</td>
+</tr>
+<tr>
+<td><code>attention_focus</code></td>
+<td>A partner agent's currently advertised focus (ordered salient targets + the snapshot hash it was computed from) from the coordination board</td>
+</tr>
+<tr>
+<td><code>attention_publish</code></td>
+<td>Publish your focus to the coordination board: a focus document <code>{agent_id, snapshot_hash, seq, targets[]}</code> (at most 8 targets); the agent_id must equal your client identity and sequences must strictly advance</td>
+</tr>
+<tr>
+<td><code>broker_status</code></td>
+<td>mode, Neovim version, cwd, config root</td>
+</tr>
+<tr>
+<td><code>get_definition</code></td>
+<td>merged definition locations across attached clients</td>
+</tr>
+<tr>
+<td><code>get_diagnostics</code></td>
+<td>buffer diagnostics from <code>vim.diagnostic</code> (LSP + linter pipelines), with the producing <code>source</code> named on every entry</td>
+</tr>
+<tr>
+<td><code>get_document_symbols</code></td>
+<td>flattened symbol outline with containers</td>
+</tr>
+<tr>
+<td><code>get_hover</code></td>
+<td>hover text at a position</td>
+</tr>
+<tr>
+<td><code>get_references</code></td>
+<td>merged reference locations across attached clients</td>
+</tr>
+<tr>
+<td><code>list_dap</code></td>
+<td>DAP modules in the config tree plus adapters/configurations registered in the session</td>
+</tr>
+<tr>
+<td><code>list_formatters</code></td>
+<td>formatter modules in the config tree</td>
+</tr>
+<tr>
+<td><code>list_linters</code></td>
+<td>linter modules in the config tree (underscore-prefixed modules reported as internal)</td>
+</tr>
+<tr>
+<td><code>list_servers</code></td>
+<td>LSP servers configured in the tree, plus servers attached to any open buffer</td>
+</tr>
+<tr>
+<td><code>run_format</code></td>
+<td>Format a file with the config's formatter pipeline (<code>require('formatters')</code>); optional explicit formatter names and LSP mode (<code>fallback</code> / <code>never</code> / <code>only</code>); returns status, <code>changed</code>, the steps that ran, and the formatted text</td>
+</tr>
+<tr>
+<td><code>run_lint</code></td>
+<td>Lint a file with the config's linter runner (<code>require('linters')</code>); optional explicit linter names, otherwise the filetype's configured set; returns per-linter status, exit code, and diagnostics (each naming its linter in <code>source</code>)</td>
+</tr>
+</tbody></table>
+<p>Positions are 0-based; <code>character</code> counts UTF-16 code units (the LSP
+convention). LSP request tools poll inside the editor while servers
+report in-flight progress, so a cold rust-analyzer returns its real
+answer (~10 s on a small project) instead of a fast, empty one.</p>
+<details>
+<summary>Usage</summary><pre><code>periscope [--workspace &lt;dir&gt;] [--attach &lt;socket&gt;] [--nvim-bin &lt;path&gt;]
+</code></pre>
+<ul>
+<li><code>--workspace</code> defaults to the current directory and is where the
+managed editor starts.</li>
+<li>Register it where you register MCP servers; in diver that is a
+<code>declared_servers</code> entry in <code>lua/ai/mcp/declared_servers.lua</code>:</li>
+</ul>
+<pre><code class="language-lua">periscope = {
+    args = { '--workspace', '/path/to/project' },
+    cmd = '/home/phaedrus/.local/bin/periscope',
+    kind = 'stdio',
+    name = 'periscope',
+    source = 'local',
+    timeout = 5000,
+    tools = 'all',
+},
+</code></pre>
+<p>Adapt <code>cmd</code>/<code>args</code> to the installation; drop the <code>--workspace</code> arg
+entry to use the client's working directory, or point it at a
+running editor with <code>--attach &lt;socket&gt;</code> instead.</p>
+</details><details>
+<summary>Budgets and bounds</summary><p>Every wait and every list is bounded: editor attach 20 s, LSP
+request phase 30 s (progress-gated polling), diagnostics settle 5 s,
+connect deadline 10 s, VimEnter readiness 20 s. Result caps:
+500 diagnostics locations per call, 1,000 document symbols (depth 6),
+500 definition/reference locations, 4 MiB per MCP input line.
+Errors from the editor are forwarded capped at 512 characters.
+Tool failures are in-band MCP <code>isError</code> results, never protocol
+errors.</p>
+</details><details>
+<summary>Security posture</summary><p>stdio transport only — nothing listens on a network port. The
+managed editor's socket lives in a private temp path and is removed
+on shutdown; the broker reaps its child. No tool writes a file to
+disk, renames, or starts a debug session: formatting changes only the
+brokered editor's buffer and is returned as text, and the attention
+board is in-process memory that is dropped when the server exits.</p>
+</details><details>
+<summary>Roadmap</summary><ul>
+<li>P2 (done): formatter and linter <em>execution</em> through the config's
+own pipelines (<code>run_format</code>, <code>run_lint</code>).</li>
+<li>P3: write tools (rename, code actions, format-and-write) behind
+an explicit enable flag.</li>
+<li>P4: SCIP query tools over <code>index.scip</code> (native Rust reader).</li>
+<li>P5: DAP session driving.</li>
+</ul>
+</details>
