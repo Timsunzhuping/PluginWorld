@@ -1,0 +1,321 @@
+<p><strong>简体中文</strong> · <a href="https://github.com/fatwang2/search2ai/blob/HEAD/README-EN.md" target="_blank" rel="noopener noreferrer">English</a></p>
+<h1>search2ai</h1>
+<p>给 AI Agent 用的自托管搜索网关。一个 Perplexity 兼容的搜索 API，背后接 Search1API、Tavily、Brave、Exa、Serper、SerpApi、Google、SearXNG 等多家服务，一家挂了自动切下一家。可以当库 <code>import</code>，可以当 HTTP 服务部署，也可以当 MCP server 接到 Claude、Cursor。</p>
+<ul>
+<li><strong>一套 schema</strong>：<code>title / url / snippet / date</code>，照抄 Perplexity Search API，换 provider 不改一行代码</li>
+<li><strong>fallback 链</strong>：限流、超时、报错自动切换下一家，响应里告诉你这次是谁答的、跳过了谁</li>
+<li><strong>search / news / crawl</strong> 三种能力，自带 key（BYO key），不做免 key 爬虫</li>
+<li><strong>库优先</strong>：核心零框架依赖，HTTP 与 MCP 只是薄壳；TypeScript + Hono，Node、Cloudflare Workers、Bun、Docker 同一份代码</li>
+<li><strong>兼容旧版</strong>：0.2.x 的「换个 base URL 让客户端联网」代理仍在，配置 <code>APIBASE</code> 即挂载</li>
+</ul>
+<h2>不想部署？用 Search1API</h2>
+<p><a href="https://www.search1api.com/?utm_source=search2ai" target="_blank" rel="noopener noreferrer"><strong>Search1API</strong></a> 是本项目配套的托管搜索服务：一个 key 聚合 Google / Bing / DuckDuckGo 等引擎，支持新闻与网页抓取，注册免费送 100 积分。search2ai 默认把它排在 fallback 链的第一位；只想要一个能用的搜索接口而不想维护服务的话，直接用它就够了。</p>
+<h2>快速开始</h2>
+<p>四种接入方式，按部署成本从低到高。</p>
+<h3>1. 作为库（零部署）</h3>
+<pre><code class="language-bash">npm i search2ai
+</code></pre>
+<pre><code class="language-ts">import { createGateway } from 'search2ai/core';
+
+const gateway = createGateway({
+  providers: {
+    search1api: { apiKey: process.env.SEARCH1API_KEY! },
+    tavily: { apiKey: process.env.TAVILY_KEY! },
+  },
+});
+
+const { provider, results, warnings } = await gateway.search({ query: 'hono cloudflare workers', max_results: 5 });
+// provider === 'search1api'；若它限流则自动落到 tavily，warnings 里记录原因
+</code></pre>
+<p><code>gateway.news()</code> 与 <code>gateway.crawl({ url })</code> 同理。</p>
+<h3>2. 作为 MCP server（本地，零部署）</h3>
+<p>Claude Desktop / Cursor / Claude Code 的 MCP 配置：</p>
+<pre><code class="language-json">{
+  "mcpServers": {
+    "search2ai": {
+      "command": "npx",
+      "args": ["-y", "search2ai", "mcp"],
+      "env": { "SEARCH1API_KEY": "your_key" }
+    }
+  }
+}
+</code></pre>
+<p>提供 <code>search</code>、<code>news</code>、<code>crawl</code> 三个工具。</p>
+<h3>3. 作为 HTTP 服务</h3>
+<pre><code class="language-bash">SEARCH1API_KEY=your_key npx search2ai serve      # http://localhost:3014
+</code></pre>
+<pre><code class="language-bash">curl http://localhost:3014/v1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "latest node.js lts", "max_results": 3}'
+</code></pre>
+<p>同一个服务同时提供 <code>/mcp</code>（Streamable HTTP），远程 MCP 客户端填 <code>http://host:3014/mcp</code> 即可。</p>
+<p><strong>Cloudflare Workers</strong></p>
+<pre><code class="language-bash">git clone https://github.com/fatwang2/search2ai &amp;&amp; cd search2ai
+npm i
+npx wrangler secret put SEARCH1API_KEY
+npm run deploy
+</code></pre>
+<p>绑定名为 <code>CACHE</code> 的 KV 命名空间并设置 <code>CACHE_TTL</code>，即可开启结果缓存。</p>
+<p><strong>Docker</strong></p>
+<pre><code class="language-bash">docker build -t search2ai .
+docker run -p 3014:3014 -e SEARCH1API_KEY=your_key search2ai
+</code></pre>
+<h3>4. 挂进你自己的 Hono 应用</h3>
+<pre><code class="language-ts">import { Hono } from 'hono';
+import { createAppFromEnv } from 'search2ai/hono';
+
+const app = new Hono();
+app.route('/search', createAppFromEnv(process.env));   // /search/v1/search、/search/mcp ...
+</code></pre>
+<h2>API</h2>
+<h3><code>POST /v1/search</code></h3>
+<p>请求体与 <a href="https://docs.perplexity.ai/api-reference/search-post" target="_blank" rel="noopener noreferrer">Perplexity Search API</a> 一致，并增加了两个扩展字段：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>query</code></td>
+<td>必填。字符串，或字符串数组（并行查询后合并去重）</td>
+</tr>
+<tr>
+<td><code>max_results</code></td>
+<td>默认 10，上限 50</td>
+</tr>
+<tr>
+<td><code>country</code></td>
+<td>ISO 3166-1 两位国家码</td>
+</tr>
+<tr>
+<td><code>search_domain_filter</code></td>
+<td>只在这些域名内搜索，最多 20 个</td>
+</tr>
+<tr>
+<td><code>search_language_filter</code></td>
+<td>ISO 639-1 语言码数组</td>
+</tr>
+<tr>
+<td><code>search_recency_filter</code></td>
+<td><code>hour</code> / <code>day</code> / <code>week</code> / <code>month</code> / <code>year</code></td>
+</tr>
+<tr>
+<td><code>search_after_date_filter</code> / <code>search_before_date_filter</code></td>
+<td><code>YYYY-MM-DD</code> 或 <code>MM/DD/YYYY</code></td>
+</tr>
+<tr>
+<td><code>max_tokens_per_page</code></td>
+<td>抓取正文时每条结果的长度上限</td>
+</tr>
+<tr>
+<td><code>providers</code></td>
+<td><strong>扩展</strong>：本次请求的 provider 顺序，覆盖默认 fallback 链</td>
+</tr>
+<tr>
+<td><code>crawl_results</code></td>
+<td><strong>扩展</strong>：对前 N 条结果抓取正文写入 <code>content</code></td>
+</tr>
+</tbody></table>
+<p>响应：</p>
+<pre><code class="language-json">{
+  "object": "search",
+  "id": "9f2c…",
+  "provider": "tavily",
+  "results": [
+    { "title": "…", "url": "https://…", "snippet": "…", "date": "2026-09-01", "content": "…（仅 crawl_results &gt; 0）" }
+  ],
+  "warnings": [
+    { "provider": "search1api", "code": "rate_limit", "message": "search1api: HTTP 429", "status": 429 }
+  ]
+}
+</code></pre>
+<p><code>provider</code> 是实际给出结果的服务，<code>warnings</code> 是 fallback 过程中被跳过的服务及原因；一切正常时没有 <code>warnings</code>。</p>
+<h3>其它端点</h3>
+<table>
+<thead>
+<tr>
+<th>端点</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>POST /v1/news</code></td>
+<td>与 <code>/v1/search</code> 相同的请求与响应，限定新闻源</td>
+</tr>
+<tr>
+<td><code>POST /v1/crawl</code></td>
+<td><code>{ "url": "https://…" }</code> → <code>{ "url", "title", "content", "links?" }</code></td>
+</tr>
+<tr>
+<td><code>GET /v1/health</code></td>
+<td>已配置的 provider、各操作的 fallback 链</td>
+</tr>
+<tr>
+<td><code>GET /openapi.json</code></td>
+<td>OpenAPI 3.1 文档</td>
+</tr>
+<tr>
+<td><code>ALL /mcp</code></td>
+<td>MCP Streamable HTTP 端点</td>
+</tr>
+</tbody></table>
+<p>错误统一为 <code>{ "error": { "message", "type", "code", "warnings?" } }</code>。所有 provider 都失败时返回 <code>502</code>，没有任何 provider 可用时返回 <code>503</code>。</p>
+<h2>配置</h2>
+<p>只配置你要用的 provider。没有指定 <code>SEARCH_SERVICE</code> 时，已配置的 provider 按下面的默认优先级组成 fallback 链。</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th align="center">search</th>
+<th align="center">news</th>
+<th align="center">crawl</th>
+<th>环境变量</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>search1api</code></td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td><code>SEARCH1API_KEY</code>（可选 <code>SEARCH1API_SERVICE</code> 指定底层引擎）</td>
+</tr>
+<tr>
+<td><code>tavily</code></td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td><code>TAVILY_KEY</code></td>
+</tr>
+<tr>
+<td><code>brave</code></td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center"></td>
+<td><code>BRAVE_KEY</code></td>
+</tr>
+<tr>
+<td><code>exa</code></td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td><code>EXA_KEY</code></td>
+</tr>
+<tr>
+<td><code>serper</code></td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center"></td>
+<td><code>SERPER_KEY</code></td>
+</tr>
+<tr>
+<td><code>serpapi</code></td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center"></td>
+<td><code>SERPAPI_KEY</code></td>
+</tr>
+<tr>
+<td><code>google</code></td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center"></td>
+<td><code>GOOGLE_KEY</code> + <code>GOOGLE_CX</code>（单次最多 10 条）</td>
+</tr>
+<tr>
+<td><code>searxng</code></td>
+<td align="center">✓</td>
+<td align="center">✓</td>
+<td align="center"></td>
+<td><code>SEARXNG_BASE_URL</code>（需开启 json 输出）</td>
+</tr>
+<tr>
+<td><code>jina</code></td>
+<td align="center"></td>
+<td align="center"></td>
+<td align="center">✓</td>
+<td><code>JINA_KEY</code>，或把 <code>jina</code> 写进 <code>CRAWL_SERVICE</code></td>
+</tr>
+<tr>
+<td><code>firecrawl</code></td>
+<td align="center"></td>
+<td align="center"></td>
+<td align="center">✓</td>
+<td><code>FIRECRAWL_KEY</code> 或 <code>FIRECRAWL_BASE_URL</code>（自托管）</td>
+</tr>
+</tbody></table>
+<p>以上 <code>*_KEY</code> 也接受 <code>*_API_KEY</code> 写法。</p>
+<table>
+<thead>
+<tr>
+<th>变量</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SEARCH_SERVICE</code></td>
+<td>逗号分隔的 provider 顺序，如 <code>search1api,tavily,serper</code>；<code>NEWS_SERVICE</code> / <code>CRAWL_SERVICE</code> 可按操作覆盖</td>
+</tr>
+<tr>
+<td><code>MAX_RESULTS</code> / <code>CRAWL_RESULTS</code></td>
+<td>默认返回条数 / 默认抓取正文条数</td>
+</tr>
+<tr>
+<td><code>FALLBACK_ON_EMPTY</code></td>
+<td>设为 <code>true</code> 时空结果也切换下一家；默认只在报错、限流、超时时切换</td>
+</tr>
+<tr>
+<td><code>PROVIDER_TIMEOUT_MS</code></td>
+<td>单个 provider 超时，默认 15000</td>
+</tr>
+<tr>
+<td><code>CACHE_TTL</code></td>
+<td>结果缓存秒数，默认 0 关闭</td>
+</tr>
+<tr>
+<td><code>AUTH_KEYS</code></td>
+<td>逗号分隔的 Bearer key；配置后 <code>/v1/*</code> 与 <code>/mcp</code> 需要 <code>Authorization: Bearer &lt;key&gt;</code></td>
+</tr>
+<tr>
+<td><code>GL</code> / <code>HL</code></td>
+<td>Google 系 provider 的国家与语言</td>
+</tr>
+</tbody></table>
+<p>完整模板见 <a href="https://github.com/fatwang2/search2ai/blob/HEAD/.env.template" target="_blank" rel="noopener noreferrer">.env.template</a>。</p>
+<h3>fallback 语义</h3>
+<ul>
+<li>按链的顺序逐家尝试；鉴权失败、限流（429）、4xx / 5xx、网络错误、超时都会切到下一家，并写入 <code>warnings</code></li>
+<li>空结果默认视为正常返回，不切换；开启 <code>FALLBACK_ON_EMPTY</code> 后才切换，避免冷门词把整条链的额度烧光</li>
+<li>单次请求可用 <code>providers</code> 字段临时指定顺序</li>
+<li>全部失败返回 <code>502</code>，<code>warnings</code> 里有每一家的失败原因</li>
+</ul>
+<h2>兼容旧版：让不联网的客户端联网</h2>
+<p>0.2.x 的核心功能保留为可选模块：配置 <code>APIBASE</code> 后，网关额外挂载 <code>/v1/chat/completions</code>，向上游模型注入 <code>search</code> / <code>news</code> / <code>crawler</code> 三个工具，模型决定何时搜索。在 NextChat、Cherry Studio、Chatbox 等客户端里把 API 地址换成网关地址即可。</p>
+<pre><code>APIBASE=https://api.openai.com/v1      # 与 OpenAI SDK baseURL 语义一致，含版本段
+SEARCH1API_KEY=your_key
+</code></pre>
+<ul>
+<li>真流式：文字边生成边输出，触发搜索后最终回答同样流式返回</li>
+<li>透传客户端参数（temperature、response_format、自带 tools 等），模型调用客户端自己的工具时原样交还</li>
+<li><code>AUTH_KEYS</code> 配置后请求 key 必须在列表中，上游改用 <code>OPENAI_API_KEY</code>；Azure 用 <code>OPENAI_TYPE=azure</code> 加 <code>RESOURCE_NAME</code> / <code>DEPLOY_NAME</code> / <code>API_VERSION</code> / <code>AZURE_API_KEY</code></li>
+<li>其它 OpenAI 端点（<code>/v1/models</code>、embeddings、audio）原样透传到上游</li>
+</ul>
+<p><strong>从 0.2.x 升级</strong>：环境变量不用改。启动命令由 <code>npm start</code> 变为 <code>npx search2ai serve</code>（或 <code>npm run build &amp;&amp; npm start</code>），Workers 入口变为 <code>src/worker.ts</code>。Bing Search API 已于 2025 年 8 月退役，<code>bing</code> 与失效的 <code>duckduckgo</code> 后端已移除，链里出现它们会被忽略。</p>
+<h2>路线图</h2>
+<ul>
+<li><strong>v0.3（当前）</strong>：TypeScript + Hono 重写，核心库、三端点、MCP、OpenAPI、8 家搜索 + 5 家抓取 provider、fallback 链、CLI、Workers / Node / Docker</li>
+<li><strong>v0.4 可靠性</strong>：同一 provider 多 key 轮换、健康探测与熔断、KV / Redis 缓存、用量日志、多源并行合并去重</li>
+<li>更多 provider 欢迎 PR：实现 <a href="https://github.com/fatwang2/search2ai/blob/HEAD/src/core/types.ts" target="_blank" rel="noopener noreferrer"><code>SearchProvider</code></a> 接口并在 <a href="https://github.com/fatwang2/search2ai/blob/HEAD/src/core/providers/index.ts" target="_blank" rel="noopener noreferrer"><code>providers/index.ts</code></a> 登记即可</li>
+</ul>
+<h2>开发</h2>
+<pre><code class="language-bash">npm i
+npm test                    # vitest：fallback 语义、各 provider 映射、路由、MCP、聊天代理流式
+npm run typecheck
+npm run build               # tsc → dist/（ESM + d.ts）
+npm run dev                 # node --watch src/cli.ts serve
+cp .env.local.example .env.local &amp;&amp; npm run test:e2e   # 真实 key 端到端
+</code></pre>
+<h2>交流与支持</h2>
+<p><a href="https://discord.gg/AKXYq32Bxc" target="_blank" rel="noopener noreferrer">Discord</a> · <a href="https://www.buymeacoffee.com/fatwang2" target="_blank" rel="noopener noreferrer">Buy Me A Coffee</a></p>
+<p>MIT License</p>

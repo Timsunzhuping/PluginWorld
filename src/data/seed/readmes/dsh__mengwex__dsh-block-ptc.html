@@ -1,0 +1,383 @@
+<h1>dsh-block-ptc</h1>
+<p><strong>English | <a href="https://github.com/mengwEX/dsh-block-ptc/blob/HEAD/README.zh.md" target="_blank" rel="noopener noreferrer">中文</a></strong></p>
+<p><a href="https://github.com/mengwEX/dsh-block-ptc/actions/workflows/ci.yml" target="_blank" rel="noopener noreferrer"><img src="https://github.com/mengwEX/dsh-block-ptc/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://www.npmjs.com/package/dsh-block-ptc" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/npm/v/dsh-block-ptc.svg" alt="npm version" /></a>
+<a href="https://github.com/mengwEX/dsh-block-ptc/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a></p>
+<p>Blackboard blocks for <strong>PTC mode</strong> in <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a>.</p>
+<p>Version <code>0.4.0</code> uses <code>block_compact({ ids, content })</code>. The old <code>block_summary</code>
+tool and <code>summary</code>/single <code>id</code> arguments are not supported. Restart DSH and
+start a new <strong>Block PTC</strong> session after updating.</p>
+<p>The block protocol uses the built-in <code>run_code</code> transport.
+DSH's PTC presentation allows only <code>run_code</code> to be called directly, so the
+model declares blocks in the tool description:</p>
+<pre><code>run_code({ description: "[block: &lt;ids&gt;] &lt;goal&gt;", code })
+</code></pre>
+<p>A <em>block</em> is a blackboard region. Every program the model runs is tagged with
+block ids. When the content is no longer needed, or its results have already
+been reported and the model is moving to other work, it can submit retained
+content <strong>it writes itself</strong> to replace the block's messages. Information still
+needed for execution, replies or discussion remains available. The original messages stay in the append-only session log, so the
+human transcript keeps everything and replay stays deterministic.</p>
+<ul>
+<li>DeepSeek Harness <strong>0.2.1-rc.2 or newer</strong>; no upper version bound</li>
+<li>Community plugin maintained by <a href="https://github.com/mengwEX" target="_blank" rel="noopener noreferrer">mengwEX</a></li>
+<li><strong>Zero runtime dependencies</strong> — the only external import is <code>node:crypto</code></li>
+<li>License: <strong>MIT</strong></li>
+</ul>
+<h2>Table of contents</h2>
+<ul>
+<li><a href="#why" target="_blank" rel="noopener noreferrer">Why</a></li>
+<li><a href="#context-and-cache-comparison" target="_blank" rel="noopener noreferrer">Context and cache comparison</a></li>
+<li><a href="#how-it-works" target="_blank" rel="noopener noreferrer">How it works</a></li>
+<li><a href="#install" target="_blank" rel="noopener noreferrer">Install</a></li>
+<li><a href="#quick-start" target="_blank" rel="noopener noreferrer">Quick start</a></li>
+<li><a href="#reference" target="_blank" rel="noopener noreferrer">Reference</a></li>
+<li><a href="#design-notes" target="_blank" rel="noopener noreferrer">Design notes</a></li>
+<li><a href="#verification" target="_blank" rel="noopener noreferrer">Verification</a></li>
+<li><a href="#troubleshooting" target="_blank" rel="noopener noreferrer">Troubleshooting</a></li>
+<li><a href="#known-limits" target="_blank" rel="noopener noreferrer">Known limits</a></li>
+<li><a href="#development" target="_blank" rel="noopener noreferrer">Development</a></li>
+<li><a href="#license" target="_blank" rel="noopener noreferrer">License</a></li>
+</ul>
+<h2>Why</h2>
+<p>Automatic compaction condenses history when token pressure builds, and it
+decides what to condense by size. It has no idea that the last forty messages
+were one finished sub-task and the next ten are a new one.</p>
+<p>This plugin lets the model draw that line itself: open a block, work inside it,
+and close it with a handover summary — so the context it keeps is the one it
+chose to keep. The model submits the summary inside its program call; the plugin
+does not run a separate summarizer model.</p>
+<h2>Context and cache comparison</h2>
+<p><img src="https://raw.githubusercontent.com/mengwEX/dsh-block-ptc/HEAD/docs/assets/context-comparison.en.png" alt="Illustrative comparison of input context and modeled cache hits for the same synthetic conversation" /></p>
+<p><strong>Mechanism illustration, not an API benchmark.</strong> Both panels replay the same
+synthetic four-task workload with assigned token weights. Full bar = input
+context; blue = modeled cache hits, orange = modeled cache misses. Cached tokens
+still occupy the context window.</p>
+<p>After a block closes, the next request carries a summary in place of its
+completed work. Replacing history can also invalidate the cached suffix:
+<strong>smaller context does not guarantee a higher cache-hit rate or a lower bill</strong>.
+The closing assistant/tool pair settles before replacement; original user
+messages remain. The baseline has not reached its automatic compaction threshold.</p>
+<p>See the <a href="https://github.com/mengwEX/dsh-block-ptc/blob/HEAD/docs/context-comparison/README.md" target="_blank" rel="noopener noreferrer">data, assumptions and reproduction steps</a>.
+The plugin's <code>tokensFreed</code> is not a provider cache-hit measurement.</p>
+<h2>How it works</h2>
+<p>The model's whole surface is the built-in PTC transport plus one
+program-callable:</p>
+<pre><code>run_code({ description: "[block: &lt;ids&gt;] &lt;goal&gt;", code })   the only tool it may call directly
+await tools.block_compact({ ids, content })                  callable from inside a program
+</code></pre>
+<ol>
+<li>The header in <code>run_code.description</code> names the blocks a program advances.
+Its ids apply to the complete assistant message, including preceding
+thinking/text, and its tool results. Calls in the same assistant message
+contribute the union of their ids.</li>
+<li><code>tools.block_compact({ ids, content })</code> replaces the complete interval from
+the earliest to the latest occurrence of any target id with the retained content.</li>
+<li>The summary inherits the union of the interval's ids minus the target ids.
+It can participate in a later summary. A summary with no remaining ids stays.</li>
+<li>If a tool pair in the interval is unfinished, the request is queued until
+its result lands. A protected system/developer message refuses the
+entire interval; no prefix is silently replaced.</li>
+</ol>
+<pre><code class="language-text">A A B A C B  -- compact([A]) --&gt; S[B] C B
+S[B] C B    -- compact([B]) --&gt; T[C]
+T[C]        -- compact([C]) --&gt; U[]
+A A B A C B -- compact([A, B]) --&gt; S[C]
+</code></pre>
+<p>What the human sees afterwards: the transcript still shows every original
+turn (the log is append-only); the model's next request shows the summary
+instead. In the Web UI the summary renders as a compaction checkpoint node.</p>
+<h2>Install</h2>
+<p>Requirements: DeepSeek Harness <code>&gt;=0.2.1-rc.2</code> and its bundled runtime, with
+Cordis <code>&gt;=4.0.5</code>. Neither peer range has an upper version bound. The plugin
+is a profile <strong>bundle</strong>: installing it adds one row to <code>dsh.profile.bundles</code>
+and one new agent preset, <code>block-ptc</code>. It does not modify the shipped <code>ptc</code>
+preset.</p>
+<p>The version ranges allow newer hosts to load the plugin; they are not a record
+of completed compatibility checks. Live host verification for this release used
+DSH <code>0.2.1-rc.2</code>. DSH's plugin loader includes prereleases when evaluating its
+peer ranges. The plugin checks the required tool/prompt methods before mounting
+and the session methods before summarizing, and reports missing capabilities.
+Method presence does not verify event semantics, preset configuration or model
+behaviour; these still need validation when the host changes.</p>
+<h3>From npm (recommended)</h3>
+<p>Find <strong>dsh-block-ptc</strong> in the Harness Plugin Manager and install it, or ask an
+agent with the Plugin Manager tool enabled to install the bundle:</p>
+<pre><code>plugin_manager  install_bundle  dsh-block-ptc
+</code></pre>
+<p>The package is published on <a href="https://www.npmjs.com/package/dsh-block-ptc" target="_blank" rel="noopener noreferrer">npm</a>.
+Restart the application after installation and select the <strong>Block PTC</strong> preset.</p>
+<h3>From a local checkout</h3>
+<pre><code class="language-sh">git clone https://github.com/mengwEX/dsh-block-ptc.git
+</code></pre>
+<p>Install the absolute checkout path through the Plugin Manager:</p>
+<pre><code>plugin_manager  install_bundle  /absolute/path/to/dsh-block-ptc
+</code></pre>
+<p>Both methods use pnpm in the target profile. The local form installs a <code>link:</code>
+dependency for development. Versioned source archives are also available under
+<a href="https://github.com/mengwEX/dsh-block-ptc/releases" target="_blank" rel="noopener noreferrer">GitHub Releases</a>.</p>
+<h3>Manual install (equivalent, if you prefer files)</h3>
+<p>In <code>~/.dsh/profiles/&lt;profile&gt;/package.json</code>:</p>
+<pre><code class="language-jsonc">{
+  "dependencies": { "dsh-block-ptc": "link:/absolute/path/to/dsh-block-ptc" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-block-ptc"] } }
+}
+</code></pre>
+<p>then run pnpm in that directory.</p>
+<h3>After installing</h3>
+<ol>
+<li>The preset appears in the session preset picker as <strong>Block PTC</strong>.</li>
+<li><strong>Restart the application once.</strong> The loader keeps a plugin module per
+resolved URL, and installing a bundle changes the composition; a running
+host keeps the old module generation until it restarts.</li>
+<li>Start a session with the <strong>Block PTC</strong> preset.</li>
+</ol>
+<h3>Uninstall</h3>
+<pre><code>plugin_manager  remove_bundle  dsh-block-ptc
+</code></pre>
+<p>then restart. <code>plugin_manager set_bundle dsh-block-ptc enabled=false</code> disables
+it without removing the package.</p>
+<h2>Quick start</h2>
+<p>Work and discuss the results first. Compact earlier blocks when moving to
+other work, once their original content is no longer needed:</p>
+<blockquote>
+<p>Explain how the tokenizer works.</p>
+<p>After that discussion: move on to the lexer; organize the earlier block if
+its original content is no longer needed.</p>
+</blockquote>
+<p>You should see:</p>
+<ul>
+<li>the model calling <code>run_code</code> with a description such as
+<code>[block: tokenizer] Explain the tokenizer</code> for everything it runs;</li>
+<li>a closing call to <code>block_compact</code> whose return value is
+<code>{"replaced": 3, "tokensFreed": 346}</code> — how many messages were replaced and
+the estimated token count of the replaced messages (before counting the new summary);</li>
+<li>a <code>&lt;block-summary&gt;…&lt;/block-summary&gt;</code> node sitting where those messages were.</li>
+</ul>
+<p>The initial request includes the header requirement in the system prompt,
+native tool description and parameter schema. The SDK uses the same header
+format.</p>
+<p>If a program call is refused with <em>"Every run_code call, including the first"</em>, that is the preset's guard working. Retry the
+program with the header; the refused call itself is not tagged.</p>
+<h2>Reference</h2>
+<p>Organize blocks around relatively independent units of work, reusing the id
+while continuing the same work. Compact a block when its content is no longer
+needed, or its results have already been reported to the user and you are
+moving on to other work. Keep content needed for upcoming execution, replies
+or discussion. Finishing a work step alone is not a reason to compact.</p>
+<h3>Header in <code>run_code.description</code></h3>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Type</th>
+<th>Required</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>[block: &lt;ids&gt;]</code></td>
+<td>header</td>
+<td>yes</td>
+<td>Comma-separated, non-empty, unique block ids, such as <code>[block: auth]</code> or <code>[block: auth, parser]</code>. Ids must not contain commas, brackets or line breaks.</td>
+</tr>
+<tr>
+<td><code>&lt;goal&gt;</code></td>
+<td>string</td>
+<td>yes</td>
+<td>The goal of this program, on the same line after the header. It is displayed as the tool row's summary.</td>
+</tr>
+</tbody></table>
+<p><code>run_code</code> itself is DSH's tool; the plugin does not replace it. Its
+<code>code</code>/<code>timeoutMs</code> parameters, sandbox, parallel scheduling and result
+rendering use the built-in PTC behavior. The plugin aligns the model-facing
+header guidance and reads the header to tag surrounding messages.</p>
+<h3>Callable <code>tools.block_compact</code></h3>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Required</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ids</code></td>
+<td>string[]</td>
+<td>yes</td>
+<td>Block ids to organize and close.</td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td>string</td>
+<td>yes</td>
+<td>Written by the model. Organize the complete first-to-last interval for these ids. Preserve information still needed for subsequent work in full, with enough detail to continue directly. Briefly summarize information no longer needed; omit irrelevant or duplicate material. Preserve user requirements, corrections and constraints accurately. Record completed work, results, unfinished work and the next step.</td>
+</tr>
+</tbody></table>
+<p>The replacement text identifies information you retained from earlier work and is
+wrapped in <code>&lt;block-summary&gt;…&lt;/block-summary&gt;</code>. It includes a <code>Block ids</code> line
+only when memberships remain. Empty ids stay in internal metadata. This format
+is separate from DSH automatic compaction; both can coexist.</p>
+<p>On immediate completion, returns <code>{ replaced, tokensFreed, ids? }</code>; <code>ids</code>, when
+non-empty, are the memberships inherited by the summary. <code>tokensFreed</code> is the estimated size of the
+replaced messages, before the new summary's cost.</p>
+<p>If tool results or another compaction are still pending, returns
+<code>{ replaced: 0, tokensFreed: 0, pending: true, requestSeq, note }</code>. This acknowledges
+queuing, not a completed replacement. The logged successful tool outcome lets
+the plugin resume the request after restart/fork. Deferred failures are logged;
+target memberships remain until a replacement commits. Missing target ids and
+protected messages reject the whole request without removing any memberships.</p>
+<h3>Preset <code>block-ptc</code></h3>
+<p>The shipped <code>ptc</code> preset plus:</p>
+<ul>
+<li>the same <code>tool-presentation.mode: ptc</code> as the shipped preset, so the host's
+own PTC collapse remains in force: only <code>run_code</code> may be called directly;</li>
+<li>this plugin's row, which adds a <strong>guard</strong> that requires the
+<code>[block: &lt;ids&gt;] &lt;goal&gt;</code> header on every model-direct <code>run_code</code> call (and
+still rejects a direct call to any other tool if the collapse is absent),
+the block rules section, model-facing native transport guidance, and the
+program-callable <code>block_compact</code>.</li>
+</ul>
+<h2>Design notes</h2>
+<p><strong>Why the header instead of a custom transport.</strong> DSH <code>0.2.1</code> removed the
+<code>both</code> presentation mode. Under <code>ptc</code>, <code>dsh-tools</code> resolves every model-direct
+call that is not <code>run_code</code> to <code>UNKNOWN_TOOL</code> before policy, so a plugin tool
+such as the old <code>block_run_code</code> can no longer be reached. The supported
+transport is <code>run_code</code>; the plugin carries block ids in its description and
+keeps the transport's exact behaviour by not wrapping or reimplementing it.</p>
+<p><strong>Why the compaction vocabulary.</strong> A message can only disappear from the model's
+context through DSH's own surface-replacement mechanism, and a replacement must
+carry the events DSH expects around it:</p>
+<pre><code>compaction/start        takes the durable compaction lock
+compaction/summary      states the token price of the exact replaced range
+user/message            the replacement itself (surfaceOp: replace, compact-checkpoint source)
+compaction/end          releases the lock
+</code></pre>
+<p>These are DSH's own session event types (<code>@deepseek-ai/dsh-compaction</code>,
+<code>@deepseek-ai/dsh-session</code>), not names invented here; a plugin cannot define new
+event types without making the session log unreadable. <strong>The built-in
+compaction engine is never invoked</strong> and no summarization call is made — the
+summary is the model's own text, and these four events are only the bookkeeping
+DSH requires for the replacement. Every failure makes exactly one close attempt,
+so a failed summary can never leave the durable lock behind.</p>
+<p><strong>What is preserved.</strong> System and developer messages are never replaced; an
+interval containing them is refused. User follow-ups and tool notices inside
+the interval are summarized with the work. The summary must preserve added
+requirements, corrections and constraints. Messages outside the interval stay.
+A user message arriving after the model wrote the summary is not discarded:
+the old summary is refused and must be updated after reading the new message.
+Unfinished tool pairs delay the complete replacement.</p>
+<p><strong>Where the state lives.</strong> <code>run_code</code> descriptions assign message memberships.
+Committed summary checkpoints carry the remaining ids, closed ids and request
+sequence in <code>source.blockPtc</code>. A summary attempt alone closes nothing. Successful
+queued outcomes are replayable; a <code>session/event</code> observer schedules completion
+outside the append boundary. No second persistence store is used.</p>
+<p><strong>Why the plugin has no external imports.</strong> Profile bundles can be installed as
+symlinks; a plugin that imports <code>@deepseek-ai/dsh-*</code> by bare specifier can fail
+to resolve depending on how the host links it. Its only external import is
+<code>node:crypto</code>; membership helpers use a bundled relative module.</p>
+<h2>Verification</h2>
+<pre><code>npm run check                  # syntax + the logic test
+node tests/logic.test.mjs
+</code></pre>
+<p>The logic test drives the real plugin entry with a fake context and fake
+sessions: header parsing, tool registration, the guard, the whole compaction
+transaction, the failure path that still releases the lock, and the host-API
+checks.</p>
+<p>The optional native checks use DSH's installed services:</p>
+<pre><code>node tests/native-session.mjs /path/to/dsh-session/lib/index.js /path/to/dsh-tools/lib/index.js
+node tests/native-prompt.mjs /path/to/dsh-tools/lib/index.js
+</code></pre>
+<p>The Session check verifies tool schema support, native append/replay and
+intervening user-message replacement. The prompt check assembles the initial
+request through real SystemPrompt, Tools and Cordis services: the native
+<code>run_code</code> schema and SDK examples carry the block header, the program SDK
+exposes <code>block_compact({ ids, content })</code>, and native code/runtime instructions
+are preserved. Both checks are offline; they do not run a model or validate
+live UI rendering, block selection, compaction timing or information retention.</p>
+<h2>Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Cause and fix</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>The preset is missing from the picker</td>
+<td>The bundle is not in <code>dsh.profile.bundles</code>, or the host has not recomposed. Check <code>plugin_manager list_bundles</code>, then restart.</td>
+</tr>
+<tr>
+<td>The preset shows as broken / <em>"dsh-block-ptc: never started"</em></td>
+<td>The plugin module failed to import (usually a package-resolution problem for a linked checkout). Fix the layout, then restart.</td>
+</tr>
+<tr>
+<td><em>"invalid config: $.mode expected native | ptc but got both"</em></td>
+<td>An older <code>0.2.x</code> bundle is installed against DSH <code>0.2.1+</code>. Update to <code>0.3.0</code> and restart.</td>
+</tr>
+<tr>
+<td>No block tagging in a session</td>
+<td>The session is not running the <code>block-ptc</code> preset, or the model omitted the header (the guard refuses that call).</td>
+</tr>
+<tr>
+<td>Summary says <em>"no current content for ids"</em></td>
+<td>The id never appeared in a <code>run_code</code> header in the current surface. Check the header spelling; already summarized ids are closed.</td>
+</tr>
+<tr>
+<td>New summaries still use the old framing</td>
+<td>The host is running an old module generation. Update the bundle and fully quit/reopen DSH. Existing historical summaries keep their original text.</td>
+</tr>
+<tr>
+<td>Edits to the plugin do not take effect</td>
+<td>Modules are cached per URL and module watching is off by default: restart the app.</td>
+</tr>
+<tr>
+<td>A block never gets compressed</td>
+<td>It was never closed with <code>block_compact</code>, so its content stays until automatic compaction folds it into a generic summary.</td>
+</tr>
+<tr>
+<td>Compaction stops working in a session</td>
+<td>A <code>compaction/start</code> without a matching <code>compaction/end</code> is the durable lock. This plugin closes its own bracket on every failure; if you hit it from an older build, start a fresh session.</td>
+</tr>
+</tbody></table>
+<h2>Known limits</h2>
+<ul>
+<li>One summary replaces one complete contiguous first-to-last interval. A
+protected system/developer message rejects that interval; it is not
+skipped and no prefix is treated as a completed summary.</li>
+<li>The block header is model-authored. A call without it is refused before
+execution, so untagged work never enters a block.</li>
+<li>Omitted information is unavailable in later model requests. Preserve all
+details still needed for subsequent work in <code>content</code>.</li>
+<li>Checkpoints inherit remaining ids and may be summarized again. A checkpoint
+with empty ids is retained as the completed result.</li>
+<li>Blocks are per session. Sub-agents run their own context and their own blocks.</li>
+<li>Peer dependencies declare minimum versions without an upper bound. Newer
+hosts are allowed, but compatible event semantics and preset configuration
+still need verification.</li>
+</ul>
+<h2>Development</h2>
+<pre><code>.
+├── lib/plugin.js        host-side guard, block_compact, transactions
+├── lib/blocks.js        header parsing, message memberships and interval planning
+├── lib/prompts.js       block usage and native tool/schema guidance
+├── cordis.patch.yml     the bundle patch: one new preset, `block-ptc`
+├── locale/{en,zh}.json  display metadata read by the Harness UI
+├── tests/logic.test.mjs the logic and transaction tests
+├── RELEASING.md         release and hand-over checklist
+└── package.json         bundle manifest (`dsh.bundle.patch`)
+</code></pre>
+<p>Run the tests with any Node 22+ (no install step, no dependencies):</p>
+<pre><code>node tests/logic.test.mjs
+</code></pre>
+<h3>Releasing to npm</h3>
+<p>See <a href="https://github.com/mengwEX/dsh-block-ptc/blob/HEAD/RELEASING.md" target="_blank" rel="noopener noreferrer">RELEASING.md</a> for GitHub release and npm publication steps.
+The package name is <code>dsh-block-ptc</code>; the bundle patch resolves that same name.</p>
+<h3>Contributing and support</h3>
+<p>Issues and pull requests are welcome at
+<a href="https://github.com/mengwEX/dsh-block-ptc" target="_blank" rel="noopener noreferrer">https://github.com/mengwEX/dsh-block-ptc</a>. Please run <code>npm run check</code> before
+opening a pull request and describe any live-host verification separately from
+offline tests.</p>
+<h2>License</h2>
+<p>MIT. See <a href="https://github.com/mengwEX/dsh-block-ptc/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer">LICENSE</a>.</p>

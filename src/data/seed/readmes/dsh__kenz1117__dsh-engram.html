@@ -70,7 +70,7 @@
 <ul>
 <li><strong>跨会话记忆</strong>：会话开始注入用户画像摘要（条数 + token 预算双重上限，可配；<code>engram_profile_edit</code> 维护的 curated 画像优先于派生事实），Agent 天然"记得"你是谁、在做什么；工具检索跨会话召回历史事实。</li>
 <li><strong>双层分库</strong>：<code>user.db</code> 全局共享；<code>project-&lt;hash&gt;.db</code> 按 git origin 标识隔离（无 git 时回退 cwd 全量哈希，旧命名库自动迁移）——个人偏好跟人走，项目约定跟仓库走。<strong>项目宫殿随工作区切换</strong>：管理面板「项目」scope 默认跟随 GUI 当前选中的工作区（Header 显示工作区标题与路径），也可在下拉里固定到某个工作区；<code>engram_save/search</code> 等工具的 project 读写同样按当前会话 cwd 归属，与面板同一口径。</li>
-<li><strong>混合检索</strong>：FTS5（unicode61 + 中文 2-gram 预切词）与本地向量（<code>Xenova/bge-small-zh-v1.5</code>，512 维，q8）RRF 融合 + 关系边一跳扩展 + 新鲜度/命中次数乘性排序 boost；嵌入模型离线运行，下载失败自动降级纯关键词并显式标记。</li>
+<li><strong>混合检索</strong>：FTS5（unicode61 + 中文 2-gram 预切词）与本地向量（默认 <code>Xenova/paraphrase-multilingual-MiniLM-L12-v2</code>，384 维，q8；模型与池化可配，见下）RRF 融合 + 关系边一跳扩展 + 新鲜度/命中次数乘性排序 boost；嵌入模型离线运行，下载失败自动降级纯关键词并显式标记。</li>
 <li><strong>记忆宫殿信息架构</strong>（v0.7.2+）：四原则全部落进核心路径，而非展示层皮肤——<strong>位置当索引</strong>（写入按 kind 分房并钉「房间#桩位」坐标，房间容量 9，满员开新房，桩位只增不回收）；<strong>固定路线定顺序</strong>（<code>tour_routes</code> append-only，<code>engram_tour mode=fixed</code> 按桩位顺序走全宫）；<strong>骨架长期复用</strong>（同一 topic 永远落在同一房间同一序号，顺序提取而非重新检索）；<strong>标记独一无二</strong>（门牌规则 0-1 评分：全库唯一 +0.4 / 带日期锚点 +0.3 / 同房前 6 字不重复 +0.3，低分进翻新清单；库内 active 记忆少于 8 条时不扫描，避免小库噪声）。</li>
 <li><strong>走廊路由检索</strong>：画像里附房间目录，<code>engram_search</code> 支持 <code>room</code> 参数——先决定进哪个房间，再在房内检索，而非一上来全库 RRF。检索命中 top5 附同房间相邻桩位 id 作为编码特异性线索。</li>
 <li><strong>检索练习闭环</strong>（间隔重复）：<code>engram_review_queue</code> 只给宫殿坐标与门牌线索、<strong>不给正文</strong>，迫使模型先主动回忆；<code>engram_review</code> 揭示核对，<code>engram_report grade</code>（0-5）自评推进 SM-2 调度（1 → 6 → round(prev × ease) 天，失败重置，ease 下限 1.3）。进入复习调度的条目<strong>不再参与自动衰减</strong>——命运由回忆结果决定。会话开始注入会提示今日待回忆条数。</li>
@@ -198,6 +198,18 @@
     assessReminder: true            # 证据门收尾提醒：存在未判定检索批次时在下一步开始前注入 engram_assess 提醒
     modelCacheDir: '~/.dsh/engram/models'  # 嵌入模型缓存目录
     hfEndpoint: 'https://huggingface.co'   # 模型下载端点，网络受限可配镜像
+    # 嵌入器：整段不写就是 local + 默认模型；kind 决定用本地模型还是远程端点
+    embedder:
+      kind: 'local'                   # local（transformers.js 离线推理）| remote（OpenAI 兼容 /embeddings）
+      localModel: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2'  # 384 维；旧默认 Xenova/bge-small-zh-v1.5 为 512 维
+      localPooling: 'mean'            # mean（多数句向量模型）| cls（bge-m3 等 XLM-R 同族）
+      # kind: 'remote'
+      # model: 'text-embedding-3-small'      # remote：模型名，原样传给服务端
+      # baseUrl: 'https://api.example.com/v1' # remote：含版本号的根地址
+      # apiKeyEnv: 'EMBEDDING_API_KEY'        # remote：密钥从这个环境变量读（优先于写死在配置里的 apiKey）
+      # batchSize: 32                         # remote：每批条数
+      # timeoutMs: 30000                      # remote：单次请求超时（毫秒）
+    # 换模型要重建向量：维度与库中不同时写入和比较都直接拒绝（EMBEDDER_DIMENSION_MISMATCH），不截断后假装相似
     ingest: 'off'                   # 自动摄取：off | light（仅用户消息，每轮≤2条）| eager（含助手消息，每轮≤5条）
     reflect: 'off'                  # 自动信念巩固：off | suggest（会话结束只登记待巩固，engram_reflect 执行）| auto（会话结束后台巩固）；任何档位均可手动调 engram_reflect
     # provider 与 model 必须成对提供：摄取/蒸馏的辅助 LLM 路由覆盖（缺省从会话日志解析）
@@ -249,7 +261,7 @@
 <li><strong>宫殿结构（目录即房间，路径即路线）</strong>：<strong>主厅</strong> = 每轮注入的常驻核心画像（少而稳，每次都在场）；<strong>走廊</strong> = 画像里附的房间目录 + <code>engram_search room</code> 参数（先定房间，再检索）；<strong>房间</strong> = 按 kind 分房（事实厅 / 偏好阁 / 决策堂 / 往事廊 / 技法坊），容量 9，满员开「房名-2」；<strong>门牌</strong> = 每条记忆的 <code>placard</code> 铭牌，受唯一·差异化·带日期纪律评分。存量库首次打开时自动补排桩（幂等，开新房会告警提醒人工命名）。</li>
 <li><strong>自动摄取</strong>（<code>ingest</code> 开启时）：新一轮第一步从会话日志提取上一轮的候选事实；会话结束（session/disposed）补摄取最后一轮，5 秒超时，失败/超时把 pending 键写入操作日志，下次会话首步自动重放补做；已摄取的 (会话, 轮次) 幂等去重（键固定在私人库，实时与历史回填共用一份，跨路径不重复）。读取源是会话日志；辅助调用的请求审计走插件自身操作日志，不向会话日志 append 未知事件。候选以低 confidence 写入并按<strong>目标分库内</strong>的嵌入近邻去重。<strong>作用域逐条判</strong>：提炼输出带 <code>scope</code>，<code>project</code> 落当前会话 cwd 的项目库、<code>user</code> 落私人库；无 cwd 的会话只能进私人库（此类会话不做逐条判定，避免标记与实际分库不符）。历史回填沿用同一判定，默认按各会话自己的 cwd 落项目库。</li>
 <li><strong>来源链</strong>：每条记忆记录来源会话、轮次与事件 seq，<code>engram_review</code> 可完整回查；操作日志表记录全部写入/修改/遗忘/蒸馏/衰减。</li>
-<li><strong>嵌入离线</strong>：模型首次使用需联网下载（q8 约 50MB，端点可配镜像），此后完全离线；失败时插件照常工作，检索降级纯关键词并显式标记。</li>
+<li><strong>嵌入离线</strong>：模型首次使用需联网下载（q8 约 50MB，端点可配镜像），此后完全离线；失败时插件照常工作，检索降级纯关键词并显式标记。<strong>维度是硬约束</strong>：库中向量与当前模型的维度不一致时，写入与相似度比较都直接拒绝并报 <code>EMBEDDER_DIMENSION_MISMATCH</code>（说清两边各是多少维），而不是逐维截断后给出一个像样的相似度。</li>
 <li><strong>界面本地化</strong>：client 半经宿主 locale 服务注册 zh/en 词典，跟随宿主语言设置实时切换；状态/种类等数据枚举仅在显示层映射，存储值保持英文。</li>
 </ul>
 <h2>Web 管理面板</h2>
@@ -328,7 +340,7 @@ pnpm test
 <h2>Known Limitations and Deferred Work</h2>
 <ul>
 <li><strong>矛盾判定默认无 LLM</strong> —— 写入时默认仅按向量相似度（≥0.88）报告候选并建边，语义矛盾的确认留给模型/用户裁决与蒸馏；可配 Jev 裁决（面板「裁决」tab 或 yml <code>jev</code>）让模糊带与矛盾边走外部判决，Jev 不可用时回落本默认。</li>
-<li><strong>嵌入器降级期间的记忆无向量</strong> —— 模型未就绪时写入的记忆不参与语义道；语义上线后跑一次 <code>pnpm backfill</code> 补算存量向量（<code>pnpm build</code> 的模型缓存就绪后执行，可经 <code>HF_ENDPOINT</code> 配镜像）。</li>
+<li><strong>嵌入器降级期间的记忆无向量</strong> —— 模型未就绪时写入的记忆不参与语义道；语义上线后跑一次 <code>pnpm backfill</code> 补算存量向量（<code>pnpm build</code> 的模型缓存就绪后执行，可经 <code>HF_ENDPOINT</code> 配镜像）。<strong>换模型同理</strong>：换了 <code>embedder.localModel</code>（或从 local 换到 remote）之后，库中旧向量与新模型维度不同，写入会被拒绝——要么把模型改回去，要么用新模型重建全部向量：<code>pnpm backfill -- --force --model &lt;id&gt;</code>（<code>--pooling mean|cls</code> 可选，<code>--cache-dir</code> 指向已有模型缓存可省一次下载）。脚本扫描 <code>&lt;dbDir&gt;</code> 下的全部分库（<code>user.db</code>、<code>shared.db</code>、<code>project-&lt;hash&gt;.db</code>）；不带 <code>--force</code> 时若模型维度与库中已有向量不符，它在写入前就报错退出，绝不会写出混合维度的库。远程嵌入器（<code>kind: remote</code>）不在脚本覆盖范围——它跑的是本地 transformers.js 推理，复现不了远程端点的向量。</li>
 </ul>
 <h2>路线图</h2>
 <p>宫殿 IA（位置当索引 / 固定路线 / 检索练习）是索引与审计骨架，按三阶段向 AI 原生的记忆分层与时序事实图谱演进；实际发版按 0.0.1 递增，阶段代号仅为规划标签：</p>

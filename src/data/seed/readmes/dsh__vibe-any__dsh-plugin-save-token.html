@@ -1,0 +1,310 @@
+<h1>dsh-plugin-save-token</h1>
+<p>English | <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/README.zh-CN.md" target="_blank" rel="noopener noreferrer">简体中文</a></p>
+<p><strong>In one sentence: a DeepSeek Harness (dsh) dynamic plugin that cuts token cost without cutting model intelligence.</strong></p>
+<blockquote>
+<p><strong>Codex user?</strong> The same token-optimization brain ships as a standard Codex CLI plugin (MCP stdio server) in <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/codex-plugin-save-token/" target="_blank" rel="noopener noreferrer"><code>codex-plugin-save-token/</code></a> — see its <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/codex-plugin-save-token/README.md" target="_blank" rel="noopener noreferrer">README</a>.</p>
+</blockquote>
+<p>It slims down oversized tool outputs at the entrance of every model request — <strong>reversibly and structure-aware</strong>. The full original text is always saved to disk; what the model sees is always a condensed version carrying a retrieval path. Every optimization obeys one red line: <strong>any replacement must be restorable in one step</strong>, and the estimated token count after compression must be strictly smaller than the original.</p>
+<hr />
+<h2>Why you need it</h2>
+<ul>
+<li>The bulk of agentic-session cost is <strong>tool output that keeps re-entering the context</strong>: large JSON from APIs, CLI tables, logs. The same 40KB price table may be billed again on every conversation turn.</li>
+<li>But blunt truncation degrades intelligence: research shows that even with perfect retrieval, merely padding the context with irrelevant content drops accuracy by 13.9–85% (curated in <a href="https://github.com/pleasedodisturb/awesome-llm-token-optimization" target="_blank" rel="noopener noreferrer">"Context Length Alone Hurts"</a>); conversely, over-compression fails too — in production randomized controlled trials, aggressive compression (keep ratio 0.2) actually made cost <strong>+1.8%</strong> worse, while moderate compression (0.5) delivered <strong>−27.9%</strong>.</li>
+<li>Conclusion: <strong>the right way to save tokens is structure-preserving slimming, not content hacking.</strong> All strategies in this plugin are designed within that boundary.</li>
+</ul>
+<hr />
+<h2>Core optimizations</h2>
+<h3>1. Structure-aware compression: no more blind table slicing</h3>
+<p>Detects pipe-delimited high-density table rows (≥70% of lines sharing the same separator profile). When matched, instead of a blind head/tail window it does: keep the first 60 rows verbatim + stride-sample the middle section every N rows with original line numbers annotated (<code>L61: ...</code>) + keep the last 40 rows verbatim. The model receives a "map with coordinates" — any segment can be fetched precisely by line number.</p>
+<blockquote>
+<p>Reference: <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noopener noreferrer">rtk</a>'s never-worse guard and error-line retention policy; the stride sampling is this plugin's improvement over rtk's head/tail window.</p>
+</blockquote>
+<h3>2. TOON-style lossless encoding first</h3>
+<p>Uniform JSON arrays (e.g. API responses with 300 homogeneous objects) first go through deterministic tabular re-encoding: <code>prices[300]{model,input,output}:</code> — one schema header line + CSV data rows. Keys are written once, zero information loss, and the notice explicitly says <em>"zero information loss"</em>. Lossy paths are only used when the lossless route is unavailable.</p>
+<blockquote>
+<p>Reference: <a href="https://github.com/toon-format/toon" target="_blank" rel="noopener noreferrer">TOON — Token-Oriented Object Notation</a>; measured savings of 30–60% tokens on uniform arrays.</p>
+</blockquote>
+<h3>3. Compress means spill (CCR): never burn the bridge</h3>
+<p>Before every replacement, the original text is written to disk via the dsh <code>spillStore</code>; the replacement embeds two retrieval paths: the dynamic tool <code>save_token_expand</code> (one-call fetch by marker id) plus a file locator for the original (readable directly with read/grep). If spilling fails, compression is abandoned — <strong>reversibility is a hard precondition, not an option</strong>.</p>
+<blockquote>
+<p>Reference: <a href="https://github.com/headroomlabs-ai/headroom" target="_blank" rel="noopener noreferrer">headroom</a>'s CCR (Compress-Cache-Retrieve) pattern.</p>
+</blockquote>
+<h3>4. Cross-turn dedup</h3>
+<p>Tool-call results byte-identical within a 90-second window (rerunning the same command, etc.) are replaced by one stub: "This output is identical to N seconds ago, refer to earlier context." Prevents the same large output from appearing twice in the context.</p>
+<blockquote>
+<p>Reference: <a href="https://github.com/headroomlabs-ai/headroom" target="_blank" rel="noopener noreferrer">headroom</a>'s cross-turn dedup.</p>
+</blockquote>
+<h3>5. Never-worse double gate</h3>
+<p>A candidate compressed result is adopted only if it passes both gates:</p>
+<ul>
+<li><strong>Byte gate</strong>: compressed ≤ 72% of the original (<code>keepRatioMax=0.72</code>, more conservative than the RCT-validated 0.5), and absolute savings ≥500B;</li>
+<li><strong>Token gate</strong>: estimated tokens must strictly decrease (an llmtrim-style quality-gating idea).
+If either gate fails, the output passes through untouched.</li>
+</ul>
+<blockquote>
+<p>Reference: RCT boundary data and quality-gating survey in <a href="https://github.com/pleasedodisturb/awesome-llm-token-optimization" target="_blank" rel="noopener noreferrer">awesome-llm-token-optimization</a>.</p>
+</blockquote>
+<h3>6. Error-line protection</h3>
+<p>Within the omitted region of log-like output, up to 25 lines matching <code>error/fatal/traceback/timeout...</code> are kept (with line-number prefixes). Debugging evidence is never compressed away.</p>
+<blockquote>
+<p>Reference: <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noopener noreferrer">rtk</a>'s error-line keeps.</p>
+</blockquote>
+<h3>7. Compaction pressure coupling</h3>
+<p>At each reasoning-step boundary, check the session's most recent actual context size; above 120k tokens (10-minute cooldown), fire dsh's native <code>compaction.compactIfNeeded()</code> with <code>'pressure'</code> and let the engine decide when to summarize history.</p>
+<blockquote>
+<p>The threshold is a conservative water line (sized for 128k-class context windows); compaction itself is built into dsh — the plugin only hands over the trigger at the right moment.</p>
+</blockquote>
+<h3>8. Full-chain metering + dual-panel dashboard</h3>
+<p>Every <code>llm/stream</code> is intercepted: real billed tokens (input/cached/output/reasoning) and "tokens avoided from context" are accounted separately. Historical messages are scanned for <code>[save-token #id]</code> markers to total savings (including multi-turn replays). The Settings page hosts a full panel (KPIs, per-request stacked chart, top-tools leaderboard, activity feed), plus a persistent live strip under the input box.</p>
+<hr />
+<h2>Measured results</h2>
+<h3>End-to-end A/B on real agent tasks (2026-08-29)</h3>
+<p>Randomized comparison on GAIA / Terminal-Bench / SWE-bench-Verified tasks — unique variable: the plugin's compress/dedupe switches; both arms under identical constraints that force large tool output to be printed directly into the conversation. Full data, scripts and per-episode records: <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/bench" target="_blank" rel="noopener noreferrer"><code>bench/</code></a>, report: <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/bench/report_2026-08-29.md" target="_blank" rel="noopener noreferrer"><code>bench/report_2026-08-29.md</code></a>.</p>
+<table>
+<thead>
+<tr>
+<th>Episodes</th>
+<th>Success rate</th>
+<th>Total tokens</th>
+<th>Compressions</th>
+<th>Per-episode median</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>24/24 (6 tasks × 2 arms × n=2)</td>
+<td><strong>100% vs 100%</strong></td>
+<td>5.25M vs <strong>4.32M (−17.6%)</strong></td>
+<td>16 events across 8/12 episodes</td>
+<td><strong>−56%</strong></td>
+</tr>
+</tbody></table>
+<p>Take-aways: the plugin pays off exactly when large tool output lands directly in
+the context (verbose test runs, raw log/JSON dumps); when agents go through the
+write-file-then-read pattern it never triggers — and costs nothing. Success rate
+was never hurt.</p>
+<h3>End-to-end A/B, round 2 — the optimized build (2026-09-03, v2.4.1)</h3>
+<p>Same harness re-run after the v2.4.1 optimizations (lossless-TOON-first pipeline,
+gated fallback, cache-aware layer), this time on a Linux host. 24/24 valid
+episodes again; unique variable unchanged. Report: <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/bench/report_2026-09-03.md" target="_blank" rel="noopener noreferrer"><code>bench/report_2026-09-03.md</code></a>, records: <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/bench/results/raw2" target="_blank" rel="noopener noreferrer"><code>bench/results/raw2/</code></a>, summary: <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/bench/results/summary-r2.md" target="_blank" rel="noopener noreferrer"><code>bench/results/summary-r2.md</code></a>.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>baseline</th>
+<th>treatment (v2.4.1 on)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Success rate</td>
+<td>100% (12/12)</td>
+<td><strong>100% (12/12)</strong> — <strong>48/48 across both rounds, zero damage re-confirmed</strong></td>
+</tr>
+<tr>
+<td>Provider cache-hit rate</td>
+<td>90.0%</td>
+<td><strong>90.7%</strong> — held at <strong>91.1%</strong> even in the heaviest episode (1.86M tokens of repeated dump/expand cycles)</td>
+</tr>
+<tr>
+<td>Tokens avoided (plugin estimate)</td>
+<td>—</td>
+<td><strong>~560k</strong> — 11 compressions across 6/12 episodes (13.8% of their tokens)</td>
+</tr>
+<tr>
+<td>SWE long-context tasks (sympy / django)</td>
+<td>—</td>
+<td><strong>−19.7% / −18.0%</strong>, both repeats same direction</td>
+</tr>
+</tbody></table>
+<p>Take-aways: on the optimized build the value proposition sharpens — savings
+concentrate exactly where context is longest and output is largest (SWE-style
+agent runs), the cache-aware marker-replay layer keeps provider cache hits
+stable even under worst-case repeated re-reading, and success rate remains
+untouched. As with any n=2 study, one agent-side strategy outlier can outweigh
+per-output savings in the aggregate — see the report's paired per-task analysis
+for the breakdown.</p>
+<h3>Single-event compression strength</h3>
+<table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Before</th>
+<th>After</th>
+<th>Strategy</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>CLI price table (400-line pipe table)</td>
+<td>41,727 B</td>
+<td><strong>15,191 B (−64%)</strong></td>
+<td>Structure-aware: verbatim head/tail + stride-sampled middle with original line numbers</td>
+</tr>
+<tr>
+<td>Model-price JSON registry (300-item uniform array)</td>
+<td>34,000 B</td>
+<td><strong>19,935 B (−41%)</strong></td>
+<td>TOON lossless route, zero information loss</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>Anti-pattern on record: an early version once applied blind head/tail windowing to a 35.5KB LiteLLM price registry; subagents couldn't locate middle rows and re-queried repeatedly — that failure is why the structure-aware strategy exists.</p>
+</blockquote>
+<blockquote>
+<p>Single-event figures were measured in a development environment; session-level gains depend on how much of your workload is large tool output delivered directly to the model (write-file-then-read patterns bypass compression by design, at zero cost).</p>
+</blockquote>
+<hr />
+<h2>Installation &amp; usage</h2>
+<p><strong>Requirements</strong>: a running DeepSeek Harness (dsh) with its Web GUI, and <code>pnpm</code> on PATH. The web profile provides everything else the plugin needs (<code>tools</code>, <code>webServer</code>, React for the dashboard; <code>spillStore</code> is included in standard deployments — if it is ever missing, compression stays off by design).</p>
+<h3>Install</h3>
+<p>Run <strong>one</strong> of these commands — <code>dsh plugin</code> installs the package into the profile and activates its bundle layer automatically:</p>
+<pre><code class="language-bash"># from the npm registry
+dsh plugin --profile web add dsh-plugin-save-token
+
+# or straight from GitHub
+dsh plugin --profile web add github:vibe-any/dsh-plugin-save-token
+
+# or from a local checkout
+dsh plugin --profile web add /absolute/path/to/dsh-plugin-save-token
+</code></pre>
+<p>That's the whole installation: no prompts to paste into the GUI, no dynamic-code authorization dialogs. Verify it's in the roster with <code>dsh --profile web --dump-config | grep save-token</code>, then restart the running dsh instance (ESM caches are per-process).</p>
+<p>Removal: <code>dsh plugin --profile web remove dsh-plugin-save-token</code>.</p>
+<h3>Using it</h3>
+<p>Once installed there is nothing to operate: open <strong>Settings → Token Saver</strong> for the full panel, and look for the persistent live strip under the input box. Three toggles (Compress / Dedupe / Compact@120k) switch right on the panel. The panel and the strip follow dsh's language setting (Settings → General → Language: English / 简体中文).</p>
+<h3>Config defaults (the <code>config:</code> block of the <code>save-token</code> row in <a href="https://github.com/vibe-any/dsh-plugin-save-token/blob/HEAD/cordis.patch.yml" target="_blank" rel="noopener noreferrer">cordis.patch.yml</a>; code fallbacks live in <code>src/index.js</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>minBytes</code></td>
+<td>1400</td>
+<td>Minimum size for ordinary outputs to enter compression</td>
+</tr>
+<tr>
+<td><code>errorMinBytes</code></td>
+<td>6000</td>
+<td>Higher threshold for error output (leave debugging scenes alone)</td>
+</tr>
+<tr>
+<td><code>keepRatioMax</code></td>
+<td>0.72</td>
+<td>Byte-gate cap: compressed must not exceed 72% of original</td>
+</tr>
+<tr>
+<td><code>maxLines / headLines / tailLines</code></td>
+<td>240/140/80</td>
+<td>Window shape for ordinary long outputs</td>
+</tr>
+<tr>
+<td><code>tabularHeadRows / tabularTailRows / tabularStrideSamples</code></td>
+<td>60/40/50</td>
+<td>Retention and sampling density in table mode</td>
+</tr>
+<tr>
+<td><code>longLineChars</code></td>
+<td>420</td>
+<td>Head/tail truncation threshold for single oversized lines</td>
+</tr>
+<tr>
+<td><code>jsonlMinLines</code></td>
+<td>8</td>
+<td>Minimum uniform-object lines for the JSONL/NDJSON lossless route</td>
+</tr>
+<tr>
+<td><code>noticeFullTrailerCount</code></td>
+<td>3</td>
+<td>First N adopted compressions carry the verbose retrieval notice; later ones use the compact trailer (same id + locator)</td>
+</tr>
+<tr>
+<td><code>dedupeTtlMs</code></td>
+<td>600000</td>
+<td>Validity window for cross-turn dedup (fingerprints are byte-exact, so a longer window is information-safe)</td>
+</tr>
+<tr>
+<td><code>dedupeTtlOverrides</code></td>
+<td>{}</td>
+<td>Per-tool TTL in ms; <code>0</code> disables dedupe for that tool (freshness-sensitive commands)</td>
+</tr>
+<tr>
+<td><code>compactAssistEnabled</code></td>
+<td>false</td>
+<td>Compaction coupling master switch — <strong>off by default</strong> (see cache note below)</td>
+</tr>
+<tr>
+<td><code>compactBudgetTokens / compactCooldownMs</code></td>
+<td>120000/600000</td>
+<td>Absolute fallback watermark and cooldown for the compaction assist</td>
+</tr>
+<tr>
+<td><code>contextWindowTokens / compactWatermarkRatio</code></td>
+<td>0/0.85</td>
+<td>When the model window is known, the watermark is <code>window × ratio</code> instead of the absolute budget</td>
+</tr>
+</tbody></table>
+<p>v2.2.0 behavior notes:</p>
+<ul>
+<li>Dedupe keys carry the owning session id and hash the FULL args/content strings (long shared prefixes can no longer produce false "byte-identical" stubs; two sessions sharing one process never see each other's stubs).</li>
+<li><code>save_token_expand</code> output is exempt from compression — unfolding a notice can never hand back the same elided preview again.</li>
+<li>Lossless routes extended: JSONL/NDJSON logs, nested field groups (<code>pos{x,y}</code>), keyed maps, and a depth-2 dominant-array search (<code>{data:{items:[...]}}</code>). Lossless wins whenever it passes the never-worse gates; the lossy elision candidate is generated as the gate-checked fallback before the line compressor, and lossy notices disclose exactly what was omitted.</li>
+<li>Compression counters increment on adopted candidates (previously on attempts that the gates could still reject).</li>
+</ul>
+<p>v2.3.0 cache-aware layer (bench evidence: ~90% of measured input tokens were provider cache reads, billed at ~1/30 of the miss price on DeepSeek):</p>
+<ul>
+<li><strong>Compaction assist defaults to OFF</strong> and is repositioned as an anti-overflow measure, not a saver: summarizing 120k→40k tokens converts cheap cached replay into full-price input and breaks even only after ~60 further requests. Turn it on when sessions actually grow past the watermark; do not expect it to cut spend. The toggle and watermark are honest in the panel.</li>
+<li>The watermark prefers the <strong>last real billed input</strong> for the session (main requests only) over the heuristic estimate, and scales with the model window (<code>contextWindowTokens × compactWatermarkRatio</code>) when configured.</li>
+<li><strong>Cache-hit sentinel KPI</strong>: <code>cacheRead</code>/<code>cacheWrite</code> are metered separately and the panel shows the cache-hit percentage. If a future change tanks that number, it is saving tokens while silently raising real cost.</li>
+<li><strong>Online calibration</strong>: a per-model EMA of billed/estimated tokens (learned from real usage each request) corrects the avoided-token accounting — no bundled tokenizer. The compression token gate needs no calibration (the ratio cancels in that comparison).</li>
+</ul>
+<p>v2.4.0 closing items:</p>
+<ul>
+<li>Dedupe TTL default 90s → 600s with per-tool overrides (<code>dedupeTtlOverrides</code>, <code>0</code> opts a tool out entirely).</li>
+<li>Error-line protection in plain-text windows widened to <strong>±1 context line</strong> (25 anchors, adjacent anchors merged): a bare assertion line rarely explains itself; the neighboring test name / stack header is what saves a re-run.</li>
+<li><code>save_token_expand</code> survives eviction and restarts: an id→locator side index outlives the text cache, so a miss returns the spill locator (with a transparent <code>spillStore.readText</code> attempt when the host offers one) instead of a dead end.</li>
+<li>Top-level vs nested tool calls are counted on the panel — the nesting exemption currently skips compression for subagent-internal calls, and this counter finally quantifies that unexploited surface before anyone flips it.</li>
+</ul>
+<hr />
+<h2>How it works (30-second version)</h2>
+<pre><code>tool returns ──► tools/post-execute (prepend)
+             ├─ size ≤ threshold? ────────── pass through
+             ├─ byte-identical within 90s? ─ spill original → replace with dedup stub
+             ├─ JSON with uniform array? ─── TOON lossless re-encode (zero loss)
+             ├─ JSONL of uniform objects? ── one TOON table for the whole log
+             ├─ pipe/tab table shape? ────── stride-sampled window with line numbers
+             └─ other long text ──────────── head/tail window + error-line protection
+                      │  double gate per route: ≤72% bytes AND tokens strictly decrease
+                      │  (lossless first; lossy elision is the gate-checked fallback)
+                      ▼
+             spill original to spillStore → inject [save-token #id] retrieval notice
+                      ▼
+every model request ◄── llm/stream metering (real billing + avoided tokens, per-model calibrated)
+step boundaries ──► assist on AND billed &gt; watermark? ──► compaction.compactIfNeeded('pressure')
+</code></pre>
+<p>All compression logic lives in <code>src/compress.js</code> (pure, side-effect free) and is pinned by the unit-test suite: <code>npm test</code> (<code>node --test</code>, zero extra dependencies).</p>
+<h2>Directory layout</h2>
+<pre><code>dsh-plugin-save-token/
+├── README.md             ← this file (English, default entry)
+├── README.zh-CN.md       ← Chinese documentation
+├── manifest.json         ← metadata + config defaults
+├── package.json          ← npm manifest declaring dsh.bundle + ./client export
+├── cordis.patch.yml      ← the bundle layer inserted into the profile roster
+├── build.mjs             ← esbuild script producing lib/
+├── src/
+│   ├── index.js          ← Host half: waterfall hooks / orchestration / tool registration / API routes
+│   ├── compress.js       ← pure compression brain (estimators, TOON tabular, gates, notices)
+│   └── client/index.js   ← Client half: Dashboard panel + input-box live strip
+├── test/                 ← node --test unit suite pinning the compression brain
+└── lib/                  ← built artifacts (committed, so git installs need no build step)
+    ├── index.js          ← bundled ESM host half (node)
+    └── client.js         ← bundled client half wrapped in window.__ModuleLoader__.load({ id, factory })
+</code></pre>
+<h2>Design red lines ("no dumbing down" promises)</h2>
+<ol>
+<li><strong>Reversible</strong>: failed disk write = abandon compression; <code>read</code> and <code>save_token_expand</code> outputs are never processed (by-design exemptions).</li>
+<li><strong>Lossless first</strong>: lossless wins whenever it passes the never-worse gate; lossy elision runs only as the gate-checked fallback and its notices disclose what was omitted.</li>
+<li><strong>Double gate</strong>: every replacement must prove itself "smaller in bytes AND cheaper in tokens," or it passes through.</li>
+<li><strong>Error protection</strong>: high thresholds around failure scenes, mandatory retention of error lines (±1 context line).</li>
+<li><strong>Cache-stable</strong>: compression happens once, at tool-result entry; history stays byte-stable afterwards, so the provider prompt cache keeps hitting (measured: ~90% of input tokens were cache reads at ~1/30 price, and 91.1% even in the heaviest dump-heavy episode). Replay-time rewriting of history is out of scope by design — it lowers the token meter while raising the real bill.</li>
+</ol>
