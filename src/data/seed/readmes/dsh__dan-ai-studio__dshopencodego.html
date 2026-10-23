@@ -115,6 +115,9 @@ dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
       some-new-model: openai-responses        # 合法值只有 anthropic-messages / openai-completions / openai-responses
     pinnedAddresses:                           # 固定 IP：域名 → 地址（只对网关域名生效）
       opencode.ai: 104.18.32.47              # 可写 IPv4 或 IPv6；不合法或未设置时走系统 DNS
+    requestLogEnabled: true                  # 请求日志总开关，默认开启：关闭后请求路径与没有该日志逐字节一致
+    requestLogDebug: false                   # 排错详情：连接池事件与请求 UA；会话 id 始终完整记录
+    requestLogMaxEntries: 200                # 最多保留条数，50 ~ 500，超限丢弃最旧的
     retryPolicy:                              # 可选：本路由的重试策略（由 dsh-llm-retry 执行）
       mode: normal                            # 也可用 always（对所有失败重试，maxRetries 被忽略）
       maxRetries: 2                           # 默认 5
@@ -124,7 +127,7 @@ dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
         maxDelayMs: 10000                     # 默认 10000，上限 2147483647
         jitterRatio: 0.1                      # 默认 0.1，取值 0 ~ 1
 </code></pre>
-<p><strong>保存即校验</strong>：上面这些约束在<strong>写入 profile 时</strong>就检查，不会拖到第一次请求——<code>baseURL</code> 必须是 http(s) 且不带 query/fragment；<code>refreshMinutes</code> 取值 1 ~ 10080；<code>keepAliveTimeoutMs</code> 取值 1 ~ 1800000；<code>modelLimits</code> 的每个字段都可以写 <code>null</code>，语义是"显式选回目录值"（<code>modelLimits.&lt;模型&gt;: null</code> 表示两个字段一起回退）；<code>modelProtocols</code> 只接受那三个合法值，写错会让该模型以"配置缺失"出现（开关关闭、不可选），而不是回退到猜测；<code>retryPolicy</code> 是联合类型（<code>normal</code> 读 <code>maxRetries</code>/<code>retryableCodes</code>/<code>backoff</code>，<code>always</code> 只读 <code>backoff</code>），未知字段会被拒绝。</p>
+<p><strong>保存即校验</strong>：上面这些约束在<strong>写入 profile 时</strong>就检查，不会拖到第一次请求——<code>baseURL</code> 必须是 http(s) 且不带 query/fragment；<code>refreshMinutes</code> 取值 1 ~ 10080；<code>keepAliveTimeoutMs</code> 取值 1 ~ 1800000；<code>requestLogMaxEntries</code> 取值 50 ~ 500；<code>modelLimits</code> 的每个字段都可以写 <code>null</code>，语义是"显式选回目录值"（<code>modelLimits.&lt;模型&gt;: null</code> 表示两个字段一起回退）；<code>modelProtocols</code> 只接受那三个合法值，写错会让该模型以"配置缺失"出现（开关关闭、不可选），而不是回退到猜测；<code>retryPolicy</code> 是联合类型（<code>normal</code> 读 <code>maxRetries</code>/<code>retryableCodes</code>/<code>backoff</code>，<code>always</code> 只读 <code>backoff</code>），未知字段会被拒绝。</p>
 <p>API Key 通过 Harness 凭证库提供（引用名 <code>OPENCODE_GO_API_KEY</code>），也可以直接 <code>export OPENCODE_GO_API_KEY=...</code>。</p>
 <p><strong>流超时</strong>：<code>streamIdleTimeoutMs</code> 约束的是<strong>两次流事件之间的最长静默</strong>，不是请求总时长——长思考模型只要持续产出事件就不会被误判。默认 5 分钟，上限为 <code>2147483647</code>（约 24.8 天）。超时抛出 <code>TIMEOUT</code>（可重试类）。</p>
 <p><strong>连接保留</strong>：<code>keepAliveTimeoutMs</code> 决定<strong>与网关的连接在两次请求之间保留多久</strong>。计时器<strong>每次收到回答后重新开始</strong>，所以常用时连接不会被断开，它约束的只是两次请求之间的静默。默认 10 分钟。</p>
@@ -133,6 +136,22 @@ dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
 <li>这条只影响<strong>固定了地址</strong>（<code>pinnedAddresses</code>）的部署：没有固定地址时走的是系统自己的 fetch，本插件不加任何东西。</li>
 <li>设置页里以<strong>秒</strong>显示与填写（毫秒的数字人读不出量级），存储时换算成毫秒。取值 1 ~ 1800000 毫秒。</li>
 <li>空闲满这个时间之后，连接由连接池<strong>自己回收</strong>，不需要额外的清理机制（实际释放时间比设置值多约 2 秒，那是客户端在服务端给的期限之外自留的一点缓冲）。插件被卸载时，连接池也会<strong>一并关掉</strong>——它是插件的，不该留在机器上。</li>
+</ul>
+<p><strong>请求日志</strong>：默认开启的逐请求记录，关掉它请求路径与没有该日志逐字节一致。设置页"请求日志"分组里有总开关、排错详情开关（连接池事件与请求 UA，默认关闭）、保留条数（默认 200）。</p>
+<ul>
+<li><strong>两个入口，同一个页面</strong>：<ul>
+<li><strong>侧边栏图标 → 主区域整页</strong>：跨会话看全部请求。日志是进程级的数据，放在侧边栏最合理——位置固定、常驻可见，和 DSH 自己的插件管理器同一个范式。</li>
+<li><strong>会话里的「请求日志」标签页</strong>：就地看<strong>本会话</strong>的请求，回答"刚才那轮为什么慢"不用离开对话。</li>
+</ul>
+</li>
+<li>页面是一整页而不是浮层：标题、统计（请求数／失败数／平均耗时／平均首字／平均 tok/s／平均缓存命中／连接复用率）、筛选栏固定在上方，只有表格自己滚动。每行含时间、模型、会话、输入／输出／缓存、<strong>缓存命中</strong>、<strong>tok/s</strong>、首字、耗时与状态；点一行展开 HTTP 明细（方法、协议、地址、请求体大小、脱敏后的请求头、请求构成、结果与用量、推理拆分、缓存写入、单轮花费、内容跨度）。筛选有模型／结果／慢请求／会话，分组有会话／模型／结果；<strong>点列头按该列排序</strong>，再点一次反向。</li>
+<li><strong>tok/s</strong> 是<strong>首字到结束</strong>这段解码窗口上的输出速率，口径与 Harness 自己的每轮读数一致（含推理 token）。没有 token 的请求没有速率——不编数。<strong>突发推送同样没有速率</strong>：网关把一整轮攒到最后一次性推过来时（推理模型常见：8 秒思考在 wire 上不可见，然后上百个 token 几毫秒内到达），内容跨度不足 100ms，算出来的"每秒几万 token"不是生成速度——显示为 —，也不计入平均。</li>
+<li>会话列显示<strong>会话标题</strong>（标题来自会话目录；拿不到时回退显示 id，悬停可见完整 id）。会话筛选同时匹配标题与 id；按会话分组的组头同样显示标题。<strong>点标题直接打开那个会话</strong>（归档的打不开，会明说）。</li>
+<li><strong>缓存命中</strong>是输入 token 里走缓存的占比（缓存读取／（未缓存输入＋缓存读取））。网关没报输入就没有占比——同样不编数。</li>
+<li><strong>输入列是未缓存的新增 token</strong>：网关把整段 prompt 拆成"未缓存＋缓存命中"两部分上报，输入列只记新增的——同一会话前缀缓存全中时输入很小、缓存命中 100%，不是 bug。悬停列头有口径说明。</li>
+<li>会话 id <strong>始终完整记录</strong>（它是会话身份，不是凭据；截断后两个会话会读成一个）。</li>
+<li>记录的是环形缓冲（超限丢最旧），进程重启即清；只读快照，不轮询，没人打开的页面零流量。</li>
+<li>凭据永远不进记录：记录器根本不接收请求头参数，只收白名单里的会话 id 与 UA；失败的请求同样记一条（含错误码），中断到没有终端事件的不记（网关没报总数就不编数）。</li>
 </ul>
 <p><strong>图片</strong>：三个字段各管一层，超限的图片会被明确拒绝，而不是静默降质或丢弃：</p>
 <table>
@@ -238,7 +257,7 @@ dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
 <td><strong>DSH 加载时的真门禁；声明了它，peer 判定被整体跳过</strong></td>
 </tr>
 <tr>
-<td><code>peerDependencies</code>（17 个 <code>@deepseek-ai/dsh-*</code>）</td>
+<td><code>peerDependencies</code>（20 个 <code>@deepseek-ai/dsh-*</code>）</td>
 <td>均为 <code>&gt;=0.2.0-rc.1 &lt;0.3.0-0</code></td>
 <td>仅当 <code>engines.dsh</code> 缺席时才接管；本插件声明了它，故当前不参与判定</td>
 </tr>
@@ -265,7 +284,7 @@ dsh plugin --profile web remove @dan-ai-studio/dshopencodego   # 卸载
 </tbody></table>
 <p>维护时需要注意：</p>
 <ul>
-<li><strong>必选与可选之分</strong>：18 个 peer（17 个 <code>dsh-*</code> 加框架 <code>cordis</code>）中 6 个标了 <code>optional</code>（<code>dsh-api-remotes</code>、<code>dsh-client-locale</code>、<code>dsh-client-store</code>、<code>dsh-client-ui-model-selection</code>、<code>dsh-client-ui-settings</code>、<code>dsh-client-ui-slots</code>）；其余 12 个是运行时必需的——<code>cordis</code>、<code>dsh-attachment</code>、<code>dsh-brand</code>、<code>dsh-client-ui-conversation</code>、<code>dsh-client-ui-renderer</code>、<code>dsh-credentials</code>、<code>dsh-fs</code>、<code>dsh-launch-environment</code>、<code>dsh-llm</code>、<code>dsh-timeout</code>、<code>dsh-typert-protocol</code>、<code>dsh-typert-registry</code>。这 18 个当前都<strong>不参与加载判定</strong>（见上：<code>engines.dsh</code> 单独决定），它们的价值在于声明依赖并供包管理器与读者使用。其中 <code>dsh-llm</code> 是最重的一处耦合（源码 import 二十余处）。</li>
+<li><strong>必选与可选之分</strong>：21 个 peer（20 个 <code>dsh-*</code> 加框架 <code>cordis</code>）中 9 个标了 <code>optional</code>（<code>dsh-api-remotes</code>、<code>dsh-client-locale</code>、<code>dsh-client-store</code>、<code>dsh-client-ui-layout</code>、<code>dsh-client-ui-model-selection</code>、<code>dsh-client-ui-primitives</code>、<code>dsh-client-ui-settings</code>、<code>dsh-client-ui-sidebar</code>、<code>dsh-client-ui-slots</code>）；其余 12 个是运行时必需的——<code>cordis</code>、<code>dsh-attachment</code>、<code>dsh-brand</code>、<code>dsh-client-ui-conversation</code>、<code>dsh-client-ui-renderer</code>、<code>dsh-credentials</code>、<code>dsh-fs</code>、<code>dsh-launch-environment</code>、<code>dsh-llm</code>、<code>dsh-timeout</code>、<code>dsh-typert-protocol</code>、<code>dsh-typert-registry</code>。这 21 个当前都<strong>不参与加载判定</strong>（见上：<code>engines.dsh</code> 单独决定），它们的价值在于声明依赖并供包管理器与读者使用。其中 <code>dsh-llm</code> 是最重的一处耦合（源码 import 二十余处）。</li>
 <li><strong>名义范围 ≠ 实测范围</strong>：声明范围是 <code>&gt;=0.2.0-rc.1 &lt;0.3.0-0</code>，本项目实际验证过的基线依次是 <code>0.2.0-rc.1</code>（开发依赖基线：门禁判定 + typecheck + 全量用例）、<code>0.2.0-rc.2</code>（同上 + <code>prepareCall</code> 代次冻结）、<code>0.2.1-alpha.3</code>（首个目标版本）、<code>0.2.1-alpha.4</code>（T-24）、<code>0.2.1-alpha.5</code>（T-26）与 <code>0.2.1-rc.2</code>（T-31，运行时升到 cordis <code>4.0.5</code>；上游契约层源码零变更）。范围内的其他版本没有逐个验证过。</li>
 <li><strong>上界就是跟版线</strong>：<code>&lt;0.3.0-0</code> 意味着 DSH 一旦发布 <code>0.3.0-0</code>（<code>0.3.0</code> 线的第一个预发布版），本插件必须同批发新版，否则所有用户加载失败。<code>tests/peer-coverage.spec.ts</code> 会同时断言下界接受已安装版本、上界拒绝 <code>0.3.0-0</code>，所以这条线漂移会在本地测试里先失败，而不是等用户加载失败。调整范围后用 <code>npm test</code> 验证即可（本地 mock 网关，零网络零 token）——范围以接口声明为准，不要用线上探测来"测"出一个范围。</li>
 <li><strong>peer 覆盖已双向守住</strong>：<code>dsh-typert-registry</code>、<code>dsh-client-ui-conversation</code>、<code>dsh-client-ui-renderer</code> 曾被源码 import 却未声明、门禁管不到，现已补进 <code>peerDependencies</code>；<code>tests/peer-coverage.spec.ts</code> 双向断言——源码用到的必须声明，声明了却没人用的必须删（<code>dsh-settings</code> 就这样被移除：设置表单实际由 <code>dsh-client-ui-settings</code> 提供）。</li>
@@ -328,7 +347,7 @@ npm run build       # 先构建：产出 lib/index.js 与 lib/client.js
 npm test            # 契约测试：真实 HTTP mock 网关，断言请求头/体、目录阶梯、用量
 </code></pre>
 <p><strong>顺序有讲究</strong>：<code>npm run build</code> 要排在 <code>npm test</code> 之前——<code>tests/pack-contents.spec.ts</code> 会遍历 <code>exports</code> 的每个目标，<code>lib/</code> 存在与否决定这条检查是执行还是被跳过（不报错，但会少一层保护）。<code>package.json</code> 已移除 <code>prepare</code>，因此 <code>npm ci</code> 不会再替你隐式构建；三个 CI workflow 都显式跑了 <code>npm run build</code>。</p>
-<p>测试覆盖配置校验、协议阶梯、网关与在线元数据、目录投影、适配器（三种协议的线上请求）、Remote 契约与服务、会话头不变量、用量窗口与计量、客户端控制器与用量组件、两半的挂载与登记、流空闲超时与中止的错误映射、验证脚本的退出码契约、以及几条<strong>结构性不变量</strong>（inject 声明与源码读取一致、peer 覆盖双向、README 与 manifest 一致、README 对上游的断言与实装的上游一致）。共 <strong>57 个测试文件</strong>——这个数字由 <code>tests/readme-consistency.spec.ts</code> 对着 <code>tests/</code> 目录校验，不会漂移。</p>
+<p>测试覆盖配置校验、协议阶梯、网关与在线元数据、目录投影、适配器（三种协议的线上请求）、Remote 契约与服务、会话头不变量、用量窗口与计量、客户端控制器与用量组件、两半的挂载与登记、流空闲超时与中止的错误映射、验证脚本的退出码契约、以及几条<strong>结构性不变量</strong>（inject 声明与源码读取一致、peer 覆盖双向、README 与 manifest 一致、README 对上游的断言与实装的上游一致）。共 <strong>59 个测试文件</strong>——这个数字由 <code>tests/readme-consistency.spec.ts</code> 对着 <code>tests/</code> 目录校验，不会漂移。</p>
 <h2>发布（维护者）</h2>
 <ol>
 <li><p><strong>版本</strong>：把 <code>package.json</code> 的 <code>version</code> 与即将打出的 tag 对齐（<code>v&lt;版本&gt;</code>）。CI 会校验资产名与 tag。</p>

@@ -492,13 +492,38 @@ ONNX 量化 <strong>CPU 推理</strong>——无需 API Key，数据不出本机
 </tr>
 <tr>
 <td><code>llm.maxInputChars</code></td>
-<td><code>700000</code></td>
-<td>单次蒸馏输入字符预算（超限的 L1 输入自动分块抽取）；运行时可在设置页 → 蒸馏参数 → 输入预算调整（留空/0 = 跟随本值）</td>
+<td><code>200000</code></td>
+<td>单次蒸馏调用输入闸门（超限截断）；默认 200k 适配本地/免费模型窗口，上限 256k，可再往下调。L1 抽取/L2 另有 24k 分块硬顶，不受此值影响；运行时可在设置页 → 蒸馏参数 → 输入预算调整（留空/0 = 跟随本值）</td>
 </tr>
 <tr>
 <td><code>llm.timeoutMs</code></td>
 <td><code>120000</code></td>
-<td>单次蒸馏调用超时（ms）</td>
+<td>单次蒸馏调用超时（ms）；运行时可在设置页 → 蒸馏参数 → 蒸馏超时(ms) 覆盖（仅治"慢但未被网关掐"的路由，供应商网关侧固定掐断抬此值无效）</td>
+</tr>
+<tr>
+<td><code>llm.extractTimeBudgetMs</code></td>
+<td><code>0</code></td>
+<td>整轮抽取墙钟预算（ms）：<code>0</code> = 不限（旧行为）；<code>&gt;0</code> 时多块抽取累计超此预算即把剩余块留待重试、下轮续跑，防一个慢模型独占后台串行泵（<a href="https://github.com/drscrewdriver/dsh-prime-memory/blob/HEAD/docs/adr/0023-distill-load-balance-and-secondary-route.md" target="_blank" rel="noopener noreferrer">ADR-0023</a>）</td>
+</tr>
+<tr>
+<td><code>llm.modelMaxInputChars</code></td>
+<td><code>0</code></td>
+<td>蒸馏模型真实输入上限（字符）：<code>0</code> = 未声明（回退保守口径 <code>min(24k, maxInputChars−42k)</code>）；声明后抽取/L2 块大小取 <code>min(24k, 本值−42k)</code>，避免默认值撞本地模型硬限</td>
+</tr>
+<tr>
+<td><code>llm.secondary</code></td>
+<td>关</td>
+<td>二线大容量兜底 <code>{provider,model,reasoningEffort,triggerChars}</code>：单次调用输入 ≥ <code>triggerChars</code>（默认 20000）才前置二线（肥调用走能吞大输入的二线、小调用走一线）；未配则不启用、绝不静默改选任意模型</td>
+</tr>
+<tr>
+<td><code>llm.requireExplicitRoute</code></td>
+<td><code>false</code></td>
+<td>显式路由闸（灰度）：<code>true</code> 时一线+二线+回退链皆空 → 蒸馏顺延并告警（<code>NoDistillRouteError</code>、不记退避），不再蹭宿主默认模型；<code>false</code> 保持旧行为</td>
+</tr>
+<tr>
+<td><code>llm.chunkShrink*</code> 等（预留）</td>
+<td>—</td>
+<td>⚠ <code>llm.chunkShrinkFactor</code> / <code>chunkShrinkMaxSteps</code> / <code>adaptiveChunk</code> 为<strong>预留配置，当前版本未接线生效</strong>（同轮内超时 ×0.6 缩块尚未实现）——设了不影响行为，请勿依赖</td>
 </tr>
 <tr>
 <td><code>tokenCost.retentionDays</code></td>
@@ -590,6 +615,14 @@ L3 低频可容忍慢首包但要强能力），可给差异层单独配链—�
 <li><p><strong>调高超时</strong>：<code>llm.timeoutMs</code> 只在路由确实慢但网关不掐时有用；网关 20s 掐断的场景调插件超时无效，请用前两层。</p>
 </li>
 </ol>
+<h3>二线大容量兜底与超时可调（v0.26.7+）</h3>
+<ul>
+<li><strong>面板可调超时</strong>：设置 → 记忆 → 蒸馏参数 → <strong>蒸馏超时(ms)</strong>（<code>distillTimeoutMs</code>，即时生效、无需重启）。只救"慢但未被网关掐"的路由；供应商网关侧固定掐断（如某些免费路由 60s）抬此值无效，须换路由。</li>
+<li><strong>二线模型（大容量兜底）</strong>：<code>llm.secondary{provider,model,triggerChars}</code>——单次调用输入 ≥ <code>triggerChars</code> 才走二线（小调用走便宜快的一线、肥调用走能吞大输入的二线）。未配则不启用、绝不静默改选任意模型。</li>
+<li><strong>分块分载与容错</strong>：L1 抽取 / L2 场景整合按字符预算分块，单块超时/崩只丢该块、留待重试，不再"一块崩整批丢"（待重试不再被整片回滚）。<code>llm.extractTimeBudgetMs</code>（默认 0=不限）可给整轮抽取设墙钟预算，防一个慢模型独占后台；<code>llm.modelMaxInputChars</code> 声明模型真实输入上限，块大小据此收紧。</li>
+<li><strong>显式路由（灰度）</strong>：<code>llm.requireExplicitRoute=true</code> 时，未显式配一线/二线/回退链 → 蒸馏顺延并告警，不再蹭宿主默认模型（默认 false 保持旧行为）。</li>
+<li><strong>预留未生效的配置</strong>：<code>llm.chunkShrinkFactor</code> / <code>llm.chunkShrinkMaxSteps</code> / <code>llm.adaptiveChunk</code> 已在 schema 声明但<strong>尚未接线</strong>（同轮内超时自动缩块未实现）——设了不影响行为；跨轮自适应已由 R9 路由健康学习承担。</li>
+</ul>
 <h2>日志与故障排查</h2>
 <p>dsh 宿主把插件日志打到控制台；插件另把 info 级以上镜像到数据目录的 <code>memory.log</code>。
 一轮对话的典型日志路径：<code>L0 捕获</code> → <code>L0 落盘</code> → <code>蒸馏管线开始</code> → <code>LLM 调用（输入/输出 字符数、耗时）</code> → <code>L1 阶段完成</code> → <code>管线结束</code>；下一轮开头是 <code>召回注入 N 条 L1</code>。LLM 空输出
@@ -663,6 +696,116 @@ FTS 索引按分词器版本戳自动重建）。</p>
 <blockquote>
 <p><strong>一处必须知道的语义</strong>：<code>cleanup-retired</code> 只清理<strong>已退场</strong>记录，而快照拍在删除<strong>之前</strong>——所以清理快照能找回的每一条都带着退场标记。默认情况下 <code>snapshot-restore</code> 只把行写回主表（并在 <code>stillRetired</code> 里如实报出），<strong>"回到主表" ≠ "回到召回"</strong>；要一步完成真正的回滚，加 <code>unretire: true</code>，或随后对该批 id 调 <code>records-restore</code>。</p>
 </blockquote>
+<h2>记忆时效三档与失效链反查</h2>
+<p>一条记忆的"时间性"拆成<strong>四根互不替代的轴</strong>（ADR-0022）：退场方式（取代标记）、有效性定性
+（查询期派生六态）、客观持续性（persistence）、现实有效期（valid_to）。旧版把这四件事塞进
+一根 <code>valid_to</code> 列，代价是"2020 年结束的旅行"这类<strong>合法历史记录被检索面静默遮蔽</strong>——
+它没退场，只是成了历史。</p>
+<table>
+<thead>
+<tr>
+<th>档</th>
+<th>含义</th>
+<th>进索引</th>
+<th>被动注入(默认)</th>
+<th>工具显式查</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>current</code></td>
+<td>仍在持续且未到有效期</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>historical</code></td>
+<td>时点/已结束区间/无时间性，未退场</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>expired</code></td>
+<td>有效期已闭合<strong>且来源可信</strong></td>
+<td>✅</td>
+<td>❌ 需开门2</td>
+<td>✅ <code>include_expired</code></td>
+</tr>
+<tr>
+<td><code>expired_suspect</code></td>
+<td>同上但有效期来源不可信（宁判疑不静默隐）</td>
+<td>✅</td>
+<td>✅ 带标注</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>superseded</code> / <code>retired</code></td>
+<td>取代/人工退场（软删，可恢复）</td>
+<td>❌ 撤出</td>
+<td>❌</td>
+<td>仅取代链反查</td>
+</tr>
+</tbody></table>
+<p>三扇门：</p>
+<ul>
+<li><strong>门1（bugfix，不受灰度门控）</strong>：退场判据全仓改为只认取代标记；升版后首启自动做一次
+FTS 全量回灌，把误遮蔽的历史记忆放回检索面（日志报回灌/跳过数；向量面由增量重嵌补齐，
+或设置页手动「语义检索重建」加速）。</li>
+<li><strong>门2（灰度闸 <code>validity.tieringEnabled</code>，默认关）</strong>：开时被动注入剔除 <code>expired</code>，
+<code>expired_suspect</code> 保留并在注入行带"疑似失效"标注；召回卡泡泡同步显示"已于 X 失效"。
+面板概览有同名运行时开关（与部署配置取或），验证通过后再评估翻默认。</li>
+<li><strong>门3（<code>memory_search</code> 反查参数，默认全关 = 与改前逐字一致）</strong>：<code>include_expired</code> 放行
+可信过期项并附 <code>state</code>/<code>valid_from</code>/<code>valid_to</code>/<code>valid_to_source</code>；<code>as_of</code> 按有效期回放
+历史时刻（不复活退场记忆）；<code>follow_supersede</code> 顺取代链反查"本条取代了谁"。</li>
+</ul>
+<p>存量记录的 <code>dsh_validity</code> 标注由低频本地回填补齐（零 LLM；改过的记录顺手重投图谱保鲜）。
+判据单源 <code>classifyValidity</code>：六态是查询期谓词，不会随墙钟落库翻态。</p>
+<h2>图谱确定性写面与纠正通道</h2>
+<p>图谱是 L1 的<strong>派生投影</strong>：节点/边永远由"当前事实重算"产出，所以写面的唯一真源是 L1，
+<strong>纠正 = 改源 + 重投，不是手写 SQL</strong>。本插件不提供、也永远不会提供绕过投影直写
+<code>graph_*</code> 表的入口（"零无源事实"不变量：每条边都能沿 <code>sourceRecordIds</code> 点查回现存 L1 记录）。</p>
+<table>
+<thead>
+<tr>
+<th>动作</th>
+<th>工具</th>
+<th>前提</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>修订一条记忆</td>
+<td><code>memory_update</code></td>
+<td>高权限模式</td>
+<td>读旧 → 造新（<code>version+1</code>，新 id）→ 旧行经退场汇流口 <code>superseded</code> 软删（可恢复）→ 新版进检索面；随后对 [旧,新] 强制重投，图谱边跟随（旧源支撑的边自动标墓碑）。不是物理删，也不覆写 JSONL 事实源</td>
+</tr>
+<tr>
+<td>强制重投</td>
+<td><code>memory_reproject</code></td>
+<td>配置 <code>graph.enabled</code></td>
+<td>抹掉"已按当前版本投影"凭证、按高优先级重新入队——绕开 <code>projector_version</code> 的永久跳过。幂等：在途任务不堆重。<strong>手加/导入的记忆长期不出现在图谱里，用它补投影</strong>（非蒸馏写入现已自动入队，此工具是给存量与改后保鲜的纠正通道）</td>
+</tr>
+<tr>
+<td>迁移一条关系</td>
+<td><code>memory_migrate_relation</code></td>
+<td>高权限模式</td>
+<td>源导语义：先硬校验 <code>source_record_ids</code> 全部"现存未退场" → 新关系经确定性投影支路落库（同 (起点,关系) 换目标自动闭旧边出新边）→ 新增一条承载新关系的 L1 源记录留可回溯根据（带 <code>proposal_source=tool</code> 审计标记与决策凭证）。旧边不会因后续重投被翻回：重投批只拉载体记录，不拉描述旧关系的旧源</td>
+</tr>
+<tr>
+<td>非蒸馏写入自动入队</td>
+<td><code>memory_add</code> / <code>memory_import</code></td>
+<td>配置 <code>graph.enabled</code></td>
+<td>落库成功后与蒸馏产出同优先级（<code>GRAPH_PRIORITY_NEW</code>）进投影队——"只有蒸馏才投影"的旁路缺口已闭合</td>
+</tr>
+</tbody></table>
+<p>两条必须知道的边界：</p>
+<ul>
+<li><strong>频繁 update 会累积版本行</strong>：旧行以退场态留在主表（可恢复的设计代价），规模由既有
+<code>cleanup-retired</code>（干跑 + 快照门禁）控制；</li>
+<li><strong>图谱向量路随嵌入源激活</strong>：<code>graph_node_vec</code> 在嵌入关闭时<strong>结构性不存在</strong>（不是空表）；
+启用嵌入后，投影收尾会为落库的 active 节点补写向量（旧版本存量节点经重投/重建逐步补齐）。</li>
+</ul>
 <h2>路线图</h2>
 <p>以下为规划中的功能，欢迎在 <a href="https://github.com/drscrewdriver/dsh-prime-memory/issues" target="_blank" rel="noopener noreferrer">Issues</a> 反馈需求与优先级：</p>
 <ul>
@@ -678,7 +821,8 @@ FTS 索引按分词器版本戳自动重建）。</p>
 相对上游，本仓库新增了面向 Agent 的 12 个记忆工具（含高权限写入 <code>memory_add</code> / <code>memory_delete</code> /
 <code>memory_import</code>、反刍控制 <code>memory_ruminate</code> 系列、记忆图谱 <code>memory_search_graph</code> /
 <code>memory_expand_graph_node</code>、决策凭证回溯 <code>memory_receipts</code>、矛盾裁决 <code>memory_resolve_conflict</code>）、
-<code>skills/memport</code> 跨工具记忆搬运，以及商店截图声明。</p>
+<code>skills/memport</code> 跨工具记忆搬运，以及商店截图声明；确定性写面计划又补上三件
+（<code>memory_update</code> / <code>memory_reproject</code> / <code>memory_migrate_relation</code>，见"图谱确定性写面"一节）。</p>
 <p>其中两个工具服务于<strong>可追溯性</strong>：</p>
 <ul>
 <li><code>memory_receipts</code> —— 回溯"这条记忆<strong>怎么来的</strong>"。每次 L1 去重决策都留一条凭证

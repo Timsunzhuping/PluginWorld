@@ -1,0 +1,367 @@
+<img src="https://raw.githubusercontent.com/sol5766/dshm/HEAD/docs/brand/dshm-icon.png" alt="DSHM" width="112" /><h1>DSHM</h1>
+<p><strong>在 HarmonyOS 上自足运行 DeepSeek Harness 的应用</strong></p>
+<p>DSHM 把 <a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener noreferrer">DeepSeek Harness</a>（dsh）的<strong>运行本体</strong>装进一个鸿蒙应用：HAP 内自带 Node 运行时与 dsh 核心树，核心在本机 <code>127.0.0.1</code> 上起 Host，应用内的原生 ArkUI 页面就是这个本地 Host 的客户端。</p>
+<p><strong>它不是 PC 上 dsh 的遥控器</strong>，也不需要在电脑上常驻任何服务：装上即用，数据只在本机应用沙箱内。</p>
+<p>支持 HarmonyOS 手机 / 折叠屏 / 平板 / 2in1。</p>
+<blockquote>
+<p><strong>这是一次平台移植</strong>：把官方面向桌面（Electron）的运行时，搬到 OpenHarmony arm64 上自足运行。
+移植过程中与鸿蒙平台语义的每一处冲突、根因与修法，都汇总在
+<strong><a href="https://github.com/sol5766/dshm/blob/HEAD/docs/70-%E9%B8%BF%E8%92%99%E7%A7%BB%E6%A4%8D%E8%B8%A9%E5%9D%91%E4%B8%8E%E4%BF%AE%E5%A4%8D%E6%80%BB%E8%A7%88.md" target="_blank" rel="noopener noreferrer"><code>docs/70-鸿蒙移植踩坑与修复总览.md</code></a></strong>（按技术主题组织）。
+<strong>两条根本约束</strong>决定了后面几乎所有设计：<code>jitless ⇒ WebAssembly === undefined</code>，
+以及 <strong>execve 受签名域管辖 ⇒ 所有端侧原生二进制必须构建期自签名</strong>。</p>
+</blockquote>
+<hr />
+<h2>为什么需要它：官方没有鸿蒙端</h2>
+<p>上游 DeepSeek Harness 面向的是<strong>桌面端（Windows / macOS，Electron）与 CLI</strong>。它的运行前提有两条，在鸿蒙应用沙箱里<strong>一条都不成立</strong>：</p>
+<ol>
+<li>系统里有可执行的 Node 运行时；</li>
+<li>进程能直接 <code>execve</code> 任意二进制。</li>
+</ol>
+<p>本仓库做的事，就是在官方未覆盖的平台上把这两条前提<strong>逐条补出来</strong>，并提供一个原生宿主：</p>
+<table>
+<thead>
+<tr>
+<th>官方形态依赖的前提</th>
+<th>鸿蒙端侧现状</th>
+<th>本仓库的补法</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>系统提供 Node 运行时</td>
+<td>沙箱内无 Node，且只能执行<strong>自己签名域内</strong>的原生二进制</td>
+<td>运行时与原生库随包分发（Node、koffi、node-pty、sherpa-onnx、libvips 等），构建期自签名；Host 跑在应用进程内，只监听 <code>127.0.0.1</code></td>
+</tr>
+<tr>
+<td>上游直接 <code>import('undici')</code> 可用</td>
+<td>端侧 <code>jitless ⇒ WebAssembly === undefined</code>，而 undici 的 HTTP 解析器是 WASM</td>
+<td>增加 <code>undici</code> 模块名解析钩子与全局 <code>fetch</code> 垫片，<strong>不改上游源码、不改核心树</strong>，由 <code>tools/check-web-fetch-jitless.mjs</code> 守着（自带对照实验）</td>
+</tr>
+<tr>
+<td>桌面工具链随手可用</td>
+<td>沙箱里没有可执行文件</td>
+<td>git、Python 3.12、busybox、ripgrep 随包分发并自签名，启动时逐项 <code>exec</code> 探测</td>
+</tr>
+<tr>
+<td>Electron 提供窗口 / 托盘 / 文件选择器</td>
+<td>平台是 ArkUI</td>
+<td>由 ArkUI 宿主提供窗口、菜单、托盘、系统文件选择器、剪贴板、通知与多形态布局</td>
+</tr>
+<tr>
+<td>单机单形态</td>
+<td>手机、折叠屏、平板、2in1 共用一份安装包</td>
+<td>形态由断点判定，四种形态共享同一套信息架构</td>
+</tr>
+</tbody></table>
+<p>具体落成四件事：</p>
+<ul>
+<li><strong>运行时不依赖系统，随包分发。</strong> HAP 内自带 Node 运行时与全部原生库，构建期完成自签名以进入应用签名域。代价是包体（约 300 MiB），换来"装上就能跑，不必先配环境"。</li>
+<li><strong>核心树可切换、可回滚。</strong> dsh 核心树以归档形式随包分发，首次启动解包进应用数据目录下的版本仓库（<code>dsh/cores/&lt;version&gt;</code>），通过激活事务切换版本，失败可回滚 ⇒ <strong>升级上游 = 换一个核心归档</strong>，App 代码不动。</li>
+<li><strong>宿主重写，界面不重写。</strong> 界面内容仍是官方 Web 前端；ArkUI 侧只承担平台宿主职责，设计令牌从官方 <code>--dsw-*</code> 映射到鸿蒙语义色与系统符号，不做 Web CSS 的像素级翻译——官方主题更新时不需要重做整套界面。</li>
+<li><strong>上架友好、数据保全优先。</strong> 权限共 <strong>11 项</strong>（6 项普通 + 5 项 ACL 受限，逐项见 <code>entry/src/main/module.json5</code>），<strong>不含</strong> JIT / 可写可执行内存一类（无 <code>ohos.permission.kernel.*</code>、无 <code>ALLOW_WRITABLE_CODE_MEMORY</code>）；装机一律 <code>hdc install -r</code> 覆盖安装，应用数据原地保留（详见下文「真机数据保全」）。</li>
+</ul>
+<p>端侧与官方的逐项对照（哪些对齐、哪些存在边界）登记在 <a href="https://github.com/sol5766/dshm/blob/HEAD/docs/parity-matrix.md" target="_blank" rel="noopener noreferrer"><code>docs/parity-matrix.md</code></a>，由 <code>tools/check-parity.mjs</code> 强制维护；移植过程中踩到的坑按主题汇总在 <a href="https://github.com/sol5766/dshm/blob/HEAD/docs/70-%E9%B8%BF%E8%92%99%E7%A7%BB%E6%A4%8D%E8%B8%A9%E5%9D%91%E4%B8%8E%E4%BF%AE%E5%A4%8D%E6%80%BB%E8%A7%88.md" target="_blank" rel="noopener noreferrer"><code>docs/70-鸿蒙移植踩坑与修复总览.md</code></a>。</p>
+<h3>已知边界</h3>
+<ul>
+<li><strong>WASM 缺席是全局前提。</strong> 凡是上游直接 <code>import('undici')</code> 的功能都必须走垫片；新接入的上游功能若未覆盖，在端侧会直接失败。垫片覆盖由门禁守住，不靠自觉。</li>
+<li><strong>长连接抖动</strong>：官方网关默认心跳间隔（2 s）对有重计算的会话偏紧，可能表现为连接短暂中断后自动恢复；这是 profile 层参数，可按机器调整。</li>
+<li><strong>冷启自退</strong>：曾在旧核心版本上出现一次（启动约 40 s 后 <code>process.exit(0)</code>），当前版本长时间连续运行未复现，仍在定位中。</li>
+</ul>
+<h2>能力</h2>
+<table>
+<thead>
+<tr>
+<th>领域</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>本地核心</strong></td>
+<td>内置 Node 运行时（自建、<code>jitless</code>）与 dsh 核心树；Host 仅监听 <code>127.0.0.1</code>，随应用生命周期起停</td>
+</tr>
+<tr>
+<td><strong>对话与轨迹</strong></td>
+<td>对话视图（问答，思考过程折叠在回答上方）与轨迹视图（工具调用、子代理、目标/任务、交付物、错误）分开呈现</td>
+</tr>
+<tr>
+<td><strong>工作区</strong></td>
+<td>工作区为组、会话挂在组下；可在设备上选择文件夹作为工作区（系统文件夹选择器），并在其中浏览文件</td>
+</tr>
+<tr>
+<td><strong>模型与密钥</strong></td>
+<td>按提供方管理：API 密钥（只写）、<code>baseURL</code> 与模型目录；默认模型与推理强度可选</td>
+</tr>
+<tr>
+<td><strong>插件</strong></td>
+<td>查看随包插件清单与运行阶段；按行启用/禁用，并可恢复部署默认</td>
+</tr>
+<tr>
+<td><strong>核心版本</strong></td>
+<td>同时安装多个核心版本，一键<strong>切换 / 回滚</strong>（停旧起新，逐版本校验后激活）</td>
+</tr>
+<tr>
+<td><strong>多语言</strong></td>
+<td>界面文案跟随系统语言，默认中文</td>
+</tr>
+<tr>
+<td><strong>上架友好</strong></td>
+<td>全部按 <code>jitless</code> 运行，<strong>不申请</strong> JIT / 可写可执行内存（无 <code>ohos.permission.kernel.*</code>、无 <code>ALLOW_WRITABLE_CODE_MEMORY</code>）；权限共 <strong>11 项</strong> = 6 项普通（网络、网络信息、后台保活、终止前回调、持久化数据、麦克风）+ <strong>5 项 ACL 受限</strong>（用户文件读写、文件访问持久化、全盘访问、自定义沙箱、外部原生代码加载）——ACL 这 5 项都服务于"用户可见目录读写 + 自定义沙箱"，随签名 profile 的 <code>acls</code> 声明，上架时按 ACL 清单在应用市场申请（逐项见 <code>entry/src/main/module.json5</code>）</td>
+</tr>
+</tbody></table>
+<h2>架构</h2>
+<pre><code class="language-text">┌─ DSHM（一个 HAP）──────────────────────────────────────────────┐
+│  ArkUI 原生页面（客户端）                                       │
+│        │  HTTP /api/*        WebSocket /api/remote.mux          │
+│        ▼                                                        │
+│  端侧 dsh Host（Node 运行时运行在**本应用进程内**）              │
+│        │  DSH_HOME = &lt;应用沙箱&gt;/dsh/home（跨版本共享的唯一数据）  │
+│        ▼                                                        │
+│  核心版本仓库（多个版本可并存，切换 = 停旧 + 起新 + 校验）        │
+└─────────────────────────────────────────────────────────────────┘
+</code></pre>
+<p>同进程带来的是<strong>安全语义的简化</strong>：客户端与 Host 走回环，不需要把服务暴露到局域网，也不需要跨设备转发。</p>
+<h3>端侧运行时的硬约束：<code>jitless</code> ⇒ 没有 WASM</h3>
+<p>不申请 JIT 权限意味着 Host 全程以 <code>--jitless</code> 运行，而 V8 的 <code>--jitless</code> 与 <code>--expose_wasm</code> <strong>互斥</strong>
+（启动即打印 <code>disabling flag --expose_wasm</code>），因此端侧 <code>typeof WebAssembly === 'undefined'</code>——这是恒定的，
+不是配置问题。由此推出一条对上游代码的判据：</p>
+<blockquote>
+<p><strong>凡是上游直接 <code>import('undici')</code> 的功能，在端侧都会失败</strong>，因为 undici 的 HTTP 解析器是 WASM
+（<code>lib/llhttp/llhttp-wasm.js</code>）。</p>
+</blockquote>
+<p>已实测证实的一个实例：<code>dsh-web-fetch-http</code> 不用全局 <code>fetch</code>，而是 <code>await import('undici')</code> 自建 <code>Agent</code>
+再传 <code>dispatcher</code>，于是 <code>web_fetch</code> 打不开任何网页和 IP，而走本仓纯 JS <code>node:http</code> 垫片的 <code>web_search</code> 照常工作。
+同一核心树、同一个本地 HTTP 服务下，只有 <code>--jitless</code> 一个变量就能复现两组结果（有 WASM → 200；
+无 WASM → <code>fetch failed / WebAssembly is not defined</code>）。细节与在飞修复见 <code>docs/parity-matrix.md</code> §3.2。</p>
+<p>因此新增/升级核心版本时，除了跑既有门禁，还要<strong>搜一遍核心树里对 <code>undici</code> 的直接依赖</strong>，并把垫片覆盖率当作一项验收项。</p>
+<p>对付它需要<strong>两层</strong>，缺一层就会出现"Host 起来了、模型也能回话，但某个工具静默坏掉"：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>做什么</th>
+<th>不做的后果</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>全局 fetch 垫片（<code>fetch-shim.js</code>）</td>
+<td>用 <code>node:http/https</code>（原生 llhttp）重写 <code>fetch/Request/Response/Headers/FormData</code></td>
+<td>调模型就走不通（dsh 调模型就是用 fetch）</td>
+</tr>
+<tr>
+<td><code>undici</code> <strong>模块名</strong>解析钩子（<code>undici-shim.mjs</code> + <code>undici-loader.mjs</code>）</td>
+<td>让上游的 <code>await import("undici")</code> 拿到同一个垫片，并把 <code>dispatcher</code> 翻译成 <code>lookup</code></td>
+<td><strong><code>web_fetch</code> 打不开任何网页</strong>（<code>web_search</code> 却正常，因为后者走第一层）</td>
+</tr>
+</tbody></table>
+<p>第二层由 <code>main.js</code> 的 <code>installUndiciNameHook()</code> 在 <code>WebAssembly</code> 不可用时注册；<strong>不改上游源码、不改核心树</strong>。
+这条路径由 <code>tools/check-web-fetch-jitless.mjs</code> 守着——它自带对照实验：不注册钩子时必须失败（并给出
+WASM 因果证据），注册后必须全过，且<strong>跨源跳转仍须被拒</strong>。</p>
+<h2>构建</h2>
+<p>前置：DevEco Command Line Tools（含 hvigor / ohpm / codelinter / SDK）、JDK 17、Node.js
+（仅用于仓库内的构建与检查脚本）、<strong>Python 3</strong>（<code>tools/sign-tar-elf.py</code> 用它的 <code>tarfile</code>
+改写工具链归档——Windows 上只有它能在保住归档内 symlink 的前提下改字节；缺失时
+<code>place-toolchain</code> 会告警跳过签名，归档仍可用，只是端侧 <code>git</code>/<code>python3.12</code> 真身继续被执行策略拒绝）。</p>
+<blockquote>
+<p><strong>SDK 版本口径</strong>：<code>compatibleSdkVersion</code> / <code>targetSdkVersion</code> 固定为 <strong><code>6.1.1(24)</code></strong>（决策，2026-09-14）。
+代价是<strong>不能用 API 26 的「沉浸光感」材质</strong>（官方要求 <code>targetAPIVersion ≥ 26</code>）——
+界面层次当前由系统阴影表达；升级路径与要改的几处列在 <code>appstate/ui/HarmonyTheme.ets</code> 的 <code>HarmonyMaterial</code>。</p>
+</blockquote>
+<p><strong>不入库的产物（新克隆必须先备齐，否则编不过）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>产物</th>
+<th>路径</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node 头文件</td>
+<td><code>entry/src/main/cpp/node-headers/</code></td>
+<td>编 <code>libdshhost</code> 只需要它（<code>libnode</code> <strong>不参与链接</strong>）</td>
+</tr>
+<tr>
+<td>原生库</td>
+<td><code>entry/libs/&lt;abi&gt;/</code></td>
+<td>运行期需要（含 <code>libnode.so.137</code>）；也是"编不编 koffi/flock"的门</td>
+</tr>
+<tr>
+<td>git 兼容垫片</td>
+<td><code>entry/libs/arm64-v8a/libdshm-gitcompat.so</code></td>
+<td>由 CMake 从 <code>entry/src/main/cpp/gitcompat.c</code>（<strong>源码在库里</strong>）编出；git 子进程类命令的 <code>LD_PRELOAD</code> 垫片（见 <code>docs/device-validation.md</code> 批次备注十三 三）</td>
+</tr>
+<tr>
+<td>核心包</td>
+<td><code>entry/src/main/resources/resfile/*.zip</code></td>
+<td>首启解包出端侧核心树</td>
+</tr>
+<tr>
+<td>工具链归档</td>
+<td><code>entry/src/main/resources/resfile/toolchain/{python,git}/</code></td>
+<td>由 <code>node tools/place-toolchain.mjs</code> 从 <code>third_party/</code> 放置并<strong>自签名</strong>（端侧 execve 只放行带 <code>.codesign</code> 的 ELF）</td>
+</tr>
+<tr>
+<td>入口脚本</td>
+<td><code>entry/src/main/resources/resfile/resources/app/</code></td>
+<td>由 <code>node tools/place-host-app.mjs</code> 从 <code>hostcore/app/</code> 生成</td>
+</tr>
+<tr>
+<td>鲸鱼 SVG</td>
+<td><code>entry/src/main/resources/base/media/fish_logo.svg</code></td>
+<td>由 <code>node tools/gen-fish-logo.mjs</code> 从核心树的官方 <code>dsh-client-ui-primitives</code> <strong>逐字节</strong>复制路径生成（<code>Image.fillColor</code> 按主题着色）</td>
+</tr>
+</tbody></table>
+<pre><code class="language-bash"># 1) 打完整体（HAP + 原生库 + 内置核心资源）
+devecocli build
+
+# 2) 需要重新打包核心树时（素材来自 dist/core/，产物落到应用资源目录）
+node tools/pack-core.mjs --skip-install --place-in-app
+node tools/place-host-app.mjs
+
+# 2b) 需要重建工具链归档时（放置 + 自签名；会就地改写 resfile/toolchain/ 下的归档）
+node tools/place-toolchain.mjs
+
+# 2c) 重建顶栏鲸鱼 SVG 资源（从核心树的官方 primitives 包逐字节复制路径；内含
+#     "真实包围盒 == 官方 viewBox" 与"落盘后仍与官方一致"两条自检，失败即退出）
+node tools/gen-fish-logo.mjs
+
+# 2d) 重建 **APP 图标**（官方鲸鱼 + HM/OS 角标）。需要 Python 3 + Pillow。
+#     ⚠ 它**只写 APP 图标**：AppScope 与 entry 的 {foreground,background}.png、
+#       docs/brand/dshm-icon.png、dshm-mark.png。**不写** startIcon.png / logo_dark.png
+#       —— 那两个是**启动画面**资源，必须保持原版（正本归档在 third_party/brand-original/）。
+#     全部自检通过才写盘；失败则一个文件都不动（含"归档比对"与"mark 不得带角标"两项）。
+python tools/make-icon.py
+
+# 3) 安装到已连接设备（注意：产物是 **unsigned**；签名材料不在库内）
+hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
+</code></pre>
+<h2>设计体系：Web 语义 + HarmonyOS 原生表达</h2>
+<p><strong>产品语义对齐官方 Web，视觉与交互用 HarmonyOS 原生表达</strong>——不是把 Web 的 CSS 机械翻译成 ArkUI：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>落点</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>尺度原语</td>
+<td><code>appstate/ui/Tokens.ets</code></td>
+<td><code>Sp</code> / <code>Radius</code> / <code>Border</code> / <code>Fs</code> / <code>Sz</code> / <code>Dur</code>（"有哪些档位"）</td>
+</tr>
+<tr>
+<td>语义令牌</td>
+<td><code>appstate/ui/HarmonyTheme.ets</code></td>
+<td>角色 → 系统语义资源（<code>sys.color.*</code>）+ 排版成套角色 + 层级/动效/触控；<strong><code>WEB_TOKEN_MAP</code></strong> 逐条映射官方 <code>--dsw-*</code></td>
+</tr>
+<tr>
+<td>原生原语</td>
+<td><code>entry/src/main/ets/view/NativePrimitives.ets</code></td>
+<td><code>NativeChip</code> / <code>NativeCard</code> / <code>NativeButton</code> / <code>NativeActionBar</code> / <code>NativeSectionTitle</code> + Sheet 参数助手</td>
+</tr>
+</tbody></table>
+<p><strong>四条已经定下来的规则</strong>（都是踩过或查证后写的，不是偏好）：</p>
+<ol>
+<li><strong>浮层用系统形态</strong>：半模态一律 <code>bindSheet</code>（<code>NativePrimitives.harmonySheetOptions</code> 统一参数），
+不再手写"整屏 Column + 自制遮罩"。原因：原生 Sheet 自带"非全屏、底层父视图可见"、拖拽关闭、
+遮罩与键盘避让——手写那套要逐个补回来，且必然补不全。<blockquote>
+<p>注意 <code>bindSheet</code> 是<strong>组件属性</strong>，同一节点只能绑一个。本项目因此用<strong>单一浮层宿主</strong>：
+全应用只在根节点挂一次 <code>bindSheet</code>，由 <code>sheetKind()</code>（<strong>从既有状态派生</strong>，不另立字段）
+决定显示哪个浮层、<code>closeSheet()</code> 一处复位。这样结构上<strong>不可能同时开出两个浮层</strong>，
+复位逻辑也只写一次。</p>
+</blockquote>
+</li>
+<li><strong>遮罩交给系统</strong>：不再手写 <code>rgba(...)</code> 遮罩（35% 黑在深色主题下观感就是错的），全部由原生 Sheet 提供。</li>
+<li><strong>图标用系统符号</strong>：<code>SymbolGlyph</code> 只支持系统预置资源，<strong>不引入 Web SVG</strong>（这条是 API 约束，不是偏好）。</li>
+<li><strong>裸值只许变少</strong>：<code>tools/check-design-tokens.mjs</code> 是棘轮门禁，管的是
+<code>fontSize</code>/圆角/描边/颜色字面量（含 <code>rgb()/rgba()/hsl()</code>——首版漏检过，已补）。</li>
+</ol>
+<h2>仓库结构</h2>
+<table>
+<thead>
+<tr>
+<th>目录</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>entry/</code></td>
+<td>鸿蒙应用入口：ArkUI 页面与视图（含<strong>原生原语</strong> <code>view/NativePrimitives.ets</code>）、原生桥（<code>libdshhost</code>）、随包资源（核心包与原生库）</td>
+</tr>
+<tr>
+<td><code>hostcore/</code></td>
+<td>端侧 Host 的入口脚本与 profile（<code>cordis.patch.yml</code>）、<code>fetch</code> 垫片，以及为绕开"端侧无 WASM"而做的 <code>undici</code> 模块名解析钩子</td>
+</tr>
+<tr>
+<td><code>hostruntime/</code></td>
+<td>核心版本仓库、激活事务、运行时载体（<code>RuntimePort</code> → <code>NodeRuntime</code>）</td>
+</tr>
+<tr>
+<td><code>appstate/</code></td>
+<td>客户端状态中枢与投影（会话、轨迹、工作区、设置、凭据、插件、核心视图）。<strong>纯逻辑层</strong>（不 import ArkUI，可在本机直接测）：设计令牌与布局/导航决策（<code>ui/Tokens</code>、<code>ui/HarmonyTheme</code>、<code>ui/Breakpoints</code>、<code>ui/LayoutController</code>、<code>ui/NavigationController</code>）、回合与时间线、贴底跟随、输入模态（策略与事实）、工具呈现与改动对照。由 <code>tools/check-layout-fixtures.mjs</code> 逐条断言</td>
+</tr>
+<tr>
+<td><code>platform/</code></td>
+<td>系统能力封装（文件选择、剪贴板、通知、窗口记忆等）</td>
+</tr>
+<tr>
+<td><code>dshcompat/</code></td>
+<td>与上游协议有关的<strong>全部</strong>事实：端点、参数形状、事件类型与投影键</td>
+</tr>
+<tr>
+<td><code>tools/</code></td>
+<td>构建与检查脚本（核心打包、依赖闭包、上架红线、协议往返、死按钮扫描等）</td>
+</tr>
+<tr>
+<td><code>docs/</code></td>
+<td>文档基线，索引见 <a href="https://github.com/sol5766/dshm/blob/HEAD/docs/README.md" target="_blank" rel="noopener noreferrer"><code>docs/README.md</code></a>；<strong>接手先读 <a href="https://github.com/sol5766/dshm/blob/HEAD/docs/HANDOFF.md" target="_blank" rel="noopener noreferrer"><code>docs/HANDOFF.md</code></a></strong>（现状 + 未完成事项 + Windows 端重装步骤）</td>
+</tr>
+</tbody></table>
+<h2>设计原则</h2>
+<ol>
+<li><strong>不 fork、不魔改 dsh</strong>：端侧差异只通过 dsh 自己的组合面（profile / <code>cordis.patch.yml</code> / bundle）表达。</li>
+<li><strong>不申请 JIT / 可写可执行内存</strong>：需要它们作前提的方案一律不进入选型（这是 <code>--jitless</code> 的由来）。<strong>ACL 受限权限只在文件访问与自定义沙箱必需处申请</strong>——当前 5 项（用户文件读写、文件访问持久化、全盘访问、自定义沙箱、外部原生代码加载），随签名 profile 的 <code>acls</code> 声明，逐项见 <code>entry/src/main/module.json5</code>。</li>
+<li><strong>界面不撒谎</strong>：失败必须给出下一步；空态说明"可以做什么"；不可用的动作把原因写在旁边，而不是给一个点了没反应的入口。</li>
+<li><strong>上游知识只出现在 <code>dshcompat</code></strong>：字段名、端点形状、事件类型集中一处，升级上游时改一个地方。</li>
+<li><strong>产品语义跟 Web，视觉与交互用鸿蒙原生</strong>：信息架构与行为对齐官方 Web（对等矩阵逐行登记），
+但视觉不用 Web CSS 的像素级翻译——用系统语义色、系统符号、原生控件（Sheet/菜单）、触控目标与多窗口语义表达。
+这样官方主题更新时不需要重做整套界面。</li>
+</ol>
+<h2>快速开始</h2>
+<h3>只想装上用</h3>
+<p>到本仓库 <strong>Releases</strong> 下载最新的 <code>DSHM-1.1.0-core0.2.1-alpha.1+dshm.13-arm64-signed.hap</code>，然后：</p>
+<pre><code class="language-bash">hdc install -r DSHM-1.1.0-core0.2.1-alpha.1+dshm.13-arm64-signed.hap
+</code></pre>
+<p>首次启动会解包核心树（约 60–90 秒），期间停在启动页，属正常。
+下载后请用同目录的 <code>SHA256SUMS.txt</code> 校验。</p>
+<blockquote>
+<p>Release 里附的是 <strong>debug 签名的侧载包</strong>，供尝鲜与验证；
+正式分发请用 DevEco 生成你自己的发布签名。</p>
+</blockquote>
+<h3>想从源码构建</h3>
+<p>见上面的「构建」一节。注意<strong>本仓库不含</strong>原生库、核心包、工具链归档、入口脚本、Node 头文件与签名材料
+（判据见「不入库的产物」表）—— 它们是构建产物或机器绑定材料，不入库。</p>
+<h2>真机数据保全（动手前务必读）</h2>
+<p><strong>绝对不要</strong>执行 <code>hdc uninstall</code> / <code>bm uninstall</code>，或任何删除 <code>el2</code> 下用户数据的命令。
+真机 <code>el2</code>（<code>files/dsh/home</code>）里的<strong>会话 / 插件 / 工作区没有任何可用备份通道</strong>
+（<code>hdc</code> 读不到、<code>smode</code> 被拒、<code>run-as</code> 不存在），删掉不可恢复。</p>
+<p>装机一律用<strong>覆盖安装</strong> —— 它只换 <code>el1</code>（代码与资源），不动 <code>el2</code>（用户数据）：</p>
+<pre><code class="language-bash">hdc install -r &lt;hap&gt;
+</code></pre>
+<p>判据：这条命令会不会碰 <code>el2</code>？会，就是禁止的。
+完整事故复盘与流程见 <a href="https://github.com/sol5766/dshm/blob/HEAD/docs/80-%E7%9C%9F%E6%9C%BA%E6%9B%B4%E6%96%B0%E4%B8%8E%E6%95%B0%E6%8D%AE%E4%BF%9D%E5%85%A8.md" target="_blank" rel="noopener noreferrer"><code>docs/80-真机更新与数据保全.md</code></a>。</p>
+<h2>许可</h2>
+<p>见 <a href="https://github.com/sol5766/dshm/blob/HEAD/LICENSE" target="_blank" rel="noopener noreferrer"><code>LICENSE</code></a>。</p>
+<p>本项目是<strong>移植</strong>：把官方面向桌面的 dsh 运行时搬到鸿蒙。<code>dsh</code> / DeepSeek Harness 的商标与上游代码版权归其各自所有者，
+本仓库只包含客户端侧的实现、适配与文档。</p>
+<h2>赞赏支持</h2>
+<p>DSHM 是<strong>业余时间</strong>做的移植：官方的 dsh 运行时没有鸿蒙端，端侧差异、沙箱绕行、手持档适配，
+以及两百多条回归门禁，都是照着真机读数一条条抠出来的。</p>
+<p>项目<strong>完全免费、没有付费墙</strong> —— 赞赏不会改变任何功能取舍，也不会影响 issue 的处理顺序。
+只是如果它正好省了你的事，愿意请我喝杯咖啡，我会很受用。</p>
+<table>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/sol5766/dshm/HEAD/docs/sponsor/wechat.jpg" alt="微信赞赏码" width="320" /><br /><sub>微信</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/sol5766/dshm/HEAD/docs/sponsor/alipay.jpg" alt="支付宝赞赏码" width="320" /><br /><sub>支付宝</sub></td>
+  </tr>
+</table><p>提 issue、附上复现步骤、或者把「已知边界」里少写的那条补给我们 —— 同样是实实在在的帮忙。谢谢。</p>

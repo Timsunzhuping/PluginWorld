@@ -644,6 +644,12 @@ tokscale models --json &gt; report.json   # Save to file
 <td></td>
 <td>One row per client, session, and model — useful for multi-agent runners that join on <code>session_id</code></td>
 </tr>
+<tr>
+<td><strong>Machine + Model</strong></td>
+<td><code>--group-by machine,model</code></td>
+<td></td>
+<td>One row per machine label and model — see <a href="#per-machine-usage" target="_blank" rel="noopener noreferrer">Per-machine usage</a></td>
+</tr>
 </tbody></table>
 <p><strong><code>--group-by model</code></strong> (most consolidated)</p>
 <table>
@@ -754,6 +760,29 @@ tokscale models --light --group-by workspace,model --merge-worktrees --month
 tokscale models --json --group-by workspace,model --merge-worktrees
 </code></pre>
 <p>In the TUI, press <code>g</code> → <strong>Workspace + Model</strong>, then <code>w</code> to toggle worktree rollup (the footer shows <code>[w:worktrees]</code> or <code>[w:repos]</code>).</p>
+<h4>Per-machine usage</h4>
+<p>If you copy other machines' session folders into local directories and add them with <code>scanner.extraScanPaths</code>, give each folder a machine label with <code>scanner.machineLabels</code>. Every session file under a labeled folder counts toward that machine; everything else counts toward <code>scanner.localMachineLabel</code> (default <code>"local"</code>):</p>
+<pre><code class="language-json">{
+  "scanner": {
+    "extraScanPaths": {
+      "codex": ["/Users/me/mirrors/steven/.codex/sessions"],
+      "claude": ["/Users/me/mirrors/steven/.claude/projects"]
+    },
+    "machineLabels": {
+      "/Users/me/mirrors/steven": "steven"
+    },
+    "localMachineLabel": "laptop"
+  }
+}
+</code></pre>
+<p>A folder matches every file beneath it, compared on whole path components (case-insensitively on Windows); when folders nest, the longest one wins. Then group by machine:</p>
+<pre><code class="language-bash"># One row per (machine, model), with a Machine column
+tokscale models --light --group-by machine,model
+
+# JSON entries carry a `machine` field in this mode only
+tokscale models --json --group-by machine,model
+</code></pre>
+<p>In the TUI, press <code>g</code> → <strong>Machine + Model</strong>.</p>
 <p>Workspace rows are labeled <code>repo</code> or <code>repo ⑃ worktree</code>. Clients disagree about how they record a workspace — Claude Code stores a dash-mangled directory slug (<code>-Users-me-devpro-app</code>) while Codex and OpenCode store real paths — so tokscale resolves slugs back to their true path against the filesystem. Four consequences worth knowing:</p>
 <ul>
 <li><strong>Without <code>--merge-worktrees</code>, each git worktree is its own row.</strong> Agent CLIs that isolate every task into a worktree will therefore spread one repository across many rows; <code>--merge-worktrees</code> re-unites them (and also merges a repo recorded by different clients under different key formats).</li>
@@ -1437,6 +1466,18 @@ tokscale codex activity --json
 <td>object</td>
 <td><code>{}</code></td>
 <td>Additional per-client scan roots for sessions outside Tokscale's default home-root locations</td>
+</tr>
+<tr>
+<td><code>scanner.machineLabels</code></td>
+<td>object</td>
+<td><code>{}</code></td>
+<td>Machine label for each folder, as <code>{ "&lt;folder&gt;": "&lt;label&gt;" }</code>. Session files under a folder count toward its label in <code>--group-by machine,model</code>; the longest matching folder wins. See <a href="#per-machine-usage" target="_blank" rel="noopener noreferrer">Per-machine usage</a>.</td>
+</tr>
+<tr>
+<td><code>scanner.localMachineLabel</code></td>
+<td>string</td>
+<td><code>"local"</code></td>
+<td>Machine label for session files under no <code>scanner.machineLabels</code> folder</td>
 </tr>
 <tr>
 <td><code>scanner.bucketTimezone</code></td>
@@ -2540,15 +2581,5 @@ bunx tokscale@latest
 <p>Wrapper transcript files under <code>~/.claude/transcripts/</code> are counted only when they contain real Claude usage metadata. Files with user/tool events but no <code>usage</code> block are skipped rather than estimated.</p>
 <p>The <code>claude</code> client also scans Claude Desktop's retained Code/Cowork transcripts under <code>~/Library/Application Support/Claude/{local-agent-mode-sessions,claude-code-sessions}/**/.claude/{projects,transcripts}</code> and the <code>claude-conversation-store</code> IndexedDB cache under the app's <code>IndexedDB/https_claude.ai_0.indexeddb.leveldb</code> directory. Equivalent app roots under <code>AppData/Roaming/Claude</code> and <code>.config/Claude</code> are recognized. Every retained session is scanned without a date cutoff, including subagents. Non-placeholder model identifiers carrying recorded usage are accepted, including models unknown to Tokscale's pricing tables; missing pricing does not discard tokens. Empty model identifiers and the placeholders <code>unknown</code> and <code>&lt;synthetic&gt;</code> are excluded. Cached Chat, Cowork and Code tree formats are read, but ordinary chats without token counters cannot be counted accurately and are not estimated from text.</p>
 <p>Desktop cache reads are local and read-only: no Claude process, credentials, login, or remote requests are needed. Tokscale follows the current LevelDB manifest, deletion records and conversation tombstones, decodes compressed/external values, and deduplicates streamed responses against local transcripts. It does not import <code>audit.jsonl</code> alongside the original transcripts.</p>
-<p>Cumulative <code>modelUsage</code> snapshots are <strong>not</strong> added together or added on top of the requests they already cover. Tokscale adds only the missing balance to all-time local model/session totals, with an unknown usage date and zero invented messages. These balances are conservative lower bounds when counters reset or histories overlap. Thinking tokens are already included in Anthropic output tokens and are not added again. Advisor calls are counted without adding extra turns, and per-request 1-hour cache writes retain their pricing split. When space permits, the TUI footer labels these tokens <code>undated</code>; <code>models --json</code> exposes <code>undatedTokens</code> and <code>claudeDesktopCache</code> coverage/decode diagnostics. Date-filtered reports, hourly/monthly/daily graphs and leaderboard submissions exclude undated balances. Dollar figures calculated from pricing tables are API-equivalent estimates, not subscription charges.</p>
-<p><strong>The app cache is not a complete account history.</strong> Truncated trees (<code>hasOlder</code>/<code>earlierCursor</code>), evicted/deleted conversations, incomplete streaming usage and counter resets can leave gaps. Tokscale reads the current live cache; it does not fetch missing cloud pages, recover deleted records, or retain private conversation text. An export containing only chat text cannot supply an exact token ledger. <code>tokscale usage</code> remains a separate view of subscription quota bars.</p>
-<h3>Codex CLI</h3>
-<p>Location: <code>~/.codex/sessions/</code> and <code>~/.codex/archived_sessions/</code> (<code>*.jsonl</code> rollouts, zstd-compressed <code>*.jsonl.zst</code> copies, and other archive copies that add a suffix to the <code>.jsonl</code> name)</p>
-<p>Event-based format with <code>token_count</code> events:</p>
-<pre><code class="language-json">{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1234, "output_tokens": 567}}}}
-</code></pre>
-<p>Copies of one rollout are counted once, so a session that exists in both directories, or as both a plain and a compressed file, does not double its usage.</p>
-<h3>Copilot CLI</h3>
-<p>Location: <code>~/.copilot/session-store.db</code> (CLI usage events; no OTEL required), <code>~/.copilot/otel/*.jsonl</code> or the explicit path in <code>COPILOT_OTEL_FILE_EXPORTER_PATH</code>, and Desktop <code>~/.copilot/data.db</code></p>
-<p>Copilot CLI usage is read from <code>session-store.db</code> by default. File-exported OpenTelemetry JS</p>
+<p>Cumulative <code>modelUsage</code> snapshots are <strong>not</strong> added together or added on top of the requests they already cover. Tokscale adds only the missing balance to all-time local model/session totals, with an unknown usage date and zero invented messages. These balances are conservative lower bounds when counters reset or histories overlap. Thinking tokens are already included in Anthropic output tokens and are not added again. Advisor calls are counted without adding extra turns, and per-request 1-hour cache writes retain their pricing split. When space permits, the TUI footer labels these tokens <code>undated</code>; <code>models --json</code></p>
 <p>…</p>
